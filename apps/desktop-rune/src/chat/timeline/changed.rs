@@ -1,7 +1,7 @@
 //! The changed-files card under a settled turn's last reply (ChangedFilesCard, turnDiffTree.ts):
-//! totals, Open diff, and the files as a tree whose folders start folded.
+//! totals, Open diff, expand/collapse all, and the files as a tree whose folders start folded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rune::{El, col, icon, row, text};
 use serde_json::Value;
@@ -97,11 +97,30 @@ pub fn tree(files: &[Value], open: &dyn Fn(&str) -> bool) -> Vec<Entry> {
     out
 }
 
+fn all_key(run: &str) -> String {
+    format!("changed-all:{run}")
+}
+
+/// A folder's own key flips the run's default (ChangedFilesTree: `overrides[path] ?? allExpanded`).
+fn is_open(expanded: &HashSet<String>, run: &str, path: &str) -> bool {
+    expanded.contains(&all_key(run)) != expanded.contains(&format!("changed:{run}:{path}"))
+}
+
+/// Expand all / collapse all: flips the run's default and drops its per-folder overrides.
+fn toggle_all(expanded: &mut HashSet<String>, run: &str) {
+    let all = all_key(run);
+    if !expanded.remove(&all) {
+        expanded.insert(all);
+    }
+    let prefix = format!("changed:{run}:");
+    expanded.retain(|k| !k.starts_with(&prefix));
+}
+
 fn stat(add: u64, del: u64, font: rune::tok::TextStyle, t: &T) -> El {
     row()
         .gap(4.0)
-        .child(text(format!("+{add}")).font(theme::mono(font)).color(t.c.diff_addition_foreground))
-        .child(text(format!("-{del}")).font(theme::mono(font)).color(t.c.diff_deletion_foreground))
+        .child(text(format!("+{}", crate::chat::details::thousands(add))).font(theme::mono(font)).color(t.c.diff_addition_foreground))
+        .child(text(format!("-{}", crate::chat::details::thousands(del))).font(theme::mono(font)).color(t.c.diff_deletion_foreground))
 }
 
 pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
@@ -113,7 +132,8 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
     let run = s(checkpoint, "runId").to_owned();
     let fold_key = |path: &str| format!("changed:{run}:{path}");
     let expanded = &app.ui.chat.timeline.expanded;
-    let entries = tree(files, &|path| expanded.contains(&fold_key(path)));
+    let entries = tree(files, &|path| is_open(expanded, &run, path));
+    let all_open = expanded.contains(&all_key(&run));
     let open_diff = {
         let checkpoint = checkpoint.clone();
         let first = files.first().map(|f| s(f, "path").to_owned()).filter(|p| !p.is_empty());
@@ -128,14 +148,28 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
         .py(8.0)
         .gap(12.0)
         .center_y()
-        .child(text(format!("{count} changed file{}", if count == 1 { "" } else { "s" })).font(theme::XS_MEDIUM).color(t.c.foreground));
+        .child(text(format!("{} changed file{}", crate::chat::details::thousands(count), if count == 1 { "" } else { "s" })).font(theme::XS_MEDIUM).color(t.c.foreground));
     if add + del > 0 {
         head = head.child(stat(add, del, theme::TEXT_XS, t));
     }
-    let head = head.child(rune::spacer()).child(
+    let nested = entries.iter().any(|e| e.dir.is_some());
+    head = head.child(rune::spacer());
+    if nested {
+        let (label, glyph) = if all_open { ("Collapse all folders", &icons::CHEVRONS_DOWN_UP) } else { ("Expand all folders", &icons::CHEVRONS_UP_DOWN) };
+        let all_run = run.clone();
+        head = head.child(
+            Button::new(label)
+                .icon(glyph)
+                .variant("ghost-muted")
+                .size("icon-xs")
+                .on_press(move |app: &mut App| toggle_all(&mut app.ui.chat.timeline.expanded, &all_run))
+                .build(t)
+                .help(label),
+        );
+    }
+    let head = head.child(
         Button::new("Open diff").variant("ghost-muted").size("xs").icon(&icons::FILE_DIFF).on_press(open_diff.clone()).build(t).help("Open the full diff"),
     );
-    let nested = entries.iter().any(|e| e.dir.is_some());
     let mut list = col().w_full().px(4.0).pb(4.0);
     for entry in entries {
         let pad = 8.0 + entry.depth as f32 * 14.0;
@@ -143,7 +177,7 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
         line = match &entry.dir {
             Some(path) => {
                 let key = fold_key(path);
-                let open = app.ui.chat.timeline.expanded.contains(&key);
+                let open = is_open(&app.ui.chat.timeline.expanded, &run, path);
                 line.label(entry.name.clone())
                     .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
                     .child(icon(if open { &icons::FOLDER_OPEN } else { &icons::FOLDER }, 14.0).color(t.c.muted_foreground.alpha_mul(0.75)))
@@ -152,8 +186,9 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
             }
             None => {
                 let line = if nested || entry.depth > 0 { line.child(rune::el().size(14.0, 14.0)) } else { line };
-                let (checkpoint, path) = (checkpoint.clone(), entry.path.clone());
+                let (checkpoint, path, menu) = (checkpoint.clone(), entry.path.clone(), entry.path.clone());
                 line.label(entry.name.clone())
+                    .on_secondary_press(move |app: &mut App, at: rune::PointerPress, _: &mut rune::Tx| crate::panel::file_menu(app, menu.clone(), (at.x, at.y)))
                     .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
                     .child(text(entry.name).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground.alpha_mul(0.85)).truncate().shrink().min_w(0.0))
                     .on_press(move |app: &mut App| crate::panel::open_diff_at(app, checkpoint.clone(), &path))
@@ -206,6 +241,23 @@ mod tests {
         assert_eq!(names, [(0, "src/chat"), (1, "a.rs"), (1, "b.rs"), (0, "README.md")]);
         // A file row opens the diff at its full path.
         assert_eq!(open[1].path, "src/chat/a.rs");
+    }
+
+    #[test]
+    fn expand_all_flips_the_default_and_clears_folder_overrides() {
+        let mut expanded = HashSet::new();
+        assert!(!is_open(&expanded, "r", "src"));
+        expanded.insert("changed:r:src".to_owned());
+        expanded.insert("changed:q:src".to_owned());
+        assert!(is_open(&expanded, "r", "src"));
+        toggle_all(&mut expanded, "r");
+        assert!(is_open(&expanded, "r", "src") && is_open(&expanded, "r", "docs"));
+        assert!(expanded.contains("changed:q:src"), "another run keeps its folders");
+        // Folding one folder after expand all is an override of the new default.
+        expanded.insert("changed:r:docs".to_owned());
+        assert!(!is_open(&expanded, "r", "docs"));
+        toggle_all(&mut expanded, "r");
+        assert!(!is_open(&expanded, "r", "src") && !is_open(&expanded, "r", "docs"));
     }
 
     #[test]

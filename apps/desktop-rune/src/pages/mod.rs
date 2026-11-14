@@ -210,6 +210,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_prs(s, |_| {});
         pr_row::scene(s, 2479, "stack");
     }),
+    ("pull-requests-stack-long", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2479, "stack-long");
+    }),
     ("pull-requests-checks-popover", |s| {
         open_prs(s, |_| {});
         pr_row::scene(s, 2481, "checks");
@@ -221,6 +225,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-close-sweep", |s| {
         open_prs(s, |_| {});
         pr_row::scene(s, 2468, "sweep");
+    }),
+    ("pull-requests-busy-spinner", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2468, "sweep");
+        let u = &mut s.ui.pages.pull_requests;
+        u.query.replace_text("login");
+        u.pending = Some((0, false));
     }),
     ("pull-requests-row-actions-read-only", |s| {
         open_prs(s, |_| {});
@@ -351,6 +362,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |_| {});
         s.ui.pages.pull_requests.maximized = true;
     }),
+    ("pull-requests-panel-narrow-search", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-panel-hidden", |s| {
         open_detail(s, 0, |_| {});
         pull_requests::toggle_panel(&mut s.ui.pages.pull_requests);
@@ -421,6 +433,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "cost");
         usage::offline_scene(s);
     }),
+    ("usage-no-environments", |s| {
+        open_usage(s, "cost");
+        usage::no_environments_scene(s);
+    }),
     ("usage-environments-scanning", |s| {
         open_usage(s, "cost");
         usage::studio_scene(s, None);
@@ -444,6 +460,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "tokens");
         usage::updating_scene(s);
         s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-chart-tooltip-partial", |s| {
+        open_usage(s, "cost");
+        usage::tooltip_scene(s);
     }),
     ("usage-limits-light", |s| {
         open_usage(s, "limits");
@@ -531,5 +551,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "cost");
         usage::studio_scene(s, Some(|_| {}));
         usage_prices::environments_scene(s);
+    }),
+    ("usage-prices-checking", |s| {
+        open_usage(s, "cost");
+        usage_prices::checking_scene(s);
+    }),
+    ("usage-prices-read-only", |s| {
+        open_usage(s, "cost");
+        usage_prices::read_only_scene(s);
     }),
 ];

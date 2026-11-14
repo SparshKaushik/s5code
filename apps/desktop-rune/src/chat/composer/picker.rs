@@ -5,6 +5,7 @@ use rune::{Align, Cursor, Cx, El, Key, KeyEvent, Side, TextEdit, Tx, col, el, ic
 use serde_json::Value;
 
 use super::provider_icons::STAR_FILLED;
+use super::search::{self, Searchable};
 use super::{RUNTIME_MODES, draft_mut, provider, provider_icon, providers, runtime_mode, selection, set_runtime_mode};
 use crate::data;
 use crate::icons;
@@ -62,19 +63,52 @@ fn rail(s: &App) -> String {
     s.ui.chat.composer.picker.rail.clone().or_else(|| selection(s).map(|(i, _)| i)).unwrap_or_else(|| FAVORITES.into())
 }
 
-/// `(instance, slug, name)` rows for the rail entry, filtered by the search.
+fn is_searching(s: &App) -> bool {
+    !s.ui.chat.composer.picker.query.text.trim().is_empty()
+}
+
+/// `(instance, slug, name)` rows: the rail entry's models, or while searching every ready
+/// provider's matches, best first.
 fn rows(s: &App) -> Vec<(String, String, String)> {
-    let query = s.ui.chat.composer.picker.query.text.trim().to_lowercase();
+    if is_searching(s) {
+        return search_rows(s, &s.ui.chat.composer.picker.query.text);
+    }
     let r = rail(s);
-    let all: Vec<(String, String, String)> = if r == FAVORITES {
+    if r == FAVORITES {
         favorites(s).into_iter().map(|(i, m)| { let n = super::model_name(s, &i, &m); (i, m, n) }).collect()
     } else {
         provider(s, &r)
             .and_then(|p| p["models"].as_array())
             .map(|ms| ms.iter().map(|m| (r.clone(), data::s(m, "slug").to_string(), data::s(m, "name").to_string())).collect())
             .unwrap_or_default()
-    };
-    all.into_iter().filter(|(_, slug, name)| query.is_empty() || name.to_lowercase().contains(&query) || slug.to_lowercase().contains(&query)).collect()
+    }
+}
+
+fn search_rows(s: &App, query: &str) -> Vec<(String, String, String)> {
+    let favorites = favorites(s);
+    let models: Vec<(&Value, &Value)> = rail_providers(s)
+        .into_iter()
+        .filter(|p| data::s(p, "status") == "ready")
+        .flat_map(|p| p["models"].as_array().into_iter().flatten().map(move |m| (p, m)))
+        .collect();
+    let searchable: Vec<Searchable> = models
+        .iter()
+        .map(|(p, m)| Searchable {
+            name: data::s(m, "name"),
+            short_name: data::s(m, "shortName"),
+            sub_provider: data::s(m, "subProvider"),
+            driver: data::s(p, "driver"),
+            provider_name: data::s(p, "displayName"),
+            favorite: favorites.iter().any(|(i, slug)| i == data::s(p, "instanceId") && slug == data::s(m, "slug")),
+        })
+        .collect();
+    search::rank(&searchable, query)
+        .into_iter()
+        .map(|i| {
+            let (p, m) = models[i];
+            (data::s(p, "instanceId").to_string(), data::s(m, "slug").to_string(), data::s(m, "name").to_string())
+        })
+        .collect()
 }
 
 fn pick(s: &mut App, instance: String, slug: String) {
@@ -172,9 +206,12 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         header = header.child(el().absolute(13.0, 41.0).w(290.0).h(1.0).fill(t.c.primary));
     }
     let list = rows(s);
+    let searching = is_searching(s);
     let mut models = col().w_full().px(8.0).pt(8.0);
     if list.is_empty() {
-        let message = if r == FAVORITES {
+        let message = if searching {
+            "No models found.".to_string()
+        } else if r == FAVORITES {
             "No favorite models yet.".to_string()
         } else {
             provider(s, &r).map(|p| data::s(p, "message").to_string()).filter(|m| !m.is_empty()).unwrap_or_else(|| "No models found.".into())
@@ -219,8 +256,9 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         let (i2, m2) = (instance.clone(), slug.clone());
         models = models.child(r.on_press(move |s: &mut App| pick(s, i2.clone(), m2.clone())));
     }
+    // A search spans every provider, so the rail steps aside (showSidebar).
     let middle = col()
-        .w(316.0)
+        .w(if searching { 360.0 } else { 316.0 })
         .h_full()
         .fill(panel)
         .child(el().absolute(0.0, 0.0).w(1.0).h_full().fill(line))
@@ -312,7 +350,11 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
                 }),
         );
 
-    let body = row().w_full().h(346.0).child(rail_col).child(middle).child(effort);
+    let mut body = row().w_full().h(346.0);
+    if !searching {
+        body = body.child(rail_col);
+    }
+    let body = body.child(middle).child(effort);
     let card = col()
         .key("model-picker")
         .w(554.0)
@@ -329,22 +371,22 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .modal(true, close);
     let mut layers = vec![card];
     if p.runtime_open {
-        layers.push(runtime_menu(s, t, &mode));
+        layers.push(runtime_menu(t, &mode, "picker-runtime-menu", "picker-permissions", Align::End));
     }
     layers
 }
 
-/// The permissions menu above the footer toggle.
-fn runtime_menu(_s: &App, t: &T, mode: &str) -> El {
+/// The permissions menu above `anchor`: the picker's footer toggle or the composer's chip.
+pub(super) fn runtime_menu(t: &T, mode: &str, key: &str, anchor: &str, align: Align) -> El {
     let mut menu = col()
-        .key("picker-runtime-menu")
+        .key(key)
         .w(300.0)
         .padding(4.0)
         .radius(radius::LG)
         .fill(t.c.popover)
         .border(1.0, t.c.border)
         .shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.3))
-        .anchored("picker-permissions", Side::Top, Align::End, 4.0);
+        .anchored(anchor, Side::Top, align, 4.0);
     for (id, label, description, i) in RUNTIME_MODES {
         let mut item = row()
             .key(format!("runtime-{id}"))
@@ -364,6 +406,7 @@ fn runtime_menu(_s: &App, t: &T, mode: &str) -> El {
             .on_press(move |s: &mut App| {
                 set_runtime_mode(s, id);
                 s.ui.chat.composer.picker.runtime_open = false;
+                s.ui.chat.composer.permissions_open = false;
             });
         if id == mode {
             item = item.child(icon(&icons::CHECK, 14.0).color(t.c.foreground));

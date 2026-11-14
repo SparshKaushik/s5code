@@ -1,21 +1,18 @@
 //! The new-thread draft that `/` opens (routes/_chat.index.tsx starts a draft in the most recent
-//! project): the empty-conversation prompt, with the provider status banner above it. Sending
+//! project): the empty-conversation prompt. Sending
 //! from the composer launches the thread and navigates to it.
 
-use rune::{Cursor, Cx, El, col, el, icon, row, spacer, text};
+use rune::{Cx, El, col, row, text};
 use serde_json::{Value, json};
 
 use crate::chat::composer;
 use crate::chat::details::Lane;
 use crate::data;
-use crate::icons;
-use crate::theme::{self, AlphaMul, T, radius};
+use crate::theme::{self, T};
 use crate::{App, Route};
 
 #[derive(Default)]
 pub struct Ui {
-    /// Provider instances whose status banner the user dismissed.
-    pub dismissed: Vec<String>,
     /// The checkout a "New thread on {branch}" draft launches in: `(project id, workspaceStrategy)`.
     pub workspace: Option<(String, Value)>,
 }
@@ -85,90 +82,4 @@ pub fn view(cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         .pl(lane.left)
         .pb(composer_h + composer::BOTTOM + 8.0)
         .child(row().w(lane.width).justify_center().child(text("Send a message to start the conversation.").font(theme::TEXT_SM).color(t.c.muted_foreground)))
-}
-
-/// The provider status banner, floating at the top of the lane on any chat route.
-/// ChatBannerLane: the provider status banner, then the thread's error banner.
-pub fn banner(s: &App, t: &T, lane: &Lane) -> Option<El> {
-    let provider = provider_banner(s, t);
-    let error = crate::chat::timeline::error_banner::view(s, t);
-    if provider.is_none() && error.is_none() {
-        return None;
-    }
-    let right_inset = (lane.left * 2.0 + lane.width).max(0.0);
-    let center = |b: El| row().w_full().pt(12.0).justify_center().child(b);
-    // ThreadErrorBanner: w-fit, at most min(48rem, 100% − 2rem).
-    let error = error.map(|b| center(b.max_w((right_inset - 32.0).min(768.0))));
-    Some(col().pin(Some(0.0), Some(0.0), None, None).w(right_inset).children(provider.map(center)).children(error))
-}
-
-/// ProviderStatusBanner: the selected provider is unauthenticated or failing.
-pub fn provider_banner(s: &App, t: &T) -> Option<El> {
-    let (instance, _) = composer::selection(s)?;
-    let p = composer::provider(s, &instance)?;
-    if data::s(p, "status") != "error" || s.ui.chat.home.dismissed.contains(&instance) {
-        return None;
-    }
-    let name = data::s(p, "displayName").to_string();
-    let unauthenticated = data::s(&p["auth"], "status") == "unauthenticated" || data::s(p, "message").contains("not authenticated");
-    let title = if unauthenticated { format!("{name} is unauthenticated") } else { format!("{name} is unavailable") };
-    let message = data::s(p, "message").to_string();
-    let fg = t.c.error_foreground;
-    let refresh_id = instance.clone();
-    let refresh = row()
-        .key("banner-refresh")
-        .h(24.0)
-        .px(7.0)
-        .gap(6.0)
-        .center_y()
-        .radius(theme::layout::CONTROL_RADIUS)
-        .fill(t.c.foreground.alpha_mul(0.035))
-        .border(1.0, t.c.foreground.alpha_mul(0.11))
-        .hover(t.c.accent)
-        .cursor(Cursor::Pointer)
-        .label(format!("Refresh {name} provider status"))
-        .child(icon(&icons::REFRESH_CW, 14.0).color(t.c.muted_foreground))
-        .child(text("Refresh").font(theme::XS_MEDIUM).color(t.c.foreground))
-        .on_press(move |s: &mut App| {
-            if let Some(net) = s.src.net() {
-                net.request("server.refreshProviders", json!({"instanceId": refresh_id}));
-            }
-        });
-    let dismiss_id = instance.clone();
-    let dismiss = el()
-        .key("banner-dismiss")
-        .size(24.0, 24.0)
-        .center()
-        .radius(theme::layout::CONTROL_RADIUS)
-        .hover(t.c.accent)
-        .cursor(Cursor::Pointer)
-        .label(format!("Dismiss {name} provider error"))
-        .child(icon(&icons::X, 14.0).color(t.c.muted_foreground))
-        .on_press(move |s: &mut App| s.ui.chat.home.dismissed.push(dismiss_id.clone()));
-    Some(
-        row()
-            .key("provider-banner")
-            .items_start()
-            .gap(8.0)
-            // 12 of padding inside the 1-point border, plus the 2-point lead the line box adds.
-            .px(15.0)
-            .pt(15.0)
-            .pb(13.0)
-            .radius(radius::XL)
-            // alert-glass: the page background with a 4% destructive tint.
-            .fill(t.c.destructive.alpha_mul(0.04))
-            .border(1.0, t.c.error.alpha_mul(0.32))
-            .role("alert")
-            .child(icon(&icons::INFO, 16.0).color(t.c.error).mt(2.0))
-            .child(
-                col()
-                    .gap(2.0)
-                    .shrink()
-                    .min_w(0.0)
-                    .child(text(title).font(theme::SM_MEDIUM).color(fg))
-                    .child(text(message).font(theme::TEXT_SM).color(fg.alpha_mul(0.8)).wrap().max_lines(3))
-                    .child(row().w_full().pt(6.0).child(spacer()).child(refresh)),
-            )
-            .child(dismiss.mt(-2.0)),
-    )
 }

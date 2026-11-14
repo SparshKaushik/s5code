@@ -3,11 +3,14 @@
 //! Drafts are kept per thread (and one for the home draft), as the web composer draft store does.
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
+mod attachments;
 pub mod chips;
 mod context;
 mod menu;
 mod picker;
 pub mod provider_icons;
+mod search;
+mod stash;
 
 use std::collections::HashMap;
 
@@ -54,11 +57,13 @@ pub struct Ui {
     /// The trigger token Escape closed, so the menu stays shut until the token changes.
     pub menu_dismissed: Option<String>,
     pub picker: picker::Ui,
+    pub stash: stash::Stash,
+    /// The permissions menu opened from the footer chip.
+    pub permissions_open: bool,
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
-    /// Messages waiting on `assets.persistChatAttachments`: the request, the command or launch
-    /// payload, the thread a launch starts, and the send it belongs to.
-    uploads: Vec<(u64, Value, Option<String>, Outgoing)>,
+    /// Messages waiting on their attachments to be stored.
+    uploads: Vec<attachments::Upload>,
     /// Commands whose failure shows in the route's error banner (setThreadError).
     sends: Vec<(u64, Outgoing)>,
     pub context: context::Hover,
@@ -363,7 +368,7 @@ pub fn runtime_mode(s: &App) -> String {
     if let Some(t) = ctx(s).thread {
         return data::s(t, "runtimeMode").to_string();
     }
-    s.state().config.as_ref().map(|c| data::s(&c["settings"], "defaultRuntimeMode").to_string()).filter(|m| !m.is_empty()).unwrap_or_else(|| "full-access".into())
+    default_runtime_mode(s)
 }
 
 pub fn interaction_mode(s: &App) -> String {
@@ -385,6 +390,11 @@ pub const RUNTIME_MODES: [(&str, &str, &str, &rune::Icon); 4] = [
     ("auto", "Auto", "Supported providers approve routine actions; others still ask.", &icons::SPARKLES),
     ("full-access", "Full access", "Allow commands and edits without prompts.", &icons::SHIELD_OFF),
 ];
+
+/// The mode new threads start in (`defaultRuntimeMode`); the footer names any other.
+fn default_runtime_mode(s: &App) -> String {
+    s.state().config.as_ref().map(|c| data::s(&c["settings"], "defaultRuntimeMode").to_string()).filter(|m| !m.is_empty()).unwrap_or_else(|| "full-access".into())
+}
 
 pub fn set_runtime_mode(s: &mut App, mode: &str) {
     draft_mut(s).runtime_mode = Some(mode.to_string());
@@ -445,8 +455,14 @@ fn send(s: &mut App, alternate: bool) {
     let snapshot = stored_draft(d);
     let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
     let mut text = text.trim().to_string();
-    // A file that can no longer be read keeps the draft as it is.
-    let Some(uploads) = d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
+    // A file that can no longer be sent keeps the draft as it is and says why.
+    let uploads = match d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).map(|p| attachments::stage(p)).collect::<Result<Vec<_>, _>>() {
+        Ok(uploads) => uploads,
+        Err(message) => {
+            crate::chat::timeline::error_banner::set_local(s, &key, Some(&message));
+            return;
+        }
+    };
     if let Route::Thread(thread) = s.frame_route().clone()
         && !text.is_empty()
     {
@@ -516,7 +532,7 @@ fn send(s: &mut App, alternate: bool) {
         }
         _ => {
             let Some(project_id) = project_id else { return };
-            let thread_id = format!("thread:project:{project_id}:{}", s5_net::uuid());
+            let thread_id = crate::panel::drawer::take_draft_thread(s, &project_id).unwrap_or_else(|| format!("thread:project:{project_id}:{}", s5_net::uuid()));
             let preset = crate::chat::home::take_workspace(s, &project_id);
             let draft_run = crate::chat::details::take_draft_workspace(s);
             // A sidebar "new thread on branch" preset wins over the details card's env mode.
@@ -541,31 +557,20 @@ fn send(s: &mut App, alternate: bool) {
     if uploads.is_empty() {
         deliver(net, composer, payload, launch, json!([]), outgoing);
     } else {
-        let request = net.request(
-            "assets.persistChatAttachments",
-            json!({"threadId": thread_id, "messageId": message_id, "attachments": uploads}),
-        );
-        composer.uploads.push((request, payload, launch, outgoing));
+        composer.uploads.push(attachments::start(net, &thread_id, &message_id, uploads, payload, launch, outgoing));
     }
     sent(s);
 }
 
-/// Image types the server stores (PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES), by extension.
-const IMAGE_TYPES: [(&str, &str); 5] =
-    [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
-
-/// Pasted images join the draft's attachments (ChatComposer onPaste): copied image files as they
-/// are, raw image data as a temporary PNG. Text, and a queued-message edit, paste as usual.
+/// Pasted files join the draft's attachments (ChatComposer onPaste): copied files as they are,
+/// raw image data as a temporary PNG. Text, and a queued-message edit, paste as usual.
 fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
     if editing_run(s).is_some() {
         return false;
     }
-    let image_ext = |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
-    let files: Vec<String> = content.files().iter().filter(|p| image_ext(p)).map(|p| p.display().to_string()).collect();
+    let files: Vec<String> = content.files().iter().map(|p| p.display().to_string()).collect();
     if !files.is_empty() {
-        draft_mut(s).attachments.extend(files);
+        add_files(s, files);
         return true;
     }
     let Some(image) = content.image().filter(|_| content.text().trim().is_empty()) else { return false };
@@ -573,22 +578,18 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
     if std::fs::write(&path, image.png()).is_err() {
         return false;
     }
-    draft_mut(s).attachments.push(path.display().to_string());
+    add_files(s, [path.display().to_string()]);
     true
 }
 
-/// An image file as `assets.persistChatAttachments` takes it, inlined as a data URL.
-fn upload(path: &str) -> Option<Value> {
-    use base64::Engine;
-    let path = std::path::Path::new(path);
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    let mime = IMAGE_TYPES.iter().find(|(e, _)| *e == ext)?.1;
-    let bytes = std::fs::read(path).ok().filter(|b| b.len() <= MAX_IMAGE_BYTES)?;
-    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(json!({
-        "type": "image", "name": path.file_name()?.to_str()?, "mimeType": mime,
-        "sizeBytes": bytes.len(), "dataUrl": format!("data:{mime};base64,{data}"),
-    }))
+/// Queues files in the open route's draft; the route's banner says why one was refused.
+fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
+    if editing_run(s).is_some() {
+        return;
+    }
+    let key = active_key(s);
+    let error = attachments::intake(&mut draft_mut(s).attachments, paths);
+    crate::chat::timeline::error_banner::set_local(s, &key, error.as_deref());
 }
 
 /// Sends a message, or launches the thread it starts, with its stored attachments.
@@ -689,20 +690,20 @@ pub fn poll(s: &mut App) -> bool {
     if s.src.net().is_none() {
         return false;
     }
-    let mut changed = persist(s);
+    let mut changed = persist(s) | stash::persist(s);
     let Some(net) = s.src.net() else { return false };
     let composer = &mut s.ui.chat.composer;
     let mut failed = Vec::new();
     let mut i = 0;
     while i < composer.uploads.len() {
-        let Some(reply) = net.take_reply(composer.uploads[i].0) else {
+        let Some(stored) = attachments::advance(net, &mut composer.uploads[i]).transpose() else {
             i += 1;
             continue;
         };
-        let (_, payload, launch, outgoing) = composer.uploads.remove(i);
-        match reply {
-            Ok(v) => deliver(net, composer, payload, launch, v["attachments"].clone(), outgoing),
-            Err(e) => failed.push((outgoing, e)),
+        let upload = composer.uploads.remove(i);
+        match stored {
+            Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
+            Err(e) => failed.push((upload.outgoing, e)),
         }
         changed = true;
     }
@@ -874,6 +875,9 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.chat.composer.picker.open {
         return false;
     }
+    if stash::on_key(s, e) {
+        return true;
+    }
     if let Some(m) = menu::open_menu(s).filter(|_| question::active(s).is_none()) {
         let count = menu::items(s, &m).len();
         let active = &mut s.ui.chat.composer.menu_active;
@@ -954,7 +958,16 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         toggle_plan(s);
         return true;
     }
-    false
+    // A pending question has no prompt to set aside, so the shortcut only shows the stash.
+    if crate::panel::shortcut(s, e, "composer.stash") {
+        if question::active(s).is_some() {
+            stash::toggle(s);
+        } else if editing_run(s).is_none() {
+            stash::stash(s);
+        }
+        return true;
+    }
+    stash::on_key(s, e)
 }
 
 /// While an approval waits, the prompt says a message declines it (ChatComposer).
@@ -977,7 +990,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let empty = Draft::default();
     let d = draft(s).unwrap_or(&empty);
     // A pending question takes the editor for its own answer (ChatComposer's pending input).
-    let field = if let Some(q) = question::editor(s) {
+    let field = if let Some(q) = question::editor(s).filter(|q| q.choice_only) {
+        // The web disables the field; with nothing to type into, digits pick the options.
+        text(q.placeholder).font(theme::TEXT_SM.lh(22.75)).color(t.c.placeholder).w_full()
+    } else if let Some(q) = question::editor(s) {
         let key = q.key.clone();
         text_input(&q.edit, theme::TEXT_SM.lh(22.75))
             .key("composer-editor")
@@ -1006,6 +1022,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .on_input_paste(on_paste)
             .on_input_change(|s: &mut App, _| {
                 s.ui.chat.composer.menu_active = 0;
+                s.ui.chat.composer.stash.open = false;
                 menu::refresh(s);
             })
     };
@@ -1013,12 +1030,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 
     let mut body = col()
         .key("composer")
-        .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
-            if editing_run(s).is_none() {
-                draft_mut(s).attachments.extend(files.iter().map(|p| p.display().to_string()));
-            }
-        })
-        .accepts_extensions(&IMAGE_EXTENSIONS)
+        .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| add_files(s, files.iter().map(|p| p.display().to_string())))
         .w_full().radius(radius::XL2).fill(composer_fill(t)).border(1.0, composer_outline(t)).padding(1.0).pb(11.0);
     if !t.dark {
         body = body.shadow(1.0, 2.0, Color::BLACK.alpha(0.05));
@@ -1028,16 +1040,27 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     let body = body.child(editor).child(footer(s, t));
 
+    // The @ menu wins over the stash drawer (isStashMenuOpen && !composerMenuOpen).
     let menu = if question::active(s).is_some() { None } else { menu::view(s, cx, t) };
     let mut stack = col().key("composer-lane").w(lane.width).pin(Some(lane.left), None, None, Some(BOTTOM));
     if let Some(menu) = menu {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
+    } else if let Some(stash) = stash::menu(s, t) {
+        // Full width, so the inset is the wrapper's padding (margins would shift it).
+        stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(stash));
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t));
-    if let Some(docked) = docked {
-        stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(docked));
+    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    // The stash tab rides the composer's right shoulder, beside anything docked there.
+    let badge = stash::badge(s, t).filter(|_| !s.ui.chat.composer.stash.open);
+    match (docked, badge) {
+        (Some(docked), None) => stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(docked)),
+        (Some(docked), Some(badge)) => {
+            stack = stack.child(row().w_full().px(22.0).mb(-17.0).gap(8.0).items_end().child(col().grow(1.0).shrink().min_w(0.0).child(docked)).child(badge));
+        }
+        (None, Some(badge)) => stack = stack.child(row().w_full().px(22.0).mb(-17.0).child(spacer()).child(badge)),
+        (None, None) => {}
     }
     stack.child(body)
 }
@@ -1045,6 +1068,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut layers = picker::view(s, cx, t);
+    if s.ui.chat.composer.permissions_open {
+        let menu = picker::runtime_menu(t, &runtime_mode(s), "composer-permissions-menu", "composer-permissions", rune::Align::Start);
+        layers.push(menu.modal(true, |s: &mut App| s.ui.chat.composer.permissions_open = false));
+    }
     layers.extend(chip_details(s, t));
     layers.extend(context::popover(s, t));
     layers
@@ -1083,8 +1110,21 @@ fn composer_outline(t: &T) -> Color {
 
 fn footer(s: &App, t: &T) -> El {
     let mut left = row().gap(4.0).center_y().child(
-        icon_button(t, &icons::PAPERCLIP, "Attach images", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
+        icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
     );
+    // The permissions chip shows only while the thread differs from the default (accessDisplay).
+    let mode = runtime_mode(s);
+    if !mode.is_empty() && mode != default_runtime_mode(s) {
+        let (_, label, description, glyph) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[0]);
+        left = left.child(
+            control(t, glyph, label, t.c.foreground.alpha_mul(0.8))
+                .key("composer-permissions")
+                .role("button")
+                .label(format!("Permissions: {label}"))
+                .help(format!("Permissions: {label}. {description}"))
+                .on_press(|s: &mut App| s.ui.chat.composer.permissions_open = !s.ui.chat.composer.permissions_open),
+        );
+    }
     if supports_plan(s) {
         let (glyph, label, help) = if interaction_mode(s) == "plan" {
             (&icons::PENCIL_RULER, "Plan", "Plan mode. Click to return to normal build mode")
@@ -1214,10 +1254,16 @@ fn send_button(s: &App, t: &T, sendable: bool) -> El {
     b
 }
 
+/// A chip per queued file (ComposerAttachmentStrip): its name and size, or in red why it cannot
+/// be sent (moved, emptied or grown since it was added).
 fn attachment_chips(t: &T, paths: &[String]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
     for (i, path) in paths.iter().enumerate() {
-        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let name = attachments::file_name(path);
+        let (detail, ink, help) = match attachments::check(path) {
+            Ok(size) => (attachments::format_size(size), t.c.muted_foreground, path.clone()),
+            Err(e) => ("Can't send".to_owned(), t.c.destructive, e),
+        };
         chips = chips.child(
             row()
                 .key(format!("composer-attachment-{i}"))
@@ -1228,8 +1274,10 @@ fn attachment_chips(t: &T, paths: &[String]) -> El {
                 .center_y()
                 .radius(theme::layout::CONTROL_RADIUS)
                 .fill(t.c.foreground.alpha_mul(0.06))
-                .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground))
+                .help(help)
+                .child(icon(&icons::FILE, 14.0).color(ink))
                 .child(text(name).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(180.0))
+                .child(text(detail).font(theme::TEXT_XS).color(ink))
                 .child(
                     el().size(20.0, 20.0)
                         .center()
@@ -1250,12 +1298,12 @@ fn attachment_chips(t: &T, paths: &[String]) -> El {
     chips
 }
 
+/// Any file: a filter list would narrow the macOS picker to its types.
 fn attach(tx: &mut Tx) {
-    let exts: Vec<&str> = IMAGE_TYPES.iter().map(|(e, _)| *e).collect();
-    let options = rune::FileDialogOptions { title: "Attach images".into(), ..Default::default() }.filter("Images", &exts);
+    let options = rune::FileDialogOptions { title: "Attach files".into(), ..Default::default() };
     tx.open_file(options, |s: &mut App, picked: rune::FileDialogResult, _| {
         if let Ok(Some(path)) = picked {
-            draft_mut(s).attachments.push(path.display().to_string());
+            add_files(s, [path.display().to_string()]);
         }
     });
 }
@@ -1407,6 +1455,17 @@ fn context_scene(s: &mut App, used: f64) {
     }
 }
 
+/// The showcase thread with three stashed prompts of different ages.
+fn stash_scene(s: &mut App) {
+    on_replay_showcase(s);
+    let now = s.now_ms;
+    s.ui.chat.composer.stash.entries = vec![
+        json!({"id": "stash-1", "createdAt": now - 4 * 60_000, "draft": {"prompt": "Refactor the websocket retry loop to back off exponentially and log each attempt"}}),
+        json!({"id": "stash-2", "createdAt": now - 3 * 3_600_000, "draft": {"prompt": "Check these traces", "attachments": ["/tmp/trace-1.json", "/tmp/trace-2.json"]}}),
+        json!({"id": "stash-3", "createdAt": now - 2 * 86_400_000, "draft": {"prompt": "", "attachments": ["/tmp/screenshot.png"]}}),
+    ];
+}
+
 fn on_replay_showcase(s: &mut App) {
     crate::scene_clock(s);
     if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_string()) {
@@ -1517,6 +1576,40 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];
     }),
+    ("composer-file-chip", |s| {
+        on_replay_showcase(s);
+        let dir = std::env::temp_dir().join("s5-scene-attachments");
+        let pdf = dir.join("design-review.pdf");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(&pdf, vec![b'%'; 240 * 1024]);
+        }
+        set_text(s, "Summarize the review notes");
+        draft_mut(s).attachments = vec![pdf.display().to_string(), "/nonexistent/moved-away.csv".into()];
+    }),
+    ("composer-stash-badge", |s| {
+        stash_scene(s);
+        set_text(s, "Now look at the reconnect path");
+    }),
+    ("composer-stash-menu", |s| {
+        stash_scene(s);
+        s.ui.chat.composer.stash.open = true;
+    }),
+    ("composer-model-search", |s| {
+        on_replay_showcase(s);
+        picker::toggle(s);
+        let query = &mut s.ui.chat.composer.picker.query;
+        query.replace_text("5");
+        query.set_caret(1);
+    }),
+    ("composer-permissions", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).runtime_mode = Some("approval-required".into());
+    }),
+    ("composer-permissions-menu", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).runtime_mode = Some("approval-required".into());
+        s.ui.chat.composer.permissions_open = true;
+    }),
     ("topbar-rename", |s| {
         on_replay_showcase(s);
         crate::chat::topbar::start_rename(s);
@@ -1531,21 +1624,6 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uploads_inline_supported_images_only() {
-        let dir = std::env::temp_dir().join(format!("s5-upload-{}", s5_net::uuid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let png = dir.join("shot.PNG");
-        std::fs::write(&png, [1u8, 2, 3]).unwrap();
-        let notes = dir.join("notes.txt");
-        std::fs::write(&notes, "hi").unwrap();
-        let v = upload(png.to_str().unwrap()).unwrap();
-        assert_eq!(v, json!({"type": "image", "name": "shot.PNG", "mimeType": "image/png", "sizeBytes": 3, "dataUrl": "data:image/png;base64,AQID"}));
-        assert!(upload(notes.to_str().unwrap()).is_none());
-        assert!(upload(dir.join("gone.png").to_str().unwrap()).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn removing_a_context_takes_its_pill_and_trailing_space() {

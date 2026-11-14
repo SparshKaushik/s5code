@@ -1,4 +1,5 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
+pub(crate) mod agent;
 pub mod browser;
 mod closed;
 mod diff;
@@ -7,6 +8,7 @@ mod favicon;
 mod files;
 mod history;
 pub mod popout;
+mod proactive;
 pub(crate) mod preview;
 pub mod browser_import;
 pub(crate) mod terminal;
@@ -65,6 +67,7 @@ pub struct Ui {
     /// What `right-panel.json` holds; `None` until the first poll reads it.
     saved: Option<Value>,
     pub waker: Option<Waker>,
+    proactive: proactive::Watch,
     history: history::History,
 }
 #[derive(Default)]
@@ -93,6 +96,7 @@ impl Default for Ui {
             stash_key: String::new(),
             saved: None,
             waker: None,
+            proactive: Default::default(),
             history: Default::default(),
         }
     }
@@ -120,6 +124,31 @@ fn diff_context(app: &App) -> Option<(String, String)> {
     }
     let cwd = workspace(app)?;
     Some((crate::chat::composer::draft_key(app, &app.route), cwd))
+}
+/// A diff's file path inside the open workspace (`resolveDiffPathForWorkspace`), or `None` when
+/// it lies outside. A checkout thread reads repository-relative paths against the project's
+/// repository root; a worktree thread is its own root.
+pub(crate) fn workspace_path(app: &App, file_path: &str) -> Option<String> {
+    let cwd = workspace(app);
+    let thread = match &app.route {
+        Route::Thread(id) => app.state().threads.iter().find(|v| v["id"] == *id),
+        _ => None,
+    };
+    let project = match thread {
+        Some(t) => app.state().projects.iter().find(|p| p["id"] == t["projectId"]),
+        None => crate::chat::home::draft_project(app),
+    };
+    let in_worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty());
+    let root = project.map(|p| data::s(&p["repositoryIdentity"], "rootPath")).filter(|r| !in_worktree && !r.is_empty());
+    diff::file_menu::resolve_diff_path(file_path, cwd.as_deref(), root)
+}
+/// Diff is offered in Git repositories only; until the status arrives it stays available.
+fn diff_available(app: &App) -> bool {
+    diff_context(app).is_some() && diff::is_repo(app) != Some(false)
+}
+/// The changed-files card's right-click menu: the diff file menu, outside the panel.
+pub fn file_menu(app: &mut App, path: String, at: (f32, f32)) {
+    diff::file_menu::open(app, path, at);
 }
 /// The Files surface's root: the thread's workspace, or on a new-thread draft its project's.
 fn workspace(app: &App) -> Option<String> {
@@ -236,6 +265,10 @@ pub fn terminal_active(app: &App) -> bool {
     app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
 }
 fn close(app: &mut App, surface: Surface) {
+    if surface == Surface::Terminal {
+        drawer::request_close_panel(app);
+        return;
+    }
     let view = match surface {
         Surface::Files => Some(closed::View::Files(files::selected(app))),
         Surface::Diff => Some(closed::View::Diff),
@@ -246,7 +279,6 @@ fn close(app: &mut App, surface: Surface) {
         app.ui.panel.closed.record(closed::Closed { thread, view });
     }
     match surface {
-        Surface::Terminal => drawer::close_panel(app),
         Surface::Files => files::flush(app),
         Surface::Browser(tab) => preview::close(app, tab),
         _ => {}
@@ -292,6 +324,40 @@ fn remove_surface(app: &mut App, surface: Surface) {
     app.ui.panel.surfaces.retain(|v| *v != surface);
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
+    }
+}
+/// Gives `thread`'s panel, on screen or put away, a browser tab, leaving the panel shut.
+/// Whether that panel is the one on screen.
+fn add_browser(app: &mut App, thread: &str, tab: browser::TabId, float: bool) -> bool {
+    let surface = Surface::Browser(tab);
+    let panel = &mut app.ui.panel;
+    let (surfaces, active, pip) = if panel.stash_key == thread {
+        (&mut panel.surfaces, &mut panel.active, &mut panel.browser.pip)
+    } else {
+        let stash = panel.stash.entry(thread.to_owned()).or_default();
+        (&mut stash.surfaces, &mut stash.active, &mut stash.pip)
+    };
+    if !surfaces.contains(&surface) {
+        surfaces.push(surface);
+    }
+    active.get_or_insert(surface);
+    if float {
+        *pip = Some(tab);
+    }
+    panel.stash_key == thread
+}
+/// Takes a browser tab off every thread's panel.
+fn drop_browser(app: &mut App, tab: browser::TabId) {
+    let surface = Surface::Browser(tab);
+    remove_surface(app, surface);
+    for stash in app.ui.panel.stash.values_mut() {
+        stash.surfaces.retain(|v| *v != surface);
+        if stash.active == Some(surface) {
+            stash.active = stash.surfaces.last().copied();
+        }
+        if stash.pip == Some(tab) {
+            stash.pip = None;
+        }
     }
 }
 /// Opens a workspace file in the Files surface (the palette's "Go to file").
@@ -484,6 +550,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         if app.ui.panel.active == Some(Surface::Terminal) {
             drawer::open_panel(app);
         }
+        context_changed |= proactive::poll(app);
     }
 
     let changed = diff::poll(app)
@@ -603,7 +670,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         if let Key::Text(v) = &e.key {
             let key = v.to_uppercase();
             if let Some(&(surface, _)) = LAUNCH.iter().find(|(_, k)| *k == key) {
-                add(app, surface);
+                if surface != Surface::Diff || diff_available(app) {
+                    add(app, surface);
+                }
                 return true;
             }
         }
@@ -632,9 +701,10 @@ fn picker(app: &App, t: &T) -> El {
     for (surface, key) in LAUNCH {
         let available = match surface {
             Surface::Browser(_) => true,
-            Surface::Diff => diff_context(app).is_some(),
+            Surface::Diff => diff_available(app),
             _ => context(app).is_some(),
         };
+        let hint = (surface == Surface::Diff && !available && diff_context(app).is_some()).then_some("Available for Git repositories.");
         list = list.child(
             row()
                 .h(32.)
@@ -659,6 +729,7 @@ fn picker(app: &App, t: &T) -> El {
                         .grow(1.),
                 )
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
+                .help(hint.unwrap_or_default())
                 .on_press(move |s: &mut App| add(s, surface)),
         );
     }
@@ -911,6 +982,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             "term-1",
         );
     }),
+    ("panel-diff-banners", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::banners_fixture(s);
+    }),
+    ("panel-terminal-close", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(s, drawer::Owner::Panel, &[(&[("term-1", TERMINAL_DEV), ("term-2", TERMINAL_VIM)], false)], "term-1");
+        s.ui.shell.panel_open = true;
+        s.ui.panel.surfaces.push(Surface::Terminal);
+        s.ui.panel.active = Some(Surface::Terminal);
+        close(s, Surface::Terminal);
+    }),
+    ("checkout-pr", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        crate::chat::details::pr::scene(s);
+    }),
     ("terminal-drawer-close", |s| {
         (crate::shell::SCENES[1].1)(s);
         drawer::fixture(s, drawer::Owner::Drawer, &[(&[("term-1", TERMINAL_DEV)], false)], "term-1");
@@ -946,6 +1033,7 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
         out.extend(diff::overlays(app, t));
     }
+    diff::file_menu::overlay(app, t, &mut out);
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
@@ -1006,7 +1094,7 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
     for (surface, key) in LAUNCH {
         let available = match surface {
             Surface::Browser(_) => true,
-            Surface::Diff => diff_context(app).is_some(),
+            Surface::Diff => diff_available(app),
             _ => context(app).is_some(),
         };
         menu = menu.item(

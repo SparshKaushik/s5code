@@ -438,7 +438,7 @@ pub fn poll(s: &mut App) -> bool {
     {
         s.ui.chat.details.git.init = None;
         if let Err(e) = reply {
-            palette::toast(s, "Git initialization failed", Some(&palette::error_message(&e, "An error occurred.")));
+            palette::toast_error_brief(s, "Git initialization failed", Some(&palette::error_message(&e, "An error occurred.")));
         }
         changed = true;
     }
@@ -683,9 +683,9 @@ fn files(status: &Value) -> Vec<(String, u64, u64)> {
 fn diff_count(t: &T, add: u64, del: u64) -> El {
     let mono = theme::mono(theme::TEXT_SM);
     row()
-        .child(text(format!("+{add}")).font(mono).color(t.c.diff_addition))
+        .child(text(format!("+{}", super::thousands(add))).font(mono).color(t.c.diff_addition))
         .child(text(" / ").font(mono).color(t.c.muted_foreground))
-        .child(text(format!("-{del}")).font(mono).color(t.c.diff_deletion))
+        .child(text(format!("-{}", super::thousands(del))).font(mono).color(t.c.diff_deletion))
 }
 
 fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {

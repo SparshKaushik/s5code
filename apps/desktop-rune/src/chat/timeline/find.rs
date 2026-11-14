@@ -54,10 +54,17 @@ fn query(app: &App) -> Option<&str> {
     (f.open && !q.is_empty()).then_some(q)
 }
 
-/// How many matches a row holds: user text plainly, replies in their rendered Markdown.
+/// How many matches a row holds: user text with chips plainly, the rest in rendered Markdown.
 fn row_matches(row: &Row, q: &str) -> usize {
     match row {
-        Row::User(item) => find_plain(&crate::chat::composer::chips::display(s(item, "text")).0, q).len(),
+        Row::User(item) => {
+            let (shown, chips) = crate::chat::composer::chips::display(s(item, "text"));
+            if chips.is_empty() {
+                find_markdown(&super::markdown::user_source(s(item, "text")), q, Case::Insensitive).len()
+            } else {
+                find_plain(&shown, q).len()
+            }
+        }
         Row::Assistant(item) => find_markdown(s(item, "text"), q, Case::Insensitive).len(),
         _ => 0,
     }

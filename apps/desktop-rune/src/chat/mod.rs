@@ -101,7 +101,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .w_full()
         .child(body)
         .children(timeline::scroll_to_end(s, cx, t, &lane))
-        .children(home::banner(s, t, &lane))
+        .children(timeline::banners::lane(s, t, &lane))
+        .children(timeline::banners::stack(s, cx, t, &lane))
         .child(composer::view(s, cx, t, &lane))
         .children(details::view(s, cx, t, shown, w))
         .children({
@@ -121,7 +122,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
 
 /// Chat keys no focused control took: find in thread, then a question's 1-9 shortcuts.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    timeline::attachments::on_key(s, e) || timeline::find::on_key(s, e, tx) || timeline::question::on_key(s, e, tx) || composer::shortcut(s, e)
+    timeline::attachments::on_key(s, e) || timeline::find::on_key(s, e, tx) || timeline::question::on_key(s, e, tx) || composer::shortcut(s, e) || details::shortcut(s, e)
 }
 
 #[cfg(test)]

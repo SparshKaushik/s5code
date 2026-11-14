@@ -228,6 +228,8 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "tailscaleServeEnabled": serve,
             "tailscaleServePort": serve_port,
             "shellEnvironmentPrepared": prepared,
+            "desktopBrowserFd": BROWSER_EVENTS_FD,
+            "desktopBrowserControlFd": BROWSER_CONTROL_FD,
         });
         let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
         let child = match spawn(&binary, &log_path, &bootstrap.to_string(), env) {
@@ -369,23 +371,56 @@ const DESKTOP_BACKEND_ENV_NAMES: &[&str] = &[
     "T3CODE_TAILSCALE_SERVE_PORT",
 ];
 
+/// The server reads browser events from one and writes browser commands to the other, as the
+/// Electron shell's backend manager hands them over (`DesktopBrowserChannel`).
+const BROWSER_EVENTS_FD: i32 = 6;
+const BROWSER_CONTROL_FD: i32 = 7;
+
 fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, String)]) -> std::io::Result<Child> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
     let out = File::options().create(true).append(true).open(log_path)?;
+    let (events, server_events) = std::os::unix::net::UnixStream::pair()?;
+    let (commands, server_commands) = std::os::unix::net::UnixStream::pair()?;
+    let fds = [(server_events.as_raw_fd(), BROWSER_EVENTS_FD), (server_commands.as_raw_fd(), BROWSER_CONTROL_FD)];
     let mut command = Command::new(binary);
     for name in DESKTOP_BACKEND_ENV_NAMES {
         command.env_remove(name);
     }
-    let mut child = command
-        .envs(env.iter().map(|(k, v)| (k, v)))
-        .args(["--bootstrap-fd", "0"])
-        .stdin(Stdio::piped())
-        .stdout(out.try_clone()?)
-        .stderr(out)
-        .spawn()?;
+    command.envs(env.iter().map(|(k, v)| (k, v))).args(["--bootstrap-fd", "0"]).stdin(Stdio::piped()).stdout(out.try_clone()?).stderr(out);
+    // SAFETY: between fork and exec this only calls fcntl and dup2, which are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            // Copies above both targets first, so placing one never closes the other's source;
+            // the copies and their targets lose close-on-exec.
+            let mut high = [0; 2];
+            for (i, (fd, _)) in fds.iter().enumerate() {
+                high[i] = fcntl(*fd, F_DUPFD, 10);
+                if high[i] < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for (i, (_, target)) in fds.iter().enumerate() {
+                if dup2(high[i], *target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    drop((server_events, server_commands));
+    crate::panel::agent::connect(events, commands);
     // One JSON line; the server reads fd 0 once and the pipe closes on drop.
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(format!("{bootstrap}\n").as_bytes())?;
     Ok(child)
+}
+
+const F_DUPFD: i32 = 0;
+unsafe extern "C" {
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn dup2(from: i32, to: i32) -> i32;
 }
 
 fn log(path: &PathBuf, line: &str) {

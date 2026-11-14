@@ -321,6 +321,13 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
         copied: Vec::new(),
     });
 }
+/// An error toast that times out like a plain one (web's `type: "error"` without `timeout: 0`).
+pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&str>) {
+    toast_error(s, title, description);
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.until = data::now_ms() + 4000;
+    }
+}
 /// The first `message` in an Effect cause, else the reply's own text.
 pub(crate) fn error_message(error: &serde_json::Value, fallback: &str) -> String {
     fn find(v: &serde_json::Value) -> Option<&str> {

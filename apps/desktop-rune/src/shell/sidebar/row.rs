@@ -298,6 +298,11 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
         let label = crate::chat::composer::model_name(s, &th.provider, &slug);
         rows = rows.child(detail(crate::chat::composer::provider_icon(t, driver, 12.0).shrink().opacity(0.6), label));
     }
+    let terminals = crate::panel::terminal::running(s, id);
+    if terminals > 0 {
+        let label = format!("{terminals} terminal {} running", if terminals == 1 { "process" } else { "processes" });
+        rows = rows.child(detail(icon(&i::TERMINAL, 12.0).color(if t.dark { tw::TEAL_300.alpha_mul(0.9) } else { tw::TEAL_600 }).shrink(), label));
+    }
     let body = col().max_w(346.0).padding(13.0).gap(8.0)
         .child(text(th.title.clone()).font(theme::XS_MEDIUM.lh(15.0)).color(t.c.foreground).truncate())
         .child(rows);

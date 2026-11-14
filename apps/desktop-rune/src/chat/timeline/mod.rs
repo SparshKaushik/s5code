@@ -15,6 +15,14 @@ pub mod requests;
 mod rows;
 mod scenes;
 mod secret;
+pub mod banners;
+mod child_approvals;
+mod link;
+mod worktree_setup;
+mod inspector;
+mod history;
+mod md_links;
+mod work;
 
 use crate::data::s;
 use crate::theme::{self, AlphaMul, T};
@@ -31,6 +39,12 @@ pub struct Ui {
     assets: attachments::Assets,
     follow: Follow,
     secrets: secret::State,
+    links: link::State,
+    banners: banners::State,
+    worktree: worktree_setup::State,
+    inspector: inspector::State,
+    history: history::State,
+    md_links: md_links::State,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
@@ -58,7 +72,7 @@ pub struct Ui {
 pub(super) fn row_key(row: &Row, index: usize) -> String {
     let key = match row {
         Row::User(item) | Row::Assistant(item) | Row::Item(item) => s(item, "id"),
-        Row::Working { id, .. } | Row::Work { id, .. } => id.as_str(),
+        Row::Working { id, .. } | Row::Work { id, .. } | Row::Tools { id, .. } | Row::Thinking { id, .. } => id.as_str(),
         Row::Request { request, .. } => s(request, "id"),
     };
     format!("timeline-row-{key}-{index}")
@@ -100,7 +114,7 @@ pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::det
     Some(
         row()
             .key("timeline-scroll-to-end")
-            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0))
+            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0 + banners::stack_h(cx)))
             .w(lane.width)
             .justify_center()
             .live_opacity(&follow.opacity)
@@ -191,7 +205,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let id = s(item, "id").to_owned();
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
     if kind == "assistant_message" {
-        return markdown::view(app, s(item, "text"), &id, t);
+        // The same inset as a top-level assistant row.
+        return col().w_full().px(4.0).child(markdown::view(app, s(item, "text"), &id, t));
     }
     if kind == "compaction" {
         let active = matches!(s(item, "status"), "pending" | "running" | "waiting");
@@ -238,10 +253,14 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         });
         return divider(t, &icons::GIT_FORK, label.into(), t.c.muted_foreground, None, open);
     }
-    if matches!(
-        kind,
-        "error" | "system_notice" | "handoff" | "link_request"
-    ) {
+    if kind == "link_request" {
+        let thread = match app.frame_route() {
+            crate::Route::Thread(id) => id.as_str(),
+            _ => "",
+        };
+        return link::view(app, item, thread, t);
+    }
+    if matches!(kind, "error" | "system_notice" | "handoff") {
         let detail = [
             s(&item["failure"], "message"),
             s(item, "message"),
@@ -290,7 +309,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                     t.c.muted_foreground
                 }),
             )
-            .child(notice);
+            .child(notice)
+            .children(worktree_setup::retry_button(app, item, t));
     }
     if kind == "secret_request" {
         let thread = match app.frame_route() {
@@ -344,6 +364,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let failed = s(item, "status") == "failed" && kind != "notification";
     let glyph_color = if failed { t.c.destructive.alpha_mul(0.4) } else { t.c.muted_foreground };
     let spoken = if failed { format!("{title}, tool call failed") } else { title.to_owned() };
+    let ask = inspector::ask(app, item);
     let mut out = col().w_full().gap(4.0);
     out = out.child(
         row()
@@ -359,7 +380,12 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             .key(head_key.clone())
             .on_press_tx(move |app: &mut App, tx| {
                 tx.keep_on_screen(head_key.clone());
-                toggle(app, &id)
+                toggle(app, &id);
+                if let Some(ask) = &ask
+                    && app.ui.chat.timeline.expanded.contains(&id)
+                {
+                    inspector::fetch(app, ask);
+                }
             })
             .child(if failed { icon(glyph, 16.0).color(glyph_color).help("Tool call failed") } else { icon(glyph, 16.0).color(glyph_color) })
             .child(
@@ -382,6 +408,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 .color(t.c.muted_foreground),
             ),
     );
+    let inspected = (expanded && todo.is_none() && !matches!(kind, "reasoning" | "notification")).then(|| inspector::view(app, item, t)).flatten();
     if expanded && todo.is_some() {
         let mut steps = col().w_full().gap(6.0).px(28.0);
         for step in array(item, "steps") {
@@ -407,6 +434,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             );
         }
         out = out.child(steps);
+    } else if let Some(body) = inspected {
+        out = out.child(body);
     } else if expanded {
         let detail = if kind == "reasoning" {
             s(item, "text").to_owned()
@@ -439,6 +468,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 .child(markdown::view(app, &detail, s(item, "id"), t))
                 .child(copy_button(app, &detail, t, "Copy")),
         );
+    }
+    if expanded {
         if kind == "file_change" {
             let route_thread = match app.frame_route() {
                 crate::Route::Thread(id) => id.clone(),
@@ -485,7 +516,9 @@ fn send(app: &mut App, request: &str, command: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
+        | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | worktree_setup::poll(app)
+        | inspector::poll(app) | md_links::poll(app) | history::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -620,15 +653,23 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     let changes = changed::by_reply(&view.projection);
     let keys: Vec<String> = rows.iter().enumerate().map(|(i, r)| row_key(r, i)).collect();
     let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
+    // A run of steers shows the marker once (continuesSteer).
+    let mut prev_steer = false;
     let mut stack = col()
         .w(lane.width)
         .growth(GrowthSpec::default())
         .virtualize(100.0)
         // The composer floats over the list's bottom. Scroll extent counts the stack's own
         // padding but not the viewport's, so the clearance lives here.
-        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0);
+        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banners::stack_h(cx));
+    if let Some(control) = history::view(app, thread_id, t) {
+        stack = stack.child(col().key("timeline-row-history").w_full().child(control));
+    }
     for (index, r) in rows.into_iter().enumerate() {
         let marks = marks.next().flatten();
+        let steer = if let Row::User(item) = &r { work::steer(item) } else { None };
+        let steer_marker = steer.filter(|_| !prev_steer);
+        prev_steer = steer.is_some();
         let (_, body) = match r {
             Row::User(item) => {
                 let mut content = col().gap(8.0);
@@ -640,17 +681,21 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     use crate::chat::composer::chips;
                     // Context links read as their chips (ContextChip inline in the bubble).
                     let (shown, links) = chips::display(s(item, "text"));
+                    // Text without chips renders as Markdown, as web's ChatMarkdown does.
+                    let rich = links.is_empty();
                     let records = array(&item["context"], "records");
                     let chip_links = chip::links(&links, records);
                     let pills = links.into_iter().map(|c| {
                         let record = records.iter().find(|r| s(r, "contextId") == c.id);
                         (c.range, chips::style(&c.kind, record))
                     });
-                    let highlights = marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown));
+                    let highlights = if rich { Vec::new() } else { marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown)) };
+                    let found = if rich { marks.is_some() } else { !highlights.is_empty() };
                     // A find match inside shows the whole message, as web's findReveal does.
                     let fold_key = format!("user-full:{}", s(item, "id"));
                     let foldable = collapses(&shown);
-                    let folded = foldable && highlights.is_empty() && !app.ui.chat.timeline.expanded.contains(&fold_key);
+                    let folded = foldable && !found && !app.ui.chat.timeline.expanded.contains(&fold_key);
+                    let rendered = rich.then(|| markdown::user(app, s(item, "text"), s(item, "id"), t, marks.as_ref()));
                     let mut body = text(shown)
                         .font(theme::TEXT_SM.lh(22.75))
                         .color(t.c.message_foreground)
@@ -667,6 +712,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     if folded {
                         body = body.max_lines(7);
                     }
+                    let body = match rendered {
+                        // Seven body lines, fading out, as the plain text's max_lines(7).
+                        Some(md) if folded => col().w_full().max_h(7.0 * 22.75).clip_fade(0.0, 0.0, 0.0, 24.0).child(md),
+                        Some(md) => md,
+                        None => body,
+                    };
                     let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(t.c.message_surface).child(body);
                     if foldable {
                         let label = if folded { "Show full message" } else { "Show less" };
@@ -696,6 +747,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         .hover_group()
                         .gap(4.0)
                         .pb(8.0)
+                        .children(steer_marker.map(|help| row().w_full().justify_end().pr(4.0).child(work::steer_marker(help, t))))
                         .child(row().w_full().justify_end().child(bubble))
                         .child(
                             row()
@@ -769,8 +821,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         ),
                 );
                 if expanded {
-                    for item in items {
-                        body = body.child(item_view(app, item, t));
+                    for entry in work::group(&items) {
+                        body = body.child(match entry {
+                            work::Entry::One(item) => item_view(app, item, t),
+                            work::Entry::Group(id, items) => work::group_view(app, &id, &items, t),
+                        });
                     }
                 }
                 (
@@ -783,6 +838,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 )
             }
             Row::Item(item) => (s(item, "id").to_owned(), item_view(app, item, t)),
+            Row::Tools { id, items } => {
+                let view = work::group_view(app, &id, &items, t);
+                (id, view)
+            }
+            Row::Thinking { id, elapsed } => (id, work::thinking_view(&elapsed, t)),
             Row::Request { request, item } => (
                 s(request, "id").to_owned(),
                 if s(request, "kind") == "user_input"
@@ -810,6 +870,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 .py(3.0)
                 .child(body),
         );
+    }
+    if let Some(setup) = worktree_setup::view(app, thread_id, t) {
+        stack = stack.child(col().key("timeline-row-worktree-setup").w_full().py(3.0).child(setup));
     }
     if let Some(queue) = queue::view(app, thread_id, t, lane.width) {
         stack = stack.child(col().key("timeline-row-queue").w_full().py(3.0).child(queue));

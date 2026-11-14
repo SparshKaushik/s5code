@@ -137,12 +137,20 @@ pub fn refresh(app: &mut App) -> bool {
     find.searched = sig;
     let before = find.current.and_then(|j| find.hits.get(j).cloned());
     find.hits = pattern(&ui.find_edit.text, find.case, find.regex).map(|re| collect(&ui.state, &re, find.word)).unwrap_or_default();
-    find.current = match before {
-        Some(b) => find.hits.iter().position(|h| *h == b).or((!find.hits.is_empty()).then_some(0)),
-        None => (!find.hits.is_empty()).then_some(0),
-    };
+    let st = &ui.state;
+    let first = first_visible(&find.hits, &|h: &Hit| st.row_at(h.f, h.side, h.line), st.first_visible_row(), st.visible_file());
+    find.current = before.and_then(|b| find.hits.iter().position(|h| *h == b)).or(first);
     paint(app);
     true
+}
+
+/// A new search starts at the first match at or below the top of the view, wrapping to the
+/// first; a match with no row (folded file or gap) counts by its file.
+fn first_visible(hits: &[Hit], row: &dyn Fn(&Hit) -> Option<u32>, top: u32, file: usize) -> Option<usize> {
+    if hits.is_empty() {
+        return None;
+    }
+    Some(hits.iter().position(|h| row(h).map_or(h.f > file, |r| r >= top)).unwrap_or(0))
 }
 
 /// Shows match `j`: unfolds its file, opens its gap, scrolls it below the sticky header.
@@ -344,5 +352,22 @@ mod tests {
         // Without regex the pattern is literal.
         assert_eq!(find("(x)", false, false, false), [(1, 2, Side::Old, 7..10), (2, 2, Side::New, 4..7)]);
         assert!(pattern("(", false, true).is_none());
+    }
+
+    #[test]
+    fn a_new_search_starts_at_the_first_match_in_view() {
+        let hit = |f: usize, line: u32| Hit { f, h: 0, i: 0, side: Side::New, line, range: 0..1 };
+        // File 0 rows 0-9 (line n at row n), file 1 is folded, file 2 line n at row 20 + n.
+        let hits = [hit(0, 2), hit(0, 8), hit(1, 3), hit(2, 4)];
+        let row = |h: &Hit| match h.f {
+            0 => Some(h.line),
+            2 => Some(20 + h.line),
+            _ => None,
+        };
+        assert_eq!(first_visible(&hits, &row, 5, 0), Some(1));
+        assert_eq!(first_visible(&hits, &row, 10, 0), Some(2), "the folded file below the view");
+        assert_eq!(first_visible(&hits, &row, 22, 2), Some(3));
+        assert_eq!(first_visible(&hits, &row, 30, 2), Some(0), "nothing below wraps to the first");
+        assert_eq!(first_visible(&[], &row, 0, 0), None);
     }
 }

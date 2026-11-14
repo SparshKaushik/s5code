@@ -197,7 +197,7 @@ fn toggle_scope(current: &[&'static str], scope: &'static str, checked: bool) ->
 }
 
 /// Contracts `sessionGrantsScope`, with its legacy parents.
-fn grants(session: &Value, scope: &str) -> bool {
+pub(crate) fn grants(session: &Value, scope: &str) -> bool {
     if session["authenticated"] != true {
         return false;
     }

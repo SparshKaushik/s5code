@@ -169,6 +169,13 @@ impl Default for Thread {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum Confirm {
+    One(Owner, String, String),
+    /// Closing the right panel's Terminal surface stops all of its terminals.
+    Panel(String),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Owner {
     Drawer,
@@ -180,8 +187,10 @@ pub struct Ui {
     pub threads: HashMap<String, Thread>,
     /// The right panel's Terminal surface, per thread.
     pub panel: HashMap<String, Groups>,
-    /// The terminal waiting on the close confirm.
-    confirm: Option<(Owner, String, String)>,
+    /// The terminals waiting on the close confirm.
+    confirm: Option<Confirm>,
+    /// A new-thread draft's thread id, by draft key, so its terminals carry into the thread.
+    drafts: HashMap<String, String>,
     /// What `terminal-state.json` holds, once read (the web's `t3code:terminal-state:v1`).
     saved: Option<Value>,
     /// A height drag in progress: saved when it ends, not on every frame.
@@ -291,9 +300,10 @@ impl Ui {
     }
 }
 
-/// The current thread, its terminal cwd and its worktree.
-fn launch_context(app: &App) -> Option<(String, String, Option<String>)> {
-    let (thread, cwd) = super::context(app)?;
+/// The current thread (or draft), its terminal cwd, its worktree and its project's root.
+fn launch_context(app: &App) -> Option<(String, String, Option<String>, Option<String>)> {
+    let thread = current_thread(app)?;
+    let cwd = super::workspace(app)?;
     let worktree = app
         .state()
         .threads
@@ -302,7 +312,19 @@ fn launch_context(app: &App) -> Option<(String, String, Option<String>)> {
         .and_then(|v| v["worktreePath"].as_str())
         .filter(|v| !v.is_empty())
         .map(String::from);
-    Some((thread, cwd, worktree))
+    Some((thread, cwd, worktree, project_root(app)))
+}
+
+fn project_root(app: &App) -> Option<String> {
+    let project = match &app.route {
+        Route::Thread(id) => {
+            let thread = app.state().threads.iter().find(|v| v["id"] == id.as_str())?;
+            app.state().projects.iter().find(|p| p["id"] == thread["projectId"])?
+        }
+        Route::Home { .. } => crate::chat::home::draft_project(app)?,
+        _ => return None,
+    };
+    Some(crate::data::s(project, "workspaceRoot").to_string()).filter(|r| !r.is_empty())
 }
 
 /// The current thread's active terminal for `owner`, which `workspace.focusNext` focuses.
@@ -316,11 +338,33 @@ pub(super) fn active_terminal(app: &App, owner: Owner) -> Option<(String, String
     (!active.is_empty()).then_some((thread, active))
 }
 
+/// The thread on screen, or the new-thread draft's once it has a terminal.
 fn current_thread(app: &App) -> Option<String> {
     match &app.route {
         Route::Thread(id) => Some(id.clone()),
+        Route::Home { .. } => app.ui.panel.drawer.drafts.get(&crate::chat::composer::draft_key(app, &app.route)).cloned(),
         _ => None,
     }
+}
+
+/// The current thread; a draft gets the thread id it will be created with (web's draft terminals).
+fn current_or_draft(app: &mut App) -> Option<String> {
+    if let Some(thread) = current_thread(app) {
+        return Some(thread);
+    }
+    if !matches!(app.route, Route::Home { .. }) || super::workspace(app).is_none() {
+        return None;
+    }
+    let project = crate::data::s(crate::chat::home::draft_project(app)?, "id").to_string();
+    let thread = format!("thread:project:{project}:{}", s5_net::uuid());
+    let key = crate::chat::composer::draft_key(app, &app.route);
+    app.ui.panel.drawer.drafts.insert(key, thread.clone());
+    Some(thread)
+}
+
+/// The id a draft's terminals run under becomes the new thread's, once.
+pub fn take_draft_thread(app: &mut App, project: &str) -> Option<String> {
+    app.ui.panel.drawer.drafts.remove(&crate::chat::composer::home_key(project))
 }
 
 /// Every id the thread's drawer and panel hold, so a new one never shares a PTY.
@@ -335,8 +379,8 @@ fn allocate(app: &App, thread: &str) -> String {
 }
 
 fn start(app: &mut App, thread: &str, id: &str, focus: bool) {
-    if let Some((_, cwd, worktree)) = launch_context(app).filter(|(t, ..)| t == thread) {
-        terminal::ensure(app, thread, id, &cwd, worktree.as_deref());
+    if let Some((_, cwd, worktree, root)) = launch_context(app).filter(|(t, ..)| t == thread) {
+        terminal::ensure(app, thread, id, &terminal::Launch { cwd: &cwd, worktree: worktree.as_deref(), root: root.as_deref() });
     }
     if focus {
         terminal::focus(app, thread, id);
@@ -345,7 +389,7 @@ fn start(app: &mut App, thread: &str, id: &str, focus: bool) {
 
 /// `terminal.toggle`: opening a drawer with no terminals starts `term-1`.
 pub fn toggle(app: &mut App) {
-    let Some(thread) = current_thread(app) else {
+    let Some(thread) = current_or_draft(app) else {
         return;
     };
     let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
@@ -367,8 +411,28 @@ pub fn sync_topbar(app: &mut App) {
         current_thread(app).is_some_and(|t| app.ui.panel.drawer.is_open(&t));
 }
 
-pub fn new_terminal(app: &mut App, owner: Owner) {
+/// Opens the drawer on a terminal the server started, such as a setup script's
+/// (`storeEnsureTerminal` with open and active, then focus).
+pub fn show(app: &mut App, id: &str) {
     let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let drawer = &mut app.ui.panel.drawer;
+    let owner = drawer.owner_of(&thread, id);
+    if owner != Some(Owner::Panel) {
+        let state = drawer.threads.entry(thread.clone()).or_default();
+        state.open = true;
+        if owner.is_none() {
+            state.groups.add(id);
+        }
+    }
+    activate(app, &thread, id);
+    start(app, &thread, id, true);
+    sync_topbar(app);
+}
+
+pub fn new_terminal(app: &mut App, owner: Owner) {
+    let Some(thread) = current_or_draft(app) else {
         return;
     };
     let id = allocate(app, &thread);
@@ -383,7 +447,7 @@ pub fn new_terminal(app: &mut App, owner: Owner) {
 /// Types `input` into an idle drawer terminal, the active one first, else a new one
 /// (`findReusableProjectScriptTerminal`); panel-owned terminals are never reused.
 pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
-    let Some(thread) = current_thread(app) else {
+    let Some(thread) = current_or_draft(app) else {
         return;
     };
     let ui = &app.ui.panel;
@@ -400,13 +464,14 @@ pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
         state.groups.add(&id);
     }
     state.groups.activate(&id);
-    terminal::run(app, &thread, &id, cwd, worktree, input);
+    let root = project_root(app);
+    terminal::run(app, &thread, &id, &terminal::Launch { cwd, worktree, root: root.as_deref() }, input);
     terminal::focus(app, &thread, &id);
     sync_topbar(app);
 }
 
 pub fn split(app: &mut App, owner: Owner, vertical: bool) {
-    let Some(thread) = current_thread(app) else {
+    let Some(thread) = current_or_draft(app) else {
         return;
     };
     let id = allocate(app, &thread);
@@ -428,7 +493,7 @@ pub fn split(app: &mut App, owner: Owner, vertical: bool) {
 
 /// The right panel's Terminal surface shows its own terminals, started on first open.
 pub fn open_panel(app: &mut App) {
-    let Some(thread) = current_thread(app) else {
+    let Some(thread) = current_or_draft(app) else {
         return;
     };
     let empty = app
@@ -461,8 +526,19 @@ pub fn focus_panel(app: &mut App) {
     }
 }
 
+/// Closing the panel's Terminal surface asks first, as it stops every terminal in it.
+pub fn request_close_panel(app: &mut App) {
+    match current_thread(app).filter(|t| app.ui.panel.drawer.panel.get(t).is_some_and(|g| !g.is_empty())) {
+        Some(thread) => app.ui.panel.drawer.confirm = Some(Confirm::Panel(thread)),
+        None => {
+            close_panel(app);
+            super::remove_surface(app, super::Surface::Terminal);
+        }
+    }
+}
+
 /// Closing the panel's Terminal surface stops its terminals.
-pub fn close_panel(app: &mut App) {
+fn close_panel(app: &mut App) {
     let Some(thread) = current_thread(app) else {
         return;
     };
@@ -489,7 +565,7 @@ fn select(app: &mut App, owner: Owner, id: &str) {
 
 pub fn request_close(app: &mut App, owner: Owner, id: &str) {
     if let Some(thread) = current_thread(app) {
-        app.ui.panel.drawer.confirm = Some((owner, thread, id.into()));
+        app.ui.panel.drawer.confirm = Some(Confirm::One(owner, thread, id.into()));
     }
 }
 
@@ -557,10 +633,48 @@ pub fn shortcut(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
 /// Keeps the topbar toggle in step with the drawer of the thread on screen.
 pub fn poll(app: &mut App) -> bool {
     persist(app);
+    let reconciled = reconcile(app);
     reattach(app);
     let before = app.ui.chat.topbar.terminal_open;
     sync_topbar(app);
-    before != app.ui.chat.topbar.terminal_open
+    reconciled || before != app.ui.chat.topbar.terminal_open
+}
+
+/// The drawer follows the server's terminals for the thread (another client's, an agent's),
+/// except the panel's own.
+fn reconcile(app: &mut App) -> bool {
+    let Some(thread) = current_thread(app) else { return false };
+    let ui = &app.ui.panel.drawer;
+    let panel: Vec<String> = ui.panel.get(&thread).map(|g| g.ids().cloned().collect()).unwrap_or_default();
+    let server: Vec<String> = terminal::known(app, &thread).into_iter().map(|(id, ..)| id).filter(|id| !panel.contains(id)).collect();
+    if server.is_empty() && !ui.threads.contains_key(&thread) {
+        return false;
+    }
+    let changed = reconcile_ids(&mut app.ui.panel.drawer.threads.entry(thread.clone()).or_default().groups, &server);
+    if app.ui.panel.drawer.threads.get(&thread).is_some_and(|t| t.groups.is_empty() && !t.open) {
+        app.ui.panel.drawer.threads.remove(&thread);
+    }
+    changed
+}
+
+/// `reconcileThreadTerminalSessionIds`, skipped while the server lags a terminal just opened
+/// (its ids a strict subset of ours).
+fn reconcile_ids(groups: &mut Groups, server: &[String]) -> bool {
+    let client: Vec<String> = groups.ids().cloned().collect();
+    let lagging = server.len() < client.len() && server.iter().all(|id| client.contains(id));
+    let same = server.len() == client.len() && server.iter().all(|id| client.contains(id));
+    if same || lagging {
+        return false;
+    }
+    for id in client.iter().filter(|id| !server.contains(id)) {
+        groups.remove(id);
+    }
+    for id in server.iter().filter(|id| !client.contains(id)) {
+        let active = std::mem::take(&mut groups.active);
+        groups.add(id);
+        groups.active = if active.is_empty() { id.clone() } else { active };
+    }
+    true
 }
 
 fn action(
@@ -733,12 +847,7 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
         let mut rows = col().w_full().gap(2.);
         for id in &group.ids {
             let active = *id == groups.active;
-            let label = app
-                .ui
-                .panel
-                .terminal
-                .get(thread, id)
-                .map_or_else(|| terminal::label_for(id), |s| s.title());
+            let label = terminal::title(app, thread, id);
             let fg = if active {
                 t.c.foreground
             } else {
@@ -906,35 +1015,51 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
 }
 
 pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
-    let Some((_, thread, id)) = app.ui.panel.drawer.confirm.clone() else {
+    let Some(confirm) = app.ui.panel.drawer.confirm.clone() else {
         return;
     };
-    let label = app
-        .ui
-        .panel
-        .terminal
-        .get(&thread, &id)
-        .map_or_else(|| terminal::label_for(&id), |s| s.title());
+    let labels: Vec<String> = match &confirm {
+        Confirm::One(_, thread, id) => vec![terminal::title(app, thread, id)],
+        Confirm::Panel(thread) => app.ui.panel.drawer.panel.get(thread).map_or_else(Vec::new, |g| {
+            let others = g.ids().filter(|id| **id != g.active).map(|id| terminal::title(app, thread, id));
+            std::iter::once(terminal::title(app, thread, &g.active)).chain(others).collect()
+        }),
+    };
+    let (title, description) = close_message(&labels);
     let cancel = kit::Button::new("Cancel")
         .variant("outline")
         .on_press(|s: &mut App| s.ui.panel.drawer.confirm = None)
         .build(t);
     let confirm = kit::Button::new("Confirm")
         .variant("destructive")
-        .on_press(|s: &mut App| {
-            if let Some((owner, thread, id)) = s.ui.panel.drawer.confirm.take() {
-                close_now(s, owner, &thread, &id);
+        .on_press(|s: &mut App| match s.ui.panel.drawer.confirm.take() {
+            Some(Confirm::One(owner, thread, id)) => close_now(s, owner, &thread, &id),
+            Some(Confirm::Panel(thread)) if current_thread(s).as_deref() == Some(thread.as_str()) => {
+                close_panel(s);
+                super::remove_surface(s, super::Surface::Terminal);
             }
+            _ => {}
         })
         .build(t);
-    kit::Dialog::new("terminal-close", format!("Close terminal \"{label}\"?"))
+    kit::Dialog::new("terminal-close", title)
         .alert()
         .width(448.)
         .open(true)
-        .description("This stops the running process and clears its history.")
+        .description(description)
         .child(row().w_full().gap(8.).justify_end().child(cancel).child(confirm))
         .on_close(|s: &mut App| s.ui.panel.drawer.confirm = None)
         .build(t, out);
+}
+
+/// `confirmTerminalClose`'s wording for one terminal or several.
+fn close_message(labels: &[String]) -> (String, String) {
+    match labels {
+        [one] => (format!("Close terminal \"{one}\"?"), "This stops the running process and clears its history.".into()),
+        _ => {
+            let quoted: Vec<String> = labels.iter().map(|l| format!("\"{l}\"")).collect();
+            (format!("Close {} terminals?", labels.len()), format!("This stops their running processes and clears their histories: {}.", quoted.join(", ")))
+        }
+    }
 }
 
 /// Seeds a thread's drawer from recorded snapshots for headless scenes.
@@ -1062,5 +1187,34 @@ mod tests {
         assert_eq!(ids(&g), vec![vec!["term-4"]]);
         g.remove("term-4");
         assert!(g.is_empty());
+    }
+
+    #[test]
+    fn the_drawer_follows_the_server_terminals_unless_it_is_ahead() {
+        let s = |ids: &[&str]| ids.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        let mut g = Groups::default();
+        g.add("term-1");
+        g.split("term-2", true);
+        assert!(!reconcile_ids(&mut g, &s(&["term-1"])), "the server hasn't heard of term-2 yet");
+        assert!(!reconcile_ids(&mut g, &s(&[])));
+        assert!(!reconcile_ids(&mut g, &s(&["term-2", "term-1"])));
+        assert!(reconcile_ids(&mut g, &s(&["term-1", "term-2", "term-3"])), "another client opened term-3");
+        assert_eq!(ids(&g), vec![vec!["term-1", "term-2"], vec!["term-3"]]);
+        assert_eq!(g.active, "term-2", "focus stays put");
+        assert!(!reconcile_ids(&mut g, &s(&["term-1", "term-3"])), "a strict subset reads as lag; term-2's own exit closes it");
+        assert!(reconcile_ids(&mut g, &s(&["term-1", "term-3", "term-4"])), "term-2 ended elsewhere, term-4 opened");
+        assert_eq!(ids(&g), vec![vec!["term-1"], vec!["term-3"], vec!["term-4"]]);
+        let mut empty = Groups::default();
+        assert!(reconcile_ids(&mut empty, &s(&["term-5"])));
+        assert_eq!(empty.active, "term-5");
+    }
+
+    #[test]
+    fn closing_several_terminals_names_them_all() {
+        let one = close_message(&["vim".into()]);
+        assert_eq!(one.0, "Close terminal \"vim\"?");
+        let two = close_message(&["Terminal 2".into(), "vim".into()]);
+        assert_eq!(two.0, "Close 2 terminals?");
+        assert_eq!(two.1, "This stops their running processes and clears their histories: \"Terminal 2\", \"vim\".");
     }
 }
