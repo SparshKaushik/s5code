@@ -106,6 +106,7 @@ pub fn device_only(path: &str) -> bool {
             | "connections"
             | "access"
             | "about"
+            | "open-source-licenses"
     )
 }
 pub fn sentence(s: &App, t: &T) -> El {

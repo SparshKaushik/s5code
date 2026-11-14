@@ -130,6 +130,7 @@ fn app_sign_in(s: &App, t: &T, account: Option<&str>) -> El {
         let action = crate::kit::Button::new("Sign out")
             .variant("outline")
             .size("xs")
+            .disabled(!super::permissions::allowed(s, "sourceControl.signInStart"))
             .on_press(|s: &mut App| {
                 s.ui.settings.source_control.app = AppSignIn::Idle;
                 let mut sign_ins = saved(s, "github")["signIns"].as_object().cloned().unwrap_or_default();
@@ -153,7 +154,7 @@ fn app_sign_in(s: &App, t: &T, account: Option<&str>) -> El {
         let starting = matches!(ui.app, AppSignIn::Starting(_));
         let action = crate::kit::Button::new(if failed.is_some() { "Try again" } else { "Sign in with GitHub" })
             .size("xs")
-            .disabled(starting)
+            .disabled(starting || !super::permissions::allowed(s, "sourceControl.signInStart"))
             .on_press(|s: &mut App| {
                 if let Some(net) = s.src.net() {
                     let id = net.request("sourceControl.signInStart", app_input());

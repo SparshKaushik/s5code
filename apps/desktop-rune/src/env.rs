@@ -12,14 +12,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
-use rune::{El, TextEdit, col, icon, row, text};
+use rune::{El, TextEdit, col, row, text};
 use serde_json::{Value, json};
 
 use crate::data::Source;
 use crate::theme::{self, T};
-use crate::{App, Route, icons, kit};
+use crate::{App, Route, kit};
 
 pub mod ssh;
+mod catalog;
 
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
@@ -50,15 +51,15 @@ pub struct Ui {
     /// Rows copied into `App::src`, and which environment owns each copied id.
     foreign: usize,
     owners: HashMap<String, String>,
-    /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
-    pub merges: u64,
     pub ssh: ssh::Ui,
+    /// Saved environments switched off in Settings: kept, but not connected.
+    pub off: Vec<String>,
 }
 
 fn path() -> PathBuf {
     match std::env::var_os("S5_ENVIRONMENTS") {
         Some(path) => path.into(),
-        None => crate::settings::client::config_path().with_file_name("environments.json"),
+        None => crate::settings::client::sibling_path("environments.json"),
     }
 }
 
@@ -73,14 +74,41 @@ fn decode(value: &Value) -> Vec<Saved> {
         .collect()
 }
 
-fn encode(saved: &[Saved]) -> Value {
-    let rows: Vec<Value> = saved.iter().map(|e| json!({"environmentId": e.id, "label": e.label, "httpBaseUrl": e.base, "bearerToken": e.bearer})).collect();
+/// Web's catalog `enabled: false` rows.
+fn decode_off(value: &Value) -> Vec<String> {
+    value["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["enabled"] == false)
+        .filter_map(|v| v["environmentId"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn encode(saved: &[Saved], off: &[String]) -> Value {
+    let rows: Vec<Value> = saved
+        .iter()
+        .map(|e| {
+            let mut row = json!({"environmentId": e.id, "label": e.label, "httpBaseUrl": e.base, "bearerToken": e.bearer});
+            if off.contains(&e.id) {
+                row["enabled"] = json!(false);
+            }
+            row
+        })
+        .collect();
     json!({ "version": 1, "environments": rows })
 }
 
-/// Bearer tokens are credentials: the file is the user's alone.
-fn save(saved: &[Saved]) -> Result<(), String> {
+/// Bearer tokens are credentials: the file is the user's alone. Electron's catalog follows.
+fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
     let path = path();
+    let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
+    write(&path, saved, off)?;
+    catalog::export(&old, saved);
+    Ok(())
+}
+
+fn write(path: &std::path::Path, saved: &[Saved], off: &[String]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -90,8 +118,8 @@ fn save(saved: &[Saved]) -> Result<(), String> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())
+    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 
 fn connect(s: &App, env: &Saved) -> Source {
@@ -105,13 +133,38 @@ fn connect(s: &App, env: &Saved) -> Source {
 
 /// Loads the saved environments and connects each in the background; this machine stays active.
 pub fn start(s: &mut App) {
-    let saved = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
-    for env in &saved {
+    let file = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let saved = file.as_ref().map(decode).unwrap_or_default();
+    let off = file.as_ref().map(decode_off).unwrap_or_default();
+    for env in saved.iter().filter(|e| !off.contains(&e.id)) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));
     }
     s.ui.env.saved.extend(saved);
+    s.ui.env.off = off;
     ssh::start(s);
+    if !rune::is_headless() {
+        std::thread::spawn(|| *CATALOG.lock().unwrap() = Some(catalog::read()));
+    }
+}
+
+/// Electron's saved connections, read off the UI thread at launch.
+static CATALOG: std::sync::Mutex<Option<Vec<Saved>>> = std::sync::Mutex::new(None);
+
+/// Connections paired in the Electron app that this list lacks join it, and connect.
+fn adopt_catalog(s: &mut App) -> bool {
+    let Some(found) = CATALOG.lock().unwrap().take() else { return false };
+    let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
+    if new.is_empty() {
+        return false;
+    }
+    for env in new {
+        let src = connect(s, &env);
+        s.ui.env.parked.push((env.id.clone(), src));
+        s.ui.env.saved.push(env);
+    }
+    s.ui.env.error = save(&s.ui.env.saved, &s.ui.env.off).err().map(|e| format!("Could not save environments: {e}"));
+    true
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -173,6 +226,37 @@ pub fn status(s: &App, key: &str) -> String {
         s5_net::Conn::Closed(reason) if rejected(reason) => format!("Connection failed. Reason: {reason}. Pair this environment again."),
         s5_net::Conn::Closed(reason) if reason.is_empty() => "Reconnecting...".into(),
         s5_net::Conn::Closed(reason) => format!("Failed to connect. Reconnecting... Reason: {reason}"),
+    }
+}
+
+/// The setup wizard's one-word state (`presentSavedCloudEnvironmentConnection`'s `buttonLabel`).
+pub fn short_status(s: &App, key: &str) -> &'static str {
+    let Some(src) = source(s, key) else { return "Not connected" };
+    let st = src.state();
+    match &st.conn {
+        s5_net::Conn::Open if st.shell_ready => "Connected",
+        s5_net::Conn::Open | s5_net::Conn::Connecting => "Connecting…",
+        s5_net::Conn::Closed(reason) if rejected(reason) => "Connection failed",
+        s5_net::Conn::Closed(_) => "Reconnecting…",
+    }
+}
+
+/// The base URL a saved environment was paired at.
+pub fn base_url(s: &App, key: &str) -> Option<String> {
+    s.ui.env.saved.iter().find(|e| e.id == key).map(|e| e.base.clone())
+}
+
+/// The settings row's shorter status (SavedEnvironmentRows' `statusPresentation`), and whether it
+/// reads as an error; the full [`status`] is its tooltip.
+pub fn row_status(s: &App, key: &str) -> (String, bool) {
+    let Some(src) = source(s, key) else { return ("Not connected".into(), false) };
+    let st = src.state();
+    match &st.conn {
+        s5_net::Conn::Open if st.shell_ready => ("Connected".into(), false),
+        s5_net::Conn::Open | s5_net::Conn::Connecting => ("Connecting".into(), false),
+        s5_net::Conn::Closed(reason) if rejected(reason) => (format!("Connection failed: {reason}. Pair this environment again."), true),
+        s5_net::Conn::Closed(reason) if reason.is_empty() => ("Reconnecting".into(), true),
+        s5_net::Conn::Closed(reason) => (format!("Reconnecting: {reason}"), true),
     }
 }
 
@@ -250,11 +334,13 @@ pub fn remote_label(s: &App, row: &Value) -> Option<String> {
     (key != LOCAL).then(|| label(s, &key))
 }
 
-/// Every environment this window knows: this machine first, then the saved ones by label.
+/// Every environment this window knows: this machine first, then the saved ones by label. With
+/// the local environment off there is no primary environment, as web's `readPrimaryEnvironmentTarget`.
 pub fn keys(s: &App) -> Vec<String> {
     let mut saved: Vec<&Saved> = s.ui.env.saved.iter().collect();
     saved.sort_by(|a, b| a.label.cmp(&b.label));
-    std::iter::once(LOCAL.to_owned()).chain(saved.into_iter().map(|e| e.id.clone())).collect()
+    let local = (!s.ui.desktop.local_off).then(|| LOCAL.to_owned());
+    local.into_iter().chain(saved.into_iter().map(|e| e.id.clone())).collect()
 }
 
 /// Whether the environment is connected and has its shell (`canCreateProjectInEnvironment`).
@@ -341,7 +427,6 @@ fn merge(s: &mut App) -> bool {
             }
         }
     }
-    env.merges += 1;
     true
 }
 
@@ -366,8 +451,36 @@ pub fn remove(s: &mut App, id: &str) {
     }
     s.ui.env.parked.retain(|(k, _)| k != id);
     s.ui.env.saved.retain(|e| e.id != id);
-    s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.off.retain(|k| k != id);
+    s.ui.env.error = persist(s);
     ssh::forget(s, id);
+}
+
+/// Writes the saved environments, returning the error the settings page shows.
+pub(crate) fn persist(s: &App) -> Option<String> {
+    save(&s.ui.env.saved, &s.ui.env.off).err().map(|e| format!("Could not save environments: {e}"))
+}
+
+/// Web `setEnabled` on a saved environment: off disconnects it and keeps it saved; on reconnects.
+pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
+    let Some(env) = s.ui.env.saved.iter().find(|e| e.id == id).cloned() else { return };
+    if enabled == !s.ui.env.off.iter().any(|k| k == id) {
+        return;
+    }
+    if enabled {
+        s.ui.env.off.retain(|k| k != id);
+        let src = connect(s, &env);
+        s.ui.env.parked.push((env.id.clone(), src));
+        ssh::resume(s, id);
+    } else {
+        if s.ui.env.active == id {
+            s.navigate(Route::Home { project_id: None });
+            switch(s, LOCAL);
+        }
+        s.ui.env.parked.retain(|(k, _)| k != id);
+        s.ui.env.off.push(id.to_owned());
+    }
+    s.ui.env.error = persist(s);
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
@@ -426,62 +539,20 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     let src = connect(s, &env);
     s.ui.env.parked.push((env.id.clone(), src));
     s.ui.env.saved.retain(|e| e.id != env.id);
+    s.ui.env.off.retain(|k| *k != env.id);
     s.ui.env.saved.push(env);
     s.ui.env.host.clear();
     s.ui.env.code.clear();
-    s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.error = persist(s);
 }
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s);
+    let changed = ssh::poll(s) | adopt_catalog(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
     true
-}
-
-/// Settings > Connections > Environments: this machine, each saved environment, and the pairing form.
-pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
-    let mut rows = Vec::new();
-    for key in keys(s) {
-        let mut detail = status(s, &key);
-        if key == LOCAL {
-            detail = format!("This machine · {detail}");
-        } else if let Some(env) = s.ui.env.saved.iter().find(|e| e.id == key) {
-            detail = ssh::detail(s, &key, &detail).unwrap_or_else(|| format!("{} · {detail}", env.base));
-        }
-        let mut actions = row().gap(8.0).center_y();
-        if key != LOCAL {
-            actions = actions.children(ssh::row_action(s, t, &key));
-            let target = key.clone();
-            actions = actions.child(
-                kit::icon_button(&icons::TRASH_2, "Remove environment").variant("ghost").size("icon-xs").on_press(move |s: &mut App| remove(s, &target)).build(t),
-            );
-        }
-        rows.push(
-            row()
-                .key(format!("env-{key}"))
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .center_y()
-                .child(icon(if key == LOCAL { &icons::LAPTOP } else { &icons::SERVER }, 16.0).color(t.c.muted_foreground))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .shrink()
-                        .min_w(0.0)
-                        .gap(2.0)
-                        .child(text(label(s, &key)).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
-                        .child(text(detail).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().max_lines(2)),
-                )
-                .child(actions),
-        );
-    }
-    rows.push(pairing_form(s, t));
-    rows.push(ssh::form(s, t));
-    rows
 }
 
 /// The web's remote pairing fields: a host (or a whole pairing URL) and a pairing code.
@@ -520,6 +591,28 @@ pub fn pairing_form(s: &App, t: &T) -> El {
     form
 }
 
+/// Two saved environments that cannot connect: one refused, one whose credential was rejected.
+fn scene_failing(s: &mut App) {
+    crate::scene_clock(s);
+    for (id, label, reason) in [("box", "Build box", "Connection refused (os error 111)"), ("lab", "Lab", "HTTP error: 401 Unauthorized")] {
+        s.ui.env.saved.push(Saved { id: id.into(), label: label.into(), base: format!("https://{id}.example.com"), bearer: String::new() });
+        let mut state = crate::data::empty_state();
+        state.conn = s5_net::Conn::Closed(reason.into());
+        park(s, id, Source::Fixture(state));
+    }
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("environments-failing", |s| {
+        scene_failing(s);
+        s.route = Route::Settings("connections".into());
+    }),
+    ("wizard-connect-environments", |s| {
+        scene_failing(s);
+        s.ui.wizard.open = true;
+    }),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,7 +624,10 @@ mod tests {
     #[test]
     fn saved_environments_round_trip_and_drop_incomplete_rows() {
         let list = vec![saved("a"), saved("b")];
-        assert_eq!(decode(&encode(&list)), list);
+        let off = vec!["b".to_owned()];
+        assert_eq!(decode(&encode(&list, &off)), list);
+        assert_eq!(decode_off(&encode(&list, &off)), off, "a switched-off environment stays off");
+        assert!(encode(&list, &[]).to_string().find("enabled").is_none(), "on is the default and omitted");
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
     }
@@ -550,6 +646,17 @@ mod tests {
             s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
             assert_eq!(status(&s, "a"), expected);
         }
+        let mut row = |s: &mut App, conn: s5_net::Conn| {
+            remote.conn = conn;
+            s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
+            row_status(s, "a")
+        };
+        assert_eq!(row(&mut s, s5_net::Conn::Connecting), ("Connecting".into(), false));
+        assert_eq!(short_status(&s, "a"), "Connecting…");
+        assert_eq!(row(&mut s, s5_net::Conn::Closed("refused".into())), ("Reconnecting: refused".into(), true));
+        assert_eq!(short_status(&s, "a"), "Reconnecting…");
+        assert_eq!(row(&mut s, s5_net::Conn::Closed("HTTP error: 401 Unauthorized".into())).0, "Connection failed: HTTP error: 401 Unauthorized. Pair this environment again.");
+        assert_eq!(short_status(&s, "a"), "Connection failed");
         assert_eq!(status(&s, "gone"), "Not connected");
     }
 
@@ -569,12 +676,21 @@ mod tests {
         remote.shell_revision = 1;
         s.ui.env.saved.push(saved("a"));
         s.ui.env.parked.push(("a".into(), Source::Fixture(remote)));
+        assert_eq!(keys(&s), [LOCAL, "a"]);
+        s.ui.desktop.local_off = true;
+        assert_eq!(keys(&s), ["a"], "web drops the primary environment while it is off");
+        s.ui.desktop.local_off = false;
         let ids = |s: &App| s.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).collect::<Vec<_>>();
 
         assert!(drain(&mut s));
         assert_eq!(ids(&s), ["t-here", "t-there"]);
         assert_eq!((owner(&s, "t-there"), owner(&s, "p-there"), owner(&s, "t-here")), ("a".into(), "a".into(), LOCAL.into()));
         assert_eq!(remote_label(&s, &s.state().projects[1]), Some("Box a".into()));
+        // The scope menu's server-icon tooltip (ProjectEnvironmentBadge).
+        let members = |ids: &[&str]| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        assert_eq!(badge(&s, &members(&["p-here", "p-there"])).as_deref(), Some("Also on Box a"));
+        assert_eq!(badge(&s, &members(&["p-there"])).as_deref(), Some("On Box a"));
+        assert_eq!(badge(&s, &members(&["p-here"])), None);
         assert!(!drain(&mut s), "nothing moved, so nothing is copied again");
 
         s.navigate(Route::Thread("t-there".into()));

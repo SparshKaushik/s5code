@@ -22,7 +22,8 @@ fn blocks_page(method: &str) -> bool {
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     let mut page = col()
         .w_full()
-        .max_w(896.0)
+        // Web's `width="expanded"` (max-w-6xl) for the wide diagnostics tables.
+        .max_w(if path == "diagnostics" { 1152.0 } else { 896.0 })
         .px(24.0)
         .pt(24.0)
         .pb(48.0)
@@ -33,10 +34,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
             .as_ref()
             .or(s.client_settings.error.as_ref())
     {
-        let (title, detail) = match error.strip_prefix("Setting not saved. ") {
-            Some(detail) => ("Setting not saved", detail),
-            None => ("Something went wrong", error.as_str()),
-        };
+        let (title, detail) = ("Something went wrong", error.as_str());
         page = page.child(
             row()
                 .w_full()
@@ -135,6 +133,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 for section in super::storage::maintenance(s, cx, t) {
                     page = page.child(section);
                 }
+                page = page.child(diagnostics_link(s, t));
             }
             if path == "worktrees" && title == "Branches" {
                 page = page.child(super::storage::worktree_cleanup(s, cx, t));
@@ -152,8 +151,34 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "projects" => super::projects::view(s, cx, t),
         "archived" => super::projects::archived(s, t),
         "about" => super::about::view(s, t),
+        "secrets" => super::secrets::view(s, t),
+        "diagnostics" => super::diagnostics::view(s, cx, t),
+        super::licenses::PATH => super::licenses::view(s, t),
         _ => unavailable(path, t),
     })
+}
+
+/// Web Maintenance's Diagnostics section: the way into the detail page.
+fn diagnostics_link(s: &App, t: &T) -> El {
+    let description = if s.ui.settings.environment_only {
+        "Inspect processes, resource use, and logs on this environment."
+    } else {
+        "Inspect processes, resource use, and logs on one environment at a time."
+    };
+    c::section(
+        "Diagnostics",
+        vec![super::about::about_row(
+            t,
+            "Diagnostics",
+            description,
+            crate::kit::Button::new("View diagnostics")
+                .variant("outline")
+                .size("sm")
+                .build(t)
+                .on_press(|s: &mut App| s.navigate(crate::Route::Settings("diagnostics".into()))),
+        )],
+        t,
+    )
 }
 
 pub(super) fn advanced_trigger(path: String, open: bool, t: &T) -> El {

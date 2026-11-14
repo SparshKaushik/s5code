@@ -92,6 +92,12 @@ fn is_quit(e: &KeyEvent) -> bool {
     e.key == Key::Command('q') && !e.mods.alt && !e.mods.shift
 }
 
+/// Electron's `before-input-event` guard: a held Cmd/Ctrl+W closes one tab or terminal, not
+/// each one behind it, so its auto-repeats go nowhere.
+pub fn held_close(e: &KeyEvent, repeat: bool) -> bool {
+    repeat && e.key == Key::Command('w') && !e.mods.alt && !e.mods.shift
+}
+
 /// The native app menu's Quit (`MenuItem::new(title, quit::menu_quit)`). With the item's
 /// `keys_first`, Cmd+Q reaches `on_key` and its hold first, so this runs only when Quit is picked
 /// in the menu, which quits at once as Electron's `role: "quit"` does.
@@ -102,6 +108,9 @@ pub fn menu_quit(s: &mut App, tx: &mut Tx) {
 
 /// Runs before every other key handler, so the press never reaches a text field.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if held_close(e, tx.key_repeat()) {
+        return true;
+    }
     let now = crate::data::now_ms();
     if !is_quit(e) {
         if !tx.key_repeat() && s.ui.shell.quit.hint().is_some() {
@@ -149,11 +158,12 @@ pub fn overlay(s: &App, t: &T) -> Option<El> {
     Some(
         col()
             .key("quit-hold")
+            .transition(rune::Transition::none())
             .role("status")
             .inert()
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
             .child(el().grow(22.0))
-            .child(row().w_full().justify_center().child(pill))
+            .child(row().w_full().justify_center().child(crate::kit::motion::popup(pill)))
             .child(el().grow(78.0)),
     )
 }
@@ -161,6 +171,18 @@ pub fn overlay(s: &App, t: &T) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_repeats_of_a_held_close_chord_are_swallowed() {
+        let mut w = KeyEvent::from(Key::Command('w'));
+        w.mods.cmd = true;
+        w.mods.ctrl = !cfg!(target_os = "macos");
+        assert!(!held_close(&w, false), "the first press closes");
+        assert!(held_close(&w, true));
+        w.mods.shift = true;
+        assert!(!held_close(&w, true), "Shift+W is another chord");
+        assert!(!held_close(&KeyEvent::from(Key::Command('q')), true));
+    }
 
     #[test]
     fn a_held_q_quits_after_the_hold_and_a_release_cancels_it() {

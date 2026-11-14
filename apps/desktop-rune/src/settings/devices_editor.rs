@@ -20,6 +20,27 @@ pub struct Editor {
 enum Kind {
     Ssh(Ssh),
     Eas(Eas),
+    Simlock(Simlock),
+}
+
+/// Web `SimlockDeviceHostEditor` for the one environment Settings edits.
+struct Simlock {
+    host: Value,
+    is_new: bool,
+    /// The Clear button was pressed; typing a new token undoes it.
+    cleared: bool,
+    /// The gateway URL field was typed in; until then a detected gateway may fill it.
+    url_edited: bool,
+    /// `device.simlockIdentity` without a gateway: the one this machine's agent-device uses.
+    detect: Option<u64>,
+    /// The identity check for the gateway and token entry it was sent for.
+    check: Option<(String, Identity)>,
+}
+
+enum Identity {
+    Pending(u64),
+    Accepted(Value),
+    Failed(String),
 }
 
 struct Ssh {
@@ -151,6 +172,59 @@ fn eas_host(original: &Value, label: &str, limits: [i64; 3], app_id: Option<&str
     host
 }
 
+/// Web `simlockDeviceHostProblem`: why the shared fields keep a draft from saving.
+fn simlock_problem(label: &str, gateway: &str, leases: i64, minutes: i64) -> Option<&'static str> {
+    let gateway = gateway.trim();
+    let origin = gateway
+        .strip_prefix("https://")
+        .or_else(|| gateway.strip_prefix("http://"))
+        .map(|rest| rest.strip_suffix('/').unwrap_or(rest))
+        .is_some_and(|host| !host.is_empty() && !host.contains('/') && !host.chars().any(char::is_whitespace));
+    let limits = (1..=20).contains(&leases) && (5..=240).contains(&minutes);
+    if label.trim().is_empty() {
+        Some("Give the host a label.")
+    } else if !origin {
+        Some("Enter the gateway's origin, such as https://gateway.example.ts.net:4700.")
+    } else if !limits {
+        Some("Keep the limits within the ranges shown.")
+    } else {
+        None
+    }
+}
+
+fn simlock_has_token(host: &Value) -> bool {
+    match &host["agentToken"] {
+        Value::String(token) => !token.is_empty(),
+        Value::Object(_) => true,
+        _ => false,
+    }
+}
+
+/// The Simlock host Save writes; a saved token arrives redacted and is sent back to keep it.
+fn simlock_host(original: &Value, label: &str, gateway: &str, limits: [i64; 2], token: Token, typed: &str) -> Value {
+    let mut host = original.clone();
+    host["label"] = json!(label.trim());
+    host["gatewayUrl"] = json!(gateway.trim());
+    host["maxLeases"] = json!(limits[0]);
+    host["maxLeaseMinutes"] = json!(limits[1]);
+    host["agentToken"] = match token {
+        Token::Saved => original["agentToken"].clone(),
+        Token::New => json!(typed.trim()),
+        Token::Cleared => json!(""),
+    };
+    host
+}
+
+/// Web `updateSimlockDeviceHosts`: replaces the host with the same id, or adds it.
+fn update_simlock_hosts(hosts: &[Value], host: &Value) -> Vec<Value> {
+    let mut next = hosts.to_vec();
+    match next.iter_mut().find(|candidate| candidate["id"] == host["id"]) {
+        Some(slot) => *slot = host.clone(),
+        None => next.push(host.clone()),
+    }
+    next
+}
+
 fn str_of(host: &Value, key: &str) -> String {
     host[key].as_str().unwrap_or("").to_owned()
 }
@@ -165,6 +239,13 @@ fn ssh_mut(s: &mut App) -> Option<&mut Ssh> {
 fn eas_mut(s: &mut App) -> Option<&mut Eas> {
     match s.ui.settings.devices.editor.as_mut() {
         Some(Editor { kind: Kind::Eas(eas), .. }) => Some(eas),
+        _ => None,
+    }
+}
+
+fn simlock_mut(s: &mut App) -> Option<&mut Simlock> {
+    match s.ui.settings.devices.editor.as_mut() {
+        Some(Editor { kind: Kind::Simlock(simlock), .. }) => Some(simlock),
         _ => None,
     }
 }
@@ -227,16 +308,42 @@ pub fn open_eas(s: &mut App, saved: Option<Value>) {
     });
 }
 
-/// Opens the editor for a source row key (`ssh:{id}` or `eas:{id}`).
+pub fn open_simlock(s: &mut App, saved: Option<Value>) {
+    let is_new = saved.is_none();
+    let host = saved.unwrap_or_else(|| {
+        json!({"kind": "simlock", "id": s5_net::uuid(), "label": "Simlock", "gatewayUrl": "", "agentToken": "", "maxLeases": 2, "maxLeaseMinutes": 60})
+    });
+    let fields = &mut s.ui.settings.devices.fields;
+    fields.label = TextEdit::new(str_of(&host, "label"));
+    fields.label.focused = true;
+    fields.gateway = TextEdit::new(str_of(&host, "gatewayUrl"));
+    fields.token = TextEdit::new("").secure();
+    fields.sessions = TextEdit::new(host["maxLeases"].as_i64().unwrap_or(2).to_string());
+    fields.session_minutes = TextEdit::new(host["maxLeaseMinutes"].as_i64().unwrap_or(60).to_string());
+    // A new host starts at the gateway this machine's agent-device already uses.
+    let detect = if is_new { s.src.net().map(|net| net.request("device.simlockIdentity", json!({}))) } else { None };
+    s.ui.settings.devices.editor = Some(Editor {
+        kind: Kind::Simlock(Simlock { host, is_new, cleared: false, url_edited: false, detect, check: None }),
+        saving: None,
+        error: None,
+    });
+}
+
+/// Opens the editor for a source row key (`ssh:{id}`, `eas:{id}` or `simlock:{id}`).
 pub fn edit(s: &mut App, key: &str) {
     let Some((kind, id)) = key.split_once(':') else { return };
     let field = match kind {
         "ssh" => "deviceHosts",
         "eas" => "easDeviceHosts",
+        "simlock" => "simlockDeviceHosts",
         _ => return,
     };
     let Some(host) = settings_list(s, field).into_iter().find(|host| host["id"] == id) else { return };
-    if kind == "ssh" { open_ssh(s, Some(host)) } else { open_eas(s, Some(host)) }
+    match kind {
+        "ssh" => open_ssh(s, Some(host)),
+        "eas" => open_eas(s, Some(host)),
+        _ => open_simlock(s, Some(host)),
+    }
 }
 
 fn close(s: &mut App) {
@@ -284,6 +391,7 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
+    changed |= poll_simlock(s);
     let saving = s.ui.settings.devices.editor.as_ref().and_then(|editor| editor.saving);
     if let Some(id) = saving
         && !s.ui.settings.pending.contains_key(&id)
@@ -300,6 +408,69 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     changed
+}
+
+fn poll_simlock(s: &mut App) -> bool {
+    let Some(Editor { kind: Kind::Simlock(simlock), .. }) = &s.ui.settings.devices.editor else { return false };
+    let mut changed = false;
+    if let Some(id) = simlock.detect
+        && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
+    {
+        let url_edited = simlock_mut(s).map_or(true, |simlock| {
+            simlock.detect = None;
+            simlock.url_edited
+        });
+        let detected = reply.ok().and_then(|identity| identity["gatewayUrl"].as_str().filter(|u| !u.is_empty()).map(str::to_owned));
+        let fields = &mut s.ui.settings.devices.fields;
+        if let (Some(url), false, true) = (detected, url_edited, fields.gateway.text.is_empty()) {
+            fields.gateway = TextEdit::new(url);
+        }
+        changed = true;
+    }
+    let Some(Editor { kind: Kind::Simlock(simlock), .. }) = &s.ui.settings.devices.editor else { return changed };
+    if let Some((_, Identity::Pending(id))) = &simlock.check {
+        let id = *id;
+        if let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) {
+            if let Some(simlock) = simlock_mut(s)
+                && let Some((_, check)) = simlock.check.as_mut()
+            {
+                *check = match reply {
+                    Ok(identity) => Identity::Accepted(identity),
+                    Err(cause) => Identity::Failed(error_text(&cause)),
+                };
+            }
+            return true;
+        }
+        return changed;
+    }
+    let Some(Editor { kind: Kind::Simlock(simlock), .. }) = &s.ui.settings.devices.editor else { return changed };
+    let input = simlock_identity_input(s, simlock);
+    let key = input.as_ref().map(Value::to_string);
+    if key.as_deref() != simlock.check.as_ref().map(|(k, _)| k.as_str()) {
+        let next = match (key, input) {
+            (Some(key), Some(input)) => s.src.net().map(|net| (key, Identity::Pending(net.request("device.simlockIdentity", input)))),
+            _ => None,
+        };
+        if let Some(simlock) = simlock_mut(s) {
+            simlock.check = next;
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn simlock_identity_input(s: &App, simlock: &Simlock) -> Option<Value> {
+    let f = &s.ui.settings.devices.fields;
+    if simlock_problem("x", &f.gateway.text, 1, 60).is_some() {
+        return None;
+    }
+    let mut input = json!({"gatewayUrl": f.gateway.text.trim()});
+    match token_state(f.token.text.trim(), simlock_has_token(&simlock.host), simlock.cleared) {
+        Token::New => input["agentToken"] = json!(f.token.text.trim()),
+        Token::Saved if !simlock.is_new => input["hostId"] = simlock.host["id"].clone(),
+        _ => {}
+    }
+    Some(input)
 }
 
 fn commit(s: &mut App, title: &str, patch: Result<Value, String>) {
@@ -327,8 +498,29 @@ fn save(s: &mut App) {
     if editor.saving.is_some() {
         return;
     }
-    let ssh = matches!(editor.kind, Kind::Ssh(_));
-    if ssh { save_ssh(s) } else { save_eas(s) }
+    match editor.kind {
+        Kind::Ssh(_) => save_ssh(s),
+        Kind::Eas(_) => save_eas(s),
+        Kind::Simlock(_) => save_simlock(s),
+    }
+}
+
+fn simlock_draft(s: &App, simlock: &Simlock) -> (Value, Option<&'static str>, Token) {
+    let f = &s.ui.settings.devices.fields;
+    let limits = [number(&f.sessions.text), number(&f.session_minutes.text)];
+    let token = token_state(f.token.text.trim(), simlock_has_token(&simlock.host), simlock.cleared);
+    let host = simlock_host(&simlock.host, &f.label.text, &f.gateway.text, limits, token, &f.token.text);
+    (host, simlock_problem(&f.label.text, &f.gateway.text, limits[0], limits[1]), token)
+}
+
+fn save_simlock(s: &mut App) {
+    let Some(Editor { kind: Kind::Simlock(simlock), .. }) = &s.ui.settings.devices.editor else { return };
+    let (host, problem, _) = simlock_draft(s, simlock);
+    if problem.is_some() {
+        return;
+    }
+    let hosts = update_simlock_hosts(&settings_list(s, "simlockDeviceHosts"), &host);
+    commit(s, "Simlock host not saved everywhere", Ok(json!({"simlockDeviceHosts": hosts})));
 }
 
 fn save_ssh(s: &mut App) {
@@ -398,6 +590,9 @@ fn token_edited(s: &mut App) {
         eas.cleared = false;
         eas.account = Account::Idle;
     }
+    if let Some(simlock) = simlock_mut(s) {
+        simlock.cleared = false;
+    }
 }
 
 fn clear_token(s: &mut App) {
@@ -405,6 +600,9 @@ fn clear_token(s: &mut App) {
     if let Some(eas) = eas_mut(s) {
         eas.cleared = true;
         eas.account = Account::Idle;
+    }
+    if let Some(simlock) = simlock_mut(s) {
+        simlock.cleared = true;
     }
 }
 
@@ -439,7 +637,118 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     match &editor.kind {
         Kind::Ssh(ssh) => ssh_dialog(s, t, editor, ssh, layers),
         Kind::Eas(eas) => eas_dialog(s, t, editor, eas, layers),
+        Kind::Simlock(simlock) => simlock_dialog(s, t, editor, simlock, layers),
     }
+}
+
+fn simlock_dialog(s: &App, t: &T, editor: &Editor, simlock: &Simlock, layers: &mut Vec<El>) {
+    let f = &s.ui.settings.devices.fields;
+    let busy = editor.saving.is_some();
+    let (_, problem, token) = simlock_draft(s, simlock);
+    let mut token_row = row().w_full().gap(8.0).center_y().child(
+        el().grow(1.0).min_w(0.0).child(
+            kit::Input::new(&f.token)
+                .placeholder(if token == Token::Saved { "Stored secret, enter a new value to replace" } else { "Not set" })
+                .disabled(busy)
+                .on_edit(|s: &mut App| &mut s.ui.settings.devices.fields.token)
+                .on_change(|s: &mut App, _: &mut rune::Tx| token_edited(s))
+                .on_submit(|s: &mut App, _: &mut rune::Tx| save(s))
+                .build(t)
+                .label("Agent token")
+                .single_line()
+                .secure(),
+        ),
+    );
+    if token != Token::Cleared {
+        token_row = token_row.child(
+            kit::Button::new("Clear agent token")
+                .variant("ghost-destructive")
+                .size("icon-sm")
+                .icon(&icons::X)
+                .disabled(busy)
+                .on_press(clear_token)
+                .build(t),
+        );
+    }
+    let mut token_field = col().w_full().gap(6.0).child(text("Agent token").font(theme::TEXT_SM).color(t.c.foreground)).child(token_row);
+    let status = match simlock.check.as_ref().map(|(_, check)| check) {
+        Some(Identity::Pending(_)) => Some(("Checking…".to_owned(), t.c.muted_foreground)),
+        Some(Identity::Accepted(identity)) => {
+            let who = identity["signedInAs"].as_str().unwrap_or_default();
+            Some((
+                if identity["tokenSource"] == "env" {
+                    format!("Using this machine's agent-device token ({who}).")
+                } else {
+                    format!("Accepted as {who}.")
+                },
+                t.c.muted_foreground,
+            ))
+        }
+        Some(Identity::Failed(error)) => Some((error.clone(), if token == Token::Cleared { t.c.muted_foreground } else { t.c.destructive })),
+        None => None,
+    };
+    if let Some((copy, color)) = status {
+        token_field = token_field.child(text(copy).font(theme::TEXT_XS).color(color).wrap().role("status"));
+    }
+    let limits = row()
+        .w_full()
+        .gap(12.0)
+        .items_start()
+        .child(limit(t, busy, "Devices at once", &f.sessions, sessions_field))
+        .child(limit(t, busy, "Lease minutes", &f.session_minutes, session_minutes_field));
+    let restart = if simlock.is_new { "" } else { " Saving restarts this host, which releases its devices." };
+    let mut body = col()
+        .w_full()
+        .gap(16.0)
+        .child(field(
+            t,
+            "Name",
+            kit::Input::new(&f.label)
+                .disabled(busy)
+                .on_edit(|s: &mut App| &mut s.ui.settings.devices.fields.label)
+                .on_submit(|s: &mut App, _: &mut rune::Tx| save(s))
+                .build(t)
+                .label("Name")
+                .single_line(),
+        ))
+        .child(field(
+            t,
+            "Gateway URL",
+            kit::Input::new(&f.gateway)
+                .placeholder("https://gateway.example.ts.net:4700")
+                .disabled(busy)
+                .on_edit(|s: &mut App| &mut s.ui.settings.devices.fields.gateway)
+                .on_change(|s: &mut App, _: &mut rune::Tx| {
+                    if let Some(simlock) = simlock_mut(s) {
+                        simlock.url_edited = true;
+                    }
+                })
+                .on_submit(|s: &mut App, _: &mut rune::Tx| save(s))
+                .build(t)
+                .label("Gateway URL")
+                .single_line(),
+        ))
+        .child(
+            col().w_full().gap(12.0).child(token_field).child(note(
+                t,
+                "Leases, drives, and streams devices. Create one with simlock --gateway token create --role agent, or leave it blank to add it later. A blank token uses the machine's AGENT_DEVICE_DAEMON_AUTH_TOKEN when its AGENT_DEVICE_DAEMON_BASE_URL is this gateway.",
+            )),
+        )
+        .child(limits)
+        .child(note(t, format!("A lease ends after the lease minutes even while in use.{restart}")));
+    if let Some(problem) = problem.filter(|_| !f.gateway.text.is_empty()) {
+        body = body.child(text(problem).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert"));
+    }
+    if let Some(error) = &editor.error {
+        body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert"));
+    }
+    kit::Dialog::new("simlock-device-host-editor", if simlock.is_new { "Add Simlock host" } else { "Edit Simlock host" })
+        .open(true)
+        .description("The environment's server leases devices from your Simlock gateway and releases them when they close.")
+        .on_close(close)
+        .child(body)
+        .child(footer(t, busy, problem.is_none()))
+        .build(t, layers);
 }
 
 fn ssh_dialog(s: &App, t: &T, editor: &Editor, ssh: &Ssh, layers: &mut Vec<El>) {
@@ -876,6 +1185,29 @@ mod tests {
         assert_eq!((kept["maxConcurrentSessions"].as_i64(), kept["maxSessionMinutes"].as_i64(), kept["idleMinutes"].as_i64()), (Some(1), Some(40), Some(5)));
         assert_eq!(eas_host(&saved, "Expo", [2, 30, 10], Some("a2"), Token::New, "tok")["accessToken"], "tok");
         assert_eq!(eas_host(&saved, "Expo", [2, 30, 10], Some("a2"), Token::Cleared, "")["accessToken"], "");
+    }
+
+    #[test]
+    fn simlock_drafts_follow_web_simlock_device_host_problem() {
+        assert_eq!(simlock_problem("Pool", "https://gw.example.ts.net:4700", 2, 60), None);
+        assert_eq!(simlock_problem("Pool", " http://gw:4700/ ", 1, 5), None);
+        assert_eq!(simlock_problem(" ", "https://gw", 2, 60), Some("Give the host a label."));
+        let origin = Some("Enter the gateway's origin, such as https://gateway.example.ts.net:4700.");
+        assert_eq!(simlock_problem("Pool", "gw.example:4700", 2, 60), origin);
+        assert_eq!(simlock_problem("Pool", "https://gw/api", 2, 60), origin);
+        assert_eq!(simlock_problem("Pool", "https://", 2, 60), origin);
+        assert_eq!(simlock_problem("Pool", "https://gw", 21, 60), Some("Keep the limits within the ranges shown."));
+        assert_eq!(simlock_problem("Pool", "https://gw", 2, 4), Some("Keep the limits within the ranges shown."));
+
+        let saved = json!({"kind": "simlock", "id": "p", "label": "Pool", "gatewayUrl": "https://gw", "agentToken": "<redacted>", "maxLeases": 2, "maxLeaseMinutes": 60});
+        assert!(simlock_has_token(&saved));
+        let kept = simlock_host(&saved, " Lab ", " https://gw2 ", [3, 90], Token::Saved, "");
+        assert_eq!((kept["label"].as_str(), kept["gatewayUrl"].as_str(), kept["agentToken"].as_str()), (Some("Lab"), Some("https://gw2"), Some("<redacted>")));
+        assert_eq!(simlock_host(&saved, "Lab", "https://gw", [2, 60], Token::New, " tok ")["agentToken"], "tok");
+        assert_eq!(simlock_host(&saved, "Lab", "https://gw", [2, 60], Token::Cleared, "")["agentToken"], "");
+        let other = json!({"kind": "simlock", "id": "q"});
+        assert_eq!(update_simlock_hosts(&[saved.clone(), other.clone()], &kept), vec![kept.clone(), other.clone()]);
+        assert_eq!(update_simlock_hosts(std::slice::from_ref(&other), &kept), vec![other, kept]);
     }
 
     #[test]

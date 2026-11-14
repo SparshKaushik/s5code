@@ -6,17 +6,18 @@ use std::sync::OnceLock;
 pub struct Item {
     pub title: String,
     pub to: String,
-    terms: Vec<String>,
+    pub terms: Vec<String>,
     secondary: bool,
 }
 
-fn items() -> &'static [Item] {
+/// Every setting this client has, for the command palette's own matcher.
+pub fn items() -> &'static [Item] {
     static ITEMS: OnceLock<Vec<Item>> = OnceLock::new();
     ITEMS.get_or_init(|| {
         let raw: Vec<Value> = serde_json::from_str(include_str!("search.json")).unwrap();
         raw.iter()
-            // Pages this client has (diagnostics isn't ported), on this platform.
-            .filter(|v| super::NAV.iter().any(|(_, pages)| pages.iter().any(|(p, _)| v["to"] == *p)))
+            // Pages this client has, on this platform.
+            .filter(|v| super::has_page(v["to"].as_str().unwrap_or_default()))
             .filter(|v| v["macOnly"] != true || cfg!(target_os = "macos"))
             .map(|v| Item {
                 title: v["title"].as_str().unwrap_or("").to_owned(),
@@ -99,6 +100,7 @@ mod tests {
         assert!(titles("   ").is_empty());
         // The real index loads and only lists pages this client has.
         assert!(search("contrast").iter().any(|i| i.to == "appearance"));
-        assert!(super::items().iter().all(|i| i.to != "diagnostics"));
+        assert!(super::items().iter().all(|i| super::super::has_page(&i.to)));
+        assert!(search("open source licenses").iter().any(|i| i.to == "about"));
     }
 }

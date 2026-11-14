@@ -198,7 +198,7 @@ pub(super) fn start(s: &mut App) {
     if rune::is_headless() {
         return;
     }
-    let ids: Vec<String> = s.ui.env.ssh.targets.iter().map(|(id, _)| id.clone()).collect();
+    let ids: Vec<String> = s.ui.env.ssh.targets.iter().map(|(id, _)| id.clone()).filter(|id| !s.ui.env.off.contains(id)).collect();
     for id in ids {
         reconnect(s, &id, false);
     }
@@ -297,7 +297,7 @@ fn spawn(s: &mut App, job: Job) {
     s.ui.env.ssh.jobs.push((slot, rx));
 }
 
-fn add(s: &mut App) {
+pub fn add(s: &mut App) {
     if busy(&s.ui.env.ssh, ADD) {
         return;
     }
@@ -412,6 +412,13 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
     }
 }
 
+/// Re-ensures a switched-on SSH environment's tunnel.
+pub(super) fn resume(s: &mut App, id: &str) {
+    if s.ui.env.ssh.targets.iter().any(|(k, _)| k == id) && !rune::is_headless() {
+        reconnect(s, id, false);
+    }
+}
+
 /// A tunnel that came back on another local port, or a session paired again, moves the saved
 /// environment with it.
 fn rebase(s: &mut App, id: &str, base: String, bearer: Option<String>) {
@@ -428,7 +435,7 @@ fn rebase(s: &mut App, id: &str, base: String, bearer: Option<String>) {
     if let Some(slot) = super::source_mut(s, id) {
         *slot = src;
     }
-    s.ui.env.error = super::save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.error = super::persist(s);
 }
 
 fn answer(s: &mut App) {
@@ -452,12 +459,14 @@ fn cancel(s: &mut App) {
 // ---------------------------------------------------------------------------------------------
 // Settings UI
 
-/// The environment row's detail for an SSH environment.
-pub fn detail(s: &App, id: &str, status: &str) -> Option<String> {
+/// An SSH environment's connection state when its tunnel says more than the server's status:
+/// connecting, or the last reconnect's failure.
+pub fn state(s: &App, id: &str) -> Option<String> {
     let ui = &s.ui.env.ssh;
-    let target = &ui.targets.iter().find(|(k, _)| k == id)?.1;
-    let state = if busy(ui, id) { "Connecting over SSH…" } else { ui.notes.get(id).map_or(status, String::as_str) };
-    Some(format!("SSH {} · {state}", target.display()))
+    if busy(ui, id) {
+        return Some("Connecting over SSH…".into());
+    }
+    ui.notes.get(id).cloned()
 }
 
 /// Reconnect, on an SSH environment's row.
@@ -474,72 +483,36 @@ pub fn row_action(s: &App, t: &T, id: &str) -> Option<El> {
     })
 }
 
-/// The web's SSH fields: a host or alias (with suggestions from the SSH config), username and port.
-pub fn form(s: &App, t: &T) -> El {
+/// Add environment's SSH mode: an add is connecting.
+pub fn adding(s: &App) -> bool {
+    busy(&s.ui.env.ssh, ADD)
+}
+
+/// SSH config hosts not saved yet that match the host field: alias and hostname.
+pub fn suggestions(s: &App) -> Vec<(String, String)> {
     let ui = &s.ui.env.ssh;
-    let adding = busy(ui, ADD);
-    let field = |label: &str, input: El| col().gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input);
-    let mut form = col()
-        .key("env-ssh-add")
-        .w_full()
-        .padding(16.0)
-        .gap(12.0)
-        .child(text("Add SSH environment").font(theme::SM_MEDIUM).color(t.c.foreground))
-        .child(
-            row()
-                .w_full()
-                .gap(12.0)
-                .child(
-                    field("SSH host", kit::Input::new(&ui.host).placeholder("devbox or user@host:22").on_edit(|s: &mut App| &mut s.ui.env.ssh.host).on_submit(|s: &mut App, _| add(s)).build(t).single_line())
-                        .grow(1.0)
-                        .shrink()
-                        .min_w(0.0),
-                )
-                .child(field("Username", kit::Input::new(&ui.username).placeholder("Optional").on_edit(|s: &mut App| &mut s.ui.env.ssh.username).on_submit(|s: &mut App, _| add(s)).build(t).single_line()).w(140.0))
-                .child(field("Port", kit::Input::new(&ui.port).placeholder("22").on_edit(|s: &mut App| &mut s.ui.env.ssh.port).on_submit(|s: &mut App, _| add(s)).build(t).single_line()).w(90.0)),
-        )
-        .child(
-            text("S5 Code starts or reuses its server on that host over SSH and forwards it to this machine.")
-                .font(theme::TEXT_XS)
-                .color(t.c.muted_foreground)
-                .wrap(),
-        );
     let saved: Vec<&str> = ui.targets.iter().map(|(_, t)| t.alias.as_str()).collect();
     let unsaved: Vec<Host> = ui.hosts.iter().filter(|h| !saved.contains(&h.alias.as_str())).cloned().collect();
-    let suggestions = filter_hosts(&unsaved, &ui.host.text);
-    if !suggestions.is_empty() {
-        let mut chips = row().w_full().flex_wrap().gap(6.0);
-        for host in suggestions.into_iter().take(8) {
-            let alias = host.alias.clone();
-            chips = chips.child(
-                kit::Button::new(host.alias)
-                    .variant("outline")
-                    .size("xs")
-                    .disabled(adding)
-                    .on_press(move |s: &mut App| {
-                        let ui = &mut s.ui.env.ssh;
-                        ui.host = TextEdit::new(alias.clone());
-                        ui.username.clear();
-                        ui.port.clear();
-                        add(s);
-                    })
-                    .build(t),
-            );
-        }
-        form = form.child(chips);
-    }
-    if let Some(error) = &ui.error {
-        form = form.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive_foreground).wrap());
-    }
-    form.child(
-        row().child(
-            kit::Button::new(if adding { "Connecting…" } else { "Add SSH environment" })
-                .size("sm")
-                .disabled(adding || ui.host.text.trim().is_empty())
-                .on_press(add)
-                .build(t),
-        ),
-    )
+    filter_hosts(&unsaved, &ui.host.text).into_iter().map(|h| (h.alias, h.hostname)).collect()
+}
+
+/// Web `environmentTransportLabel` for an SSH environment: "SSH user@host:port".
+pub fn transport(s: &App, id: &str) -> Option<String> {
+    s.ui.env.ssh.targets.iter().find(|(k, _)| k == id).map(|(_, t)| format!("SSH {}", t.display()))
+}
+
+/// The SSH alias that reaches a saved environment.
+pub fn alias<'a>(s: &'a App, id: &str) -> Option<&'a str> {
+    s.ui.env.ssh.targets.iter().find(|(k, _)| k == id).map(|(_, t)| t.alias.as_str())
+}
+
+/// Web `handleSelectSshHostSuggestion`: a picked host connects at once.
+pub fn pick(s: &mut App, alias: &str) {
+    let ui = &mut s.ui.env.ssh;
+    ui.host = TextEdit::new(alias.to_owned());
+    ui.username.clear();
+    ui.port.clear();
+    add(s);
 }
 
 /// The web's SshPasswordPromptDialog.

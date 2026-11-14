@@ -105,11 +105,13 @@ pub struct Status {
     pub muted: bool,
     /// The page's icon URL (a `<link rel=icon>`, else `/favicon.ico`), once it loaded.
     pub favicon: Option<String>,
+    /// Chrome's target id once the page is attached, for an agent's own connection to it.
+    pub target: Option<String>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None, target: None }
     }
 }
 
@@ -138,6 +140,8 @@ pub struct Shared {
     /// Chrome could not start, or its connection dropped.
     pub fatal: Option<String>,
     pub events: Vec<Event>,
+    /// Chrome's DevTools `host:port` once it is up.
+    pub devtools: Option<String>,
     /// Bumped on every visible change, so the UI re-runs its view only when something moved.
     pub generation: u64,
 }
@@ -356,6 +360,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
     let (child, url) = launch(scale)?;
     *CHROME.lock().unwrap() = Some(child);
     let host = url.trim_start_matches("ws://").split('/').next().unwrap_or_default().to_string();
+    shared.lock().unwrap().devtools = Some(host.clone());
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
     let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
@@ -978,6 +983,8 @@ impl Worker {
                 let Some(t) = self.tabs.get_mut(&tab) else { return };
                 t.session = Some(session.clone());
                 let queue = std::mem::take(&mut t.queue);
+                let target = t.target.clone();
+                self.update(tab, |s| s.target = target);
                 self.sessions.insert(session.clone(), tab);
                 self.send(Some(&session), "Page.enable", json!({}), None);
                 self.send(Some(&session), "Network.enable", json!({}), None);
