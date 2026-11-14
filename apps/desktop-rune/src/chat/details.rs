@@ -702,7 +702,7 @@ fn set_thread_branch(s: &mut App, branch: &str, worktree: Option<String>) {
 
 /// `resolveLocalCheckoutBranchMismatch`: a local-checkout thread whose branch is no longer the
 /// one checked out, as `(thread branch, current branch)`.
-fn branch_mismatch(thread_branch: &str, worktree: &str, current: &str) -> Option<(String, String)> {
+pub(crate) fn branch_mismatch(thread_branch: &str, worktree: &str, current: &str) -> Option<(String, String)> {
     (worktree.is_empty() && !thread_branch.is_empty() && !current.is_empty() && thread_branch != current).then(|| (thread_branch.to_string(), current.to_string()))
 }
 

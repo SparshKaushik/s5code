@@ -9,6 +9,7 @@ use super::{Dragging, Model, Shelf, brand};
 use crate::icons as i;
 use crate::theme::{self, AlphaMul, BOLD, T, mono, radius, tw};
 use crate::App;
+use serde_json::Value;
 
 fn hue(index: usize, dark: bool) -> Color {
     const DARK: [Color; 18] = [
@@ -204,6 +205,8 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
                 }
                 // The boring sidebar's rows don't drag.
                 Phase::Move if super::boring(s) => {}
+                // `useSortable({ disabled: !canOperateThread })`: a read-only row doesn't drag.
+                Phase::Move if s.ui.shell.sidebar.drag.is_none() && !super::can_operate_id(s, &id) => {}
                 Phase::Move => {
                     let ui = &mut s.ui.shell.sidebar;
                     if ui.drag.is_some() || far {
@@ -299,22 +302,74 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
     if let Some(raw) = raw.filter(|_| crate::env::spans(s)) {
         rows = rows.child(detail(icon(&i::SERVER, 12.0).color(t.c.muted_foreground).shrink(), crate::env::label(s, &crate::env::of(s, raw))));
     }
+    // The row's own server: its projects, checkouts and providers.
+    let state = th.env.as_deref().and_then(|key| crate::env::source(s, key)).map_or(s.state(), |src| src.state());
+    let warn = |glyph: &'static rune::Icon, label: &str, color: rune::Color| {
+        row().gap(8.0).items_start().min_w(0.0)
+            .child(icon(glyph, 12.0).color(color).mt(2.0).shrink())
+            .child(text(label.to_string()).font(theme::TEXT_XS).color(color).wrap().grow(1.0).min_w(0.0))
+    };
     if let Some(branch) = &th.branch {
         rows = rows.child(detail(icon(&i::GIT_BRANCH, 12.0).color(t.c.muted_foreground).shrink(), branch.clone()));
+        // `resolveLocalCheckoutBranchMismatch` against the project checkout's current branch.
+        let root = state.projects.iter().find(|p| crate::data::s(p, "id") == th.project_id).map(|p| crate::data::s(p, "workspaceRoot")).unwrap_or("");
+        let current = state.vcs.get(root).map(|v| crate::data::s(&v["local"], "refName")).unwrap_or("");
+        if crate::chat::details::branch_mismatch(branch, th.worktree.as_deref().unwrap_or(""), current).is_some() {
+            rows = rows.child(warn(&i::CIRCLE_ALERT, "You're currently checked out on another branch.", t.sb.warning_foreground));
+        }
     }
+    let config = super::config_of(s, th);
+    let providers = config.and_then(|c| c["providers"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
+    // `modelInstanceId`: the running instance, else the one the thread selected.
+    let instance = raw.and_then(|v| v["runtime"]["providerInstanceId"].as_str().or(v["modelSelection"]["instanceId"].as_str())).unwrap_or(&th.provider).to_string();
     let slug = raw.map(|v| crate::data::s(&v["modelSelection"], "model").to_string()).unwrap_or_default();
     if let Some(driver) = model.drivers.get(&th.provider).filter(|_| !slug.is_empty()) {
-        let label = crate::chat::composer::model_name(s, &th.provider, &slug);
+        let mut label = crate::chat::composer::model_name(s, &th.provider, &slug);
+        let entry = providers.iter().find(|p| p["instanceId"] == instance.as_str());
+        if let Some(entry) = entry.filter(|_| logic::shows_instance_badge(&instance, providers, &config.map_or(Value::Null, |c| c["settings"]["providerInstances"].clone()))) {
+            label = format!("{label} · {}", entry["displayName"].as_str().unwrap_or(&instance));
+        }
         rows = rows.child(detail(crate::chat::composer::provider_icon(t, driver, 12.0).shrink().opacity(0.6), label));
+    }
+    if let Some(raw) = raw {
+        let earlier = logic::handed_off_from(raw, &instance, providers);
+        if !earlier.is_empty() {
+            rows = rows.child(detail(icon(&i::ARROW_RIGHT_LEFT, 12.0).color(t.c.muted_foreground).shrink(), format!("Handed off from {}", earlier.join(", "))));
+        }
     }
     let terminals = crate::panel::terminal::running(s, id);
     if terminals > 0 {
         let label = format!("{terminals} terminal {} running", if terminals == 1 { "process" } else { "processes" });
         rows = rows.child(detail(icon(&i::TERMINAL, 12.0).color(if t.dark { tw::TEAL_300.alpha_mul(0.9) } else { tw::TEAL_600 }).shrink(), label));
     }
-    let body = col().max_w(346.0).padding(13.0).gap(8.0)
+    let runtime = raw.map_or(&Value::Null, |v| &v["runtime"]);
+    if runtime["lastError"].as_str().is_some_and(|e| !e.is_empty()) {
+        rows = rows.child(if runtime["lastErrorClass"] == "usage_limit" {
+            warn(&i::CIRCLE_ALERT, "Usage limit reached", t.sb.warning_foreground)
+        } else {
+            warn(&i::CIRCLE_ALERT, "Error occurred", t.c.destructive)
+        });
+    }
+    let mut body = col().max_w(346.0).padding(13.0).gap(8.0)
         .child(text(th.title.clone()).font(theme::XS_MEDIUM.lh(15.0)).color(t.c.foreground).truncate())
         .child(rows);
+    // `ThreadPullRequestsMiniList`, once the row's server config has loaded.
+    let lines = raw.filter(|_| config.is_some()).map(|v| logic::pr_lines(v["pullRequests"].as_array().map(Vec::as_slice).unwrap_or(&[]))).unwrap_or_default();
+    if !lines.is_empty() {
+        let mut list = col().gap(4.0).pt(8.0).pl(2.0);
+        for line in lines {
+            let (glyph, tone) = pr_glyph(t, line.state.as_deref());
+            let mut entry = row().gap(8.0).center_y().min_w(0.0).pl(line.depth.min(3) as f32 * 12.0)
+                .child(icon(glyph, 12.0).color(tone).shrink())
+                .child(text(format!("#{}", line.number)).font(theme::MONO_XS.features("'tnum' 1")).color(t.c.muted_foreground).shrink())
+                .child(text(line.title).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.75)).truncate().shrink());
+            if let Some((kind, size)) = line.stack {
+                entry = entry.child(spacer()).child(text(format!("{} · {size}", if kind == "native" { "stack" } else { "chain" })).font(theme::TEXT_2XS).color(t.c.muted_foreground).shrink());
+            }
+            list = list.child(entry);
+        }
+        body = body.child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(list);
+    }
     let surface = crate::kit::menu::glass(body.key("sb-card"), &k, false).radius(6.0);
     overlays.push(crate::kit::motion::popup(rune_kit::popover::anchored(&k, surface, &format!("sb-row-{id}"), rune_kit::Placement::RightStart, 4.0)));
 }
@@ -419,7 +474,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered { 0.0 } else { 1.0 }));
         if hovered {
             let mut actions = row().h_full();
-            if th.can_snooze() {
+            // `showSnoozeButton`: operate access, a loaded config, and a thread that can snooze.
+            if th.can_snooze() && super::can_operate(s, &[th]) && super::config_of(s, th).is_some() {
                 let id = th.id.clone();
                 actions = actions.child(hover_action(t, format!("sb-snooze-{}", th.id), &i::CLOCK, 12.0, None, 6.0).on_press_tx(move |s: &mut App, tx: &mut Tx| {
                     let _ = tx;
@@ -429,7 +485,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
                 }));
             }
             let id = th.id.clone();
-            actions = actions.child(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0).on_press(move |s: &mut App| super::settle(s, &id)));
+            actions = actions.child(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)));
             slot = slot.child(actions.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }
         line1 = line1.child(slot);
@@ -475,16 +531,21 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
+/// A pull request state's glyph and tone (`resolvePullRequestState` presentation).
+fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
+    let dark = t.dark;
+    match state {
+        Some("draft") => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
+        Some("merged") => (&i::GIT_MERGE, if dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }),
+        Some("closed") => (&i::GIT_PULL_REQUEST_CLOSED, if dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }),
+        Some("open") => (&i::GIT_PULL_REQUEST_ARROW, if dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }),
+        _ => (&i::GIT_PULL_REQUEST_ARROW, t.sb.muted_foreground),
+    }
+}
+
 /// `PullRequestBadge`: the state glyph in its tone, then the number, "+N" or a stack's layer count.
 fn pr_badge(t: &T, thread: &str, pr: &logic::PrBadge) -> El {
-    let dark = t.dark;
-    let (glyph, tone) = match pr.state {
-        "draft" => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
-        "merged" => (&i::GIT_MERGE, if dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }),
-        "closed" => (&i::GIT_PULL_REQUEST_CLOSED, if dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }),
-        "open" => (&i::GIT_PULL_REQUEST_ARROW, if dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }),
-        _ => (&i::GIT_PULL_REQUEST_ARROW, t.sb.muted_foreground),
-    };
+    let (glyph, tone) = pr_glyph(t, Some(pr.state));
     let glyph = if pr.stack { &i::LAYERS } else { glyph };
     let (id, url, list) = (thread.to_string(), pr.url.clone(), pr.opens_list);
     row()
@@ -573,9 +634,9 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         if hovered {
             let id = th.id.clone();
             let action = match rc.section {
-                Section::Snoozed => hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0).on_press(move |s: &mut App| super::unsnooze(s, &id)),
-                Section::Settled => hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0).on_press(move |s: &mut App| super::unsettle(s, &id)),
-                _ => hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0).on_press(move |s: &mut App| super::settle(s, &id)),
+                Section::Snoozed => hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsnooze)),
+                Section::Settled => hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsettle)),
+                _ => hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)),
             };
             slot = slot.child(action.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }

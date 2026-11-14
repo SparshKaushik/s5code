@@ -62,6 +62,16 @@ pub struct Patch {
     pub title: Option<String>,
 }
 
+/// A sent command: its request, the thread whose client owns it, web's failure title, and the
+/// threads whose optimistic state a failure undoes.
+#[derive(Clone, Debug)]
+pub struct Inflight {
+    pub request: u64,
+    pub thread: String,
+    pub title: &'static str,
+    pub rollback: Vec<String>,
+}
+
 /// A question the sidebar asks before it acts, as `dialogs.confirm` does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Confirm {
@@ -96,6 +106,10 @@ pub struct Ui {
     pub drag_target: std::cell::RefCell<Option<logic::DropTarget>>,
     pub menu: Option<menu::Menu>,
     pub patches: HashMap<String, Patch>,
+    /// Commands awaiting their reply, to toast and roll back a failure.
+    pub inflight: Vec<Inflight>,
+    /// The threads a drop is changing, while it dispatches: a failure rolls back all of them.
+    drop_group: Option<Vec<String>>,
     pub back: Vec<Route>,
     pub forward: Vec<Route>,
     /// The row whose title is being edited in place, and the edit.
@@ -504,15 +518,123 @@ fn patched(mut t: Thread, patches: &HashMap<String, Patch>) -> Thread {
 
 // --- Commands ---------------------------------------------------------------------------------
 
+/// The environment key a row acts on.
+pub fn env_key<'a>(s: &'a App, th: &'a Thread) -> &'a str {
+    th.env.as_deref().unwrap_or(&s.ui.env.active)
+}
+
+/// Web `readEnvironmentScope(environmentId, scope)` for the row's environment: the connection on
+/// screen asks its own session; another environment its last session answer, unknown until it
+/// comes (the server still authorizes).
+pub fn grants_on(s: &App, key: &str, scope: &str) -> bool {
+    if key == s.ui.env.active {
+        return crate::chat::details::grants(s, scope);
+    }
+    crate::settings::permissions::reply_on(s, key).is_none_or(|r| r.as_ref().is_ok_and(|v| crate::settings::session_grants(v, scope)))
+}
+
+/// `canOperateThreads`: every thread's environment grants `orchestration:operate`.
+pub fn can_operate(s: &App, threads: &[&Thread]) -> bool {
+    threads.iter().all(|th| grants_on(s, env_key(s, th), "orchestration:operate"))
+}
+
+/// The row's server config, once it has loaded (`serverConfigs.get(environmentId)`).
+pub fn config_of<'a>(s: &'a App, th: &Thread) -> Option<&'a Value> {
+    match &th.env {
+        None => s.state().config.as_ref(),
+        Some(key) => crate::env::source(s, key).and_then(|src| src.state().config.as_ref()),
+    }
+}
+
+/// The web's failure toast title for a sidebar command.
+fn failure_title(kind: &str, extra: &Value) -> Option<&'static str> {
+    Some(match kind {
+        "thread.pin" => "Failed to pin thread",
+        "thread.unpin" => "Failed to unpin thread",
+        "thread.settle" => "Failed to settle thread",
+        "thread.unsettle" => "Failed to un-settle thread",
+        "thread.snooze" => "Failed to snooze thread",
+        "thread.unsnooze" => "Failed to wake thread",
+        "thread.archive" => "Failed to archive thread",
+        "thread.delete" => "Failed to delete thread",
+        "thread.pin.reorder" => "Failed to reorder pinned threads",
+        "thread.active.reorder" => "Failed to reorder active threads",
+        "thread.auto-settle.set" => "Failed to update auto-settle",
+        "thread.metadata.update" if extra["regenerateTitle"] == true => "Failed to regenerate thread title",
+        "thread.metadata.update" if extra.get("title").is_some() => "Failed to rename thread",
+        _ => return None,
+    })
+}
+
 /// Sends one orchestration command (the web's `thread.*` dispatches); fixtures only patch.
 fn dispatch(s: &mut App, kind: &str, id: &str, extra: Value) {
-    if let Some(net) = crate::env::net_for(s, id) {
-        let mut cmd = json!({ "type": kind, "commandId": s5_net::uuid(), "threadId": id });
-        if let (Some(obj), Value::Object(more)) = (cmd.as_object_mut(), extra) {
-            obj.extend(more);
-        }
-        net.dispatch(cmd);
+    let title = failure_title(kind, &extra);
+    let Some(net) = crate::env::net_for(s, id) else { return };
+    let mut cmd = json!({ "type": kind, "commandId": s5_net::uuid(), "threadId": id });
+    if let (Some(obj), Value::Object(more)) = (cmd.as_object_mut(), extra) {
+        obj.extend(more);
     }
+    let request = net.dispatch(cmd);
+    if let Some(title) = title {
+        let ui = &mut s.ui.shell.sidebar;
+        let rollback = ui.drop_group.clone().unwrap_or_else(|| vec![id.to_string()]);
+        ui.inflight.push(Inflight { request, thread: id.to_string(), title, rollback });
+    }
+}
+
+/// Takes command replies: a failure toasts its title and undoes the optimistic state it set.
+fn poll_inflight(s: &mut App) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i < s.ui.shell.sidebar.inflight.len() {
+        let (request, thread) = (s.ui.shell.sidebar.inflight[i].request, s.ui.shell.sidebar.inflight[i].thread.clone());
+        let reply = match crate::env::net_for(s, &thread) {
+            Some(net) => net.take_reply(request),
+            // The thread's client is gone, and its reply with it.
+            None => Some(Ok(Value::Null)),
+        };
+        let Some(reply) = reply else {
+            i += 1;
+            continue;
+        };
+        let done = s.ui.shell.sidebar.inflight.remove(i);
+        if let Err(error) = reply {
+            failed(s, &done, &error);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn failed(s: &mut App, done: &Inflight, error: &Value) {
+    for id in &done.rollback {
+        s.ui.shell.sidebar.patches.remove(id);
+    }
+    let message = crate::shell::palette::error_message(error, "An error occurred.");
+    crate::shell::palette::toast_error_brief(s, done.title, Some(&message));
+}
+
+/// Runs a row action when `checkThreadOperations` allows it.
+pub fn checked(s: &mut App, id: &str, f: fn(&mut App, &str)) {
+    if check_operations(s, &[id.to_string()]) {
+        f(s, id);
+    }
+}
+
+pub fn can_operate_id(s: &App, id: &str) -> bool {
+    Model::build(s).thread(id).is_none_or(|th| can_operate(s, &[th]))
+}
+
+/// `checkThreadOperations`: whether the threads' environments let this client change them,
+/// else web's "Thread action unavailable" toast.
+pub fn check_operations(s: &mut App, ids: &[String]) -> bool {
+    let model = Model::build(s);
+    let threads: Vec<&Thread> = ids.iter().filter_map(|id| model.thread(id)).collect();
+    if can_operate(s, &threads) {
+        return true;
+    }
+    crate::shell::palette::toast_error_brief(s, "Thread action unavailable", Some("This connection cannot change one or more selected threads."));
+    false
 }
 
 fn patch(s: &mut App, id: &str, f: impl FnOnce(&mut Patch)) {
@@ -804,7 +926,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 pub fn poll(s: &mut App) -> bool {
     folders::ensure_loaded(s);
     folders::sync_scope(s);
-    let searched = poll_content(s) | favicon::poll(s) | updates::poll(s) | share::poll(s);
+    let searched = poll_content(s) | favicon::poll(s) | updates::poll(s) | share::poll(s) | poll_inflight(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
         _ => None,
@@ -1000,8 +1122,25 @@ fn reorder(s: &mut App, kind: &str, assignments: &[(String, String)]) {
     }
 }
 
-/// Runs a drop plan as the web's `handleDragEnd` does: lifecycle first, then order writes.
+/// Runs a drop plan as the web's `handleDragEnd` does: lifecycle first, then order writes. A
+/// failed write rolls back the whole drop.
 pub fn apply_plan(s: &mut App, id: &str, plan: Plan) {
+    let mut touched = vec![id.to_string()];
+    match &plan {
+        Plan::Pin { extra: a, .. } | Plan::ReorderPinned { assignments: a, .. } | Plan::MoveActive { assignments: a, .. } => {
+            touched.extend(a.iter().map(|(id, _)| id.clone()));
+        }
+        Plan::None | Plan::Settle => {}
+    }
+    if !matches!(plan, Plan::None) && !check_operations(s, &touched) {
+        return;
+    }
+    s.ui.shell.sidebar.drop_group = Some(touched);
+    run_plan(s, id, plan);
+    s.ui.shell.sidebar.drop_group = None;
+}
+
+fn run_plan(s: &mut App, id: &str, plan: Plan) {
     match plan {
         Plan::None => {}
         Plan::Settle => settle_in_place(s, id),

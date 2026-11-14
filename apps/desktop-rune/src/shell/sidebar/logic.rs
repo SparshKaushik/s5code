@@ -65,6 +65,10 @@ pub struct Thread {
     /// `Some(i64::MIN)` for an unparseable visit, which reads as "long ago".
     pub last_visited_at: Option<i64>,
     pub pr: Option<PrBadge>,
+    /// The environment key a copied row came from; `None` for the one on screen.
+    pub env: Option<String>,
+    /// `titleRegeneration` is set while the server regenerates the title.
+    pub title_regenerating: bool,
 }
 
 /// The row's pull request badge (`ThreadPullRequestBadgeControl`).
@@ -183,6 +187,8 @@ impl Thread {
             branch: opt_str(&v["branch"]),
             worktree: opt_str(&v["worktreePath"]),
             pr: pr_badge(v),
+            env: v[crate::env::TAG].as_str().map(str::to_owned),
+            title_regenerating: !v["titleRegeneration"].is_null(),
             created_at: opt_ts(&v["createdAt"]).unwrap_or(0),
             updated_at,
             latest_user_message_at: opt_ts(&v["latestUserMessageAt"]),
@@ -1091,6 +1097,165 @@ pub fn select_click(selected: &mut HashSet<String>, anchor: &mut Option<String>,
     true
 }
 
+/// One line of `ThreadPullRequestsMiniList`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrLine {
+    pub number: i64,
+    pub title: String,
+    /// `resolvePullRequestState`: "open", "draft", "merged" or "closed"; `None` before a snapshot.
+    pub state: Option<String>,
+    pub depth: usize,
+    /// On a chain's first line: "native" or "chain", and its size.
+    pub stack: Option<(&'static str, usize)>,
+}
+
+fn text<'a>(v: &'a Value, key: &str) -> &'a str {
+    v[key].as_str().unwrap_or("")
+}
+
+/// `pullRequestListLines(resolveThreadPullRequestChains(links))`: native stacks in layer order,
+/// then base-to-head chains derived from snapshot branches, newest chain first.
+pub fn pr_lines(links: &[Value]) -> Vec<PrLine> {
+    let visible: Vec<&Value> = links.iter().filter(|l| l["source"] != "stack-dismissed").collect();
+    let repo = |l: &Value| format!("{}/{}", text(l, "host").trim().to_lowercase(), text(l, "repository").trim().to_lowercase());
+    let key = |l: &Value| format!("{}#{}", repo(l), l["number"]);
+    let number = |l: &Value| l["number"].as_i64().unwrap_or(0);
+    let mut chains: Vec<(&'static str, Vec<&Value>, Vec<usize>)> = Vec::new();
+    let mut placed: HashSet<String> = HashSet::new();
+
+    let mut stacks: Vec<(String, Vec<&Value>)> = Vec::new();
+    for link in &visible {
+        if link["stack"].is_null() {
+            continue;
+        }
+        let stack = format!("{}#stack:{}", repo(link), text(&link["stack"], "id"));
+        match stacks.iter_mut().find(|(k, _)| *k == stack) {
+            Some((_, members)) => members.push(link),
+            None => stacks.push((stack, vec![link])),
+        }
+    }
+    let layers_of = |l: &Value| -> Vec<i64> { l["stack"]["layers"].as_array().into_iter().flatten().filter_map(|x| x["number"].as_i64()).collect() };
+    for (_, mut members) in stacks {
+        // Saved snapshots can lag behind newer members of the same stack.
+        let numbers: HashSet<i64> = members.iter().map(|m| number(m)).collect();
+        let covered = |layers: &[i64]| layers.iter().filter(|n| numbers.contains(n)).count();
+        let mut layers = layers_of(members[0]);
+        for member in &members[1..] {
+            let candidate = layers_of(member);
+            if covered(&candidate) > covered(&layers) || (covered(&candidate) == covered(&layers) && candidate.len() > layers.len()) {
+                layers = candidate;
+            }
+        }
+        members.sort_by_key(|m| layers.iter().position(|n| *n == number(m)).unwrap_or(layers.len()));
+        placed.extend(members.iter().map(|m| key(m)));
+        let depths = (0..members.len()).collect();
+        chains.push(("native", members, depths));
+    }
+
+    let remaining: Vec<&Value> = visible.iter().copied().filter(|l| !placed.contains(&key(l))).collect();
+    let branch = |l: &Value, b: &str| format!("{}:{b}", repo(l));
+    let mut by_head: HashMap<String, Option<&Value>> = HashMap::new();
+    for link in &remaining {
+        if link["snapshot"].is_null() {
+            continue;
+        }
+        let head = branch(link, text(&link["snapshot"], "headBranch"));
+        let ambiguous = by_head.contains_key(&head);
+        by_head.insert(head, if ambiguous { None } else { Some(link) });
+    }
+    let parent_of = |l: &Value| -> Option<&Value> {
+        if l["snapshot"].is_null() {
+            return None;
+        }
+        let parent = (*by_head.get(&branch(l, text(&l["snapshot"], "baseBranch")))?)?;
+        (!std::ptr::eq(parent, l)).then_some(parent)
+    };
+    let mut children: HashMap<String, Vec<&Value>> = HashMap::new();
+    for link in &remaining {
+        if let Some(parent) = parent_of(link) {
+            children.entry(key(parent)).or_default().push(link);
+        }
+    }
+    for base in &remaining {
+        if parent_of(base).is_some() {
+            continue;
+        }
+        let (mut layers, mut depths) = (Vec::new(), Vec::new());
+        let mut pending = vec![(*base, 0)];
+        while let Some((link, depth)) = pending.pop() {
+            let k = key(link);
+            // Two links with one identity would otherwise share a child list forever.
+            if !placed.insert(k.clone()) {
+                continue;
+            }
+            layers.push(link);
+            depths.push(depth);
+            for child in children.get(&k).into_iter().flatten().rev() {
+                pending.push((*child, depth + 1));
+            }
+        }
+        if !layers.is_empty() {
+            chains.push(("chain", layers, depths));
+        }
+    }
+    for link in &remaining {
+        if !placed.contains(&key(link)) {
+            chains.push(("chain", vec![link], vec![0]));
+        }
+    }
+
+    let updated = |l: &Value| iso_ms(l["snapshot"]["updatedAt"].as_str().unwrap_or(text(l, "linkedAt"))).unwrap_or(0);
+    chains.sort_by_key(|(_, layers, _)| std::cmp::Reverse(layers.iter().map(|l| updated(l)).max().unwrap_or(0)));
+    chains
+        .into_iter()
+        .flat_map(|(kind, layers, depths)| {
+            let size = layers.len();
+            layers.into_iter().zip(depths).enumerate().map(move |(i, (l, depth))| {
+                let snapshot = &l["snapshot"];
+                PrLine {
+                    number: l["number"].as_i64().unwrap_or(0),
+                    title: snapshot["title"].as_str().unwrap_or(text(l, "repository")).to_string(),
+                    state: (!snapshot.is_null()).then(|| {
+                        if snapshot["state"] == "open" && snapshot["isDraft"] == true { "draft".to_string() } else { text(snapshot, "state").to_string() }
+                    }),
+                    depth,
+                    stack: (i == 0 && size > 1).then_some((kind, size)),
+                }
+            })
+        })
+        .collect()
+}
+
+/// `shouldShowInstanceBadge`: an accent colour, or another provider instance of the same kind.
+pub fn shows_instance_badge(instance: &str, providers: &[Value], instances: &Value) -> bool {
+    let accent = instances[instance]["accentColor"].as_str().unwrap_or("").trim_start_matches('#');
+    if accent.len() == 6 && accent.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    let Some(entry) = providers.iter().find(|p| p["instanceId"] == instance) else { return false };
+    let enabled = entry["enabled"] != false;
+    providers
+        .iter()
+        .filter(|p| p["driver"] == entry["driver"])
+        // Historical threads still tell apart accounts that are all disabled.
+        .filter(|p| !enabled || p["enabled"] != false)
+        .filter(|p| entry["driver"] != "acpRegistry" || p["acpRegistryAgentId"] == entry["acpRegistryAgentId"])
+        .count()
+        > 1
+}
+
+/// "Handed off from …": the thread's earlier provider instances, by display name.
+pub fn handed_off_from(thread: &Value, current: &str, providers: &[Value]) -> Vec<String> {
+    thread["providerInstanceHistory"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| *id != current)
+        .map(|id| providers.iter().find(|p| p["instanceId"] == id).and_then(|p| p["displayName"].as_str()).unwrap_or(id).to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1596,5 +1761,46 @@ mod tests {
         // Message matches follow, in server order, without repeating a title hit.
         let content = ["miss".to_string(), "word".into(), "gone".into()];
         assert_eq!(search(&threads, "side", &content), [2, 1, 0, 3]);
+    }
+
+    #[test]
+    fn pull_request_lines_order_stacks_and_derived_chains_like_the_web() {
+        let link = |n: i64, head: &str, base: &str, updated: &str| {
+            serde_json::json!({"host": "github.com", "repository": "acme/app", "number": n, "linkedAt": updated,
+                "snapshot": {"title": format!("PR {n}"), "state": "open", "isDraft": (n == 3), "headBranch": head, "baseBranch": base, "updatedAt": updated}})
+        };
+        let mut lone = link(9, "x", "main", "2026-01-01T00:00:00Z");
+        lone["snapshot"]["state"] = serde_json::json!("merged");
+        let mut hidden = link(7, "y", "main", "2026-09-01T00:00:00Z");
+        hidden["source"] = serde_json::json!("stack-dismissed");
+        let links = vec![link(3, "c", "b", "2026-02-01T00:00:00Z"), link(1, "a", "main", "2026-02-01T00:00:00Z"), link(2, "b", "a", "2026-03-01T00:00:00Z"), lone, hidden];
+        let lines = pr_lines(&links);
+        let shape: Vec<(i64, usize, Option<(&str, usize)>, Option<&str>)> = lines.iter().map(|l| (l.number, l.depth, l.stack, l.state.as_deref())).collect();
+        assert_eq!(
+            shape,
+            vec![(1, 0, Some(("chain", 3)), Some("open")), (2, 1, None, Some("open")), (3, 2, None, Some("draft")), (9, 0, None, Some("merged"))],
+            "FAILED: base-to-head chain first (newest), then the lone merged PR; dismissed ones hidden"
+        );
+
+        let native = |n: i64, layers: &[i64]| {
+            let layers: Vec<Value> = layers.iter().map(|n| serde_json::json!({"number": n})).collect();
+            serde_json::json!({"host": "github.com", "repository": "acme/app", "number": n, "linkedAt": "2026-01-01T00:00:00Z", "snapshot": null, "stack": {"id": "s1", "layers": layers}})
+        };
+        let lines = pr_lines(&[native(5, &[4]), native(4, &[4, 5])]);
+        assert_eq!(lines.iter().map(|l| (l.number, l.depth)).collect::<Vec<_>>(), vec![(4, 0), (5, 1)], "FAILED: the fullest layer list orders a native stack");
+        assert_eq!((lines[0].stack, lines[0].state.clone(), lines[0].title.as_str()), (Some(("native", 2)), None, "acme/app"));
+    }
+
+    #[test]
+    fn instance_badges_and_handoffs_follow_the_web() {
+        let p = |id: &str, driver: &str, enabled: bool| serde_json::json!({"instanceId": id, "driver": driver, "enabled": enabled, "displayName": id.to_uppercase()});
+        let providers = vec![p("codex", "codex", true), p("codex-work", "codex", true), p("claude", "claudeAgent", true), p("claude-old", "claudeAgent", false)];
+        let none = serde_json::json!({});
+        assert!(shows_instance_badge("codex", &providers, &none), "FAILED: two codex accounts need a badge");
+        assert!(!shows_instance_badge("claude", &providers, &none), "FAILED: a disabled sibling doesn't count");
+        assert!(shows_instance_badge("claude-old", &providers, &none), "FAILED: a disabled thread's provider counts every sibling");
+        assert!(shows_instance_badge("claude", &providers, &serde_json::json!({"claude": {"accentColor": "#2563eb"}})), "FAILED: an accent colour badges");
+        let thread = serde_json::json!({"providerInstanceHistory": ["claude", "gone", "codex"]});
+        assert_eq!(handed_off_from(&thread, "codex", &providers), vec!["CLAUDE", "gone"]);
     }
 }
