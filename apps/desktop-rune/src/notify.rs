@@ -301,7 +301,8 @@ pub fn overlays(s: &App, t: &T) -> Option<El> {
         return None;
     }
     let k = kit::theme(t);
-    let mut region = col().key("thread-toasts").role("region").label("Notifications").pin(None, Some(32.0 + layout::TOPBAR_H), Some(32.0), None).w(360.0).gap(12.0);
+    // The region only positions; each toast plays the popup fade (rune's default would add 300 ms).
+    let mut region = col().key("thread-toasts").transition(rune::Transition::none()).role("region").label("Notifications").pin(None, Some(32.0 + layout::TOPBAR_H), Some(32.0), None).w(360.0).gap(12.0);
     for toast in toasts.iter().rev().take(3) {
         region = region.child(toast_view(toast, t, &k));
     }
