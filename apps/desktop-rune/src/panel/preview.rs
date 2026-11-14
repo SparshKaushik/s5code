@@ -75,11 +75,13 @@ struct Tab {
     stream: Option<super::stream::Stream>,
     /// The session's latest snapshot, for a streamed tab's address and history.
     snapshot: Value,
+    /// The page's last `(url, loading)`, to drop the agent's cursor on a navigation.
+    nav: (String, bool),
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default() }
     }
 }
 
@@ -156,6 +158,8 @@ pub struct Ui {
     /// The newest agent pointer drawn and whether a cursor was bright, so a move or a dimming
     /// repaints.
     cursor_seen: (u64, bool),
+    /// The person's last input to a page, which dims the agent's cursor (Electron's `human`).
+    human: Option<(TabId, std::time::Instant)>,
     /// Other environments whose preview sessions this panel follows, as streams.
     remote_watched: Vec<String>,
 }
@@ -364,6 +368,14 @@ fn device(app: &mut App, tab: TabId) -> &mut Device {
 }
 
 fn send(app: &mut App, cmd: Cmd) {
+    let human = match &cmd {
+        Cmd::Mouse { kind, .. } => *kind != "mouseMoved",
+        Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) => true,
+        _ => false,
+    };
+    if let Some(tab) = app.ui.panel.browser.shown.filter(|_| human) {
+        app.ui.panel.browser.human = Some((tab, std::time::Instant::now()));
+    }
     let ui = &app.ui.panel.browser;
     let tab = match &cmd {
         Cmd::Mouse { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) => ui.shown,
@@ -619,6 +631,21 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         if !idle(&status) && !status.loading && status.failure.is_none() {
             loaded.push(status.url.clone());
+        }
+        let nav = (status.url.clone(), status.loading);
+        if tab.nav != nav {
+            if navigated(&tab.nav, &status) {
+                match &tab.stream {
+                    Some(stream) => stream.clear_pointer(),
+                    None => {
+                        if let Some(key) = &tab.session {
+                            agent::clear_pointer(key);
+                        }
+                    }
+                }
+                changed = true;
+            }
+            tab.nav = nav;
         }
         if tab.bar.focused && !tab.focused {
             tab.bar.set_selection(0, tab.bar.text.len());
@@ -1442,10 +1469,13 @@ fn toggle(t: &T, label: &str, glyph: &'static rune::Icon, on: bool, disabled: bo
 pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     let ui = &app.ui.panel.browser;
     let status = ui.browser.status(tab);
-    let started = ui.browser.started();
     let Some(state) = ui.tabs.get(&tab) else {
         return super::notice(t, "This browser tab is closed.");
     };
+    // A streamed tab needs no local Chrome, and takes page input only while this viewer has control.
+    let streamed = state.stream.as_ref().map(|s| s.state());
+    let started = ui.browser.started() || streamed.is_some();
+    let input_off = streamed.as_ref().is_some_and(|s| s.controller.as_deref() != Some("you"));
     let focused = state.bar.focused;
     let live = !idle(&status) && status.failure.is_none();
     let address = text_input(&state.bar, theme::TEXT_SM)
@@ -1494,7 +1524,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         ))
     });
     // A child added after `build` misses the disabled button's dimming.
-    let refresh_off = !started || idle(&status);
+    let refresh_off = !started || idle(&status) || input_off;
     let refresh_color = if refresh_off { t.c.contrast_foreground.alpha_mul(0.64) } else { t.c.contrast_foreground };
     let mut refresh_glyph = icon(&icons::REFRESH_CW, 14.).color(refresh_color).a11y_hidden();
     if status.loading {
@@ -1514,13 +1544,13 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                 .center_y()
                 .child(
                     action("Back", &icons::ARROW_LEFT)
-                        .disabled(!status.can_back)
+                        .disabled(!status.can_back || input_off)
                         .on_press(move |s: &mut App| send(s, Cmd::Back(tab)))
                         .build(t),
                 )
                 .child(
                     action("Forward", &icons::ARROW_RIGHT)
-                        .disabled(!status.can_forward)
+                        .disabled(!status.can_forward || input_off)
                         .on_press(move |s: &mut App| send(s, Cmd::Forward(tab)))
                         .build(t),
                 )
@@ -1538,18 +1568,22 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                 ),
         )
         .child(row().grow(1.).min_w(0.).hover_group().child(address).children(external))
-        .child(toggle(
-            t,
-            if status.picking { "Cancel annotation" } else { "Annotate preview" },
-            &icons::MOUSE_POINTER_CLICK,
-            status.picking,
-            !status.painted || !live,
-            move |s: &mut App| {
+        // Web offers neither on a server's tab: the page isn't in this client.
+        .children(streamed.is_none().then(|| {
+            let help = if status.failure.is_some() {
+                "Page didn't load. Pick is unavailable until the page renders"
+            } else if status.picking {
+                "Cancel annotation (Esc)"
+            } else {
+                "Annotate an element"
+            };
+            toggle(t, if status.picking { "Cancel annotation" } else { "Annotate preview" }, &icons::MOUSE_POINTER_CLICK, status.picking, !status.painted || !live, move |s: &mut App| {
                 let on = !s.ui.panel.browser.browser.status(tab).picking;
                 send(s, Cmd::Pick(tab, on));
-            },
-        ))
-        .child(capture_button(t, tab, &status, live))
+            })
+            .help(help)
+        }))
+        .children(streamed.is_none().then(|| capture_button(t, tab, &status, live)))
         .child(toggle(
             t,
             if pip { "Close floating preview" } else { "Float preview over chat" },
@@ -1815,6 +1849,8 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
         return;
     }
     let [x, y, w, h] = pip_frame(ui.pip_frame, aspect, container);
+    let popped = ui.popout == Some(tab) && popout::visible();
+    let recording = ui.browser.status(tab).recording;
     let pill = row()
         .pin(None, Some(6.), Some(6.), None)
         .h(32.)
@@ -1828,6 +1864,7 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
         .group_opacity(0., 1.)
         .cursor(rune::Cursor::Grab)
         .on_drag(move |s: &mut App, d, _| pip_gesture(s, d, (0, 0), aspect))
+        .children(recording.then(|| el().size(24., 24.).center().child(el().size(8., 8.).radius(4.).fill(t.c.destructive)).a11y_hidden()))
         .child(
             action("Open preview in right panel", &icons::PANEL_RIGHT)
                 .on_press(move |s: &mut App| {
@@ -1836,7 +1873,9 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
                 })
                 .build(t),
         )
+        .child(toggle(t, if popped { "Close popped-out preview" } else { "Pop preview into separate window" }, &icons::PICTURE_IN_PICTURE_2, popped, false, move |s: &mut App| toggle_popout(s, tab)).help(if popped { "Close separate window" } else { "Pop into separate window" }))
         .child(action("Close floating preview", &icons::X).on_press(|s: &mut App| s.ui.panel.browser.pip = None).build(t));
+
     // Web's `RESIZE_HANDLES`: 8 pt edges and 16 pt corners straddling the frame.
     let handles = [(0, -1, -4., 0.), (0, 1, -4., 0.), (-1, 0, -4., 0.), (1, 0, -4., 0.), (-1, -1, -8., 16.), (1, -1, -8., 16.), (-1, 1, -8., 16.), (1, 1, -8., 16.)].map(|(dx, dy, inset, size)| {
         let handle = el().on_drag(move |s: &mut App, d, _| pip_gesture(s, d, (dx, dy), aspect));
@@ -2013,23 +2052,44 @@ fn agent_cursor(app: &App, t: &T, tab: TabId, scale: f32) -> Option<El> {
     if ui.browser.status(tab).recording {
         return None;
     }
+    // Web draws none over a stream this viewer is driving.
+    if ui.tabs.get(&tab)?.stream.as_ref().is_some_and(|s| s.state().controller.as_deref() == Some("you")) {
+        return None;
+    }
     let active = pointer.at.elapsed() < CURSOR_ACTIVE;
-    let mut mark = el().key("agent-cursor").pin(Some(pointer.x * scale - 2.), Some(pointer.y * scale - 2.), None, None).size(20., 20.).opacity(cursor_opacity(active)).a11y_hidden();
+    let human = ui.human.is_some_and(|(t, at)| t == tab && at.elapsed() < HUMAN_ACTIVE);
+    let mut mark = el().key("agent-cursor").pin(Some(pointer.x * scale - 2.), Some(pointer.y * scale - 2.), None, None).size(20., 20.).opacity(cursor_opacity(active, human)).a11y_hidden();
     if pointer.click && active {
         mark = mark.child(el().key(format!("agent-cursor-ring-{}", pointer.sequence)).pin(Some(2.), Some(2.), None, None).size(16., 16.).radius(8.).fill(t.c.primary.alpha_mul(0.25)));
     }
     Some(mark.child(icon(&icons::MOUSE_POINTER_2, 20.).color(t.c.primary)))
 }
 
-/// Web's `agentBrowserCursorOpacity` for an agent-driven tab.
-fn cursor_opacity(active: bool) -> f32 {
-    if active { 1. } else { 0.35 }
+/// Electron's human controller lasts this long after the person's last input.
+const HUMAN_ACTIVE: Duration = Duration::from_millis(750);
+
+/// Web's `agentBrowserCursorOpacity`: dimmer while the person is the one acting.
+fn cursor_opacity(active: bool, human: bool) -> f32 {
+    match (active, human) {
+        (true, _) => 1.,
+        (false, true) => 0.18,
+        (false, false) => 0.35,
+    }
 }
 
 /// When the brightest agent cursor dims, so the panel repaints then.
 fn cursor_wake(app: &App) -> Option<Duration> {
     let ui = &app.ui.panel.browser;
-    ui.tabs.values().filter_map(tab_pointer).filter_map(|p| CURSOR_ACTIVE.checked_sub(p.at.elapsed())).min()
+    let human = ui.human.and_then(|(_, at)| HUMAN_ACTIVE.checked_sub(at.elapsed()));
+    ui.tabs.values().filter_map(tab_pointer).filter_map(|p| CURSOR_ACTIVE.checked_sub(p.at.elapsed())).chain(human).min()
+}
+
+/// Web's `shouldClearBrowserPointer`: a new load, or a different page, drops the old cursor.
+fn navigated(before: &(String, bool), status: &Status) -> bool {
+    if before.0.is_empty() {
+        return false;
+    }
+    (status.loading && !before.1) || (!idle(status) && before.0 != "about:blank" && before.0 != status.url)
 }
 
 /// Where the agent last pointed: from the stream for a streamed tab, else from our relay.
@@ -2151,6 +2211,11 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             send(s, Cmd::Inspect { x: p.x * k, y: p.y * k, at: (p.window_x, p.window_y) });
         })
         .on_key(|s: &mut App, e, tx| {
+            // Web's way out of a page that takes every key.
+            if matches!(e.key, Key::Escape) && e.mods.shift {
+                tx.blur();
+                return true;
+            }
             // An open dialog blocks the page: Enter accepts it, Escape cancels it.
             if s.ui.panel.browser.dialog.as_ref().is_some_and(|d| Some(d.tab) == s.ui.panel.browser.shown) {
                 match e.key {
@@ -2261,7 +2326,7 @@ fn unreachable(t: &T, tab: TabId, failure: &browser::Failure, details: bool) -> 
     }
     body = body
         .child(
-            text(failure.description.to_uppercase())
+            text(if failure.description.is_empty() { "ERR_FAILED".to_owned() } else { failure.description.to_uppercase() })
                 .font(theme::TEXT_XS)
                 .color(t.c.muted_foreground.alpha_mul(0.7))
                 .mt(32.),
@@ -2712,6 +2777,29 @@ mod tests {
         assert!(ui.deferred.is_empty());
         // No server listens in tests, so nothing is opened again; with one, each tab registers anew.
         assert!(ui.opening.is_empty());
+    }
+
+    #[test]
+    fn a_new_page_drops_the_agents_cursor_as_web_does() {
+        let at = |url: &str, loading: bool| Status { url: url.into(), loading, ..Status::default() };
+        assert!(!navigated(&(String::new(), false), &at("https://a.dev/", true)), "the first report has nothing to compare");
+        assert!(navigated(&("https://a.dev/".into(), false), &at("https://a.dev/", true)), "a reload starts");
+        assert!(navigated(&("https://a.dev/".into(), false), &at("https://a.dev/next", false)), "a same-document navigation");
+        assert!(!navigated(&("https://a.dev/".into(), true), &at("https://a.dev/", false)), "the load finishing");
+        assert!(!navigated(&("about:blank".into(), false), &at("https://a.dev/", false)));
+        assert_eq!((cursor_opacity(true, true), cursor_opacity(false, true), cursor_opacity(false, false)), (1., 0.18, 0.35));
+    }
+
+    #[test]
+    fn a_streamed_tab_shows_its_sessions_page_and_history() {
+        let snapshot = json!({ "navStatus": { "_tag": "Loading", "url": "https://a.dev/", "title": "A" }, "canGoBack": true, "canGoForward": false });
+        let state = super::super::stream::State { painted: true, ..Default::default() };
+        let status = stream_status(&snapshot, &state);
+        assert_eq!((status.url.as_str(), status.title.as_str(), status.loading, status.can_back, status.can_forward, status.painted), ("https://a.dev/", "A", true, true, false, true));
+        assert!(status.failure.is_none());
+        let failed = super::super::stream::State { ended: true, error: Some("The server needs a Chrome sandbox.".into()), ..Default::default() };
+        assert_eq!(stream_status(&snapshot, &failed).failure.unwrap().description, "The server needs a Chrome sandbox.");
+        assert!(idle(&stream_status(&json!({ "navStatus": { "_tag": "Idle" } }), &state)));
     }
 
     #[test]

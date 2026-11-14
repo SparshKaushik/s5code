@@ -63,6 +63,10 @@ impl Stream {
         }
     }
 
+    pub fn clear_pointer(&self) {
+        self.state.lock().unwrap().pointer = None;
+    }
+
     pub fn toggle_control(&self) {
         let take = self.state().controller.as_deref() != Some("you");
         self.send(json!({ "type": if take { "takeControl" } else { "releaseControl" } }));

@@ -156,6 +156,12 @@ pub fn download_event(target: &str, method: &str, params: Value) {
     }
 }
 
+pub fn clear_pointer(key: &Key) {
+    if let Some(p) = POINTERS.lock().unwrap().as_mut() {
+        p.remove(key);
+    }
+}
+
 pub fn pointer(key: &Key) -> Option<Pointer> {
     POINTERS.lock().unwrap().as_ref()?.get(key).cloned()
 }
