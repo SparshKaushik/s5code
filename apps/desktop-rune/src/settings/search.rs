@@ -98,6 +98,7 @@ mod tests {
             title: title.into(),
             to: to.into(),
             terms: terms.iter().map(|t| normalize(t)).collect(),
+            target: None,
             secondary,
         };
         let fixture = [
