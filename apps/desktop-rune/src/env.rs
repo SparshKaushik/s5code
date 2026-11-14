@@ -34,9 +34,23 @@ pub struct Saved {
     pub bearer: String,
 }
 
+/// Another way to reach a saved environment, after its [`Saved::base`] (web `alternateRoutes`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Alt {
+    pub base: String,
+    pub bearer: String,
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub saved: Vec<Saved>,
+    /// Each saved environment's routes after its first, preferred first.
+    pub alternates: HashMap<String, Vec<Alt>>,
+    /// When each environment last fell back to another route.
+    fell_back: HashMap<String, std::time::Instant>,
+    /// The environment a pairing in flight adds a route to, and the label of one just added.
+    pub route_for: Option<String>,
+    pub route_added: Option<String>,
     /// Connected environments that are not on screen, by key.
     parked: Vec<(String, Source)>,
     /// The environment `App::src` belongs to.
@@ -86,13 +100,34 @@ fn decode_off(value: &Value) -> Vec<String> {
         .collect()
 }
 
-fn encode(saved: &[Saved], off: &[String]) -> Value {
+fn decode_alternates(value: &Value) -> HashMap<String, Vec<Alt>> {
+    let field = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_owned();
+    value["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            let routes: Vec<Alt> = v["alternateRoutes"]
+                .as_array()?
+                .iter()
+                .map(|r| Alt { base: field(r, "httpBaseUrl"), bearer: field(r, "bearerToken") })
+                .filter(|r| !r.base.is_empty() && !r.bearer.is_empty())
+                .collect();
+            (!routes.is_empty()).then(|| (field(v, "environmentId"), routes))
+        })
+        .collect()
+}
+
+fn encode(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>) -> Value {
     let rows: Vec<Value> = saved
         .iter()
         .map(|e| {
             let mut row = json!({"environmentId": e.id, "label": e.label, "httpBaseUrl": e.base, "bearerToken": e.bearer});
             if off.contains(&e.id) {
                 row["enabled"] = json!(false);
+            }
+            if let Some(routes) = alternates.get(&e.id).filter(|r| !r.is_empty()) {
+                row["alternateRoutes"] = routes.iter().map(|r| json!({"httpBaseUrl": r.base, "bearerToken": r.bearer})).collect();
             }
             row
         })
@@ -101,7 +136,7 @@ fn encode(saved: &[Saved], off: &[String]) -> Value {
 }
 
 /// Bearer tokens are credentials: the file is the user's alone.
-fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
+fn save(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>) -> Result<(), String> {
     let path = path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -112,13 +147,17 @@ fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off, alternates)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&temporary, &path).map_err(|e| e.to_string())
 }
 
 fn connect(s: &App, env: &Saved) -> Source {
+    connect_to(s, &env.base, &env.bearer)
+}
+
+fn connect_to(s: &App, base: &str, bearer: &str) -> Source {
     let waker = s.ui.panel.waker.clone();
-    Source::Live(s5_net::Net::connect(&env.base, &env.bearer, move || {
+    Source::Live(s5_net::Net::connect(base, bearer, move || {
         if let Some(w) = &waker {
             w()
         }
@@ -130,6 +169,7 @@ pub fn start(s: &mut App) {
     let file = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let saved = file.as_ref().map(decode).unwrap_or_default();
     let off = file.as_ref().map(decode_off).unwrap_or_default();
+    s.ui.env.alternates = file.as_ref().map(decode_alternates).unwrap_or_default();
     for env in saved.iter().filter(|e| !off.contains(&e.id)) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));
@@ -216,20 +256,6 @@ pub fn short_status(s: &App, key: &str) -> &'static str {
 /// The base URL a saved environment was paired at.
 pub fn base_url(s: &App, key: &str) -> Option<String> {
     s.ui.env.saved.iter().find(|e| e.id == key).map(|e| e.base.clone())
-}
-
-/// The settings row's shorter status (SavedEnvironmentRows' `statusPresentation`), and whether it
-/// reads as an error; the full [`status`] is its tooltip.
-pub fn row_status(s: &App, key: &str) -> (String, bool) {
-    let Some(src) = source(s, key) else { return ("Not connected".into(), false) };
-    let st = src.state();
-    match &st.conn {
-        s5_net::Conn::Open if st.shell_ready => ("Connected".into(), false),
-        s5_net::Conn::Open | s5_net::Conn::Connecting => ("Connecting".into(), false),
-        s5_net::Conn::Closed(reason) if rejected(reason) => (format!("Connection failed: {reason}. Pair this environment again."), true),
-        s5_net::Conn::Closed(reason) if reason.is_empty() => ("Reconnecting".into(), true),
-        s5_net::Conn::Closed(reason) => (format!("Reconnecting: {reason}"), true),
-    }
 }
 
 /// The server refused the bearer during the WebSocket upgrade (tungstenite's "HTTP error: 401 …").
@@ -423,13 +449,14 @@ pub fn remove(s: &mut App, id: &str) {
     s.ui.env.parked.retain(|(k, _)| k != id);
     s.ui.env.saved.retain(|e| e.id != id);
     s.ui.env.off.retain(|k| k != id);
+    s.ui.env.alternates.remove(id);
     s.ui.env.error = persist(s);
     ssh::forget(s, id);
 }
 
 /// Writes the saved environments, returning the error the settings page shows.
 pub(crate) fn persist(s: &App) -> Option<String> {
-    save(&s.ui.env.saved, &s.ui.env.off).err().map(|e| format!("Could not save environments: {e}"))
+    save(&s.ui.env.saved, &s.ui.env.off, &s.ui.env.alternates).err().map(|e| format!("Could not save environments: {e}"))
 }
 
 /// Web `setEnabled` on a saved environment: off disconnects it and keeps it saved; on reconnects.
@@ -449,6 +476,7 @@ pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
             switch(s, LOCAL);
         }
         s.ui.env.parked.retain(|(k, _)| k != id);
+        ssh::suspend(s, id);
         s.ui.env.off.push(id.to_owned());
     }
     s.ui.env.error = persist(s);
@@ -466,6 +494,18 @@ fn pair(host: String, code: String) -> Result<Saved, String> {
 
 pub fn pairing(s: &App) -> bool {
     s.ui.env.pairing.is_some()
+}
+
+/// Web's Add route: pairs `id`'s machine again at another address.
+pub(crate) fn add_route(s: &mut App, id: &str) {
+    if s.ui.env.pairing.is_some() {
+        return;
+    }
+    s.ui.env.route_for = Some(id.to_owned());
+    add(s);
+    if s.ui.env.pairing.is_none() {
+        s.ui.env.route_for = None;
+    }
 }
 
 pub(crate) fn add(s: &mut App) {
@@ -491,6 +531,17 @@ pub(crate) fn add(s: &mut App) {
 
 /// Folds a finished pairing in, replacing an environment saved before (a fresh session).
 fn paired(s: &mut App, result: Result<Saved, String>) {
+    if let Some(id) = s.ui.env.route_for.take() {
+        match result.and_then(|env| route_paired(s, &id, env)) {
+            Ok(label) => {
+                s.ui.env.host.clear();
+                s.ui.env.code.clear();
+                s.ui.env.route_added = Some(label);
+            }
+            Err(e) => s.ui.env.error = Some(e),
+        }
+        return;
+    }
     let env = match result {
         Ok(env) if Some(&env.id) == local_id(s).as_ref() => Err("That address reaches this machine's own server.".to_owned()),
         other => other,
@@ -517,9 +568,164 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     s.ui.env.error = persist(s);
 }
 
+/// Web `upsertRoute`: the route joins `id`'s, first among its kind, or replaces one at the same
+/// address with its fresh credential.
+fn route_paired(s: &mut App, id: &str, paired: Saved) -> Result<String, String> {
+    let Some(saved) = s.ui.env.saved.iter().find(|e| e.id == id) else { return Err("That environment is no longer saved.".into()) };
+    if paired.id != id {
+        return Err(format!("That address reaches {}, a different machine. Add it as its own environment instead.", paired.label));
+    }
+    let label = saved.label.clone();
+    let route = Alt { base: paired.base, bearer: paired.bearer };
+    let routes = upsert_route(routes(s, id), route, &|base| ssh::is_tunnel(s, id, base));
+    set_routes(s, id, routes);
+    Ok(label)
+}
+
+fn upsert_route(mut routes: Vec<Alt>, route: Alt, tunnel: &dyn Fn(&str) -> bool) -> Vec<Alt> {
+    let same = |r: &Alt| r.base.trim_end_matches('/') == route.base.trim_end_matches('/');
+    if let Some(existing) = routes.iter_mut().find(|r| same(r)) {
+        *existing = route;
+        return routes;
+    }
+    let rank = |r: &Alt| if tunnel(&r.base) { 4 } else { route_rank(&r.base) };
+    let new = rank(&route);
+    let at = routes.iter().position(|r| rank(r) >= new).unwrap_or(routes.len());
+    routes.insert(at, route);
+    routes
+}
+
+/// Web `ROUTE_KIND_RANK` for a bearer route; an SSH tunnel ranks 4.
+fn route_rank(base: &str) -> u8 {
+    match route_kind(base) {
+        "loopback" => 0,
+        "lan" => 1,
+        "tailnet" | "vpn" => 2,
+        _ => 3,
+    }
+}
+
+/// Web `connectionRouteKind` for a bearer route's host.
+pub fn route_kind(base: &str) -> &'static str {
+    let host = route_host(base);
+    let ipv4 = host.parse::<std::net::Ipv4Addr>().ok().map(|ip| ip.octets());
+    let loopback = host == "localhost" || host == "::1" || ipv4.is_some_and(|o| o[0] == 127);
+    let tailnet = host.ends_with(".ts.net")
+        || host.parse::<std::net::Ipv6Addr>().is_ok_and(|ip| ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]);
+    let shared = ipv4.is_some_and(|o| o[0] == 100 && (64..=127).contains(&o[1]));
+    let private = host.ends_with(".local")
+        || host.ends_with(".localhost")
+        || host == "home.arpa"
+        || host.ends_with(".home.arpa")
+        || (!host.contains('.') && !host.contains(':'))
+        || ipv4.is_some_and(|o| {
+            o[0] == 0
+                || o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+                || (o[0] == 198 && (18..=19).contains(&o[1]))
+        });
+    if host.is_empty() {
+        "public"
+    } else if loopback {
+        "loopback"
+    } else if tailnet {
+        "tailnet"
+    } else if shared {
+        "vpn"
+    } else if private {
+        "lan"
+    } else {
+        "public"
+    }
+}
+
+pub fn route_host(base: &str) -> String {
+    let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host.trim_end_matches('.').to_lowercase()
+}
+
+/// A saved environment's routes, preferred first.
+pub fn routes(s: &App, id: &str) -> Vec<Alt> {
+    let Some(saved) = s.ui.env.saved.iter().find(|e| e.id == id) else { return Vec::new() };
+    let first = Alt { base: saved.base.clone(), bearer: saved.bearer.clone() };
+    std::iter::once(first).chain(s.ui.env.alternates.get(id).into_iter().flatten().cloned()).collect()
+}
+
+/// The route the live connection uses, when connected.
+pub fn route_in_use(s: &App, id: &str) -> Option<usize> {
+    let Some(Source::Live(net)) = source(s, id) else { return None };
+    if !connected(s, id) {
+        return None;
+    }
+    let base = net.base_url().trim_end_matches('/');
+    routes(s, id).iter().position(|r| r.base.trim_end_matches('/') == base)
+}
+
+/// Saves `routes` (web `reorderRoutes` / `removeRoute`); a new first route connects at once.
+pub fn set_routes(s: &mut App, id: &str, routes: Vec<Alt>) {
+    let Some(first) = routes.first().cloned() else { return };
+    let Some(saved) = s.ui.env.saved.iter_mut().find(|e| e.id == id) else { return };
+    let moved = saved.base != first.base;
+    saved.base = first.base;
+    saved.bearer = first.bearer;
+    let env = saved.clone();
+    s.ui.env.alternates.insert(id.to_owned(), routes[1..].to_vec());
+    let in_use = source(s, id).and_then(|src| match src {
+        Source::Live(net) => Some(net.base_url().trim_end_matches('/').to_owned()),
+        Source::Fixture(_) => None,
+    });
+    let still_saved = in_use.is_some_and(|b| routes.iter().any(|r| r.base.trim_end_matches('/') == b));
+    if (moved || !still_saved) && !s.ui.env.off.contains(&env.id) {
+        let src = connect(s, &env);
+        if let Some(slot) = source_mut(s, id) {
+            *slot = src;
+        }
+    }
+    s.ui.env.error = persist(s);
+}
+
+/// Web's supervisor tries an environment's routes in order: one that fails hands over to the next,
+/// at most every ten seconds each.
+fn fall_back(s: &mut App) -> bool {
+    let now = std::time::Instant::now();
+    let mut moves = Vec::new();
+    for (id, alternates) in &s.ui.env.alternates {
+        if alternates.is_empty() || s.ui.env.off.contains(id) {
+            continue;
+        }
+        let Some(Source::Live(net)) = source(s, id) else { continue };
+        if !matches!(&net.state().conn, s5_net::Conn::Closed(reason) if !reason.is_empty()) {
+            continue;
+        }
+        if s.ui.env.fell_back.get(id).is_some_and(|at| now.duration_since(*at).as_secs() < 10) {
+            continue;
+        }
+        let routes = routes(s, id);
+        let current = net.base_url().trim_end_matches('/');
+        let at = routes.iter().position(|r| r.base.trim_end_matches('/') == current).unwrap_or(0);
+        moves.push((id.clone(), routes[(at + 1) % routes.len()].clone()));
+    }
+    for (id, route) in &moves {
+        s.ui.env.fell_back.insert(id.clone(), now);
+        let src = connect_to(s, &route.base, &route.bearer);
+        if let Some(slot) = source_mut(s, id) {
+            *slot = src;
+        }
+    }
+    !moves.is_empty()
+}
+
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s);
+    let changed = ssh::poll(s) | fall_back(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
@@ -596,11 +802,36 @@ mod tests {
     fn saved_environments_round_trip_and_drop_incomplete_rows() {
         let list = vec![saved("a"), saved("b")];
         let off = vec!["b".to_owned()];
-        assert_eq!(decode(&encode(&list, &off)), list);
-        assert_eq!(decode_off(&encode(&list, &off)), off, "a switched-off environment stays off");
-        assert!(encode(&list, &[]).to_string().find("enabled").is_none(), "on is the default and omitted");
+        let none = HashMap::new();
+        assert_eq!(decode(&encode(&list, &off, &none)), list);
+        assert_eq!(decode_off(&encode(&list, &off, &none)), off, "a switched-off environment stays off");
+        assert!(encode(&list, &[], &none).to_string().find("enabled").is_none(), "on is the default and omitted");
+        let alternates = HashMap::from([("a".to_owned(), vec![Alt { base: "https://a.ts.net".into(), bearer: "t2".into() }])]);
+        assert_eq!(decode_alternates(&encode(&list, &off, &alternates)), alternates, "web's alternateRoutes survive a save");
+        assert!(encode(&list, &off, &none).to_string().find("alternateRoutes").is_none());
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
+    }
+
+    #[test]
+    fn a_new_route_goes_first_among_its_kind_and_one_at_the_same_address_is_replaced() {
+        let alt = |base: &str, bearer: &str| Alt { base: base.into(), bearer: bearer.into() };
+        let none = |_: &str| false;
+        let routes = vec![alt("http://192.168.1.4:3773", "lan"), alt("https://box.example.com", "public")];
+        let added = upsert_route(routes.clone(), alt("https://box.tail1.ts.net", "tail"), &none);
+        assert_eq!(added.iter().map(|r| r.bearer.as_str()).collect::<Vec<_>>(), ["lan", "tail", "public"]);
+        let lan = upsert_route(routes.clone(), alt("http://10.0.0.4:3773", "lan2"), &none);
+        assert_eq!(lan[0].bearer, "lan2", "a fresh credential connects before its kind");
+        let renewed = upsert_route(routes.clone(), alt("https://box.example.com/", "fresh"), &none);
+        assert_eq!((renewed.len(), renewed[1].bearer.as_str()), (2, "fresh"));
+        // An SSH tunnel ranks after every address route, though its host is loopback.
+        let tunnel = |base: &str| base.starts_with("http://127.0.0.1");
+        let ssh = vec![alt("http://127.0.0.1:41000", "ssh")];
+        let with_lan = upsert_route(ssh, alt("http://192.168.1.4:3773", "lan"), &tunnel);
+        assert_eq!(with_lan[0].bearer, "lan");
+        assert_eq!(route_kind("http://[fd7a:115c:a1e0::1]:3773"), "tailnet");
+        assert_eq!(route_kind("http://100.64.0.2"), "vpn");
+        assert_eq!(route_kind("http://localhost:3773"), "loopback");
     }
 
     #[test]
@@ -617,17 +848,14 @@ mod tests {
             s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
             assert_eq!(status(&s, "a"), expected);
         }
-        let mut row = |s: &mut App, conn: s5_net::Conn| {
+        let mut short = |s: &mut App, conn: s5_net::Conn| {
             remote.conn = conn;
             s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
-            row_status(s, "a")
+            short_status(s, "a")
         };
-        assert_eq!(row(&mut s, s5_net::Conn::Connecting), ("Connecting".into(), false));
-        assert_eq!(short_status(&s, "a"), "Connecting…");
-        assert_eq!(row(&mut s, s5_net::Conn::Closed("refused".into())), ("Reconnecting: refused".into(), true));
-        assert_eq!(short_status(&s, "a"), "Reconnecting…");
-        assert_eq!(row(&mut s, s5_net::Conn::Closed("HTTP error: 401 Unauthorized".into())).0, "Connection failed: HTTP error: 401 Unauthorized. Pair this environment again.");
-        assert_eq!(short_status(&s, "a"), "Connection failed");
+        assert_eq!(short(&mut s, s5_net::Conn::Connecting), "Connecting…");
+        assert_eq!(short(&mut s, s5_net::Conn::Closed("refused".into())), "Reconnecting…");
+        assert_eq!(short(&mut s, s5_net::Conn::Closed("HTTP error: 401 Unauthorized".into())), "Connection failed");
         assert_eq!(status(&s, "gone"), "Not connected");
     }
 

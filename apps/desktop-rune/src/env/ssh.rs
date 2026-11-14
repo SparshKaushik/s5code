@@ -314,9 +314,9 @@ pub fn add(s: &mut App) {
 
 fn reconnect(s: &mut App, id: &str, interactive: bool) {
     let Some(target) = s.ui.env.ssh.targets.iter().find(|(k, _)| k == id).map(|(_, t)| t.clone()) else { return };
-    let saved = s.ui.env.saved.iter().find(|e| e.id == id);
-    let preferred = saved.and_then(|e| port_of(&e.base));
-    let bearer = saved.map(|e| e.bearer.clone()).filter(|b| !b.is_empty());
+    let tunnel = tunnel_route(s, id);
+    let preferred = tunnel.as_ref().and_then(|r| port_of(&r.base));
+    let bearer = tunnel.map(|r| r.bearer).filter(|b| !b.is_empty());
     s.ui.env.ssh.notes.remove(id);
     let job = Job { kind: Kind::Reconnect(id.to_owned()), target, secret: None, prompts: 0, interactive, version: version(s), preferred, bearer };
     spawn(s, job);
@@ -422,20 +422,34 @@ pub(super) fn resume(s: &mut App, id: &str) {
 /// A tunnel that came back on another local port, or a session paired again, moves the saved
 /// environment with it.
 fn rebase(s: &mut App, id: &str, base: String, bearer: Option<String>) {
-    let Some(env) = s.ui.env.saved.iter_mut().find(|e| e.id == id) else { return };
-    if env.base == base && bearer.is_none() {
+    let mut routes = super::routes(s, id);
+    // The tunnel is the environment's loopback route; it is not always the preferred one.
+    let Some(route) = routes.iter_mut().find(|r| is_tunnel(s, id, &r.base)) else { return };
+    if route.base == base && bearer.is_none() {
         return;
     }
-    env.base = base;
+    route.base = base;
     if let Some(bearer) = bearer {
-        env.bearer = bearer;
+        route.bearer = bearer;
     }
-    let env = env.clone();
-    let src = super::connect(s, &env);
-    if let Some(slot) = super::source_mut(s, id) {
-        *slot = src;
+    // Reconnects when the tunnel is the first route, or was the one in use.
+    super::set_routes(s, id, routes);
+}
+
+/// Whether `base` is the SSH tunnel of the saved environment `id`.
+pub(super) fn is_tunnel(s: &App, id: &str, base: &str) -> bool {
+    s.ui.env.ssh.targets.iter().any(|(k, _)| k == id) && super::route_kind(base) == "loopback"
+}
+
+fn tunnel_route(s: &App, id: &str) -> Option<super::Alt> {
+    super::routes(s, id).into_iter().find(|r| is_tunnel(s, id, &r.base))
+}
+
+/// Switching an SSH environment off closes its forward; switching it on reconnects ([`resume`]).
+pub(super) fn suspend(s: &App, id: &str) {
+    if let Some((_, target)) = s.ui.env.ssh.targets.iter().find(|(k, _)| k == id) {
+        close(&target.key());
     }
-    s.ui.env.error = super::persist(s);
 }
 
 fn answer(s: &mut App) {

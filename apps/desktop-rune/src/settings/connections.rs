@@ -61,6 +61,11 @@ pub struct Ui {
     env_icon_menu: bool,
     /// Saved environments whose routes are showing.
     routes_open: Vec<String>,
+    /// A route being dragged (environment, position, distance), one to confirm removing, and
+    /// the environment Add environment adds a route to.
+    route_drag: Option<(String, usize, f32)>,
+    route_remove: Option<(String, usize)>,
+    route_target: Option<String>,
     remove: Option<(String, String)>,
     linking: bool,
     link_url: TextEdit,
@@ -141,6 +146,11 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
+    if let Some(label) = s.ui.env.route_added.take() {
+        close_add(s);
+        toast(s, "Route added", Some(&format!("{label} now has another way to connect.")));
+        changed = true;
+    }
     let added = match &s.ui.settings.connections.adding {
         Some(before) if *before != s.ui.env.saved => {
             Some(s.ui.env.saved.iter().find(|e| !before.iter().any(|b| b.id == e.id)).map(|e| e.id.clone()))
@@ -187,6 +197,7 @@ pub fn escape(s: &mut App) -> bool {
     ui.env_icon_menu = false;
     let closed = ui.env_menu.take().is_some()
         || ui.remove.take().is_some()
+        || ui.route_remove.take().is_some()
         || ui.forget.take().is_some()
         || std::mem::take(&mut ui.local_confirm)
         || std::mem::take(&mut ui.ssh_suggest)
@@ -212,6 +223,7 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             add_dialog(s, t, layers);
             env_menu(s, t, layers);
             remove_dialog(s, t, layers);
+            route_remove_dialog(s, t, layers);
             link_dialog(s, t, layers);
             forget_dialog(s, t, layers);
         }
@@ -237,6 +249,7 @@ pub fn view(s: &App, t: &T) -> El {
         .on_press(|s: &mut App| {
             s.ui.env.error = None;
             s.ui.env.ssh.error = None;
+            s.ui.settings.connections.route_target = None;
             s.ui.settings.connections.adding = Some(s.ui.env.saved.clone());
         })
         .build(t);
@@ -347,51 +360,15 @@ fn saved_status(off: bool, status: &str) -> (String, bool) {
     }
 }
 
-/// Web `connectionRouteKind` / `connectionRouteLabel` for a bearer route's host.
+/// Web `connectionRouteLabel` for a bearer route.
 fn route_label(base: &str) -> String {
-    let host = route_host(base);
-    let ipv4 = host.parse::<std::net::Ipv4Addr>().ok().map(|ip| ip.octets());
-    let loopback = host == "localhost" || host == "::1" || ipv4.is_some_and(|o| o[0] == 127);
-    let tailnet = host.ends_with(".ts.net")
-        || host.parse::<std::net::Ipv6Addr>().is_ok_and(|ip| ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]);
-    let shared = ipv4.is_some_and(|o| o[0] == 100 && (64..=127).contains(&o[1]));
-    let private = host.ends_with(".local")
-        || host.ends_with(".localhost")
-        || host == "home.arpa"
-        || host.ends_with(".home.arpa")
-        || (!host.contains('.') && !host.contains(':'))
-        || ipv4.is_some_and(|o| {
-            o[0] == 0
-                || o[0] == 10
-                || (o[0] == 172 && (16..=31).contains(&o[1]))
-                || (o[0] == 192 && o[1] == 168)
-                || (o[0] == 169 && o[1] == 254)
-                || (o[0] == 198 && (18..=19).contains(&o[1]))
-        });
-    if host.is_empty() {
-        "Remote link".into()
-    } else if loopback {
-        "This device".into()
-    } else if tailnet {
-        "Tailscale".into()
-    } else if shared {
-        "VPN".into()
-    } else if private {
-        "LAN".into()
-    } else {
-        host
+    match env::route_kind(base) {
+        "loopback" => "This device".into(),
+        "tailnet" => "Tailscale".into(),
+        "vpn" => "VPN".into(),
+        "lan" => "LAN".into(),
+        _ => Some(env::route_host(base)).filter(|h| !h.is_empty()).unwrap_or_else(|| "Remote link".into()),
     }
-}
-
-fn route_host(base: &str) -> String {
-    let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default(),
-        None => authority.split(':').next().unwrap_or_default(),
-    };
-    host.trim_end_matches('.').to_lowercase()
 }
 
 /// Web `mcpUrlFromBase`: the route's origin with the path `/mcp`.
@@ -502,40 +479,176 @@ fn toggle_routes(s: &mut App, id: &str) {
     }
 }
 
-/// Web `EnvironmentRoutesList` for Rune's one route per environment: nothing to reorder or remove.
-fn routes_list(s: &App, t: &T, saved: &Saved) -> El {
-    let ssh = env::ssh::alias(s, &saved.id).map(str::to_owned);
-    let (label, address) = match &ssh {
-        Some(alias) => {
-            let target = env::ssh::remote_host(s, &saved.id)
-                .map(|(host, user)| user.map_or(host.clone(), |u| format!("{u}@{host}")))
-                .unwrap_or_default();
-            (if target.is_empty() { "SSH".to_owned() } else { format!("SSH {target}") }, alias.clone())
-        }
-        None => (route_label(&saved.base), saved.base.clone()),
-    };
-    let mut heading = row().gap(6.0).center_y().child(text(label).font(theme::XS_MEDIUM).color(t.c.foreground));
-    if env::connected(s, &saved.id) {
-        heading = heading.child(
-            text("In use")
-                .font(theme::TEXT_2XS)
-                .color(t.c.success_foreground)
-                .px(4.0)
-                .radius(2.0)
-                .fill(t.c.success.alpha_mul(0.12)),
-        );
+/// One route row's height, which a drag moves past to change places.
+const ROUTE_ROW: f32 = 48.0;
+
+/// Web `connectionRouteLabel` and `connectionRouteAddress` for a saved route.
+fn route_presentation(s: &App, id: &str, route: &env::Alt) -> (String, String) {
+    if !env::ssh::is_tunnel(s, id, &route.base) {
+        return (route_label(&route.base), route.base.clone());
     }
+    let target = env::ssh::remote_host(s, id).map(|(host, user)| user.map_or(host.clone(), |u| format!("{u}@{host}"))).unwrap_or_default();
+    let label = if target.is_empty() { "SSH".to_owned() } else { format!("SSH {target}") };
+    (label, env::ssh::alias(s, id).unwrap_or_default().to_owned())
+}
+
+/// Web `arrayMove`.
+fn moved<T>(mut items: Vec<T>, from: usize, to: usize) -> Vec<T> {
+    let to = to.min(items.len().saturating_sub(1));
+    if from < items.len() {
+        let item = items.remove(from);
+        items.insert(to, item);
+    }
+    items
+}
+
+fn reorder_route(s: &mut App, id: &str, from: usize, to: usize) {
+    if from != to {
+        let routes = moved(env::routes(s, id), from, to);
+        env::set_routes(s, id, routes);
+    }
+}
+
+/// Web `EnvironmentRoutesList`: the routes preferred first, each draggable by its grip (or moved
+/// with the arrow keys there), removable while another remains, then Add route.
+fn routes_list(s: &App, t: &T, saved: &Saved) -> El {
+    let routes = env::routes(s, &saved.id);
+    let in_use = env::route_in_use(s, &saved.id);
+    let drag = s.ui.settings.connections.route_drag.as_ref().filter(|(k, ..)| *k == saved.id);
+    let mut list = col().w_full().role("list").label(format!("Routes to {}, preferred first", saved.label));
+    for (i, route) in routes.iter().enumerate() {
+        let (label, address) = route_presentation(s, &saved.id, route);
+        let mut heading = row().gap(6.0).center_y().child(text(label.clone()).font(theme::XS_MEDIUM).color(t.c.foreground));
+        if in_use == Some(i) {
+            heading = heading.child(
+                text("In use")
+                    .font(theme::TEXT_2XS)
+                    .color(t.c.success_foreground)
+                    .px(4.0)
+                    .radius(2.0)
+                    .fill(t.c.success.alpha_mul(0.12)),
+            );
+        }
+        let (id, count) = (saved.id.clone(), routes.len());
+        let keys = saved.id.clone();
+        let grip = row()
+            .key(format!("route-grip-{}-{i}", saved.id))
+            .role("button")
+            .label(format!("Reorder {label}, position {}", i + 1))
+            .focusable(true)
+            .size(24.0, 24.0)
+            .center()
+            .radius(4.0)
+            .cursor(rune::Cursor::Grab)
+            .focus_ring(2.0, -2.0, t.c.ring)
+            .child(icon(&icons::GRIP_VERTICAL, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
+            .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut rune::Tx| {
+                let to = match e.key {
+                    rune::Key::ArrowUp if i > 0 => i - 1,
+                    rune::Key::ArrowDown if i + 1 < count => i + 1,
+                    _ => return false,
+                };
+                reorder_route(s, &keys, i, to);
+                true
+            })
+            .on_drag(move |s: &mut App, d: &mut rune::Drag, _: &mut rune::Tx| {
+                let dy = d.dy * crate::desktop::from_window(1.0, 1.0).0;
+                match d.phase {
+                    rune::Phase::Down => {}
+                    rune::Phase::Move => s.ui.settings.connections.route_drag = Some((id.clone(), i, dy)),
+                    rune::Phase::Up => {
+                        s.ui.settings.connections.route_drag = None;
+                        if !d.cancelled() {
+                            let to = (i as f32 + (dy / ROUTE_ROW).round()).clamp(0.0, (count - 1) as f32) as usize;
+                            reorder_route(s, &id, i, to);
+                        }
+                    }
+                }
+            });
+        let mut item = row()
+            .key(format!("route-{}-{i}", saved.id))
+            .role("listitem")
+            .w_full()
+            .h(ROUTE_ROW)
+            .gap(8.0)
+            .center_y()
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(heading)
+                    .child(text(address).font(theme::TEXT_2XS).color(t.c.muted_foreground).truncate()),
+            )
+            .child(grip);
+        if routes.len() > 1 {
+            let (id, label) = (saved.id.clone(), label.clone());
+            item = item.child(
+                kit::icon_button(&icons::X, &format!("Remove {label} route"))
+                    .variant("ghost-muted")
+                    .size("icon-xs")
+                    .on_press(move |s: &mut App| s.ui.settings.connections.route_remove = Some((id.clone(), i)))
+                    .build(t)
+                    .help("Remove route"),
+            );
+        }
+        if let Some((.., dy)) = drag.filter(|(_, from, _)| *from == i) {
+            item = item.offset(0.0, *dy).radius(6.0).fill(t.c.background).shadow(4.0, 12.0, rune::Color::BLACK.alpha_mul(0.2)).raise();
+        }
+        list = list.child(item);
+    }
+    let target = saved.id.clone();
     col()
         .w_full()
         .mt(8.0)
         .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)))
+        .child(col().w_full().py(8.0).child(list).child(
+            row().ml(-6.0).pt(4.0).child(
+                kit::Button::new("Add route")
+                    .variant("ghost-muted")
+                    .size("xs")
+                    .icon(&icons::PLUS)
+                    .on_press(move |s: &mut App| {
+                        s.ui.env.error = None;
+                        let ui = &mut s.ui.settings.connections;
+                        ui.route_target = Some(target.clone());
+                        ui.ssh = false;
+                        ui.adding = Some(s.ui.env.saved.clone());
+                    })
+                    .build(t),
+            ),
+        ))
+}
+
+/// Web's confirm before `removeRoute`.
+fn route_remove_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some((id, index)) = s.ui.settings.connections.route_remove.clone() else { return };
+    let Some(route) = env::routes(s, &id).into_iter().nth(index) else { return };
+    let (label, address) = route_presentation(s, &id, &route);
+    let close = |s: &mut App| s.ui.settings.connections.route_remove = None;
+    kit::Dialog::new("remove-route", format!("Remove {label} route?"))
+        .open(true)
+        .alert()
+        .description(address)
+        .on_close(close)
         .child(
-            col()
-                .w_full()
-                .py(16.0)
-                .child(heading)
-                .child(text(address).font(theme::TEXT_2XS).color(t.c.muted_foreground).truncate()),
+            row()
+                .gap(8.0)
+                .child(kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
+                .child(
+                    kit::Button::new("Confirm")
+                        .variant("destructive")
+                        .on_press(move |s: &mut App| {
+                            s.ui.settings.connections.route_remove = None;
+                            let mut routes = env::routes(s, &id);
+                            if routes.len() > 1 && index < routes.len() {
+                                routes.remove(index);
+                                env::set_routes(s, &id, routes);
+                            }
+                        })
+                        .build(t),
+                ),
         )
+        .build(t, layers);
 }
 
 /// Web `EmptyRemoteEnvironments` without T3 Connect.
@@ -677,6 +790,7 @@ fn remove_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
 fn close_add(s: &mut App) {
     let ui = &mut s.ui.settings.connections;
     ui.adding = None;
+    ui.route_target = None;
     ui.ssh = false;
     ui.ssh_suggest = false;
 }
@@ -692,7 +806,10 @@ fn pairing_failed(s: &mut App) -> bool {
 }
 
 fn add_remote(s: &mut App) {
-    env::add(s);
+    match s.ui.settings.connections.route_target.clone() {
+        Some(id) => env::add_route(s, &id),
+        None => env::add(s),
+    }
     if !env::pairing(s) {
         pairing_failed(s);
     }
@@ -711,18 +828,25 @@ fn add_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         return;
     }
     let busy = env::pairing(s) || env::ssh::adding(s);
-    kit::Dialog::new("add-environment", "Add Environment")
+    let route = ui.route_target.as_ref().map(|id| env::label(s, id));
+    let (title, description) = match &route {
+        Some(label) => (
+            format!("Add a route to {label}"),
+            "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine.",
+        ),
+        None => ("Add Environment".to_owned(), "Pair another environment to this client."),
+    };
+    // Rune adds routes by address; an SSH route would need a second tunnel per environment.
+    let mut modes = row().w_full().gap(12.0).child(mode_card(t, false, !ui.ssh, busy));
+    if route.is_none() {
+        modes = modes.child(mode_card(t, true, ui.ssh, busy));
+    }
+    kit::Dialog::new("add-environment", title)
         .open(true)
-        .description("Pair another environment to this client.")
+        .description(description)
         .width(768.0)
         .on_close(close_add)
-        .child(
-            row()
-                .w_full()
-                .gap(12.0)
-                .child(mode_card(t, false, !ui.ssh, busy))
-                .child(mode_card(t, true, ui.ssh, busy)),
-        )
+        .child(modes)
         .child(if ui.ssh { ssh_fields(s, t) } else { remote_fields(s, t) })
         .build(t, layers);
 }
@@ -815,7 +939,11 @@ fn remote_fields(s: &App, t: &T) -> El {
         body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
     }
     body.child(
-        kit::Button::new(if pairing { "Adding…" } else { "Add environment" })
+        kit::Button::new(match (pairing, s.ui.settings.connections.route_target.is_some()) {
+            (true, _) => "Adding…",
+            (false, true) => "Add route",
+            (false, false) => "Add environment",
+        })
             .variant("outline")
             .icon(&icons::PLUS)
             .disabled(pairing)
@@ -1510,6 +1638,13 @@ mod tests {
         assert!(link_ready(&s));
         s.ui.settings.results.insert("peerLinks.list".into(), json!({"links": [{"environmentId": "env-box", "status": "reachable"}]}));
         assert!(machines(&s)[0].linked);
+    }
+
+    #[test]
+    fn dragging_a_route_moves_it_like_web_array_move() {
+        assert_eq!(moved(vec!['a', 'b', 'c'], 0, 2), ['b', 'c', 'a']);
+        assert_eq!(moved(vec!['a', 'b', 'c'], 2, 0), ['c', 'a', 'b']);
+        assert_eq!(moved(vec!['a', 'b', 'c'], 1, 9), ['a', 'c', 'b']);
     }
 
     #[test]
