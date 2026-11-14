@@ -701,19 +701,12 @@ pub fn rows(s: &App, t: &T) -> Option<El> {
     }
     if !others.is_empty() {
         let label = if expanded { "Show less".to_string() } else { format!("Show {} more", others.len()) };
+        let chevron = icon(if expanded { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN }, 16.0).color(t.c.muted_foreground);
         out = out.child(
-            row()
-                .key("details-pr-more")
-                .h(28.0)
-                .px(10.0)
-                .gap(9.0)
-                .center_y()
-                .radius(theme::layout::CONTROL_RADIUS)
-                .cursor(Cursor::Pointer)
-                .hover(t.c.accent)
+            super::action(t, "details-pr-more", chevron, &label, t.c.muted_foreground)
+                .w_full()
                 .role("button")
-                .child(icon(if expanded { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN }, 16.0).color(t.c.muted_foreground))
-                .child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .expanded(expanded)
                 .on_press(|s: &mut App| s.ui.chat.details.pr_expanded = !s.ui.chat.details.pr_expanded),
         );
     }

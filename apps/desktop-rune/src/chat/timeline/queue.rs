@@ -55,6 +55,30 @@ fn session<'a>(p: &'a Value, active: Option<&'a Value>) -> Option<&'a Value> {
     }
 }
 
+/// threadSupportsProviderHandoff: the provider session can carry the conversation to another
+/// provider, so a started thread is not bound to its driver.
+pub fn supports_handoff(p: &Value) -> bool {
+    let active = array(p, "runs").iter().rev().find(|r| ACTIVE.contains(&s(r, "status")));
+    if let Some(session) = session(p, active) {
+        return session["capabilities"]["sessions"]["supportsProviderSwitchingViaHandoff"] == true;
+    }
+    if active.is_some() {
+        return false;
+    }
+    let thread = &p["thread"];
+    if s(thread, "historyOrigin") == "v1_import" || array(p, "runs").is_empty() {
+        return true;
+    }
+    // A detached session leaves its native thread behind for the next turn's handoff.
+    array(p, "providerThreads").iter().any(|t| {
+        !s(t, "id").is_empty()
+            && s(t, "id") == s(thread, "activeProviderThreadId")
+            && s(t, "appThreadId") == s(thread, "id")
+            && s(t, "providerInstanceId") == s(&thread["modelSelection"], "instanceId")
+            && !t["nativeThreadRef"].is_null()
+    })
+}
+
 pub fn workflow(p: &Value) -> Workflow<'_> {
     let (runs, messages) = (array(p, "runs"), array(p, "messages"));
     let message = |id: &str| messages.iter().find(|m| s(m, "id") == id);
@@ -130,8 +154,11 @@ pub fn steer_next(app: &mut App, thread_id: &str) -> bool {
     true
 }
 
-/// Alt+Up: edits the newest queued message in the composer.
+/// Alt+Up: edits the newest queued message in the composer; an open question holds the composer.
 pub fn edit_latest(app: &mut App, thread_id: &str) -> bool {
+    if super::question::active(app).is_some() {
+        return false;
+    }
     let Some(p) = projection(app, thread_id) else { return false };
     let Some(latest) = workflow(p).queued.pop().filter(|q| q.editable).map(|q| (q.run.to_owned(), q.text.to_owned())) else {
         return false;
@@ -156,6 +183,8 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
     let count = w.queued.len();
     let collapsible = count > VISIBLE_ROWS;
     let visible = if collapsible && !show_all { VISIBLE_ROWS - 1 } else { count };
+    let steer_shortcut = crate::shell::palette::shortcut_label(app, "thread.steerQueuedMessage");
+    let edit_shortcut = crate::shell::palette::shortcut_label(app, "thread.editQueuedMessage");
     let send_help = if w.can_send_now {
         "Start a turn with this message"
     } else if w.skips_compaction {
@@ -184,7 +213,7 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
         let (thread, run) = (thread_id.to_owned(), q.run.to_owned());
         if w.can_send() && !is_editing {
             let (thread, run) = (thread.clone(), run.clone());
-            let help = if index == 0 { format!("{send_help} (Ctrl+Shift+Enter)") } else { send_help.to_owned() };
+            let help = if index == 0 && !steer_shortcut.is_empty() { format!("{send_help} ({steer_shortcut})") } else { send_help.to_owned() };
             controls = controls.child(
                 Button::new("Send now")
                     .variant("ghost-muted")
@@ -209,8 +238,8 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
             let (edit_thread, edit_run, edit_text) = (thread.clone(), run.clone(), q.text.to_owned());
             let help = if blocked {
                 "Answer the question first".to_owned()
-            } else if index + 1 == count {
-                "Edit in the composer (Alt+Up)".to_owned()
+            } else if index + 1 == count && !edit_shortcut.is_empty() {
+                format!("Edit in the composer ({edit_shortcut})")
             } else {
                 "Edit in the composer".to_owned()
             };
@@ -315,6 +344,11 @@ mod tests {
         let w = workflow(&live);
         assert!(!w.can_send_now && w.can_promote);
         assert_eq!(w.active_run, Some("r"));
+        assert!(!supports_handoff(&live));
+        let mut handoff = p("running", true);
+        handoff["providerSessions"][0]["capabilities"]["sessions"] = json!({"supportsProviderSwitchingViaHandoff": true});
+        assert!(supports_handoff(&handoff));
+        assert!(supports_handoff(&json!({"thread": {"id": "t"}, "runs": []})));
         assert!(!workflow(&p("completed", true)).can_promote);
         assert!(!workflow(&p("running", false)).can_promote);
         let mut compacting = p("completed", false);
