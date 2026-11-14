@@ -1491,7 +1491,7 @@ fn marks_clip(bounds: &Value) -> Option<Value> {
 
 /// The annotation's marks in the page: element boxes, regions and strokes positioned in document
 /// pixels (callers pass viewport points), on a layer that ignores the pointer.
-const MARKS_JS: &str = r#"window.__s5Marks = window.__s5Marks || (() => {
+const MARKS_JS: &str = r##"window.__s5Marks = window.__s5Marks || (() => {
   const ns = "http://www.w3.org/2000/svg";
   const color = "#2563eb";
   let root = null, svg = null, marks = [], active = null;
@@ -1559,7 +1559,7 @@ const MARKS_JS: &str = r#"window.__s5Marks = window.__s5Marks || (() => {
     },
     clear() { if (root) root.remove(); root = null; svg = null; marks = []; active = null; },
   };
-})()"#;
+})()"##;
 
 /// Whether a paused response is a PDF, by its `Content-Type`.
 fn pdf_response(headers: &Value) -> bool {
