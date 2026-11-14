@@ -72,7 +72,7 @@ fn children<'a>(threads: &'a [Value], parent: &str) -> Vec<&'a Value> {
 }
 
 /// fullAccessOverrideExplanation.
-fn override_explanation(kind: &str) -> &'static str {
+pub(super) fn override_explanation(kind: &str) -> &'static str {
     if kind == "ask_rule" {
         "Full access skips approvals, but an ask rule in the agent's own settings matches this action, so it still asks. Remove or narrow that rule to stop these prompts."
     } else {
@@ -116,7 +116,7 @@ pub fn view(app: &App, t: &T) -> Option<El> {
                     .fill(t.c.background)
                     .label(format!("Approval from {title}"))
                     .child(text(format!("Approval needed from {title}")).font(theme::XS_MEDIUM).color(t.c.foreground).truncate())
-                    .child(super::request_view(app, id, request, item, t))
+                    .child(super::request_view(app, id, request, item, true, t))
                     .children(override_note.map(|note| text(note).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())),
             );
         }

@@ -88,6 +88,38 @@ pub fn poll(app: &mut App) -> bool {
     changed
 }
 
+/// formatBytes: "512 B", "1.20 KB", "12.5 MB".
+fn format_bytes(value: f64) -> String {
+    if value.round() < 1024.0 {
+        return format!("{} B", value.round() as i64);
+    }
+    let scaled = |v: f64| format!("{:.*}", if v >= 100.0 { 0 } else if v >= 10.0 { 1 } else { 2 }, v);
+    let units = ["KB", "MB", "GB", "TB"];
+    let (mut next, mut unit) = (value / 1024.0, 0);
+    // Pick the unit after rounding, so 1023.6 KB reads "1.00 MB".
+    while scaled(next).parse::<f64>().unwrap_or(0.0) >= 1024.0 && unit < units.len() - 1 {
+        next /= 1024.0;
+        unit += 1;
+    }
+    format!("{} {}", scaled(next), units[unit])
+}
+
+/// UserFileCard's name and size line: "Pasted text" and its size, else the file name and
+/// "{EXT} · {size}".
+fn file_label(attachment: &Value) -> (String, String) {
+    let name = s(attachment, "name");
+    let size = format_bytes(attachment["sizeBytes"].as_f64().unwrap_or(0.0));
+    if s(&attachment["source"], "_tag") == "pasted-text" {
+        return ("Pasted text".to_owned(), size);
+    }
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| (1..=8).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map_or_else(|| "File".to_owned(), str::to_uppercase);
+    (name.to_owned(), format!("{ext} · {size}"))
+}
+
 pub fn view(app: &App, attachment: &Value, t: &T) -> El {
     let id = s(attachment, "id");
     let name = s(attachment, "name");
@@ -115,35 +147,26 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
                     .radius(8.0)
                     .fill(t.c.background),
             )
-            .child(
+            .child({
+                let (label, size) = file_label(attachment);
                 col()
                     .grow(1.0)
-                    .child(
-                        text(name)
-                            .font(theme::SM_MEDIUM)
-                            .color(t.c.message_foreground),
-                    )
-                    .child(
-                        text(format!(
-                            "{} · {} bytes",
-                            name.rsplit('.').next().unwrap_or("File").to_uppercase(),
-                            attachment["sizeBytes"].as_u64().unwrap_or(0)
-                        ))
-                        .font(theme::TEXT_XS)
-                        .color(t.c.muted_foreground),
-                    ),
-            )
+                    .min_w(0.0)
+                    .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_foreground).truncate())
+                    .child(text(size).font(theme::TEXT_XS).color(t.c.muted_foreground))
+            })
             .child(icon(&icons::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
     };
     if let Some((url, _)) = asset {
         let url = url.clone();
         let image = s(attachment, "mimeType").starts_with("image/");
         let id = id.to_owned();
+        let shown = if image { name.to_owned() } else { file_label(attachment).0 };
         content = content
             .focusable(true)
             .role("button")
             .cursor(rune::Cursor::Pointer)
-            .label(format!("{} {name}", if image { "Preview" } else { "Open" }))
+            .label(format!("{} {shown}", if image { "Preview" } else { "Open" }))
             .on_press_tx(move |app: &mut App, tx| {
                 if image {
                     app.ui.chat.timeline.assets.open = Some(id.clone());
@@ -212,4 +235,23 @@ pub fn lightbox(app: &App) -> Option<El> {
                     ),
             ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_label, format_bytes};
+    use serde_json::json;
+
+    #[test]
+    fn file_cards_read_their_kind_and_size() {
+        assert_eq!(format_bytes(512.0), "512 B");
+        assert_eq!(format_bytes(1229.0), "1.20 KB");
+        assert_eq!(format_bytes(12.5 * 1024.0 * 1024.0), "12.5 MB");
+        assert_eq!(format_bytes(1023.6 * 1024.0), "1.00 MB");
+        let file = |name: &str| json!({"name": name, "sizeBytes": 2048});
+        assert_eq!(file_label(&file("notes.md")), ("notes.md".to_owned(), "MD · 2.00 KB".to_owned()));
+        assert_eq!(file_label(&file("Makefile")).1, "File · 2.00 KB");
+        let pasted = json!({"name": "pasted-1.txt", "sizeBytes": 300, "source": {"_tag": "pasted-text"}});
+        assert_eq!(file_label(&pasted), ("Pasted text".to_owned(), "300 B".to_owned()));
+    }
 }

@@ -107,7 +107,7 @@ fn compaction_message(model: Option<&str>, threshold: Option<f64>) -> String {
     }
 }
 
-fn thousands(n: u64) -> String {
+pub(super) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -131,7 +131,7 @@ fn current(app: &App) -> Option<Usage> {
 
 /// Why "Compact context" is off (ChatView's compactDisabledReason), or `None` when it can run.
 /// `None` overall when the provider has no `/compact`, so the button stays out.
-fn compact_state(app: &App) -> Option<Option<&'static str>> {
+pub(super) fn compact_state(app: &App) -> Option<Option<&'static str>> {
     let (instance, _) = super::selection(app)?;
     let provider = super::provider(app, &instance)?;
     let supported = provider["slashCommands"].as_array().is_some_and(|c| c.iter().any(|c| s(c, "name") == "compact"));
@@ -166,7 +166,7 @@ fn compact(app: &mut App) {
 /// The popover above the ring: usage, a bar, totals, cost, auto-compaction and Compact.
 pub fn popover(app: &App, t: &T) -> Option<El> {
     let hover = &app.ui.chat.composer.context;
-    if !hover.trigger && !hover.card {
+    if (!hover.trigger && !hover.card) || crate::settings::value(app, "contextWindowMeterEnabled") != true {
         return None;
     }
     let u = current(app)?;
@@ -245,6 +245,9 @@ pub fn popover(app: &App, t: &T) -> Option<El> {
 
 /// The ring; hovering it opens `popover` after 150ms (PopoverTrigger openOnHover).
 pub fn meter(app: &App, t: &T) -> Option<El> {
+    if crate::settings::value(app, "contextWindowMeterEnabled") != true {
+        return None;
+    }
     let u = current(app)?;
     let pct = u.percent();
     let label = match (pct, u.max) {

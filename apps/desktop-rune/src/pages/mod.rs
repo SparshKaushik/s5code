@@ -2,9 +2,16 @@
 //! `/usage`, a route modal over the frame like settings.
 
 pub mod avatars;
+pub mod pr_actions;
+pub mod pr_code;
+pub mod pr_conversation;
 pub mod pr_detail;
+pub mod pr_edit;
 pub mod pr_filters;
+pub mod pr_meta;
+pub mod pr_guide;
 pub mod pr_row;
+pub mod pr_tabs;
 pub mod pull_requests;
 pub mod usage;
 pub mod usage_limits;
@@ -21,6 +28,10 @@ use crate::{App, Appearance, Route};
 pub struct Ui {
     pub pull_requests: pull_requests::Ui,
     pub detail: pr_detail::Ui,
+    /// The Code tab's diff, kept across pull requests like web's mounted tab.
+    pub code: pr_code::Ui,
+    /// The Guide tab, its watched runs and tour progress kept across pull requests.
+    pub guide: pr_guide::Ui,
     pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
@@ -28,7 +39,7 @@ pub struct Ui {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
+    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -52,7 +63,8 @@ fn want_avatars(s: &mut App) {
         .chain(list(activity, "comments").map(|c| &c["author"]))
         .chain(list(activity, "reviewThreads").flat_map(|t| t["comments"].as_array().into_iter().flatten()).map(|c| &c["author"]))
         .chain(entries.iter().map(|e| &e["author"]))
-        .chain(pr_filters::hosted_actors(&pages.pull_requests.picker));
+        .chain(pr_filters::hosted_actors(&pages.pull_requests.picker))
+        .chain(pr_meta::actors(&pages.detail.meta));
     pages.avatars.want(avatars::urls(actors), waker);
 }
 
@@ -231,7 +243,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_row::scene(s, 2468, "sweep");
         let u = &mut s.ui.pages.pull_requests;
         u.query.replace_text("login");
-        u.pending = Some((0, false));
+        u.pending = vec![(String::new(), 0)];
     }),
     ("pull-requests-row-actions-read-only", |s| {
         open_prs(s, |_| {});
@@ -332,16 +344,100 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("pull-requests-detail", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
+    ("pull-requests-detail-guide-empty", |s| pr_guide::scene(s, "empty")),
+    ("pull-requests-detail-guide-ready", |s| pr_guide::scene(s, "ready")),
+    ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
     ("pull-requests-detail-code", |s| {
         open_detail(s, 2, |_| {});
-        s.ui.pages.detail.expanded.insert("apps/desktop-rune/src/pages/usage.rs".into());
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
+    }),
+    ("pull-requests-detail-code-tree", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "tree");
+    }),
+    ("pull-requests-detail-code-split", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "split");
+    }),
+    ("pull-requests-detail-code-line-comment", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "line-comment");
     }),
     ("pull-requests-detail-checks", |s| {
         open_detail(s, 0, |_| {});
         s.ui.pages.detail.checks_open = true;
         s.ui.pages.detail.description_closed = true;
     }),
+    ("pull-requests-detail-comments-filtered", |s| {
+        open_detail(s, 0, |u| {
+            u.description_closed = true;
+            let Some(a) = &mut u.activity else { return };
+            a["commentsTruncated"] = json!(true);
+            if let Some(list) = a["comments"].as_array_mut() {
+                for n in 0..12 {
+                    let at = format!("2026-11-06T07:{}:00.000Z", 21 + n);
+                    let note = json!({"id": format!("note-{n}"), "kind": "issue-comment", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": format!("Follow-up note {}.", n + 1), "createdAt": at, "url": null, "path": null, "reviewState": null});
+                    list.insert(1 + n, note);
+                }
+            }
+            if let Some(threads) = a["reviewThreads"].as_array_mut() {
+                let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+                threads.push(json!({"id": "t-resolved", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": false, "comments": [{"id": "tr1", "author": julius, "body": "Nit: rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": null}]}));
+            }
+        })
+    }),
+    ("pull-requests-detail-reviewers-verdicts", |s| {
+        open_detail(s, 0, |u| {
+            let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+            if let Some(d) = &mut u.detail {
+                d["reviewers"] = json!([julius.clone(), {"login": "sam", "name": null, "avatarUrl": null}]);
+                d["labels"] = json!([]);
+                d["capabilities"]["labels"] = json!(false);
+            }
+            if let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) {
+                let review = |id: &str, author: Value, state: &str, at: &str| json!({"id": id, "kind": "review", "author": author, "body": "", "createdAt": at, "url": null, "path": null, "reviewState": state});
+                list.push(review("v1", julius.clone(), "CHANGES_REQUESTED", "2026-11-06T09:20:00.000Z"));
+                list.push(review("v2", json!({"login": "macroscopeapp", "name": "Macroscope", "avatarUrl": null, "isBot": true}), "APPROVED", "2026-11-06T09:30:00.000Z"));
+                list.push(review("v3", json!({"login": "theo", "name": "Theo", "avatarUrl": null}), "APPROVED", "2026-11-06T09:52:00.000Z"));
+            }
+        })
+    }),
+    ("pull-requests-detail-timeline-events", |s| {
+        open_detail(s, 1, |u| {
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("merged");
+                d["mergedAt"] = json!("2026-11-06T09:55:00.000Z");
+                d["closedAt"] = json!("2026-11-06T09:55:00.000Z");
+            }
+        })
+    }),
+    ("pull-requests-detail-commit-scope", |s| {
+        open_detail(s, 1, |_| {});
+        pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
+        pr_detail::poll(s);
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
+    }),
     ("pull-requests-detail-menu", |s| open_detail(s, 0, |u| u.menu = true)),
+    ("pull-requests-detail-label-picker", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "labels");
+    }),
+    ("pull-requests-detail-reviewer-picker", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "reviewers");
+    }),
+    ("pull-requests-detail-out-of-date", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "out-of-date");
+    }),
+    ("pull-requests-detail-linked-threads", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "linked");
+    }),
+    ("pull-requests-detail-stack-menu", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "stack");
+    }),
     ("pull-requests-detail-merged", |s| {
         open_detail(s, 0, |_| {});
         if let Some(d) = &mut s.ui.pages.detail.detail {
@@ -352,15 +448,127 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |_| {});
         let u = &mut s.ui.pages.detail;
         u.detail = None;
-        u.error = Some("Pull request #2481 not found. It may be an issue rather than a pull request, or this account can't see it.".into());
+        u.error = Some("The environment request failed.".into());
+    }),
+    ("pull-requests-detail-not-found", |s| {
+        open_detail(s, 0, |_| {});
+        let u = &mut s.ui.pages.detail;
+        u.detail = None;
+        u.error = Some("Pull request operation detail failed: Could not resolve to a PullRequest with the number of 2481.".into());
+        u.not_found = true;
+    }),
+    ("pull-requests-detail-menu-merged", |s| {
+        open_detail(s, 0, |u| {
+            u.menu = true;
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("merged");
+                for list in ["capabilities", "viewerPermissions"] {
+                    if let Some(actions) = d[list]["actions"].as_array_mut() {
+                        actions.push(json!("revert"));
+                    }
+                }
+            }
+        });
+    }),
+    ("pull-requests-detail-auto-merge-armed", |s| {
+        open_detail(s, 0, |u| {
+            if let Some(d) = &mut u.detail {
+                d["autoMergeEnabled"] = json!(true);
+                d["autoMergeMethod"] = json!("squash");
+            }
+        });
+    }),
+    ("pull-requests-detail-delete-branch-confirm", |s| {
+        open_detail(s, 0, |u| {
+            u.delete_confirm = true;
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("closed");
+            }
+        });
+    }),
+    ("pull-requests-detail-approve-workflows", |s| {
+        open_detail(s, 0, |u| {
+            if let Some(d) = &mut u.detail {
+                d["workflowApprovalsRequired"] = json!(2);
+                for list in ["capabilities", "viewerPermissions"] {
+                    if let Some(actions) = d[list]["actions"].as_array_mut() {
+                        actions.push(json!("approve-workflows"));
+                    }
+                }
+            }
+        });
     }),
     ("pull-requests-detail-light", |s| {
         open_detail(s, 0, |_| {});
         light(s);
     }),
+    ("pull-requests-detail-edit-title", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.edit.title = Some(pr_edit::Draft::new("feat(desktop-rune): port the pull requests, usage and limits pages").edit);
+        })
+    }),
+    ("pull-requests-detail-edit-description", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            let body = u.detail.as_ref().map(|d| crate::data::s(d, "body").to_string()).unwrap_or_default();
+            u.edit.body = Some(pr_edit::Draft::new(&format!("{body}\n\n- [ ] Check the limits beside each provider.")));
+        })
+    }),
+    ("pull-requests-detail-edit-comment", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            let draft = pr_edit::Draft::new("Fixed in the latest push: hours now follow the local zone, and the labels say which.");
+            u.edit.comment = Some(pr_edit::CommentDraft { id: "c2".into(), kind: "issue-comment".into(), draft });
+        })
+    }),
+    ("pull-requests-detail-comment-form", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            u.comments_closed = true;
+            u.edit.composer.comment = rune::TextEdit::new("Superseded by #2490, which carries these pages forward.");
+        })
+    }),
+    ("pull-requests-detail-review-composer", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            u.comments_closed = true;
+            let c = &mut u.edit.composer;
+            c.review = true;
+            c.verdict = Some("request-changes");
+            c.verdict_menu = true;
+            c.summary = rune::TextEdit::new("The hourly labels still read in UTC on the limits card.");
+        })
+    }),
+    ("pull-requests-detail-reactions", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) else { return };
+            for c in list.iter_mut() {
+                c["reactions"] = match c["id"].as_str() {
+                    Some("c1") => json!([{"content": "thumbs-up", "count": 3, "actors": ["theo", "juliusmarminge"], "viewerHasReacted": true}, {"content": "rocket", "count": 1, "actors": ["theo"], "viewerHasReacted": false}]),
+                    Some("c2") => json!([{"content": "heart", "count": 1, "actors": ["juliusmarminge"], "viewerHasReacted": false}]),
+                    _ => continue,
+                };
+            }
+            u.edit.picker = Some("c2".into());
+        })
+    }),
     ("pull-requests-maximized", |s| {
         open_detail(s, 0, |_| {});
         s.ui.pages.pull_requests.maximized = true;
+    }),
+    ("pull-requests-tabs", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 3, None);
+    }),
+    ("pull-requests-panel-resized", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 1, Some(420.0));
     }),
     ("pull-requests-panel-narrow-search", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-panel-hidden", |s| {
@@ -400,6 +608,17 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.filters.project = first;
         u.requested = Some(pull_requests::input(u));
         u.menu = Some("filters");
+    }),
+    ("pull-requests-environments", |s| {
+        open_prs(s, |_| {});
+        pull_requests::environments_scene(s);
+    }),
+    ("pull-requests-server-menu", |s| {
+        open_prs(s, |_| {});
+        pull_requests::environments_scene(s);
+        let u = &mut s.ui.pages.pull_requests;
+        u.menu = Some("filters");
+        u.submenu = Some("server");
     }),
     ("usage-limits", |s| open_usage(s, "limits")),
     ("usage-cost", |s| open_usage(s, "cost")),
@@ -455,6 +674,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-provider-loading", |s| {
         open_usage(s, "cost");
         usage::updating_scene(s);
+    }),
+    ("usage-compact-header", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.max_w = 900.0;
+        s.ui.pages.usage.menu = Some("period");
+    }),
+    ("usage-provider-menu-icons", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.menu = Some("providers");
     }),
     ("usage-provider-loading-menu", |s| {
         open_usage(s, "tokens");

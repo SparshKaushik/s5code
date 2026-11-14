@@ -11,7 +11,7 @@ use crate::chat::composer;
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
-use crate::App;
+use crate::{App, Route};
 use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
@@ -70,6 +70,8 @@ pub struct Ui {
     session: Option<Result<Value, ()>>,
     session_at: i64,
     session_pending: Option<u64>,
+    /// Whether the card fits inline in the last laid-out chat area, for `threadPanel.toggle`.
+    fits: std::cell::Cell<bool>,
 }
 
 const SESSION_STALE_MS: i64 = 5 * 60_000;
@@ -567,6 +569,42 @@ fn set_env_mode(s: &mut App, worktree: bool) {
     }
 }
 
+/// The draft's project and one copy per other environment in its repository group; empty when
+/// it lives on one environment only.
+fn hosts(s: &App) -> Vec<String> {
+    let Some(project) = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return Vec::new() };
+    let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+    let Some(&g) = by_project.get(&project) else { return Vec::new() };
+    let rows = &s.state().projects;
+    let env_of = |id: &str| rows.iter().find(|p| data::s(p, "id") == id).filter(|p| p["archivedAt"].is_null()).map(|p| crate::env::of(s, p));
+    let mut seen = vec![env_of(&project).unwrap_or_default()];
+    let mut hosts = vec![project.clone()];
+    for member in &groups[g].members {
+        if let Some(env) = env_of(member).filter(|e| !seen.contains(e)) {
+            seen.push(env);
+            hosts.push(member.clone());
+        }
+    }
+    if hosts.len() > 1 { hosts } else { Vec::new() }
+}
+
+/// Moves the new-thread draft (prompt and run context) to `project`'s copy on another
+/// environment, as RunContextSelector's "Run on" does.
+fn move_draft(s: &mut App, project: &str) {
+    s.ui.chat.details.menu = None;
+    let (from, to) = (composer::draft_key(s, s.frame_route()), composer::home_key(project));
+    if from == to {
+        return;
+    }
+    if let Some(d) = s.ui.chat.composer.drafts.remove(&from) {
+        s.ui.chat.composer.drafts.insert(to.clone(), d);
+    }
+    if let Some(run) = s.ui.chat.details.drafts.remove(&from) {
+        s.ui.chat.details.drafts.insert(to, run);
+    }
+    s.navigate(Route::Home { project_id: Some(project.to_string()) });
+}
+
 fn pick_item(s: &mut App, item: Item) {
     s.ui.chat.details.menu = None;
     match item {
@@ -808,7 +846,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s);
     poll_branch(s) || changed
 }
 
@@ -862,18 +900,8 @@ fn poll_branch(s: &mut App) -> bool {
     true
 }
 
-/// `editor.openFavorite`: the checkout in the editor the card's "Open in editor" button uses.
-/// False with nothing to open, so the chord falls through.
-pub fn open_favorite(s: &mut App) -> bool {
-    if cwd(s).is_none() || editors(s).is_empty() {
-        return false;
-    }
-    open_in_editor(s, None);
-    true
-}
-
 fn open_in_editor(s: &mut App, editor: Option<String>) {
-    let (Some(cwd), editor) = (cwd(s), editor.or_else(|| editors(s).first().map(|e| e.0.clone()))) else { return };
+    let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
     if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
         return;
@@ -903,6 +931,24 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+const PREFERRED_EDITOR: &str = "preferredEditor";
+
+/// `usePreferredEditor`: the editor last picked, while it is still installed, else the first.
+fn preferred_editor(s: &App) -> Option<(String, String)> {
+    let stored = s.client_settings.values.get(PREFERRED_EDITOR).and_then(|v| v.as_str());
+    pick_editor(editors(s), stored)
+}
+
+fn pick_editor(editors: Vec<(String, String)>, stored: Option<&str>) -> Option<(String, String)> {
+    let at = editors.iter().position(|e| Some(e.0.as_str()) == stored).unwrap_or(0);
+    editors.into_iter().nth(at)
+}
+
+fn set_preferred_editor(s: &mut App, editor: &str) {
+    s.client_settings.values.insert(PREFERRED_EDITOR.into(), json!(editor));
+    s.client_settings.save();
+}
+
 fn env_label(s: &App) -> String {
     s.state().config.as_ref().map(|c| data::s(&c["environment"], "label").to_string()).unwrap_or_default()
 }
@@ -927,8 +973,12 @@ fn branch_row(t: &T, label: &str, fg: Color, muted: Color) -> El {
         .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted))
 }
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<El> {
-    let card = card(s, t)?;
+pub fn view(s: &App, cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<El> {
+    let h = cx.layout_with("chat-body", |r| r[3].round()).unwrap_or(848.0);
+    s.ui.chat.details.fits.set(lane(w, h, false).card);
+    // ThreadDetailsCard: the card never runs past the chat area; its content scrolls instead.
+    let offset = if shown == Shown::Inline { super::timeline::find::offset(s) } else { 0.0 };
+    let card = card(s, t, (h - 2.0 * GAP - offset).max(0.0))?;
     match shown {
         Shown::None => None,
         Shown::Inline => Some(card.absolute(w - WIDTH - GAP, GAP + super::timeline::find::offset(s))),
@@ -939,7 +989,20 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<E
     }
 }
 
-fn card(s: &App, t: &T) -> Option<El> {
+/// The card's glass frame around its scrolling content, at most `cap` tall.
+fn frame(t: &T, body: El, cap: f32) -> El {
+    col()
+        .key("thread-details")
+        .w(WIDTH)
+        .radius(radius::XL2)
+        .fill(t.c.popover.alpha_mul(0.836))
+        .border(1.0, if t.dark { Color::WHITE.alpha(0.1) } else { Color::BLACK.alpha(0.08) })
+        .shadow(8.0, 24.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.08 }))
+        .padding(1.0)
+        .child(body.key("thread-details-scroll").w_full().max_h((cap - 2.0).max(0.0)).scroll(rune::ScrollSpec { stick_bottom: false }))
+}
+
+fn card(s: &App, t: &T, cap: f32) -> Option<El> {
     let muted = t.c.muted_foreground;
     let fg = t.c.foreground.alpha_mul(0.8);
     let env = env_label(s);
@@ -981,13 +1044,15 @@ fn card(s: &App, t: &T) -> Option<El> {
             .help(with_shortcut(s, mode, "composer.workspace"))
             .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
+    let preferred = preferred_editor(s);
     let editor = split(
         t,
         "details-editor-menu",
         {
-            let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), "Open in editor", fg);
+            let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
+            let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
-            if editors(s).is_empty() { open.opacity(0.64) } else { open.on_press(|s: &mut App| open_in_editor(s, None)) }
+            if preferred.is_none() { open.opacity(0.64) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
         "Choose editor",
         Menu::Editor,
@@ -995,15 +1060,7 @@ fn card(s: &App, t: &T) -> Option<El> {
     let script = scripts::view(s, t);
     let general = col().w_full().padding(8.0).pb(10.0).child(run_context).child(editor).child(script);
 
-    let mut card = col()
-        .key("thread-details")
-        .w(WIDTH)
-        .radius(radius::XL2)
-        .fill(t.c.popover.alpha_mul(0.836))
-        .border(1.0, if t.dark { Color::WHITE.alpha(0.1) } else { Color::BLACK.alpha(0.08) })
-        .shadow(8.0, 24.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.08 }))
-        .padding(1.0)
-        .child(general);
+    let mut body = col().w_full().child(general);
 
     // A failed status stream still shows the section, with Commit disabled and +0 -0.
     let failed = (vcs(s).is_none() && git::status_error(s).is_some()).then(|| json!({"isRepo": true}));
@@ -1035,7 +1092,7 @@ fn card(s: &App, t: &T) -> Option<El> {
             section = section.child(prs);
         }
         // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
-        let Some(git) = git::view(s, t, v, draft) else { return Some(card.child(section)) };
+        let Some(git) = git::view(s, t, v, draft) else { return Some(frame(t, body.child(section), cap)) };
         section = section.child(git);
         let (add, del) = git::changes_totals(v);
         let stat = theme::mono(theme::XS_MEDIUM);
@@ -1048,9 +1105,9 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .child(text(format!("-{}", thousands(del))).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
             );
         section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
-        card = card.child(section);
+        body = body.child(section);
     }
-    Some(card)
+    Some(frame(t, body, cap))
 }
 
 /// The open card menu, anchored under its trigger. Attach after the card so it draws above.
@@ -1091,13 +1148,20 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             let editors = editors(s);
             let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
             if editors.is_empty() {
-                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No installed editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
             }
+            let preferred = preferred_editor(s).map(|e| e.0);
+            let shortcut = palette::shortcut_label(s, "editor.openFavorite");
+            // OpenInPicker's panel menu picks the button's editor; the button opens it.
             for (id, label) in editors {
-                list = list.child(menu_row(t, None, &label, Some(move |s: &mut App| {
-                    s.ui.chat.details.menu = None;
-                    open_in_editor(s, Some(id.clone()));
-                }), None));
+                let mark = (preferred.as_deref() == Some(id.as_str()) && !shortcut.is_empty()).then(|| text(shortcut.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground));
+                list = list.child(
+                    menu_row(t, None, &label, Some(move |s: &mut App| {
+                        s.ui.chat.details.menu = None;
+                        set_preferred_editor(s, &id);
+                    }), None)
+                    .children(mark),
+                );
             }
             ("details-editor-menu", list)
         }
@@ -1117,10 +1181,18 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     let worktree = draft_run(s).is_some_and(|r| r.worktree);
-    let mut rows = vec![
-        group_label(t, "Run on"),
-        radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
-    ];
+    let mut rows = vec![group_label(t, "Run on")];
+    // One row per environment holding the project's repository; picking one moves the draft.
+    let hosts = hosts(s);
+    if hosts.is_empty() {
+        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
+    }
+    let current = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).unwrap_or_default();
+    for project in hosts {
+        let label = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| crate::env::location(s, p)).unwrap_or_default();
+        let checked = project == current;
+        rows.push(radio_row(t, &icons::SERVER, &label, checked, move |s: &mut App| move_draft(s, &project)));
+    }
     // BranchToolbar's "Add to another machine": clone this project onto a connected environment.
     if let Some(id) = composer::ctx(s).project.map(|p| data::s(p, "id").to_owned())
         && !crate::add_to_machine::targets(s, &id).is_empty()
@@ -1293,6 +1365,12 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
 /// showing the card first when it is closed. Web binds both outside the terminal.
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    // `editor.openFavorite` opens the card's preferred editor, as its button does.
+    if crate::panel::shortcut(s, e, "editor.openFavorite") {
+        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some()) else { return false };
+        open_in_editor(s, Some(editor));
+        return true;
+    }
     if crate::panel::terminal_active(s) || composer::ctx(s).project.is_none() {
         return false;
     }
@@ -1304,9 +1382,16 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         composer::focus(s, &route);
         return true;
     }
+    if crate::panel::shortcut(s, e, "threadPanel.toggle") {
+        let fits = s.ui.chat.details.fits.get();
+        toggle(s, fits);
+        return true;
+    }
     let menu = if crate::panel::shortcut(s, e, "composer.branch") && vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
         Menu::Branch
     } else if crate::panel::shortcut(s, e, "composer.workspace") && draft_run(s).is_some() {
+        Menu::RunContext
+    } else if crate::panel::shortcut(s, e, "composer.host") && draft_run(s).is_some() && !hosts(s).is_empty() {
         Menu::RunContext
     } else {
         return false;
@@ -1482,6 +1567,62 @@ mod tests {
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
     }
 
+    fn chord(c: char) -> rune::KeyEvent {
+        let mut e = rune::KeyEvent::from(rune::Key::Command(c));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        e
+    }
+
+    #[test]
+    fn the_thread_panel_chord_toggles_the_details_card_as_the_lane_fits() {
+        let mut s = App::new();
+        let id = s.state().threads.iter().find(|t| !data::s(t, "projectId").is_empty()).map(|t| data::s(t, "id").to_owned()).unwrap();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| serde_json::json!({}))["keybindings"] =
+                serde_json::json!([{"command": "threadPanel.toggle", "shortcut": {"key": "b", "modKey": true, "shiftKey": true}}]);
+        }
+        s.navigate(Route::Thread(id));
+        let mut chord = rune::KeyEvent::from(rune::Key::Command('b'));
+        chord.mods.cmd = true;
+        chord.mods.ctrl = !cfg!(target_os = "macos");
+        chord.mods.shift = true;
+        let (wide, narrow) = ((1182.0, 848.0), (900.0, 848.0));
+        s.ui.chat.details.fits.set(true);
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline);
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::None, "the chord closes the inline card");
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline, "and opens it again");
+        s.ui.chat.details.fits.set(false);
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::Popover, "a narrow lane opens the popover");
+    }
+
+    #[test]
+    fn the_host_chord_lists_one_copy_per_environment_and_moves_the_draft() {
+        let mut s = App::new();
+        let identity = json!({"canonicalKey": "github.com/acme/app", "name": "app", "rootPath": "/src/app"});
+        let project = |id: &str| json!({"id": id, "title": "app", "workspaceRoot": "/src/app", "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] =
+                json!([{"command": "composer.host", "shortcut": {"key": "h", "modKey": true, "shiftKey": true}}]);
+            let mut remote = project("remote-app");
+            remote[crate::env::TAG] = json!("box");
+            state.projects.extend([project("local-app"), project("local-app-2"), remote]);
+        }
+        s.navigate(Route::Home { project_id: Some("local-app".into()) });
+        assert_eq!(super::hosts(&s), vec!["local-app".to_string(), "remote-app".to_string()], "FAILED: one row per environment");
+        s.ui.chat.composer.drafts.entry(crate::chat::composer::home_key("local-app")).or_default().edit.replace_text("carry me");
+        assert!(super::shortcut(&mut s, &chord('h')), "FAILED: the chord opens Run on");
+        assert_eq!(s.ui.chat.details.menu, Some(super::Menu::RunContext));
+        super::move_draft(&mut s, "remote-app");
+        assert_eq!(s.route, Route::Home { project_id: Some("remote-app".into()) });
+        assert_eq!(s.ui.chat.composer.drafts[&crate::chat::composer::home_key("remote-app")].edit.text, "carry me", "FAILED: the prompt moves along");
+        assert!(!s.ui.chat.composer.drafts.contains_key(&crate::chat::composer::home_key("local-app")));
+    }
+
     #[test]
     fn a_branch_made_by_commit_on_new_branch_becomes_the_drafts() {
         let mut s = App::new();
@@ -1494,6 +1635,15 @@ mod tests {
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
+    }
+
+    #[test]
+    fn the_preferred_editor_is_the_last_picked_while_installed() {
+        let editors = || vec![("cursor".to_string(), "Cursor".to_string()), ("vscode".to_string(), "VS Code".to_string())];
+        assert_eq!(super::pick_editor(editors(), Some("vscode")).map(|e| e.0), Some("vscode".to_string()));
+        assert_eq!(super::pick_editor(editors(), Some("zed")).map(|e| e.0), Some("cursor".to_string()), "an uninstalled pick falls back to the first");
+        assert_eq!(super::pick_editor(editors(), None).map(|e| e.0), Some("cursor".to_string()));
+        assert_eq!(super::pick_editor(Vec::new(), Some("zed")), None);
     }
 
     #[test]

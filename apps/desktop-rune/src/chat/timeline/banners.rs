@@ -1,6 +1,6 @@
 //! The banners around the chat lane. Pinned on top (ChatBannerLane): ProviderStatusBanner, then
 //! the thread's error banner. Above the composer (ComposerBannerStack): an offline environment,
-//! the usage-limit recovery notice (UsageLimitRecoveryBanner) and approvals waiting in child threads.
+//! a server update running or failed (useSystemComposerBanners), the usage-limit recovery notice (UsageLimitRecoveryBanner) and approvals waiting in child threads.
 
 use std::collections::HashMap;
 
@@ -376,6 +376,10 @@ fn notice(t: &T, tone: Color, glyph: &'static rune::Icon, title: String, descrip
 
 fn offline(app: &App, t: &T) -> Option<El> {
     let s5_net::Conn::Closed(reason) = &app.state().conn else { return None };
+    // A restarting server drops the connection on purpose; the update notice explains it.
+    if matches!(crate::chat::server_update::status(app), crate::chat::server_update::Status::Running { .. }) {
+        return None;
+    }
     let label = env::label(app, &app.ui.env.active);
     let reconnect = Button::new("Reconnect")
         .variant("ghost")
@@ -388,6 +392,31 @@ fn offline(app: &App, t: &T) -> Option<El> {
         .build(t);
     let reason = Some(reason.clone()).filter(|r| !r.trim().is_empty());
     Some(notice(t, t.c.warning, &icons::WIFI_OFF, format!("{label} is offline"), reason, vec![reconnect]))
+}
+
+/// The server update notice: only one running or failed, since an available update lives in
+/// Settings › About. Retry shows while the server is still short of the version.
+fn server_update(app: &App, t: &T) -> Option<El> {
+    use crate::chat::server_update::{self as update, Status};
+    if update::dismissed(app) {
+        return None;
+    }
+    let (failed, description, target) = match update::status(app) {
+        Status::Idle => return None,
+        Status::Running { stage, target, .. } => (false, stage.label().to_owned(), target.clone()),
+        Status::Failed { message, target, .. } => (true, message.clone(), target.clone()),
+    };
+    let title = format!("{} server", if failed { "Could not update" } else { "Updating" });
+    let mut actions = Vec::new();
+    if failed {
+        let current = app.state().config.as_ref().map(|c| s(&c["environment"], "serverVersion").to_owned()).unwrap_or_default();
+        if current != target {
+            actions.push(Button::new("Retry").variant("ghost").size("xs").on_press(move |app: &mut App| update::start(app, &target)).build(t));
+        }
+        actions.push(icon_button(&icons::X, "Dismiss update notice").size("icon-xs").on_press(update::dismiss).build(t));
+    }
+    let (tone, glyph) = if failed { (t.c.error, &icons::CIRCLE_ALERT) } else { (t.c.muted_foreground, &icons::DOWNLOAD) };
+    Some(notice(t, tone, glyph, title, Some(description), actions))
 }
 
 fn usage_limit(app: &App, t: &T) -> Option<El> {
@@ -418,7 +447,7 @@ fn usage_limit(app: &App, t: &T) -> Option<El> {
 /// ComposerBannerStack and ChildThreadApprovals, pinned just above the composer: the machine
 /// first, then what needs the user.
 pub fn stack(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
-    let cards: Vec<El> = [offline(app, t), usage_limit(app, t), super::child_approvals::view(app, t)].into_iter().flatten().collect();
+    let cards: Vec<El> = [offline(app, t), server_update(app, t), usage_limit(app, t), super::child_approvals::view(app, t)].into_iter().flatten().collect();
     if cards.is_empty() {
         return None;
     }

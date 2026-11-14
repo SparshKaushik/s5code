@@ -5,6 +5,7 @@
 pub mod composer;
 pub mod details;
 pub mod home;
+pub mod server_update;
 pub mod timeline;
 pub mod topbar;
 
@@ -20,6 +21,7 @@ pub struct Ui {
     pub home: home::Ui,
     pub details: details::Ui,
     pub topbar: topbar::Ui,
+    pub server_update: server_update::State,
     /// The remembered route was restored (or found stale) once the shell loaded.
     route_restored: bool,
 }
@@ -85,13 +87,18 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if matches!(s.frame_route(), Route::Settings(_)) {
         return main;
     }
+    if let Route::Thread(id) = s.frame_route()
+        && crate::not_found::missing_thread(s, id)
+    {
+        return main.child(crate::not_found::no_active_thread(t));
+    }
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let shown = details::shown(s, w, h);
     let lane = details::lane(w, h, shown != details::Shown::Inline);
     // Under the settings modal the frame keeps showing the route settings was opened from.
     let body = match s.frame_route() {
         Route::Thread(id) if !timeline::is_empty(s, id) => timeline::view(s, cx, t, id, &lane),
-        _ => home::view(cx, t, &lane),
+        _ => home::view(s, cx, t, &lane),
     };
     // The composer, details card and their menus float over the body.
     let stack = col()

@@ -346,7 +346,7 @@ fn unavailable_reason(connected: bool, loaded: bool, session: Option<&Session>, 
     }
     match session {
         Some(Session { failed: true, .. }) => Some("Read-only access"),
-        Some(Session { data: Some(v), .. }) => (!super::pr_row::grants(v, "settings:write")).then_some("Read-only access"),
+        Some(Session { data: Some(v), .. }) => (!crate::settings::session_grants(v, "settings:write")).then_some("Read-only access"),
         Some(Session { pending: Some(_), .. }) => Some("Checking permissions…"),
         _ if live => Some("Checking permissions…"),
         _ => None,

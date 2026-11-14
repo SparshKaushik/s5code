@@ -219,11 +219,32 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-thinking", thinking),
     ("timeline-tool-inspector", tool_inspector),
     ("timeline-link-chips", link_chips),
+    ("chat-server-update-running", server_update_running),
+    ("chat-server-update-failed", server_update_failed),
     ("timeline-user-markdown", user_markdown),
     ("timeline-steer", steer),
     ("timeline-load-earlier", load_earlier),
     ("timeline-load-earlier-error", load_earlier_error),
     ("timeline-answered-questions", answered_questions),
+    ("timeline-now", thread_now),
+    ("timeline-now-stop", thread_now_stop),
+    ("timeline-header-subagent", header_subagent),
+    ("timeline-draft-hero", draft_hero),
+    ("timeline-draft-hero-empty", draft_hero_empty),
+    ("timeline-work-history-loading", work_history_loading),
+    ("timeline-work-history-error", work_history_error),
+    ("timeline-command-output", command_output),
+    ("timeline-provider-errors", provider_errors),
+    ("timeline-lifecycle", lifecycle_rows),
+    ("timeline-parent-divider", parent_divider),
+    ("timeline-user-attribution", user_attribution),
+    ("timeline-steer-segments", steer_segments),
+    ("timeline-steer-segments-open", steer_segments_open),
+    ("timeline-superseded-attempt", superseded_attempt),
+    ("timeline-superseded-attempt-open", superseded_attempt_open),
+    ("timeline-subagent-group", subagent_group),
+    ("timeline-subagent-group-open", subagent_group_open),
+    ("timeline-compacting", compacting),
 ];
 
 /// Appends `value` to the route thread's projection `list`, creating the list when missing.
@@ -431,12 +452,25 @@ fn tool_inspector(app: &mut App) {
     tool_group_open(app);
     app.ui.chat.timeline.expanded.extend(["scene-tool-test".to_owned(), "scene-tool-mcp".to_owned(), "scene-tool-search".to_owned()]);
 }
+fn server_update_running(app: &mut App) {
+    use crate::chat::server_update::{Stage, Status, show};
+    showcase(app);
+    show(app, Status::Running { stage: Stage::Resuming, from: "0.0.20".into(), target: "0.0.21".into() });
+}
+fn server_update_failed(app: &mut App) {
+    use crate::chat::server_update::{Stage, Status, show};
+    showcase(app);
+    let message = "Server update failed: The new server did not start.".to_owned();
+    show(app, Status::Failed { stage: Stage::Downloading, from: "0.0.20".into(), target: "0.0.21".into(), message });
+}
 fn link_chips(app: &mut App) {
     showcase(app);
     let other = app.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).find(|t| !t.is_empty()).unwrap_or_default();
     let text = format!(
         "I moved the grouping into [rows.rs](src/chat/timeline/rows.rs:124) and the summary into [`work.rs`](./src/chat/timeline/work.rs). \
-         The approach follows [the earlier discussion](t3-thread://v1/{other}); see also the [Rust reference](https://doc.rust-lang.org/reference/)."
+         The approach follows [the earlier discussion](t3-thread://v1/{other}); see also the [Rust reference](https://doc.rust-lang.org/reference/).\n\n\
+         - Timeline: [mod.rs](src/chat/timeline/mod.rs:40)\n\
+         - Composer: [mod.rs](src/chat/composer/mod.rs)"
     );
     push_visible(app, vec![serde_json::json!({"id": "scene-link-chips", "type": "assistant_message", "status": "completed", "text": text,
         "createdAt": "2026-01-01T00:00:00Z"})]);
@@ -485,4 +519,302 @@ fn answered_questions(app: &mut App) {
         "questionAnswer": {"requestId": "r", "questionTextById": {"q1": "Strict schemas or UI flexibility?", "q2": "Which runtime should the probe target?"},
             "answers": {"q1": ["UI flexibility"], "q2": "Node 24"}}})]);
     app.ui.chat.timeline.expanded.insert("scene-answered".into());
+}
+
+/// The showcase's first finished turn with its work deferred by the server, its fold open.
+fn deferred_work(app: &mut App) -> Option<String> {
+    showcase(app);
+    let Route::Thread(thread) = app.route.clone() else { return None };
+    let (fold, anchor) = app.state().thread_views.get(&thread).and_then(|v| {
+        rows::derive(&v.projection, app.now_ms).into_iter().find_map(|r| match r {
+            Row::Work { id, items, .. } => items.first().map(|i| (id, crate::data::s(i, "id").to_owned())),
+            _ => None,
+        })
+    })?;
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(v) = state.thread_views.get_mut(&thread)
+    {
+        for list in ["visibleTurnItems", "turnItems"] {
+            for entry in v.projection[list].as_array_mut().into_iter().flatten() {
+                let item = if entry["item"].is_object() { &mut entry["item"] } else { entry };
+                if item["id"] == anchor.as_str() {
+                    item["deferredWork"] = serde_json::json!({"cursor": "scene-work", "itemCount": 240, "lastOrdinal": 100000});
+                }
+            }
+        }
+    }
+    app.ui.chat.timeline.expanded.insert(fold);
+    Some(anchor)
+}
+fn work_history_loading(app: &mut App) {
+    deferred_work(app);
+}
+fn work_history_error(app: &mut App) {
+    if let Some(anchor) = deferred_work(app) {
+        app.ui.chat.timeline.history.failed_work.insert(anchor);
+    }
+}
+/// A running command's open row streaming coloured output.
+fn command_output(app: &mut App) {
+    live_turn(app, true);
+    app.ui.chat.timeline.expanded.extend(["tools:scene-tool-read-a".to_owned(), "scene-tool-test".to_owned()]);
+    let raw = "\u{1b}[2m$ vp test run src/chat/timeline\u{1b}[22m\n\u{1b}[32m✓\u{1b}[39m rows.rs (14 tests)\n\u{1b}[31m✗\u{1b}[39m work.rs › groups tools\n  expected \u{1b}[33m3\u{1b}[39m, received \u{1b}[33m2\u{1b}[39m\n\u{1b}[42;30m PASS \u{1b}[0m find.rs\nRunning 3 more files… 40%\r\u{1b}[KRunning 3 more files… 80%";
+    super::inspector::scene_stream(app, "scene-tool-test", raw, true);
+}
+
+/// Another thread's id, for rows that open one.
+fn other_thread(app: &App) -> String {
+    let Route::Thread(id) = &app.route else { return String::new() };
+    app.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).find(|t| !t.is_empty() && t != id).unwrap_or_default()
+}
+/// A failed provider call, a retry in flight and one that recovered, a usage limit with its
+/// reset time, and a runtime warning.
+fn provider_errors(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:00Z").unwrap_or(app.now_ms);
+    let at = "2026-03-10T11:58:00Z";
+    let overloaded = json!({"class": "transport_error", "message": "Overloaded: the provider is temporarily unable to take requests."});
+    push_visible(app, vec![
+        json!({"id": "scene-provider-error", "type": "error", "status": "failed", "createdAt": at,
+            "failure": {"class": "provider_error", "message": "The provider process exited unexpectedly. Please try again.", "code": null, "retryable": true}}),
+        json!({"id": "scene-provider-retrying", "type": "error", "status": "running", "createdAt": at, "failure": overloaded.clone(),
+            "retry": {"attempt": 2, "maxAttempts": 5, "retryDelayMs": 1500}}),
+        json!({"id": "scene-provider-recovered", "type": "error", "status": "completed", "createdAt": at, "failure": overloaded,
+            "retry": {"attempt": 3, "maxAttempts": 5, "retryDelayMs": null}}),
+        json!({"id": "scene-usage-limit", "type": "error", "status": "failed", "createdAt": at,
+            "failure": {"class": "usage_limit", "message": "You've hit your usage limit.", "resetAt": "2026-03-10T15:30:00Z"}}),
+        json!({"id": "scene-system-notice", "type": "system_notice", "status": "completed", "createdAt": at, "message": "Sandbox is off for this turn."}),
+    ]);
+}
+/// Lifecycle rows: a handoff, a created thread, a fork, compactions, an interrupt and a
+/// subagent's notice, with every work fold open.
+fn lifecycle_rows(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let other = other_thread(app);
+    let at = "2026-01-01T00:00:00Z";
+    push_visible(app, vec![
+        json!({"id": "scene-handoff", "type": "handoff", "status": "completed", "createdAt": at, "fromProviderInstanceIds": ["claudeAgent"],
+            "fromModelSelections": [{"instanceId": "claudeAgent", "model": "claude-opus-4-5"}], "toProviderInstanceId": "codex", "toModel": "gpt-5-codex"}),
+        json!({"id": "scene-created", "type": "thread_created", "status": "completed", "createdAt": at, "title": "Migrate the billing schema", "targetThreadId": other}),
+        json!({"id": "scene-fork", "type": "fork", "status": "completed", "createdAt": at, "source": {"type": "run", "threadId": other, "runId": "scene-run"}}),
+        json!({"id": "scene-compacted", "type": "compaction", "status": "completed", "createdAt": at, "beforeTokenCount": 182_000, "afterTokenCount": 24_000}),
+        json!({"id": "scene-compact-failed", "type": "compaction", "status": "failed", "createdAt": at, "summary": "The provider rejected the summary request."}),
+        json!({"id": "scene-interrupted", "type": "run_interrupt_result", "status": "completed", "createdAt": at, "message": "Stopped by the user."}),
+        json!({"id": "scene-subagent-note", "type": "notification", "status": "completed", "outcome": "completed", "createdAt": at,
+            "source": {"kind": "subagent", "childThreadId": other}, "summary": "Billing schema migrated"}),
+    ]);
+    let Route::Thread(id) = app.route.clone() else { return };
+    let folds: Vec<String> = app
+        .state()
+        .thread_views
+        .get(&id)
+        .map(|v| rows::derive(&v.projection, app.now_ms).iter().filter_map(|r| if let Row::Work { id, .. } = r { Some(id.clone()) } else { None }).collect::<Vec<_>>())
+        .unwrap_or_default();
+    app.ui.chat.timeline.expanded.extend(folds);
+}
+/// A subagent's thread, with the divider naming its parent above the timeline.
+fn parent_divider(app: &mut App) {
+    showcase(app);
+    let parent = other_thread(app);
+    patch_shell(app, serde_json::json!({"lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"}}));
+}
+/// Prompts from an automation and another agent (open), one T3 Code sent, a failed prompt after
+/// a model switch, file cards with a pasted text, and an empty reply.
+fn user_attribution(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let other = other_thread(app);
+    let at = "2026-01-01T00:00:00Z";
+    let user = |id: &str, text: &str, extra: serde_json::Value| {
+        let mut item = json!({"id": id, "type": "user_message", "status": "completed", "inputIntent": "turn_start", "text": text, "createdAt": at, "attachments": []});
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            item[k] = v.clone();
+        }
+        item
+    };
+    push_visible(app, vec![
+        user("scene-user-automation", "Check CI on main and summarize any failures.\n\nOpen an issue for each new flaky test.",
+            json!({"scheduledTaskId": "task-nightly", "createdBy": "agent", "creationSource": "server"})),
+        user("scene-user-agent", "The schema migration is done; please review the diff before I merge.",
+            json!({"createdBy": "agent", "creationSource": "mcp", "senderThreadId": other})),
+        user("scene-user-t3", "Continue", json!({"createdBy": "agent", "creationSource": "server"})),
+        user("scene-user-failed", "Rename the billing tables.", json!({"status": "failed",
+            "modelSwitch": {"from": {"instanceId": "codex", "model": "gpt-5-codex"}, "to": {"instanceId": "codex", "model": "gpt-5"}}})),
+        user("scene-user-files", "", json!({"attachments": [
+            {"type": "file", "id": "scene-pasted", "name": "pasted-text-1.txt", "mimeType": "text/plain", "sizeBytes": 1834, "source": {"_tag": "pasted-text"}},
+            {"type": "file", "id": "scene-log", "name": "build.log", "mimeType": "text/plain", "sizeBytes": 48_213}]})),
+        json!({"id": "scene-empty-reply", "type": "assistant_message", "status": "interrupted", "streaming": false, "text": "", "createdAt": at}),
+    ]);
+    app.ui.chat.timeline.expanded.insert("user-fold:scene-user-agent".into());
+}
+
+/// Sets the scene clock to `iso`.
+fn clock(app: &mut App, iso: &str) {
+    if let Some(now) = crate::data::iso_ms(iso) {
+        app.now_ms = now;
+    }
+}
+/// A finished turn the user steered once its first work was done: "Worked for" over the whole
+/// turn, the steer, then "Continued for" over the work after it.
+fn steer_segments(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-03T00:00:{s:02}.000Z");
+    push_items(app, "runs", vec![json!({"id": "scene-steered", "ordinal": 996, "status": "completed", "startedAt": at(0), "completedAt": at(42)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| {
+        let mut item = json!({"id": id, "type": kind, "runId": "scene-steered", "status": "completed", "createdAt": at(end.saturating_sub(2)),
+            "completedAt": at(end), "updatedAt": at(end)});
+        for (k, v) in fields.as_object().into_iter().flatten() {
+            item[k] = v.clone();
+        }
+        item
+    };
+    push_visible(app, vec![
+        item("scene-steered-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "Add a retry to the upload client.", "attachments": []})),
+        item("scene-steered-think", "reasoning", 3, json!({"text": "**Reading the upload client**"})),
+        item("scene-steered-read", "dynamic_tool", 5, json!({"toolName": "Read", "input": {"path": "src/upload/client.rs"}})),
+        item("scene-steered-test", "command_execution", 12, json!({"input": "vp test run src/upload", "exitCode": 0})),
+        item("scene-steered-steer", "user_message", 14, json!({"inputIntent": "steer", "text": "Use exponential backoff, capped at 30s.", "attachments": [],
+            "createdAt": at(14)})),
+        item("scene-steered-edit", "file_change", 25, json!({"changes": [{"path": "src/upload/client.rs"}], "fileName": "src/upload/client.rs"})),
+        item("scene-steered-retest", "command_execution", 38, json!({"input": "vp test run src/upload", "exitCode": 0})),
+        item("scene-steered-reply", "assistant_message", 42, json!({"text": "Added exponential backoff to the upload client, capped at 30s."})),
+    ]);
+}
+fn steer_segments_open(app: &mut App) {
+    steer_segments(app);
+    app.ui.chat.timeline.expanded.extend(["work:scene-steered".to_owned(), "work:scene-steered:steer:scene-steered-steer".to_owned()]);
+}
+/// A turn in flight whose first attempt a steer cut off: that attempt's work folds under
+/// "Superseded attempt" while the new attempt runs.
+fn superseded_attempt(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-02T00:00:{s:02}.000Z");
+    let (run, first, second) = ("scene-steer-run", "scene-attempt-1", "scene-attempt-2");
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 997, "status": "running", "rootNodeId": "scene-attempt-1-root", "startedAt": at(0)})]);
+    push_items(app, "attempts", vec![
+        json!({"id": first, "runId": run, "attemptOrdinal": 1, "rootNodeId": "scene-attempt-1-root", "reason": "initial", "status": "superseded",
+            "completedAt": at(14)}),
+        json!({"id": second, "runId": run, "attemptOrdinal": 2, "rootNodeId": "scene-attempt-2-root", "reason": "steering_restart", "status": "running"}),
+    ]);
+    let item = |id: &str, node: &str, kind: &str, status: &str, s: u32, fields: serde_json::Value| {
+        let mut item = json!({"id": id, "type": kind, "runId": run, "nodeId": node, "status": status, "createdAt": at(s), "updatedAt": at(s)});
+        for (k, v) in fields.as_object().into_iter().flatten() {
+            item[k] = v.clone();
+        }
+        item
+    };
+    let (old, new) = ("scene-attempt-1-root", "scene-attempt-2-root");
+    push_visible(app, vec![
+        item("scene-attempt-prompt", old, "user_message", "completed", 0, json!({"inputIntent": "turn_start", "attachments": [],
+            "text": "Rename the billing tables and update the migrations."})),
+        item("scene-attempt-think", old, "reasoning", "completed", 2, json!({"text": "**Planning the rename**"})),
+        item("scene-attempt-search", old, "command_execution", "completed", 4, json!({"input": "rg -l billing_ src/", "exitCode": 0})),
+        item("scene-attempt-read", old, "dynamic_tool", "completed", 6, json!({"toolName": "Read", "input": {"path": "src/db/schema.rs"}})),
+        item("scene-attempt-reply", old, "assistant_message", "interrupted", 9, json!({"text": "I'll start with the schema, then"})),
+        item("scene-attempt-steer", new, "user_message", "completed", 12, json!({"inputIntent": "steer", "attachments": [],
+            "text": "Keep the old table names as views."})),
+        item("scene-attempt-test", new, "command_execution", "running", 15, json!({"input": "vp test run src/db"})),
+    ]);
+    clock(app, &at(20));
+}
+fn superseded_attempt_open(app: &mut App) {
+    superseded_attempt(app);
+    app.ui.chat.timeline.expanded.insert("attempt-fold:scene-attempt-1".into());
+}
+/// Four tasks one turn delegated, grouped behind "4 subagents".
+fn subagent_group(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-04T00:00:{s:02}.000Z");
+    let agent = |n: u32, driver: &str, status: &str, title: &str, done: Option<u32>| {
+        json!({"id": format!("scene-agent-{n}"), "type": "subagent", "subagentId": format!("scene-task-{n}"), "runId": "scene-agents-run",
+            "providerTurnId": "scene-agents-turn", "driver": driver, "status": status, "title": title, "startedAt": at(n),
+            "completedAt": done.map(at), "progress": "Reading the billing migrations", "createdAt": at(n)})
+    };
+    push_visible(app, vec![
+        agent(1, "codex", "running", "Review the schema diff", None),
+        agent(2, "claudeAgent", "completed", "Subagent: Update the migrations", Some(30)),
+        agent(3, "codex", "failed", "/root/agents/test_runner/", Some(22)),
+        agent(4, "opencode", "completed", "Check the docs", Some(18)),
+    ]);
+    clock(app, &at(48));
+}
+fn subagent_group_open(app: &mut App) {
+    subagent_group(app);
+    app.ui.chat.timeline.expanded.insert("subagent-group:scene-agent-1".into());
+}
+/// A turn in flight compacting its context: the working row says so and nothing thinks.
+fn compacting(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-05T00:00:{s:02}.000Z");
+    push_items(app, "runs", vec![json!({"id": "scene-compact-run", "ordinal": 995, "status": "running", "startedAt": at(0)})]);
+    push_visible(app, vec![
+        json!({"id": "scene-compact-prompt", "type": "user_message", "runId": "scene-compact-run", "inputIntent": "turn_start", "status": "completed",
+            "text": "Keep going with the migration.", "createdAt": at(0), "attachments": []}),
+        json!({"id": "scene-compaction", "type": "compaction", "runId": "scene-compact-run", "status": "running", "createdAt": at(2)}),
+    ]);
+    clock(app, &at(9));
+}
+
+/// The end of the timeline: a subagent's question, a background command, a paused goal, and
+/// the thread snoozed.
+fn thread_now(app: &mut App) {
+    showcase(app);
+    let Route::Thread(parent) = app.route.clone() else { return };
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:00Z").unwrap_or(app.now_ms);
+    patch_shell(app, serde_json::json!({"status": "idle", "activityRunStatus": null, "activeRunId": null,
+        "pendingBackgroundTasks": [{"taskId": "scene-bg", "kind": "command", "description": "bun run dev --port 5173"}],
+        "goal": {"status": "paused", "objective": "Migrate billing to the new schema", "tokensUsed": 48_200, "timeUsedSeconds": 1_260},
+        "snoozedUntil": "2026-03-10T14:30:00Z", "snoozedAt": "2026-03-10T11:00:00Z"}));
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
+        state.threads.push(serde_json::json!({"id": "scene-child-question", "title": "Audit the billing schema", "projectId": project,
+            "status": "running", "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"},
+            "pendingRuntimeRequest": {"kind": "user_input"}}));
+    }
+}
+/// A Stop the agent has not answered, with Force stop.
+fn thread_now_stop(app: &mut App) {
+    showcase(app);
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:00Z").unwrap_or(app.now_ms);
+    push_items(app, "runs", vec![serde_json::json!({"id": "scene-stop-run", "ordinal": 9_999, "status": "running"})]);
+    push_items(app, "turnItems", vec![serde_json::json!({"id": "scene-stop", "type": "run_interrupt_request", "runId": "scene-stop-run", "ordinal": 99_999,
+        "startedAt": "2026-03-10T11:59:18Z", "updatedAt": "2026-03-10T11:59:48Z", "unresponsiveAt": "2026-03-10T11:59:48Z"})]);
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["environment"]["capabilities"]["threadForceStop"] = true.into();
+    }
+}
+/// A subagent's header: its parent in the breadcrumb, and the linked environment it came from.
+fn header_subagent(app: &mut App) {
+    showcase(app);
+    let Route::Thread(parent) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
+        state.threads.push(serde_json::json!({"id": "scene-subagent", "title": "Audit the billing schema", "projectId": project, "status": "idle",
+            "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"}, "linkOrigin": {"sessionId": "scene-link", "label": "Studio"}}));
+        if let Some(view) = state.thread_views.get(&parent) {
+            let projection = view.projection.clone();
+            state.thread_views.insert("scene-subagent".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
+        }
+    }
+    app.navigate(Route::Thread("scene-subagent".into()));
+}
+/// The new-thread draft over its project.
+fn draft_hero(app: &mut App) {
+    app.navigate(Route::Home { project_id: None });
+    crate::scene_clock(app);
+}
+/// The draft with no project to build in.
+fn draft_hero_empty(app: &mut App) {
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        state.projects.clear();
+    }
+    draft_hero(app);
 }

@@ -46,7 +46,7 @@ fn subscribe(route: &Route, sub: &Subscription) -> Value {
         Route::Config => ("subscribeServerConfig", json!({})),
         Route::Thread(id) => (
             "orchestration.subscribeThread",
-            json!({"threadId":id,"requestCompletionMarker":true,"acceptBoundedSnapshot":true}),
+            json!({"threadId":id,"requestCompletionMarker":true,"acceptBoundedSnapshot":true,"acceptDeferredWork":true}),
         ),
         Route::Vcs(cwd) => ("subscribeVcsStatus", json!({"cwd":cwd})),
         Route::Resource(method, payload) => (
@@ -364,7 +364,7 @@ mod tests {
         };
         assert_eq!(
             subscribe(&Route::Thread("t".into()), &sub)["payload"],
-            json!({"threadId":"t","requestCompletionMarker":true,"acceptBoundedSnapshot":true,"afterSequence":42})
+            json!({"threadId":"t","requestCompletionMarker":true,"acceptBoundedSnapshot":true,"acceptDeferredWork":true,"afterSequence":42})
         );
         assert_eq!(
             subscribe(

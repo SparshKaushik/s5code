@@ -57,6 +57,7 @@ fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize
 
 fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
     let mut out = col().w_full().gap(10.4);
+    let parents = md_links::parent_suffixes(source);
     for (index, block) in source
         .trim()
         .split("\n\n")
@@ -72,7 +73,11 @@ fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
             .lines()
             .nth(1)
             .is_some_and(|line| line.contains("---") && line.contains('|'));
-        let content = if is_table {
+        // Find counts matches in rendered Markdown, so a marked block keeps rune_kit's rendering.
+        let chips = if is_table || marks.is_some() { None } else { md_links::inline_block(app, block, t, ink, theme::TEXT_SM.lh(22.75), &parents) };
+        let content = if let Some(chips) = chips {
+            chips
+        } else if is_table {
             table(app, block, t, marks, ink)
         } else {
             let content = Markdown::new(block)

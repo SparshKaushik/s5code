@@ -63,8 +63,7 @@ pub struct Item {
     pub pr: Option<Value>,
 }
 
-const BUILTIN_SLASH: [(&str, &str); 3] =
-    [("model", "Switch response model for this thread"), ("side", "Ask a side question in a new side chat"), ("btw", "Same as /side")];
+const BUILTIN_SLASH: [(&str, &str); 1] = [("model", "Switch response model for this thread")];
 /// Shown after `/model` when the provider has plan mode.
 const PLAN_SLASH: [(&str, &str); 2] =
     [("plan", "Switch this thread into plan mode"), ("default", "Switch this thread back to normal build mode")];
@@ -102,21 +101,27 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
     match m.kind {
         Kind::Slash => {
             let plan: &[(&str, &str)] = if supports_plan(s) { &PLAN_SLASH[..] } else { &[] };
-            // Provider commands, /side and /btw work only at the message start.
+            // Provider commands work only at the message start.
             let at_start = m.start == 0;
-            let side: &[(&str, &str)] = if at_start { &BUILTIN_SLASH[1..] } else { &[] };
-            let builtins = BUILTIN_SLASH[..1].iter().chain(plan).chain(side).map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
+            let builtins = BUILTIN_SLASH.iter().chain(plan).map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
+            let skills = slash_menu_skills(s);
+            let skill_names: Vec<String> = skills.iter().map(|k| data::s(k, "name").trim().to_lowercase()).collect();
+            let compact = compact_available(s, m);
             let provided = provider_list(s, "slashCommands")
                 .into_iter()
                 .filter(|_| at_start)
-                .map(|c| item(format!("/{}", data::s(c, "name")), format!("/{}", data::s(c, "name")), data::s(c, "description").to_string()));
-            let builtin = 1 + plan.len() + side.len();
-            let all: Vec<Item> = builtins.chain(provided).collect();
+                .filter(|c| !skill_names.contains(&data::s(c, "name").trim().to_lowercase()))
+                .filter(|c| data::s(c, "name") != "compact" || compact)
+                .map(|c| item(format!("/{}", data::s(c, "name")), format!("/{}", data::s(c, "name")), command_description(c)));
+            // A skill runs anywhere in the prompt, as `$name`.
+            let skill_items = skills.iter().map(|k| item(format!("${}", data::s(k, "name")), format!("/skill:{}", data::s(k, "name")), skill_description(k, "")));
+            let builtin = BUILTIN_SLASH.len() + plan.len();
+            let all: Vec<Item> = builtins.chain(provided).chain(skill_items).collect();
             ranked_slash(all, builtin, q.trim_start_matches('/'))
         }
         Kind::Skill => provider_list(s, "skills")
             .into_iter()
-            .map(|c| item(format!("${}", data::s(c, "name")), data::s(c, "name").to_string(), data::s(c, "description").to_string()))
+            .map(|c| item(format!("${}", data::s(c, "name")), data::s(c, "name").to_string(), skill_description(c, "Run provider skill")))
             .filter(|i| i.label.to_lowercase().contains(&q))
             .collect(),
         Kind::Path => {
@@ -138,6 +143,51 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
             .map(|e| Item { id: format!("#{}", e["number"]), label: format!("#{}", e["number"]), description: data::s(e, "title").to_string(), folder: None, pr: Some(e.clone()) })
             .collect(),
     }
+}
+
+/// A provider command's description, its input hint, or "Run provider command".
+fn command_description(c: &Value) -> String {
+    [data::s(c, "description"), data::s(&c["input"], "hint")].into_iter().find(|d| !d.is_empty()).unwrap_or("Run provider command").to_owned()
+}
+
+/// A skill's short description, its description, its scope, else `fallback`.
+fn skill_description(k: &Value, fallback: &str) -> String {
+    let scope = data::s(k, "scope");
+    let scoped = if scope.is_empty() { String::new() } else { format!("{scope} skill") };
+    [data::s(k, "shortDescription").to_owned(), data::s(k, "description").to_owned(), scoped]
+        .into_iter()
+        .find(|d| !d.is_empty())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+/// getProviderSkillsForSlashMenu: invocable skills, one per name, when Settings lists them in `/`.
+fn slash_menu_skills(s: &App) -> Vec<&Value> {
+    if crate::settings::value(s, "showSkillsInSlashMenu") == false {
+        return Vec::new();
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for k in provider_list(s, "skills") {
+        let name = data::s(k, "name").trim().to_lowercase();
+        if k["enabled"] == true && k["userInvocable"] != false && !seen.contains(&name) {
+            seen.push(name);
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// `/compact` is offered only alone in the prompt, with nothing attached, while compacting can
+/// run (compactSlashCommandAvailable).
+fn compact_available(s: &App, m: &Open) -> bool {
+    let Some(d) = draft(s) else { return false };
+    let text = &d.edit.text;
+    m.end <= text.len()
+        && text[..m.start].trim().is_empty()
+        && text[m.end..].trim().is_empty()
+        && d.attachments.is_empty()
+        && d.edit.pills().next().is_none()
+        && matches!(super::context::compact_state(s), Some(None))
 }
 
 /// searchSlashCommandItems: by the best of the name's and the description's match, built-ins
@@ -242,7 +292,7 @@ fn pr_key(q: &str) -> String {
 }
 
 /// The working directory file searches run in: the thread's worktree, else the project root.
-fn search_root(s: &App) -> Option<String> {
+pub(super) fn search_root(s: &App) -> Option<String> {
     let c = ctx(s);
     let worktree = c.thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty());
     worktree.or_else(|| c.project.map(|p| data::s(p, "workspaceRoot"))).filter(|p| !p.is_empty()).map(str::to_string)
@@ -484,7 +534,24 @@ mod tests {
 
     #[test]
     fn plan_commands_follow_model_only_for_plan_capable_providers() {
-        assert_eq!(slash_labels("codex"), ["/model", "/plan", "/default", "/side", "/btw"]);
-        assert_eq!(slash_labels("devReplay")[..3], ["/model", "/side", "/btw"]);
+        assert_eq!(slash_labels("codex")[..3], ["/model", "/plan", "/default"]);
+        assert_eq!(slash_labels("devReplay")[..1], ["/model"]);
+        assert!(!slash_labels("codex").iter().any(|l| l == "/side" || l == "/btw"), "side chats are not implemented");
+    }
+
+    #[test]
+    fn slash_lists_skills_and_offers_compact_only_alone() {
+        let labels = |model: &str, text: &str| {
+            let mut s = App::new();
+            let d = draft_mut(&mut s);
+            d.model = Some((model.into(), "m".into()));
+            d.edit = rune::TextEdit::new(text);
+            d.edit.set_caret(1);
+            let m = open_menu(&s).unwrap();
+            items(&s, &m).into_iter().map(|i| i.label).collect::<Vec<_>>()
+        };
+        assert!(labels("codex", "/").contains(&"/compact".to_owned()));
+        assert!(!labels("codex", "/ and more").contains(&"/compact".to_owned()));
+        assert!(labels("opencode", "/").contains(&"/skill:contribution-triage".to_owned()));
     }
 }

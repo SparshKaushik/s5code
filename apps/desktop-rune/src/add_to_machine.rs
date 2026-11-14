@@ -1,8 +1,11 @@
 //! AddProjectToMachineDialog with lib/addProjectToMachine.ts: clones a project onto another
 //! connected environment, then relays the chosen git-ignored files from the source. The client
 //! carries the files because the two servers never talk to each other.
+//!
+//! Also the composer's clone banner (useProjectCloneBanner): any project still cloning or
+//! copying files into place, with Cancel, Retry and Remove project, and why Send waits.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
@@ -19,6 +22,12 @@ const CLONES: &str = "subscribeProjectClones";
 pub struct Ui {
     dialog: Option<Dialog>,
     jobs: Vec<Job>,
+    /// Environments whose clone list is subscribed: the composer project's and every job's.
+    watched: BTreeSet<String>,
+    /// Copies that failed, by project id, until the banner is dismissed: title and failures.
+    copy_failed: HashMap<String, (String, Vec<String>)>,
+    /// Banner actions in flight: the reply, its failure toast title, and a removed project.
+    actions: Vec<(u64, &'static str, Option<String>)>,
 }
 
 struct Dialog {
@@ -51,13 +60,11 @@ struct Submit {
 struct Job {
     target: String,
     label: String,
-    title: String,
     project_id: String,
     cwd: String,
     subdirectory: String,
     read: Vec<(String, Result<String, String>)>,
     seen: bool,
-    told_failed: bool,
     writes: Option<Vec<(String, u64)>>,
     failures: Vec<String>,
 }
@@ -165,7 +172,7 @@ pub fn clone_url_for_protocol(url: &str, protocol: Protocol) -> Option<String> {
 
 #[derive(Debug, PartialEq)]
 enum CloneState {
-    Waiting { seen: bool, failed: Option<String> },
+    Waiting { seen: bool },
     Done,
     Gone,
 }
@@ -175,9 +182,9 @@ fn clone_state(clones: &Value, project_id: &str, seen: bool) -> CloneState {
     let clone = clones.as_array().and_then(|c| c.iter().find(|c| c["projectId"] == project_id));
     match clone {
         Some(c) if c["phase"] == "done" => CloneState::Done,
-        Some(c) => CloneState::Waiting { seen: true, failed: (c["phase"] == "failed").then(|| data::s(c, "error").to_owned()) },
+        Some(_) => CloneState::Waiting { seen: true },
         None if seen => CloneState::Gone,
-        None => CloneState::Waiting { seen, failed: None },
+        None => CloneState::Waiting { seen },
     }
 }
 
@@ -436,22 +443,16 @@ fn started(s: &mut App, project_id: String, cwd: String) {
     let Some(p) = project(s, &d.project) else { return };
     let sub = d.submit.map(|sub| sub.read).unwrap_or_default();
     let subdirectory = subdirectory(p["repositoryIdentity"]["rootPath"].as_str(), data::s(p, "workspaceRoot"));
-    let title = data::s(p, "title").to_owned();
     if !sub.is_empty() {
-        if let Some(net) = env::net_of(s, &d.target) {
-            net.watch_resource(CLONES, json!({}));
-        }
         let label = env::label(s, &d.target);
         s.ui.add_to_machine.jobs.push(Job {
             target: d.target.clone(),
             label,
-            title,
             project_id: project_id.clone(),
             cwd,
             subdirectory,
             read: sub,
             seen: false,
-            told_failed: false,
             writes: None,
             failures: Vec::new(),
         });
@@ -461,11 +462,12 @@ fn started(s: &mut App, project_id: String, cwd: String) {
 }
 
 fn poll_jobs(s: &mut App) -> bool {
+    sync_watch(s);
+    let mut changed = poll_actions(s);
     if s.ui.add_to_machine.jobs.is_empty() {
-        return false;
+        return changed;
     }
     let mut jobs = std::mem::take(&mut s.ui.add_to_machine.jobs);
-    let mut changed = false;
     jobs.retain_mut(|job| {
         if let Some(writes) = &mut job.writes {
             writes.retain(|(path, id)| match take(s, *id) {
@@ -480,20 +482,16 @@ fn poll_jobs(s: &mut App) -> bool {
                 return true;
             }
             if !job.failures.is_empty() {
-                crate::shell::palette::toast_error(s, &copy_failure_title(job.failures.len(), &job.label), Some(&job.failures.join("\n")));
+                let failed = (copy_failure_title(job.failures.len(), &job.label), std::mem::take(&mut job.failures));
+                s.ui.add_to_machine.copy_failed.insert(job.project_id.clone(), failed);
             }
             changed = true;
             return false;
         }
         let clones = env::net_of(s, &job.target).and_then(|n| n.resource(CLONES, json!({}))).cloned().unwrap_or(Value::Null);
         match clone_state(&clones, &job.project_id, job.seen) {
-            CloneState::Waiting { seen, failed } => {
+            CloneState::Waiting { seen } => {
                 job.seen = seen;
-                if let Some(error) = failed.filter(|_| !job.told_failed) {
-                    job.told_failed = true;
-                    crate::shell::palette::toast_error(s, &format!("Could not clone {} to {}", job.title, job.label), Some(&error));
-                    changed = true;
-                }
                 true
             }
             CloneState::Gone => false,
@@ -512,17 +510,212 @@ fn poll_jobs(s: &mut App) -> bool {
             }
         }
     });
-    let watching: BTreeSet<String> = jobs.iter().map(|j| j.target.clone()).collect();
-    for key in env::keys(s) {
-        if !watching.contains(&key)
-            && let Some(net) = env::net_of(s, &key)
-            && net.resource(CLONES, json!({})).is_some()
-        {
+    s.ui.add_to_machine.jobs = jobs;
+    changed
+}
+
+/// The composer's project: its id and environment.
+fn composer_project(s: &App) -> Option<(String, String)> {
+    let id = crate::chat::composer::ctx(s).project.map(|p| data::s(p, "id").to_owned())?;
+    let key = env::owner(s, &id);
+    Some((id, key))
+}
+
+/// Subscribes to the clone lists the banner and the jobs read, and drops the rest.
+fn sync_watch(s: &mut App) {
+    let mut wanted: BTreeSet<String> = s.ui.add_to_machine.jobs.iter().map(|j| j.target.clone()).collect();
+    wanted.extend(composer_project(s).map(|(_, key)| key));
+    let watched = std::mem::take(&mut s.ui.add_to_machine.watched);
+    for key in watched.difference(&wanted) {
+        if let Some(net) = env::net_of(s, key) {
             net.unwatch_resource(CLONES, json!({}));
         }
     }
-    s.ui.add_to_machine.jobs = jobs;
+    let mut now = BTreeSet::new();
+    for key in wanted {
+        if let Some(net) = env::net_of(s, &key) {
+            net.watch_resource(CLONES, json!({}));
+            now.insert(key);
+        }
+    }
+    s.ui.add_to_machine.watched = now;
+}
+
+fn poll_actions(s: &mut App) -> bool {
+    let mut changed = false;
+    for (id, title, removed) in std::mem::take(&mut s.ui.add_to_machine.actions) {
+        match take(s, id) {
+            None => s.ui.add_to_machine.actions.push((id, title, removed)),
+            Some(Err(e)) => {
+                crate::shell::palette::toast_error(s, title, Some(&message(&e)));
+                changed = true;
+            }
+            Some(Ok(_)) => {
+                if let Some(project) = removed
+                    && s.route == (Route::Home { project_id: Some(project) })
+                {
+                    s.navigate(Route::Home { project_id: None });
+                }
+                changed = true;
+            }
+        }
+    }
     changed
+}
+
+// The composer's clone banner.
+
+fn clone_of<'a>(s: &'a App, project: &str, key: &str) -> Option<&'a Value> {
+    let clones = env::source(s, key)?.net_ref()?.resource(CLONES, json!({}))?;
+    clones.as_array()?.iter().find(|c| c["projectId"] == project)
+}
+
+fn copying(s: &App, project: &str) -> bool {
+    s.ui.add_to_machine.jobs.iter().any(|j| j.project_id == project)
+}
+
+/// `projectCloneSendBlockReason`.
+fn block_reason(clone: Option<&Value>, copying: bool) -> Option<&'static str> {
+    match clone {
+        Some(c) if c["phase"] == "running" => Some("Cloning repository"),
+        Some(c) if c["phase"] != "done" => Some("Repository not cloned"),
+        _ => copying.then_some("Copying files"),
+    }
+}
+
+/// Why Send waits for the composer's project, if it does.
+pub fn send_block(s: &App) -> Option<&'static str> {
+    let (project, key) = composer_project(s)?;
+    block_reason(clone_of(s, &project, &key), copying(s, &project))
+}
+
+/// `projectCloneDisplayName`.
+fn display_name(clone: &Value) -> String {
+    if let Some(name) = clone["repository"]["nameWithOwner"].as_str() {
+        return name.to_owned();
+    }
+    let path = data::s(clone, "destinationPath");
+    path.split(['/', '\\']).filter(|p| !p.is_empty()).last().unwrap_or(path).to_owned()
+}
+
+/// `projectCloneProgressSummary`: stage, percent, then git's detail unless the clone stalled.
+fn progress_summary(clone: &Value) -> String {
+    let stage = match data::s(clone, "stage") {
+        "connecting" => "Connecting",
+        "counting" => "Counting objects",
+        "receiving" => "Receiving objects",
+        "resolving" => "Resolving deltas",
+        _ => "Checking out files",
+    };
+    let mut parts = vec![stage.to_owned()];
+    if let Some(percent) = clone["percent"].as_i64() {
+        parts.push(format!("{percent}%"));
+    }
+    if clone["stalled"] == true {
+        parts.push("Stalled".into());
+    } else if let Some(detail) = clone["detail"].as_str().filter(|d| !d.is_empty()) {
+        parts.push(detail.to_owned());
+    }
+    parts.join(" · ")
+}
+
+#[derive(Debug, PartialEq)]
+enum Tone {
+    Info,
+    Warning,
+    Error,
+}
+
+/// `projectCloneBannerItem`: a failed copy first, then a clone that hasn't finished.
+fn banner_item(clone: Option<&Value>, copy_failed: Option<&(String, Vec<String>)>) -> Option<(Tone, String, String)> {
+    if let Some((title, failures)) = copy_failed {
+        return Some((Tone::Error, title.clone(), failures.join("\n")));
+    }
+    let clone = clone.filter(|c| c["phase"] != "done")?;
+    let name = display_name(clone);
+    Some(match data::s(clone, "phase") {
+        "running" => (Tone::Info, format!("Cloning {name}"), progress_summary(clone)),
+        "cancelled" => (Tone::Warning, format!("Cancelled cloning {name}"), "Retry to bring in the repository.".into()),
+        _ => (Tone::Error, format!("Failed to clone {name}"), data::s(clone, "error").to_owned()),
+    })
+}
+
+fn clone_action(s: &mut App, key: &str, method: &str, project: &str, title: &'static str) {
+    if let Some(net) = env::net_of(s, key) {
+        let id = net.request(method, json!({"projectId": project}));
+        s.ui.add_to_machine.actions.push((id, title, None));
+    }
+}
+
+/// `useRemoveClonedProject`: unforced, so a thread made since the failed clone is never deleted.
+fn remove_project(s: &mut App, key: &str, project: &str) {
+    if let Some(net) = env::net_of(s, key) {
+        let id = net.dispatch(json!({"type": "project.delete", "commandId": s5_net::uuid(), "projectId": project}));
+        s.ui.add_to_machine.actions.push((id, "Failed to remove project", Some(project.to_owned())));
+    }
+}
+
+/// The banner docked on the composer's shoulder, as `mismatch_banner` is.
+pub fn banner(s: &App, t: &T) -> Option<El> {
+    use crate::theme::radius;
+    let (project, key) = composer_project(s)?;
+    let clone = clone_of(s, &project, &key);
+    let (tone, title, description) = banner_item(clone, s.ui.add_to_machine.copy_failed.get(&project))?;
+    let ink = match tone {
+        Tone::Info => t.c.info_foreground,
+        Tone::Warning => t.c.warning_foreground,
+        Tone::Error => t.c.destructive_foreground,
+    };
+    let button = |label: &str| kit::Button::new(label).variant("ghost").size("xs");
+    let mut actions: Vec<El> = Vec::new();
+    let failed_copy = s.ui.add_to_machine.copy_failed.contains_key(&project);
+    let (p, k) = (project.clone(), key.clone());
+    if failed_copy {
+        actions.push(
+            kit::icon_button(&icons::X, "Dismiss")
+                .size("icon-xs")
+                .on_press(move |s: &mut App| {
+                    s.ui.add_to_machine.copy_failed.remove(&p);
+                })
+                .build(t),
+        );
+    } else if tone == Tone::Info {
+        actions.push(button("Cancel").on_press(move |s: &mut App| clone_action(s, &k, "projectClone.cancel", &p, "Failed to cancel clone")).build(t));
+    } else {
+        let (p2, k2) = (p.clone(), k.clone());
+        actions.push(button("Remove project").on_press(move |s: &mut App| remove_project(s, &k2, &p2)).build(t));
+        actions.push(button("Retry").on_press(move |s: &mut App| clone_action(s, &k, "projectClone.retry", &p, "Failed to retry clone")).build(t));
+    }
+    let muted = t.c.muted_foreground;
+    Some(
+        row()
+            .key("project-clone-banner")
+            .w_full()
+            .corners([radius::XL2, radius::XL2, 0.0, 0.0])
+            .fill(if t.dark { t.c.surface_raised } else { t.c.card })
+            .border(1.0, if t.dark { rune::Color::WHITE.alpha(0.05) } else { rune::Color::BLACK.alpha(0.08) })
+            .pl(16.0)
+            .pr(8.0)
+            .pt(4.0)
+            .pb(17.0 + 4.0)
+            .gap(8.0)
+            .center_y()
+            .role("alert")
+            .child(icon(&icons::DOWNLOAD, 14.0).color(ink))
+            .child(text(title).font(theme::XS_MEDIUM).color(t.c.foreground).single_line().truncate().shrink().min_w(0.0))
+            .child(
+                text(description.replace('\n', "; "))
+                    .font(theme::TEXT_XS)
+                    .color(muted)
+                    .single_line()
+                    .truncate()
+                    .grow(1.0)
+                    .shrink()
+                    .min_w(0.0)
+                    .help(description),
+            )
+            .children(actions),
+    )
 }
 
 // The dialog.
@@ -743,7 +936,16 @@ fn scene_dialog(s: &mut App) {
     }
 }
 
-pub const SCENES: &[(&str, fn(&mut App))] = &[("add-to-machine", scene_dialog)];
+/// A project whose env files did not land on the new machine.
+fn scene_copy_failed(s: &mut App) {
+    crate::scene_clock(s);
+    let Some(id) = s.state().projects.first().map(|p| data::s(p, "id").to_owned()) else { return };
+    s.route = Route::Home { project_id: Some(id.clone()) };
+    let failures = vec![".env: Permission denied (os error 13)".to_owned(), "apps/api/.dev.vars: Permission denied (os error 13)".to_owned()];
+    s.ui.add_to_machine.copy_failed.insert(id, (copy_failure_title(failures.len(), "Build box"), failures));
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] = &[("add-to-machine", scene_dialog), ("project-copy-failed", scene_copy_failed)];
 
 #[cfg(test)]
 mod tests {
@@ -804,12 +1006,33 @@ mod tests {
     #[test]
     fn waits_for_the_clone_to_finish_or_disappear() {
         let list = |phase: &str| json!([{"projectId": "p", "phase": phase, "error": "auth failed"}]);
-        assert_eq!(clone_state(&Value::Null, "p", false), CloneState::Waiting { seen: false, failed: None });
-        assert_eq!(clone_state(&list("running"), "p", false), CloneState::Waiting { seen: true, failed: None });
-        assert_eq!(clone_state(&list("failed"), "p", true), CloneState::Waiting { seen: true, failed: Some("auth failed".into()) });
+        assert_eq!(clone_state(&Value::Null, "p", false), CloneState::Waiting { seen: false });
+        assert_eq!(clone_state(&list("running"), "p", false), CloneState::Waiting { seen: true });
+        assert_eq!(clone_state(&list("failed"), "p", true), CloneState::Waiting { seen: true });
         assert_eq!(clone_state(&list("done"), "p", true), CloneState::Done);
         assert_eq!(clone_state(&json!([]), "p", true), CloneState::Gone);
-        assert_eq!(clone_state(&json!([]), "p", false), CloneState::Waiting { seen: false, failed: None });
+        assert_eq!(clone_state(&json!([]), "p", false), CloneState::Waiting { seen: false });
+    }
+
+    #[test]
+    fn the_clone_banner_and_send_block_read_like_use_project_clone_banner() {
+        let running = json!({"projectId": "p", "phase": "running", "stage": "receiving", "percent": 42, "detail": "1.2 MiB/s", "repository": {"nameWithOwner": "acme/app"}, "destinationPath": "/w/app"});
+        assert_eq!(block_reason(Some(&running), true), Some("Cloning repository"));
+        assert_eq!(banner_item(Some(&running), None), Some((Tone::Info, "Cloning acme/app".into(), "Receiving objects · 42% · 1.2 MiB/s".into())));
+        let stalled = json!({"phase": "running", "stage": "counting", "percent": null, "detail": "old", "stalled": true, "repository": null, "destinationPath": "/w/widgets/"});
+        assert_eq!(banner_item(Some(&stalled), None).map(|b| (b.1, b.2)), Some(("Cloning widgets".into(), "Counting objects · Stalled".into())));
+        let failed = json!({"phase": "failed", "error": "auth failed", "repository": null, "destinationPath": "/w/app"});
+        assert_eq!(block_reason(Some(&failed), false), Some("Repository not cloned"));
+        assert_eq!(banner_item(Some(&failed), None), Some((Tone::Error, "Failed to clone app".into(), "auth failed".into())));
+        let cancelled = json!({"phase": "cancelled", "repository": null, "destinationPath": "C:\\w\\app"});
+        assert_eq!(banner_item(Some(&cancelled), None), Some((Tone::Warning, "Cancelled cloning app".into(), "Retry to bring in the repository.".into())));
+        let done = json!({"phase": "done"});
+        assert_eq!(block_reason(Some(&done), true), Some("Copying files"));
+        assert_eq!(block_reason(Some(&done), false), None);
+        assert_eq!(block_reason(None, false), None);
+        assert_eq!(banner_item(Some(&done), None), None);
+        let copy = ("Could not copy 2 files to Box".to_owned(), vec![".env: denied".to_owned(), ".envrc: denied".to_owned()]);
+        assert_eq!(banner_item(Some(&done), Some(&copy)), Some((Tone::Error, copy.0.clone(), ".env: denied\n.envrc: denied".into())));
     }
 
     fn app_with_remote() -> App {
