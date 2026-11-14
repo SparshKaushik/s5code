@@ -1418,6 +1418,15 @@ mod tests {
     }
 
     #[test]
+    fn the_previous_worktree_scene_offers_it_on_a_draft() {
+        let mut s = App::new();
+        let scene = crate::panel::SCENES.iter().find(|(name, _)| *name == "details-previous-worktree").unwrap();
+        (scene.1)(&mut s);
+        assert!(crate::chat::composer::ctx(&s).thread.is_none(), "a draft");
+        assert_eq!(super::previous_seed(&s), Some((Some("feat/login-redirect".into()), "/home/dev/.t3/worktrees/demo/feat-login".into())));
+    }
+
+    #[test]
     fn previous_worktree_is_the_projects_latest_live_thread_elsewhere() {
         let t = |project: &str, path: &str, branch: &str, at: &str, archived: bool| {
             json!({"projectId": project, "worktreePath": path, "branch": branch, "updatedAt": at, "archivedAt": if archived { json!(at) } else { Value::Null }})
