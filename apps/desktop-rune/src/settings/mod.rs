@@ -12,7 +12,7 @@ mod background;
 mod balance;
 pub mod client;
 mod connection_diagnosis;
-mod connections;
+pub(crate) mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;
@@ -1750,10 +1750,10 @@ mod reveal_tests {
     }
 
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
-    const UNBUILT: &[&str] = &["Cursor account usage", "Project defaults and overrides"];
-    /// Drawn only in other states: the desktop CLI row, the managed host's local environment, and
-    /// Linked environments behind its Labs flag.
-    const HIDDEN_HERE: &[&str] = &["Linked environments", "Local environment", "t3 command"];
+    const UNBUILT: &[&str] = &["Project defaults and overrides"];
+    /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
+    /// Linked environments behind its Labs flag, and Cursor's keychain usage on macOS.
+    const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {

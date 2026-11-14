@@ -1,5 +1,5 @@
 use super::find::Marks;
-use super::{copy_button, language_icons, md_links};
+use super::{copy_button, language_icons, md_links, media};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
 use rune::{El, col, el, icon, row};
@@ -55,7 +55,8 @@ fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize
     marks.map_or_else(Vec::new, |m| m.markdown(src))
 }
 
-fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
+/// `key` names this run of prose within its message, for the blocks' own keys.
+fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
     let mut out = col().w_full().gap(10.4);
     let parents = md_links::parent_suffixes(source);
     for (index, block) in source
@@ -74,8 +75,12 @@ fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
             .nth(1)
             .is_some_and(|line| line.contains("---") && line.contains('|'));
         // Find counts matches in rendered Markdown, so a marked block keeps rune_kit's rendering.
-        let chips = if is_table || marks.is_some() { None } else { md_links::inline_block(app, block, t, ink, theme::TEXT_SM.lh(22.75), &parents) };
-        let content = if let Some(chips) = chips {
+        let own = !is_table && marks.is_none();
+        let pictures = if own { media::block(app, block, t) } else { None };
+        let chips = if own && pictures.is_none() { md_links::inline_block(app, block, format!("md-block-{key}-{index}"), t, ink, theme::TEXT_SM.lh(22.75), &parents) } else { None };
+        let content = if let Some(pictures) = pictures {
+            pictures
+        } else if let Some(chips) = chips {
             chips
         } else if is_table {
             table(app, block, t, marks, ink)
@@ -201,7 +206,7 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, copied, t.code.to_bits());
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, copied, t.code.to_bits(), media::signature(app, source));
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink))
 }
 
@@ -262,7 +267,7 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: r
             continue;
         };
         if i > start {
-            out = out.child(prose(app, &lines[start..i].concat(), t, marks, ink));
+            out = out.child(prose(app, &lines[start..i].concat(), &format!("{id}-{start}"), t, marks, ink));
         }
         let language = line
             .trim_start_matches(marker)
@@ -347,7 +352,7 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: r
         start = i;
     }
     if start < lines.len() {
-        out = out.child(prose(app, &lines[start..].concat(), t, marks, ink));
+        out = out.child(prose(app, &lines[start..].concat(), &format!("{id}-{start}"), t, marks, ink));
     }
     if source.is_empty() {
         out = out.child(icon(&icons::ELLIPSIS, 16.0).color(t.c.muted_foreground));

@@ -331,7 +331,7 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     let writable = can_write_on(s, e);
     let stacked = e["stack"].is_object();
     let (term, number) = (term(e), &e["number"]);
-    let mut group = row().key(format!("pr-speed-{key}")).shrink().gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {term} #{number}"));
+    let mut group = row().key(format!("pr-speed-{key}")).gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {term} #{number}"));
     for action in actions {
         let (label, glyph): (&str, &'static rune::Icon) = match action {
             "close" => ("Close", &i::GIT_PULL_REQUEST_CLOSED),
@@ -594,16 +594,19 @@ fn advance(s: &mut App, mut a: Acting, reply: Result<Value, Value>) {
 }
 
 fn run_merge(s: &mut App, a: Acting, detail: &Value) {
-    let settings = crate::settings::server_settings(s);
-    let project = settings["projectSettingsOverrides"][field(&a.entry, "projectId")]["pullRequestMergeMethod"].as_str().or_else(|| settings["pullRequestMergeMethod"].as_str());
-    let method = merge_method(detail, project, s.ui.pages.detail.merge_method.as_deref());
-    match method {
+    match row_merge_method(s, &a.entry, detail) {
         Some(method) => {
             let payload = action_payload(&a.entry, "merge", Some(&method));
             send(s, a, Step::Run, "pullRequests.runAction", payload);
         }
         None => failed(s, &a, "No merge method is available for this repository."),
     }
+}
+
+/// The speed action's method: no pick of its own, so the project's default, then the last used.
+fn row_merge_method(s: &App, entry: &Value, detail: &Value) -> Option<String> {
+    let (project, last) = super::pr_actions::merge_defaults(s, field(entry, "projectId"));
+    merge_method(detail, project, last)
 }
 
 /// resolvePullRequestMergeMethod over the methods the repository allows; None when it allows none.
@@ -1343,6 +1346,11 @@ mod tests {
         assert_eq!(merge_method(&detail, Some("merge"), Some("rebase")).as_deref(), Some("rebase"));
         assert_eq!(merge_method(&detail, None, None).as_deref(), Some("squash"));
         assert_eq!(merge_method(&json!({"capabilities": {"mergeMethods": ["merge"]}, "mergeCapabilities": {}}), None, None), None);
+
+        let mut s = App::new();
+        s.client_settings.values.insert(super::super::pr_actions::LAST_MERGE_METHOD.into(), json!("rebase"));
+        s.ui.pages.detail.merge_method = Some("squash".into());
+        assert_eq!(row_merge_method(&s, &entry(json!({"projectId": "p"})), &detail).as_deref(), Some("rebase"), "the last one used, not the open panel's pick");
     }
 
     #[test]

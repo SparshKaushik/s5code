@@ -101,13 +101,69 @@ pub fn check(path: &str) -> Result<u64, String> {
     Ok(size)
 }
 
-/// Takes `paths` into `attachments`, keeping the ones that can be sent; the last refusal is returned.
+/// PROVIDER_SEND_TURN_MAX_ATTACHMENTS.
+pub const MAX_ATTACHMENTS: usize = 100;
+
+/// A queued file gone from disk since it was added or stashed (composerFileNeedsReattach).
+pub fn needs_reattach(path: &str) -> bool {
+    !Path::new(path).exists()
+}
+
+/// Where a queued file stands (ComposerAttachmentFileList): ready at its size, gone and waiting
+/// to be attached again, or present but unsendable.
+#[derive(Debug, PartialEq)]
+pub enum Status {
+    Ready(u64),
+    Reattach,
+    Remove(String),
+}
+
+pub fn status(path: &str) -> Status {
+    if needs_reattach(path) {
+        return Status::Reattach;
+    }
+    match check(path) {
+        Ok(size) => Status::Ready(size),
+        Err(e) => Status::Remove(e),
+    }
+}
+
+/// The note beside a queued file: its size, "Attach again" or "Remove to send".
+pub fn status_label(status: &Status) -> String {
+    match status {
+        Status::Ready(size) => format_size(*size),
+        Status::Reattach => "Attach again".to_owned(),
+        Status::Remove(_) => "Remove to send".to_owned(),
+    }
+}
+
+/// Why Send waits on the draft's files (attachmentBlockReason): some are gone from disk.
+pub fn block_reason(paths: &[String]) -> Option<&'static str> {
+    match paths.iter().filter(|p| needs_reattach(p)).count() {
+        0 => None,
+        1 => Some("Attach the interrupted file again or remove it"),
+        _ => Some("Attach the interrupted files again or remove them"),
+    }
+}
+
+/// Takes `paths` into `attachments`, keeping the ones that can be sent; the last refusal is
+/// returned. A pick named like a file gone from disk takes that file's place.
 pub fn intake(attachments: &mut Vec<String>, paths: impl IntoIterator<Item = String>) -> Option<String> {
     let mut error = None;
     for path in paths {
-        match check(&path) {
-            Ok(_) => attachments.push(path),
-            Err(e) => error = Some(e),
+        let name = file_name(&path);
+        let marker = attachments.iter().position(|a| needs_reattach(a) && file_name(a) == name);
+        if marker.is_none() && attachments.len() >= MAX_ATTACHMENTS {
+            error = Some(format!("You can attach up to {MAX_ATTACHMENTS} files per message."));
+            continue;
+        }
+        if let Err(e) = check(&path) {
+            error = Some(e);
+            continue;
+        }
+        match marker {
+            Some(at) => attachments[at] = path,
+            None => attachments.push(path),
         }
     }
     error
@@ -296,6 +352,31 @@ mod tests {
         let error = intake(&mut queued, [notes.display().to_string(), empty.display().to_string()]);
         assert_eq!(queued, [notes.display().to_string()]);
         assert_eq!(error.as_deref(), Some("'empty.txt' is empty or could not be read."));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hundred_files_fill_a_message_and_a_missing_file_is_attached_again() {
+        let dir = std::env::temp_dir().join(format!("s5-upload-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "hi").unwrap();
+        let notes = notes.display().to_string();
+        let gone = "/nonexistent/s5/notes.txt".to_owned();
+        let mut queued = vec![notes.clone(); MAX_ATTACHMENTS - 1];
+        queued.push(gone.clone());
+        assert_eq!(status(&gone), Status::Reattach);
+        assert_eq!(status_label(&status(&gone)), "Attach again");
+        assert_eq!(status_label(&Status::Remove("x".into())), "Remove to send");
+        assert_eq!(block_reason(&queued), Some("Attach the interrupted file again or remove it"));
+        assert_eq!(block_reason(&[gone.clone(), gone.clone()]), Some("Attach the interrupted files again or remove them"));
+        // Full, but the pick replaces the missing file of the same name.
+        assert_eq!(intake(&mut queued, [notes.clone()]), None);
+        assert_eq!(queued.len(), MAX_ATTACHMENTS);
+        assert_eq!(queued[MAX_ATTACHMENTS - 1], notes);
+        assert_eq!(block_reason(&queued), None);
+        assert_eq!(intake(&mut queued, [notes.clone()]).as_deref(), Some("You can attach up to 100 files per message."));
+        assert_eq!(queued.len(), MAX_ATTACHMENTS);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -1,13 +1,15 @@
 //! The banners around the chat lane. Pinned on top (ChatBannerLane): ProviderStatusBanner, then
-//! the thread's error banner. Above the composer (ComposerBannerStack): an offline environment,
-//! a server update running or failed (useSystemComposerBanners), the usage-limit recovery notice (UsageLimitRecoveryBanner) and approvals waiting in child threads.
+//! the thread's error banner. For the composer's notice stack (`composer::banners`): an offline
+//! environment, a server update running or failed (useSystemComposerBanners) and the usage-limit
+//! recovery notice (UsageLimitRecoveryBanner). Above the composer: approvals waiting in child
+//! threads (ChildThreadApprovals).
 
 use std::collections::HashMap;
 
-use rune::{Color, Cx, El, col, icon, row, text};
+use rune::{Cx, El, col, icon, row, text};
 use serde_json::{Value, json};
 
-use crate::chat::composer;
+use crate::chat::composer::{self, banners::{Item, Variant}};
 use crate::chat::details::Lane;
 use crate::data::{Zone, iso_ms, s};
 use crate::kit::button::{Button, icon_button};
@@ -307,6 +309,11 @@ fn upcoming(iso: &str, now: i64, zone: Zone, hour12: bool) -> String {
     }
 }
 
+/// formatUpcomingTimestamp in the app's zone and clock.
+pub(crate) fn upcoming_label(app: &App, iso: &str) -> String {
+    upcoming(iso, app.now_ms, Zone::Local, super::actions::hour12(app))
+}
+
 fn shell_row<'a>(app: &'a App, thread: &str) -> Option<&'a Value> {
     app.state().threads.iter().find(|r| s(r, "id") == thread)
 }
@@ -327,7 +334,8 @@ fn toggle_recovery(app: &mut App, thread: &str, action: Action) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let Some(net) = app.src.net() else { return false };
+    let feedback = composer::banners::poll(app);
+    let Some(net) = app.src.net() else { return feedback };
     let ui = &mut app.ui.chat.timeline.banners;
     let mut changed = false;
     let mut failures = Vec::new();
@@ -351,30 +359,10 @@ pub fn poll(app: &mut App) -> bool {
         let description = crate::shell::palette::error_message(&error, "An error occurred.");
         crate::shell::palette::toast_error(app, title, Some(&description));
     }
-    changed
+    changed | feedback
 }
 
-/// ComposerBanner: an attached notice card with a tinted outline.
-fn notice(t: &T, tone: Color, glyph: &'static rune::Icon, title: String, description: Option<String>, actions: Vec<El>) -> El {
-    row()
-        .w_full()
-        .min_h(40.0)
-        .px(12.0)
-        .py(6.0)
-        .gap(8.0)
-        .center_y()
-        .radius(radius::XL)
-        .fill(if t.dark { t.c.card.alpha_mul(0.96) } else { t.c.card })
-        .border(1.0, tone.alpha_mul(0.3))
-        .role("alert")
-        .child(icon(glyph, 16.0).color(tone))
-        .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0))
-        .children(description.map(|d| text(d.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).truncate().grow(1.0).shrink().min_w(0.0).help(d)))
-        .child(rune::spacer())
-        .children(actions)
-}
-
-fn offline(app: &App, t: &T) -> Option<El> {
+fn offline(app: &App, t: &T) -> Option<Item> {
     let s5_net::Conn::Closed(reason) = &app.state().conn else { return None };
     // A restarting server drops the connection on purpose; the update notice explains it.
     if matches!(crate::chat::server_update::status(app), crate::chat::server_update::Status::Running { .. }) {
@@ -390,13 +378,16 @@ fn offline(app: &App, t: &T) -> Option<El> {
             }
         })
         .build(t);
-    let reason = Some(reason.clone()).filter(|r| !r.trim().is_empty());
-    Some(notice(t, t.c.warning, &icons::WIFI_OFF, format!("{label} is offline"), reason, vec![reconnect]))
+    let mut item = Item::new(format!("environment-unavailable:{}", app.ui.env.active), Variant::Warning, &icons::WIFI_OFF, format!("{label} is offline"));
+    item.environment = true;
+    item.description = Some(reason.clone()).filter(|r| !r.trim().is_empty());
+    item.actions.push(reconnect);
+    Some(item)
 }
 
 /// The server update notice: only one running or failed, since an available update lives in
 /// Settings › About. Retry shows while the server is still short of the version.
-fn server_update(app: &App, t: &T) -> Option<El> {
+fn server_update(app: &App, t: &T) -> Option<Item> {
     use crate::chat::server_update::{self as update, Status};
     if update::dismissed(app) {
         return None;
@@ -407,26 +398,34 @@ fn server_update(app: &App, t: &T) -> Option<El> {
         Status::Failed { message, target, .. } => (true, message.clone(), target.clone()),
     };
     let title = format!("{} server", if failed { "Could not update" } else { "Updating" });
-    let mut actions = Vec::new();
+    let (variant, glyph) = if failed { (Variant::Error, &icons::CIRCLE_ALERT) } else { (Variant::Default, &icons::DOWNLOAD) };
+    let mut item = Item::new(format!("server-version:{}", app.ui.env.active), variant, glyph, title);
+    item.environment = true;
+    item.description = Some(description);
     if failed {
         let current = app.state().config.as_ref().map(|c| s(&c["environment"], "serverVersion").to_owned()).unwrap_or_default();
         if current != target {
-            actions.push(Button::new("Retry").variant("ghost").size("xs").on_press(move |app: &mut App| update::start(app, &target)).build(t));
+            item.actions.push(Button::new("Retry").variant("ghost").size("xs").on_press(move |app: &mut App| update::start(app, &target)).build(t));
         }
-        actions.push(icon_button(&icons::X, "Dismiss update notice").size("icon-xs").on_press(update::dismiss).build(t));
+        item.dismiss = Some(icon_button(&icons::X, "Dismiss update notice").variant("ghost").size("icon-xs").on_press(update::dismiss).build(t));
     }
-    let (tone, glyph) = if failed { (t.c.error, &icons::CIRCLE_ALERT) } else { (t.c.muted_foreground, &icons::DOWNLOAD) };
-    Some(notice(t, tone, glyph, title, Some(description), actions))
+    Some(item)
 }
 
-fn usage_limit(app: &App, t: &T) -> Option<El> {
+/// useSystemComposerBanners: the machine offline, then its server update.
+pub(crate) fn system_items(app: &App, t: &T) -> Vec<Item> {
+    [offline(app, t), server_update(app, t)].into_iter().flatten().collect()
+}
+
+/// usageLimitRecoveryBannerItem.
+pub(crate) fn recovery_item(app: &App, t: &T) -> Option<Item> {
     let Route::Thread(thread) = app.frame_route() else { return None };
     let limit = limit(shell_row(app, thread)?, app.now_ms)?;
-    let description = match &limit.reset {
-        Some(reset) => format!("Resets {}", upcoming(reset, app.now_ms, Zone::Local, super::actions::hour12(app))),
+    let mut item = Item::new(format!("usage-limit-recovery:{}", limit.run), Variant::Warning, &icons::GAUGE, "Usage limit reached");
+    item.description = Some(match &limit.reset {
+        Some(reset) => format!("Resets {}", upcoming_label(app, reset)),
         None => "Reset time unavailable; retry manually".to_owned(),
-    };
-    let mut actions = Vec::new();
+    });
     if limit.can_schedule {
         let pending = app.ui.chat.timeline.banners.saving.contains_key(thread.as_str());
         let button = |label: &str, disabled: bool, action: Action| {
@@ -438,28 +437,24 @@ fn usage_limit(app: &App, t: &T) -> Option<El> {
                 .on_press(move |app: &mut App| toggle_recovery(app, &thread, action))
                 .build(t)
         };
-        actions.push(button(if limit.scheduled { "Cancel auto-resume" } else { "Resume at reset" }, false, Action::Resume));
-        actions.push(button(if limit.snoozed { "Wake now" } else { "Snooze until reset" }, !limit.snoozed && limit.reset_passed, Action::Snooze));
+        item.actions.push(button(if limit.scheduled { "Cancel auto-resume" } else { "Resume at reset" }, false, Action::Resume));
+        item.actions.push(button(if limit.snoozed { "Wake now" } else { "Snooze until reset" }, !limit.snoozed && limit.reset_passed, Action::Snooze));
     }
-    Some(notice(t, t.c.warning, &icons::GAUGE, "Usage limit reached".to_owned(), Some(description), actions))
+    Some(item)
 }
 
-/// ComposerBannerStack and ChildThreadApprovals, pinned just above the composer: the machine
-/// first, then what needs the user.
+/// ChildThreadApprovals, pinned just above the composer.
 pub fn stack(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
-    let cards: Vec<El> = [offline(app, t), server_update(app, t), usage_limit(app, t), super::child_approvals::view(app, t)].into_iter().flatten().collect();
-    if cards.is_empty() {
-        return None;
-    }
+    let approvals = super::child_approvals::view(app, t)?;
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     Some(
         col()
             .key("composer-banners")
-            .pin(Some(lane.left), None, None, Some(composer::BOTTOM + composer_h + 8.0))
+            .pin(Some(lane.left), None, None, Some(composer::bottom_inset(app, cx) + composer_h + 8.0))
             .w(lane.width)
             .px(22.0)
             .gap(8.0)
-            .children(cards),
+            .child(approvals),
     )
 }
 
