@@ -50,6 +50,8 @@ pub struct Ui {
     pub hovered: Option<String>,
     /// The connection's session (`GET /api/auth/session`), read for its write grant.
     pub session: Read,
+    /// The other environments' sessions, by environment, for their rows' write grant.
+    pub sessions: HashMap<String, Read>,
     sweep: Option<Sweep>,
     batches: Vec<Batch>,
 }
@@ -90,7 +92,7 @@ enum Step {
 }
 
 #[derive(Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Stack,
     Checks,
     Breakdown,
@@ -100,9 +102,9 @@ fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.pull_requests.row
 }
 
-/// `host:repository#number`, as pullRequestEntryKey.
+/// `environment:host:repository#number`, as pullRequestEntryKey.
 pub fn row_key(e: &Value) -> String {
-    format!("{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
+    super::pull_requests::key(e)
 }
 
 fn reads(u: &mut Ui, kind: Kind) -> &mut HashMap<String, Read> {
@@ -114,7 +116,7 @@ fn reads(u: &mut Ui, kind: Kind) -> &mut HashMap<String, Read> {
 }
 
 /// Reads one row's answer unless a fresh one is held or already on its way.
-fn want(s: &mut App, kind: Kind, e: &Value) {
+pub(super) fn want(s: &mut App, kind: Kind, e: &Value) {
     let key = row_key(e);
     let now = s.now_ms;
     let fresh = reads(ui(s), kind).get(&key).is_some_and(|r| r.pending.is_some() || (r.data.is_some() && r.error.is_none() && now - r.at < STALE_MS));
@@ -126,7 +128,7 @@ fn want(s: &mut App, kind: Kind, e: &Value) {
         Kind::Checks => "pullRequests.detail",
         Kind::Breakdown => "pullRequests.changeBreakdown",
     };
-    match s.src.net() {
+    match super::pull_requests::net_for(s, e) {
         Some(net) => {
             let id = net.request(method, reference(e));
             reads(ui(s), kind).entry(key).or_default().pending = Some(id);
@@ -202,6 +204,37 @@ pub fn poll(s: &mut App) -> bool {
         advance(s, a, reply);
         changed = true;
     }
+    let active = s.ui.env.active.clone();
+    for env in super::pull_requests::capable(s).into_iter().filter(|env| *env != active) {
+        changed |= poll_session(s, &env, now);
+    }
+    changed
+}
+
+/// Another environment's session, read like the one on screen's for its rows' write grant.
+fn poll_session(s: &mut App, env: &str, now: i64) -> bool {
+    let mut changed = false;
+    let pending = ui(s).sessions.get(env).and_then(|r| r.pending);
+    if let Some(id) = pending
+        && let Some(reply) = super::pull_requests::take(s, env, id)
+    {
+        let r = ui(s).sessions.entry(env.to_string()).or_default();
+        r.pending = None;
+        r.at = now;
+        match reply {
+            Ok(v) => {
+                r.data = Some(v);
+                r.error = None;
+            }
+            Err(e) => r.error = Some(super::pull_requests::error_text(&e, "")),
+        }
+        changed = true;
+    }
+    let due = ui(s).sessions.get(env).is_none_or(|r| r.pending.is_none() && (r.at == 0 || now - r.at >= STALE_MS));
+    if due && let Some(net) = crate::env::net_of(s, env) {
+        let id = net.http_request("GET", "/api/auth/session", json!({}));
+        ui(s).sessions.entry(env.to_string()).or_default().pending = Some(id);
+    }
     changed
 }
 
@@ -222,7 +255,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 // ---- quick actions ----------------------------------------------------------------------
 
 /// The host's word for a change request (ChangeRequestTerminology.singular).
-fn term(e: &Value) -> &'static str {
+pub(super) fn term(e: &Value) -> &'static str {
     match field(e, "provider") {
         "gitlab" => "merge request",
         "github" | "gitcafe" | "forgejo" | "bitbucket" | "azure-devops" => "pull request",
@@ -231,7 +264,7 @@ fn term(e: &Value) -> &'static str {
 }
 
 /// capitalizeTerm.
-fn capitalized(term: &str) -> String {
+pub(super) fn capitalized(term: &str) -> String {
     let mut chars = term.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
@@ -258,34 +291,7 @@ fn quick_actions(e: &Value, host: &[String]) -> Vec<&'static str> {
     for_state.iter().copied().filter(|a| host.iter().any(|h| h == a)).collect()
 }
 
-/// legacyParents: the scope an older credential holds in place of a newer one.
-fn legacy_parent(scope: &str) -> Option<&'static str> {
-    match scope {
-        "filesystem:read" | "diagnostics:read" => Some("orchestration:read"),
-        "settings:write" | "providers:manage" | "environment:maintain" | "preview:operate" | "source-control:write" | "filesystem:write" => Some("orchestration:operate"),
-        "terminal:read" => Some("terminal:operate"),
-        _ => None,
-    }
-}
-
-/// sessionGrantsScope: the session's permissions when it lists them, else its scopes, where a
-/// legacy credential's parent scope still grants the newer one.
-pub(super) fn grants(session: &Value, scope: &str) -> bool {
-    let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|v| v == scope));
-    if session["authenticated"] != true {
-        return false;
-    }
-    if session.get("permissions").is_some_and(|p| !p.is_null()) {
-        return has(&session["permissions"], scope);
-    }
-    if has(&session["scopes"], scope) {
-        return true;
-    }
-    if session["auth"].get("serverUpdateScope").is_some() {
-        return false;
-    }
-    legacy_parent(scope).is_some_and(|parent| has(&session["scopes"], parent))
-}
+pub(super) use crate::settings::session_grants as grants;
 
 /// runAction's permissionAtom: whether this connection may act on pull requests. Unknown until the
 /// session answers; the recorded scenes may.
@@ -295,6 +301,16 @@ fn can_write(s: &App) -> bool {
         (_, Some(_)) => false,
         (Some(v), None) => grants(v, SOURCE_CONTROL_WRITE),
         (None, None) => !matches!(s.src, crate::data::Source::Live(_)),
+    }
+}
+
+/// `can_write` for the environment that listed `e`: the destination's own grant.
+fn can_write_on(s: &App, e: &Value) -> bool {
+    let Some(env) = e[crate::env::TAG].as_str().filter(|env| *env != s.ui.env.active) else { return can_write(s) };
+    match s.ui.pages.pull_requests.row.sessions.get(env).map(|r| (&r.data, &r.error)) {
+        Some((_, Some(_))) => false,
+        Some((Some(v), None)) => grants(v, SOURCE_CONTROL_WRITE),
+        _ => !crate::env::source(s, env).is_some_and(|src| matches!(src, crate::data::Source::Live(_))),
     }
 }
 
@@ -312,7 +328,7 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     if actions.is_empty() || !(u.speed || busy || origin) {
         return None;
     }
-    let writable = can_write(s);
+    let writable = can_write_on(s, e);
     let stacked = e["stack"].is_object();
     let (term, number) = (term(e), &e["number"]);
     let mut group = row().key(format!("pr-speed-{key}")).shrink().gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {term} #{number}"));
@@ -474,8 +490,8 @@ fn close_batch(s: &mut App, entries: Vec<Value>) {
         return;
     }
     let mut sent = Vec::new();
-    if let Some(net) = s.src.net() {
-        for e in batch {
+    for e in batch {
+        if let Some(net) = super::pull_requests::net_for(s, &e) {
             let id = net.request("pullRequests.runAction", action_payload(&e, "close", None));
             sent.push(Acting { key: row_key(&e), entry: e, action: "close", step: Step::Run, id, batch: None });
         }
@@ -540,7 +556,7 @@ fn perform(s: &mut App, e: &Value, action: &'static str) {
 }
 
 fn send(s: &mut App, mut a: Acting, step: Step, method: &str, payload: Value) {
-    match s.src.net() {
+    match super::pull_requests::net_for(s, &a.entry) {
         Some(net) => {
             a.id = net.request(method, payload);
             a.step = step;
@@ -591,7 +607,7 @@ fn run_merge(s: &mut App, a: Acting, detail: &Value) {
 }
 
 /// resolvePullRequestMergeMethod over the methods the repository allows; None when it allows none.
-fn merge_method(detail: &Value, project: Option<&str>, last: Option<&str>) -> Option<String> {
+pub(super) fn merge_method(detail: &Value, project: Option<&str>, last: Option<&str>) -> Option<String> {
     let caps = &detail["mergeCapabilities"];
     let allowed: Vec<&str> = detail["capabilities"]["mergeMethods"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| caps[*m] == true).collect();
     [project, last].into_iter().flatten().find(|m| allowed.contains(m)).or(allowed.first().copied()).map(str::to_string)
@@ -634,7 +650,7 @@ fn failure_text(action: &str, term: &str) -> (String, &'static str) {
 
 /// readableFailure: the host's own words without the operation prefix, or the hint when they
 /// are only tool noise.
-fn readable(raw: &str, hint: &str) -> String {
+pub(super) fn readable(raw: &str, hint: &str) -> String {
     let detail = without_operation(raw).trim();
     if detail.is_empty() || noise(detail) {
         return hint.to_string();
@@ -852,7 +868,7 @@ fn select_layer(s: &mut App, e: &Value, layer: &Value) {
     let number = &layer["number"];
     let list = &mut s.ui.pages.pull_requests;
     let listed = list.result.as_ref().and_then(|r| {
-        r["entries"].as_array()?.iter().find(|x| field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())
+        r["entries"].as_array()?.iter().find(|x| x[crate::env::TAG] == e[crate::env::TAG] && field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())
     });
     if let Some(url) = listed {
         list.selected = Some(url);
@@ -874,7 +890,7 @@ fn layer_entry(e: &Value, layer: &Value, url: String) -> Value {
     let title = layer["title"].as_str().filter(|v| !v.is_empty()).unwrap_or(field(layer, "headBranch"));
     let draft = layer["isDraft"] == true;
     let mut entry = json!({"url": url, "number": layer["number"], "title": title, "state": layer["state"], "isDraft": draft, "headBranch": layer["headBranch"]});
-    for key in ["provider", "host", "projectId", "projectTitle", "repository", "environmentId"] {
+    for key in ["provider", "host", "projectId", "projectTitle", "repository", "environmentId", crate::env::TAG] {
         if !e[key].is_null() {
             entry[key] = e[key].clone();
         }
@@ -1142,7 +1158,7 @@ pub fn provider_mark(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
 }
 
 /// The source control definition's label for a provider kind.
-fn provider_name(kind: &str) -> &'static str {
+pub(super) fn provider_name(kind: &str) -> &'static str {
     match kind {
         "github" => "GitHub",
         "gitlab" => "GitLab",
@@ -1376,14 +1392,6 @@ mod tests {
     #[test]
     fn quick_actions_need_the_source_control_write_grant() {
         let w = SOURCE_CONTROL_WRITE;
-        assert!(grants(&json!({"authenticated": true, "scopes": [w]}), w));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {}}), w));
-        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "server:update"}}), w));
-        assert!(!grants(&json!({"authenticated": true, "scopes": [w], "permissions": ["orchestration:read"]}), w));
-        assert!(!grants(&json!({"authenticated": false, "scopes": [w]}), w));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"]}), "settings:write"));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["terminal:operate"]}), "terminal:read"));
-        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:read"]}), "settings:write"));
         let mut s = App::new();
         assert!(can_write(&s), "the recorded scenes may act");
         s.ui.pages.pull_requests.row.session.data = Some(json!({"authenticated": true, "scopes": ["orchestration:read"]}));
@@ -1392,6 +1400,17 @@ mod tests {
         assert!(can_write(&s));
         s.ui.pages.pull_requests.row.session.error = Some("offline".into());
         assert!(!can_write(&s));
+        // A row another environment listed takes that environment's own grant.
+        let local = entry(json!({}));
+        let mut remote = entry(json!({}));
+        remote[crate::env::TAG] = json!("studio");
+        assert!(!can_write_on(&s, &local) && can_write_on(&s, &remote), "an environment not connected yet reads like the scenes");
+        s.ui.pages.pull_requests.row.sessions.insert("studio".into(), Read { data: Some(json!({"authenticated": true, "permissions": ["orchestration:read"]})), ..Read::default() });
+        assert!(!can_write_on(&s, &remote));
+        s.ui.pages.pull_requests.row.session = Read::default();
+        s.ui.pages.pull_requests.row.sessions.insert("studio".into(), Read { data: Some(json!({"authenticated": true, "permissions": [w]})), ..Read::default() });
+        assert!(can_write_on(&s, &local) && can_write_on(&s, &remote));
+        assert_ne!(row_key(&local), row_key(&remote), "the same pull request listed by two environments is two rows");
     }
 
     #[test]

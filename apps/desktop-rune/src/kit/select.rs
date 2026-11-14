@@ -32,6 +32,7 @@ pub struct Select {
     toggle: Option<Box<dyn FnOnce(El) -> El>>,
     choose: Option<Choose>,
     close: Option<Box<dyn FnOnce(Menu) -> Menu>>,
+    tips: Vec<String>,
 }
 impl Select {
     pub fn new<S: AsRef<str>>(key: impl Into<String>, options: &[S]) -> Self {
@@ -54,7 +55,13 @@ impl Select {
             toggle: None,
             choose: None,
             close: None,
+            tips: vec![],
         }
+    }
+    /// Per-option native titles, in option order (web `SelectItem title`).
+    pub fn tips<S: AsRef<str>>(mut self, tips: &[S]) -> Self {
+        self.tips = tips.iter().map(|v| v.as_ref().into()).collect();
+        self
     }
     pub fn disabled_option(mut self, value: impl Into<String>) -> Self {
         self.disabled_options.push(value.into());
@@ -230,7 +237,7 @@ impl Select {
                 Placement::BottomStart
             })
             .open(self.open && !disabled);
-        for option in self.options {
+        for (index, option) in self.options.into_iter().enumerate() {
             let mut item = MenuItem::new(&option)
                 .option(self.current.as_ref() == Some(&option))
                 .disabled(self.disabled_options.contains(&option));
@@ -238,6 +245,9 @@ impl Select {
                 let action = choose(&option);
                 // The shared row renderer drops this transformation for disabled rows.
                 item = item.transform(action);
+            }
+            if let Some(tip) = self.tips.get(index).cloned() {
+                item = item.transform(Box::new(move |e| e.help(tip)));
             }
             menu = menu.item(item);
         }

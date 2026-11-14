@@ -2,6 +2,8 @@
 //! `/usage`, a route modal over the frame like settings.
 
 pub mod avatars;
+pub mod pr_actions;
+pub mod pr_conversation;
 pub mod pr_detail;
 pub mod pr_filters;
 pub mod pr_row;
@@ -231,7 +233,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_row::scene(s, 2468, "sweep");
         let u = &mut s.ui.pages.pull_requests;
         u.query.replace_text("login");
-        u.pending = Some((0, false));
+        u.pending = vec![(String::new(), 0)];
     }),
     ("pull-requests-row-actions-read-only", |s| {
         open_prs(s, |_| {});
@@ -341,6 +343,55 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.pages.detail.checks_open = true;
         s.ui.pages.detail.description_closed = true;
     }),
+    ("pull-requests-detail-comments-filtered", |s| {
+        open_detail(s, 0, |u| {
+            u.description_closed = true;
+            let Some(a) = &mut u.activity else { return };
+            a["commentsTruncated"] = json!(true);
+            if let Some(list) = a["comments"].as_array_mut() {
+                for n in 0..12 {
+                    let at = format!("2026-11-06T07:{}:00.000Z", 21 + n);
+                    let note = json!({"id": format!("note-{n}"), "kind": "issue-comment", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": format!("Follow-up note {}.", n + 1), "createdAt": at, "url": null, "path": null, "reviewState": null});
+                    list.insert(1 + n, note);
+                }
+            }
+            if let Some(threads) = a["reviewThreads"].as_array_mut() {
+                let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+                threads.push(json!({"id": "t-resolved", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": false, "comments": [{"id": "tr1", "author": julius, "body": "Nit: rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": null}]}));
+            }
+        })
+    }),
+    ("pull-requests-detail-reviewers-verdicts", |s| {
+        open_detail(s, 0, |u| {
+            let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+            if let Some(d) = &mut u.detail {
+                d["reviewers"] = json!([julius.clone(), {"login": "sam", "name": null, "avatarUrl": null}]);
+                d["labels"] = json!([]);
+                d["capabilities"]["labels"] = json!(false);
+            }
+            if let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) {
+                let review = |id: &str, author: Value, state: &str, at: &str| json!({"id": id, "kind": "review", "author": author, "body": "", "createdAt": at, "url": null, "path": null, "reviewState": state});
+                list.push(review("v1", julius.clone(), "CHANGES_REQUESTED", "2026-11-06T09:20:00.000Z"));
+                list.push(review("v2", json!({"login": "macroscopeapp", "name": "Macroscope", "avatarUrl": null, "isBot": true}), "APPROVED", "2026-11-06T09:30:00.000Z"));
+                list.push(review("v3", json!({"login": "theo", "name": "Theo", "avatarUrl": null}), "APPROVED", "2026-11-06T09:52:00.000Z"));
+            }
+        })
+    }),
+    ("pull-requests-detail-timeline-events", |s| {
+        open_detail(s, 1, |u| {
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("merged");
+                d["mergedAt"] = json!("2026-11-06T09:55:00.000Z");
+                d["closedAt"] = json!("2026-11-06T09:55:00.000Z");
+            }
+        })
+    }),
+    ("pull-requests-detail-commit-scope", |s| {
+        open_detail(s, 1, |_| {});
+        pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
+        pr_detail::poll(s);
+        s.ui.pages.detail.expanded.insert("apps/desktop-rune/src/pages/usage.rs".into());
+    }),
     ("pull-requests-detail-menu", |s| open_detail(s, 0, |u| u.menu = true)),
     ("pull-requests-detail-merged", |s| {
         open_detail(s, 0, |_| {});
@@ -352,7 +403,55 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |_| {});
         let u = &mut s.ui.pages.detail;
         u.detail = None;
-        u.error = Some("Pull request #2481 not found. It may be an issue rather than a pull request, or this account can't see it.".into());
+        u.error = Some("The environment request failed.".into());
+    }),
+    ("pull-requests-detail-not-found", |s| {
+        open_detail(s, 0, |_| {});
+        let u = &mut s.ui.pages.detail;
+        u.detail = None;
+        u.error = Some("Pull request operation detail failed: Could not resolve to a PullRequest with the number of 2481.".into());
+        u.not_found = true;
+    }),
+    ("pull-requests-detail-menu-merged", |s| {
+        open_detail(s, 0, |u| {
+            u.menu = true;
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("merged");
+                for list in ["capabilities", "viewerPermissions"] {
+                    if let Some(actions) = d[list]["actions"].as_array_mut() {
+                        actions.push(json!("revert"));
+                    }
+                }
+            }
+        });
+    }),
+    ("pull-requests-detail-auto-merge-armed", |s| {
+        open_detail(s, 0, |u| {
+            if let Some(d) = &mut u.detail {
+                d["autoMergeEnabled"] = json!(true);
+                d["autoMergeMethod"] = json!("squash");
+            }
+        });
+    }),
+    ("pull-requests-detail-delete-branch-confirm", |s| {
+        open_detail(s, 0, |u| {
+            u.delete_confirm = true;
+            if let Some(d) = &mut u.detail {
+                d["state"] = json!("closed");
+            }
+        });
+    }),
+    ("pull-requests-detail-approve-workflows", |s| {
+        open_detail(s, 0, |u| {
+            if let Some(d) = &mut u.detail {
+                d["workflowApprovalsRequired"] = json!(2);
+                for list in ["capabilities", "viewerPermissions"] {
+                    if let Some(actions) = d[list]["actions"].as_array_mut() {
+                        actions.push(json!("approve-workflows"));
+                    }
+                }
+            }
+        });
     }),
     ("pull-requests-detail-light", |s| {
         open_detail(s, 0, |_| {});
@@ -400,6 +499,17 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.filters.project = first;
         u.requested = Some(pull_requests::input(u));
         u.menu = Some("filters");
+    }),
+    ("pull-requests-environments", |s| {
+        open_prs(s, |_| {});
+        pull_requests::environments_scene(s);
+    }),
+    ("pull-requests-server-menu", |s| {
+        open_prs(s, |_| {});
+        pull_requests::environments_scene(s);
+        let u = &mut s.ui.pages.pull_requests;
+        u.menu = Some("filters");
+        u.submenu = Some("server");
     }),
     ("usage-limits", |s| open_usage(s, "limits")),
     ("usage-cost", |s| open_usage(s, "cost")),
@@ -455,6 +565,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-provider-loading", |s| {
         open_usage(s, "cost");
         usage::updating_scene(s);
+    }),
+    ("usage-compact-header", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.max_w = 900.0;
+        s.ui.pages.usage.menu = Some("period");
+    }),
+    ("usage-provider-menu-icons", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.menu = Some("providers");
     }),
     ("usage-provider-loading-menu", |s| {
         open_usage(s, "tokens");

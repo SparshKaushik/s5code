@@ -1,6 +1,7 @@
 //! The detail beside the `/pull-requests` list (PullRequestDetailPanel): the header's primary
 //! action and actions menu, then the Summary, Timeline and Code tabs.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, icon, row, spacer, text};
@@ -9,6 +10,7 @@ use rune_kit::markdown::{Markdown, MarkdownStyle};
 use serde_json::{Value, json};
 
 use super::avatars::avatar;
+use super::pr_conversation as conv;
 use super::pull_requests::relative;
 use crate::data::{s as field, ts};
 use crate::icons as i;
@@ -41,11 +43,27 @@ pub struct Ui {
     pub comments_closed: bool,
     pub oldest_first: bool,
     pub expanded: HashSet<String>,
+    /// The commit the Code tab reads alone (selectedCodeCommitOid).
+    pub commit: Option<String>,
+    /// Conversations shown past the first page.
+    pub conversations: usize,
+    /// Resolved or dismissed conversations opened from their collapsed card.
+    pub open_comments: HashSet<String>,
+    /// The open comment filter or commit scope menu.
+    pub popup: Option<&'static str>,
+    pub scope_commits: usize,
     pub menu: bool,
-    /// The destructive or merging action waiting on its second press.
+    /// The header button's action waiting on its second press.
     pub confirm: Option<&'static str>,
+    /// The actions menu's item waiting on its second press.
+    pub menu_confirm: Option<&'static str>,
+    /// The merge method picked for this pull request, or the one its auto-merge was armed with.
     pub merge_method: Option<String>,
-    pub action_error: Option<String>,
+    pub delete_confirm: bool,
+    /// The detail's error was the host's not-found.
+    pub not_found: bool,
+    /// A copyable value reading "Copied" until the given time.
+    pub copied: Option<(&'static str, i64)>,
     pub(super) live: super::pull_requests::Live,
 }
 
@@ -102,16 +120,22 @@ pub fn poll(s: &mut App) -> bool {
         load(s);
         changed = true;
     }
+    let mut detail_loaded = false;
     if let Some(net) = s.src.net() {
         let u = &mut s.ui.pages.detail;
         if let Some(reply) = u.pending_detail.and_then(|id| net.take_reply(id)) {
             u.pending_detail = None;
             match reply {
                 Ok(d) => {
+                    follow_auto_merge(u, &d);
                     u.detail = Some(d);
                     u.error = None;
+                    detail_loaded = true;
                 }
-                Err(e) => u.error = Some(message(&e, "Could not load this pull request.")),
+                Err(e) => {
+                    u.not_found = super::pr_actions::not_found(&e);
+                    u.error = Some(message(&e, "Could not load this pull request."));
+                }
             }
             changed = true;
         }
@@ -137,19 +161,18 @@ pub fn poll(s: &mut App) -> bool {
             }
             changed = true;
         }
-        let mut acted = false;
+        let mut acted = None;
         if let Some(reply) = u.pending_action.as_ref().and_then(|(id, _)| net.take_reply(*id)) {
             let (_, action) = u.pending_action.take().unwrap_or_default();
-            match reply {
-                Ok(_) => acted = true,
-                Err(e) => u.action_error = Some(message(&e, &format!("Could not {}.", action_verb(&action)))),
-            }
+            acted = Some((action, reply));
             changed = true;
         }
-        if acted {
-            s.ui.pages.pull_requests.requested = None;
-            reload(s);
+        if let Some((action, reply)) = acted {
+            finished(s, &action, reply);
         }
+    }
+    if detail_loaded {
+        super::pr_actions::want_stack(s);
     }
     let u = ui(s);
     if u.tab == 2 && u.entry.is_some() && u.files.is_none() && u.pending_diff.is_none() && u.diff_error.is_none() {
@@ -166,7 +189,7 @@ fn message(e: &Value, fallback: &str) -> String {
 fn load(s: &mut App) {
     let Some(entry) = ui(s).entry.clone() else { return };
     let r = reference(&entry);
-    match s.src.net() {
+    match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
             let d = net.request("pullRequests.detail", r.clone());
             let a = net.request("pullRequests.activity", r);
@@ -225,62 +248,104 @@ fn reload(s: &mut App) {
 
 fn load_diff(s: &mut App) {
     let Some(entry) = ui(s).entry.clone() else { return };
-    match s.src.net() {
+    let commit = super::pr_conversation::scoped_commit(ui(s));
+    let mut input = reference(&entry);
+    if let Some(oid) = &commit {
+        input["commit"] = json!(oid);
+    }
+    match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
-            let id = net.http_request("POST", "/api/pull-requests/diff", reference(&entry));
+            let id = net.http_request("POST", "/api/pull-requests/diff", input);
             ui(s).pending_diff = Some(id);
         }
         None if !crate::host::live() => {
             let recording = super::fixture("pull-request-detail.json").unwrap_or(Value::Null);
-            ui(s).files = Some(rune_kit::diff::parse(recording["diff"]["patch"].as_str().unwrap_or("")));
+            let diff = commit.map_or(&recording["diff"], |oid| &recording["diff"]["commits"][oid.as_str()]);
+            ui(s).files = Some(rune_kit::diff::parse(diff["patch"].as_str().unwrap_or("")));
         }
         None => ui(s).diff_error = Some("Not connected.".into()),
     }
 }
 
+/// perform: one action at a time, merges carrying the resolved method.
 fn run(s: &mut App, action: &'static str) {
     let Some(entry) = ui(s).entry.clone() else { return };
-    let picked = ui(s).merge_method.clone();
-    let method = ui(s).detail.as_ref().map(|d| merge_method(d, picked));
+    if ui(s).pending_action.is_some() {
+        return;
+    }
+    let app: &App = s;
+    let method = app.ui.pages.detail.detail.as_ref().map(|d| merge_method(app, d));
     let u = ui(s);
     u.confirm = None;
+    u.menu_confirm = None;
     u.menu = false;
-    u.action_error = None;
     let payload = action_payload(&entry, action, method.as_deref());
-    match s.src.net() {
+    match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
             let id = net.request("pullRequests.runAction", payload);
             ui(s).pending_action = Some((id, action.to_string()));
         }
-        None => ui(s).action_error = Some("Actions need a connected environment.".into()),
+        None => {
+            let (title, _) = super::pr_actions::failure_text(action, super::pr_row::term(&entry));
+            crate::shell::palette::toast_error_brief(s, &title, Some("Actions need a connected environment."));
+        }
     }
 }
 
-fn action_verb(action: &str) -> &'static str {
-    match action {
-        "merge" => "merge",
-        "ready" => "mark it ready for review",
-        "draft" => "convert it to a draft",
-        "close" => "close it",
-        "reopen" => "reopen it",
-        "delete-branch" => "delete the branch",
-        "enable-auto-merge" => "enable auto-merge",
-        "disable-auto-merge" => "disable auto-merge",
-        _ => "finish that",
+/// useInlineActionConfirm for the header's buttons: the first press arms, the second runs.
+fn arm_or_run(s: &mut App, action: &'static str) {
+    if ui(s).confirm == Some(action) {
+        run(s, action);
+    } else {
+        ui(s).confirm = Some(action);
     }
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
-    if !matches!(s.route, Route::PullRequests) || !matches!(e.key, rune::Key::Escape) {
+/// finishAction: a failure toasts the host's words or the action's hint; a success toasts what
+/// the refreshed detail can't show and reads it again.
+fn finished(s: &mut App, action: &str, reply: Result<Value, Value>) {
+    let u = &s.ui.pages.detail;
+    let term = u.detail.as_ref().or(u.entry.as_ref()).map_or("pull request", super::pr_row::term);
+    match reply {
+        Err(e) => {
+            let (title, hint) = super::pr_actions::failure_text(action, term);
+            let detail = super::pr_row::readable(&message(&e, ""), &hint);
+            crate::shell::palette::toast_error_brief(s, &title, Some(&detail));
+        }
+        Ok(_) => {
+            if let Some(title) = super::pr_actions::success_title(action, term) {
+                crate::shell::palette::toast(s, &title, None);
+            }
+            s.ui.pages.pull_requests.requested = None;
+            reload(s);
+        }
+    }
+}
+
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if !matches!(s.route, Route::PullRequests) {
         return false;
     }
-    let u = ui(s);
-    if u.menu || u.confirm.is_some() {
-        u.menu = false;
-        u.confirm = None;
-        return true;
+    if matches!(e.key, rune::Key::Escape) {
+        let u = ui(s);
+        if u.menu || u.confirm.is_some() || u.menu_confirm.is_some() {
+            u.menu = false;
+            u.confirm = None;
+            u.menu_confirm = None;
+            return true;
+        }
+        return false;
     }
-    false
+    // The open panel's `pullRequest.copyNumber`.
+    if s.ui.pages.pull_requests.selected.is_none() || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
+        return false;
+    }
+    let Some(entry) = ui(s).entry.clone() else { return false };
+    if !tx.key_repeat() {
+        tx.copy(format!("#{}", entry["number"]));
+        crate::shell::palette::toast(s, &format!("{} number copied", super::pr_actions::short_label(&entry)), None);
+    }
+    true
 }
 
 // ---- derived ----------------------------------------------------------------------------
@@ -289,21 +354,45 @@ fn has(list: &Value, item: &str) -> bool {
     list.as_array().is_some_and(|a| a.iter().any(|v| v == item))
 }
 
-fn can(d: &Value, action: &str) -> bool {
+pub(super) fn can(d: &Value, action: &str) -> bool {
     has(&d["capabilities"]["actions"], action) && has(&d["viewerPermissions"]["actions"], action)
 }
 
-fn allowed_methods(d: &Value) -> Vec<String> {
+pub(super) fn allowed_methods(d: &Value) -> Vec<String> {
     let caps = &d["mergeCapabilities"];
     d["capabilities"]["mergeMethods"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| caps[*m].as_bool().unwrap_or(false)).map(str::to_string).collect()
 }
 
-fn merge_method(d: &Value, picked: Option<String>) -> String {
-    let allowed = allowed_methods(d);
-    picked.filter(|m| allowed.contains(m)).or_else(|| allowed.first().cloned()).unwrap_or_else(|| "merge".into())
+/// selectedMergeMethod: this pull request's pick, the project's default, then the last one used.
+fn merge_method(s: &App, d: &Value) -> String {
+    let project = super::pr_actions::project_merge_method(crate::settings::server_settings(s), field(d, "projectId"));
+    let last = s.client_settings.values.get(super::pr_actions::LAST_MERGE_METHOD).and_then(Value::as_str);
+    super::pr_actions::resolve_merge_method(d, s.ui.pages.detail.merge_method.as_deref(), project, last)
 }
 
-fn method_label(m: &str) -> &'static str {
+/// The armed method becomes the pick whenever the host's auto-merge method changes.
+fn follow_auto_merge(u: &mut Ui, d: &Value) {
+    let before = u.detail.as_ref().map(|p| &p["autoMergeMethod"]);
+    if before != Some(&d["autoMergeMethod"])
+        && let Some(m) = d["autoMergeMethod"].as_str()
+    {
+        u.merge_method = Some(m.to_string());
+    }
+}
+
+/// Picks the merge method here and as the last one used.
+fn pick_merge_method(s: &mut App, m: &str) {
+    let u = ui(s);
+    u.merge_method = Some(m.to_string());
+    u.menu_confirm = None;
+    u.menu = false;
+    if s.client_settings.values.get(super::pr_actions::LAST_MERGE_METHOD).and_then(Value::as_str) != Some(m) {
+        s.client_settings.values.insert(super::pr_actions::LAST_MERGE_METHOD.into(), json!(m));
+        s.client_settings.save();
+    }
+}
+
+pub(super) fn method_label(m: &str) -> &'static str {
     match m {
         "squash" => "Squash and merge",
         "rebase" => "Rebase and merge",
@@ -356,8 +445,8 @@ pub enum Primary {
     Merge,
 }
 
-/// resolvePullRequestPrimaryControl.
-pub fn primary(d: &Value) -> Option<Primary> {
+/// resolvePullRequestPrimaryControl; a stack that owns the merge leaves it to the stack menu.
+pub fn primary(d: &Value, stack_owns_merge: bool) -> Option<Primary> {
     let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     match field(d, "state") {
         "merged" => return Some(Primary::Merged),
@@ -377,10 +466,10 @@ pub fn primary(d: &Value) -> Option<Primary> {
     if allowed_methods(d).is_empty() {
         return None;
     }
-    if auto == Some(false) && checks_state(checks).is_some_and(|c| c != "passing") && can(d, "enable-auto-merge") {
+    if auto == Some(false) && checks_state(checks).is_some_and(|c| c != "passing") && !stack_owns_merge && can(d, "enable-auto-merge") {
         return Some(Primary::EnableAutoMerge);
     }
-    can(d, "merge").then_some(Primary::Merge)
+    (!stack_owns_merge && can(d, "merge")).then_some(Primary::Merge)
 }
 
 fn bounded(v: &str) -> String {
@@ -492,30 +581,21 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let shown = u.detail.as_ref().unwrap_or(entry);
     panel = panel.child(top(s, t, shown, u.detail.is_some(), overlays));
     match (&u.detail, &u.error) {
-        (None, Some(error)) => return panel.child(rule(t)).child(unavailable(t, entry, error)),
+        (None, Some(error)) => return panel.child(rule(t)).child(unavailable(s, t, entry, error)),
         (None, None) => return panel.child(rule(t)).child(ghost(t)),
         _ => {}
     }
     let d = u.detail.as_ref().unwrap_or(entry);
     panel = panel.child(header_body(s, t, d)).child(rule(t)).child(tab_bar(s, t, d)).child(rule(t));
-    if let Some(error) = &u.action_error {
-        panel = panel.child(
-            row()
-                .w_full()
-                .px(16.0)
-                .py(8.0)
-                .gap(8.0)
-                .center_y()
-                .fill(t.c.destructive.alpha_mul(0.08))
-                .child(icon(&i::CIRCLE_ALERT, 14.0).color(t.c.destructive))
-                .child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive_foreground).wrap().grow(1.0).shrink().min_w(0.0))
-                .child(kit::Button::new("Dismiss").variant("ghost").size("xs").on_press(|s: &mut App| ui(s).action_error = None).build(t)),
-        );
+    if u.tab == 2
+        && let Some(bar) = super::pr_conversation::scope_bar(s, t, overlays)
+    {
+        panel = panel.child(bar);
     }
     let content = match u.tab {
         1 => timeline(s, t),
         2 => code(s, t),
-        _ => summary(s, t, d),
+        _ => summary(s, t, d, overlays),
     };
     let key = format!("pr-detail-scroll-{}", u.tab);
     panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t))
@@ -551,72 +631,115 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         );
     let mut actions = row().gap(4.0).center_y().shrink();
     if loaded {
-        if let Some(p) = primary_action(s, t, d) {
-            actions = actions.child(p);
+        let gate = super::pr_actions::stack_gate(s, d);
+        let p = primary(d, gate.owns);
+        if gate.failed {
+            actions = actions.child(kit::Button::new("Retry stack lookup").variant("ghost").size("xs").on_press(super::pr_actions::want_stack).build(t));
         }
-        actions = actions.child(actions_menu(s, t, d, overlays));
+        for control in primary_action(s, t, d, p, gate) {
+            actions = actions.child(control);
+        }
+        actions = actions.child(actions_menu(s, t, d, p, gate, overlays));
+        if s.ui.pages.detail.delete_confirm {
+            delete_branch_dialog(t, d, overlays);
+        }
     }
     actions = actions.child(super::pull_requests::maximize_control(s, t)).child(super::pull_requests::panel_control(s, t));
     row().key("pr-detail-top").w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
 }
 
-fn primary_action(s: &App, t: &T, d: &Value) -> Option<El> {
+/// PullRequestPrimaryAction: the armed auto-merge badge beside any other control, then the one
+/// control where the pull request stands.
+fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_actions::StackGate) -> Vec<El> {
     let u = &s.ui.pages.detail;
     let pending = u.pending_action.as_ref().map(|(_, a)| a.as_str());
-    let badge = |label: &str| {
-        let ink = tone(t, d);
-        row().h(24.0).px(8.0).radius(radius::MD).border(1.0, t.c.border).center_y().child(text(label.to_string()).font(theme::XS_MEDIUM).color(ink))
+    let armed_badge = || {
+        let label = super::pr_actions::auto_merge_label(d["autoMergeMethod"].as_str());
+        row()
+            .h(24.0)
+            .px(7.0)
+            .gap(4.0)
+            .radius(4.0)
+            .center_y()
+            .fill(t.c.info.alpha_mul(0.16))
+            .role("img")
+            .label(label.clone())
+            .help(format!("{label}: the host will merge this on its own once its requirements are met"))
+            .child(icon(&i::GIT_MERGE, 14.0).color(t.c.info_foreground))
+            .child(text(label).font(theme::XS_MEDIUM).color(t.c.info_foreground))
     };
-    Some(match primary(d)? {
-        Primary::Merged => badge("Merged"),
-        Primary::Closed => badge("Closed"),
+    let state_badge = |label: &str, glyph: &'static rune::Icon| {
+        let ink = tone(t, d);
+        row().h(24.0).px(8.0).gap(4.0).radius(radius::MD).border(1.0, t.c.border).center_y().child(icon(glyph, 14.0).color(ink)).child(text(label.to_string()).font(theme::XS_MEDIUM).color(ink))
+    };
+    // The merge and auto-merge buttons confirm on a second press, and wait on a stack lookup.
+    let merging = |action: &'static str, idle: String, working: &str, confirm: &str| {
+        let armed = u.confirm == Some(action);
+        let label = if pending == Some(action) { working.to_string() } else if armed { confirm.to_string() } else { idle };
+        let glyph: &'static rune::Icon = if armed { &i::CHECK } else { &i::GIT_MERGE };
+        let button = kit::Button::new(label.clone()).variant("default").size("xs").icon(glyph).disabled(pending.is_some());
+        match gate.blocked {
+            Some(reason) => button.build(t).opacity(0.64).help(reason),
+            None => button.on_press(move |s: &mut App| arm_or_run(s, action)).build(t).help(label),
+        }
+    };
+    let mut out = Vec::new();
+    if field(d, "state") == "open" && d["autoMergeEnabled"] == true && p != Some(Primary::Armed) {
+        out.push(armed_badge());
+    }
+    let Some(p) = p else { return out };
+    out.push(match p {
+        Primary::Merged => state_badge("Merged", &i::GIT_MERGE),
+        Primary::Closed => state_badge("Closed", &i::GIT_PULL_REQUEST_CLOSED),
         Primary::Resolve => {
             let prompt = resolve_text(d);
             kit::Button::new("Resolve conflicts").variant("warning-outline").size("xs").icon(&i::TRIANGLE_ALERT).on_press(move |s: &mut App| handoff(s, prompt.clone(), None)).build(t)
         }
-        Primary::Ready => {
-            let label = if pending == Some("ready") { "Marking ready…" } else { "Ready for review" };
-            kit::Button::new(label).variant("default").size("xs").disabled(pending.is_some()).on_press(|s: &mut App| run(s, "ready")).build(t)
-        }
-        Primary::Armed => badge("Auto-merge on"),
+        Primary::Ready => kit::Button::new("Ready for review")
+            .variant("default")
+            .size("xs")
+            .icon(&i::GIT_PULL_REQUEST_ARROW)
+            .disabled(pending.is_some())
+            .on_press(|s: &mut App| run(s, "ready"))
+            .build(t)
+            .help("Ready for review"),
+        Primary::Armed => armed_badge(),
         Primary::EnableAutoMerge => {
-            let label = if pending == Some("enable-auto-merge") { "Enabling…" } else { "Enable auto-merge" };
-            kit::Button::new(label).variant("default").size("xs").disabled(pending.is_some()).on_press(|s: &mut App| run(s, "enable-auto-merge")).build(t)
+            let method = merge_method(s, d);
+            merging("enable-auto-merge", super::pr_actions::auto_merge_label(Some(&method)), "Enabling...", "Confirm auto-merge?")
         }
-        Primary::Merge => {
-            let method = merge_method(d, u.merge_method.clone());
-            let label = match (pending, u.confirm) {
-                (Some("merge"), _) => "Merging…".to_string(),
-                (_, Some("merge")) => "Confirm merge?".to_string(),
-                _ => method_label(&method).to_string(),
-            };
-            kit::Button::new(label)
-                .variant("default")
-                .size("xs")
-                .disabled(pending.is_some())
-                .on_press(|s: &mut App| {
-                    if ui(s).confirm == Some("merge") {
-                        run(s, "merge");
-                    } else {
-                        ui(s).confirm = Some("merge");
-                    }
-                })
-                .build(t)
-        }
-    })
+        Primary::Merge => merging("merge", method_label(&merge_method(s, d)).to_string(), "Merging...", "Confirm merge?"),
+    });
+    out
 }
 
-fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
+/// PullRequestActionsMenu: the handoffs, then what the pull request's state allows, its links,
+/// and the destructive actions last.
+fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_actions::StackGate, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
-    let open = field(d, "state") == "open";
+    let state = field(d, "state");
+    let open = state == "open";
+    let pending = u.pending_action.as_ref().map(|(_, a)| a.as_str());
+    let busy = pending.is_some();
+    let term = super::pr_row::term(d);
+    let shows = super::pr_actions::shows(d, p, gate.single);
     let close_menu = |s: &mut App| {
         let u = ui(s);
         u.menu = false;
-        if u.confirm != Some("merge") {
-            u.confirm = None;
-        }
+        u.menu_confirm = None;
     };
-    let trigger = kit::Button::new("").variant("ghost").size("icon-xs").icon(&i::ELLIPSIS).on_press(|s: &mut App| ui(s).menu = !ui(s).menu).build(t).label("Pull request actions");
+    // useInlineActionConfirm for menu items: the first select arms and keeps the menu open.
+    let confirming = |action: &'static str, idle: String, confirm: &str, glyph: &'static rune::Icon| {
+        let label = if u.menu_confirm == Some(action) { confirm.to_string() } else { idle };
+        MenuItem::new(label).icon(glyph).disabled(busy).on_select(move |s: &mut App| {
+            if ui(s).menu_confirm == Some(action) {
+                run(s, action);
+            } else {
+                ui(s).menu_confirm = Some(action);
+            }
+        })
+    };
+    let trigger = kit::Button::new("").variant("ghost-muted").size("icon-xs").icon(&i::ELLIPSIS).on_press(|s: &mut App| ui(s).menu = !ui(s).menu).build(t).label(format!("More {term} actions")).help(format!("More {term} actions"));
     let ask = handoff_task(d, false);
     let explain = handoff_task(d, true);
     let mut menu = Menu::new("pr-detail-menu")
@@ -630,90 +753,113 @@ fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
             reload(s);
         }))
         .item(MenuItem::new("Ask a question").icon(&i::MESSAGE_CIRCLE_QUESTION_MARK).on_select(move |s: &mut App| handoff(s, ask.0.clone(), Some(ask.1.clone()))))
-        .item(MenuItem::new("Explain this PR").icon(&i::SPARKLES).on_select(move |s: &mut App| handoff(s, explain.0.clone(), Some(explain.1.clone()))));
+        .item(MenuItem::new("Explain this PR").icon(&i::SPARKLES).on_select(move |s: &mut App| handoff(s, explain.0.clone(), Some(explain.1.clone()))))
+        .separator();
     if open {
-        let draft = d["isDraft"].as_bool().unwrap_or(false);
-        let (action, label, glyph): (&'static str, &str, &'static rune::Icon) =
-            if draft { ("ready", "Ready for review", &i::GIT_PULL_REQUEST_ARROW) } else { ("draft", "Convert to draft", &i::GIT_PULL_REQUEST_DRAFT) };
-        let mut lifecycle = Vec::new();
-        if can(d, action) {
-            lifecycle.push(MenuItem::new(label).icon(glyph).on_select(move |s: &mut App| run(s, action)));
+        let draft = d["isDraft"] == true;
+        if shows.draft_toggle {
+            let (action, label, glyph): (&'static str, &str, &'static rune::Icon) =
+                if draft { ("ready", "Ready for review", &i::GIT_PULL_REQUEST_ARROW) } else { ("draft", "Convert to draft", &i::GIT_PULL_REQUEST_DRAFT) };
+            menu = menu.item(MenuItem::new(label).icon(glyph).disabled(busy).on_select(move |s: &mut App| run(s, action)));
         }
-        let auto = d["autoMergeEnabled"].as_bool();
-        if auto == Some(true) && can(d, "disable-auto-merge") {
-            lifecycle.push(MenuItem::new("Disable auto-merge").icon(&i::CIRCLE_STOP).on_select(|s: &mut App| run(s, "disable-auto-merge")));
-        } else if auto == Some(false) && !draft && can(d, "enable-auto-merge") && !allowed_methods(d).is_empty() {
-            lifecycle.push(MenuItem::new("Enable auto-merge").icon(&i::ZAP).on_select(|s: &mut App| run(s, "enable-auto-merge")));
+        if shows.merge_now {
+            menu = menu.item(confirming("merge", "Merge now".into(), "Confirm merge?", &i::GIT_MERGE));
         }
-        if !lifecycle.is_empty() {
-            menu = menu.separator();
-            for item in lifecycle {
-                menu = menu.item(item);
+        if d["autoMergeEnabled"] == true && can(d, "disable-auto-merge") {
+            menu = menu.item(MenuItem::new("Disable auto-merge").icon(&i::GIT_MERGE).disabled(busy).on_select(|s: &mut App| run(s, "disable-auto-merge")));
+        } else if shows.auto_merge {
+            menu = menu.item(confirming("enable-auto-merge", "Enable auto-merge".into(), "Confirm auto-merge?", &i::GIT_MERGE));
+        }
+        if shows.merge_methods {
+            if shows.draft_toggle || shows.merge_now || shows.auto_merge {
+                menu = menu.separator();
             }
-        }
-        let methods = allowed_methods(d);
-        if methods.len() > 1 && can(d, "merge") {
-            let current = merge_method(d, u.merge_method.clone());
-            menu = menu.separator().group_label("Merge method");
-            for m in methods {
+            let current = merge_method(s, d);
+            for m in allowed_methods(d) {
                 let on = m == current;
-                menu = menu.item(MenuItem::new(method_label(&m)).radio(on).on_select(move |s: &mut App| {
-                    let u = ui(s);
-                    u.merge_method = Some(m.clone());
-                    u.confirm = None;
-                }));
+                menu = menu.item(MenuItem::new(method_label(&m)).icon(&i::GIT_MERGE).radio(on).disabled(busy).on_select(move |s: &mut App| pick_merge_method(s, &m)));
             }
+        }
+        if shows.group() {
+            menu = menu.separator();
         }
     }
     let url = field(d, "url").to_string();
     let on_host = super::pull_requests::open_label(s.ui.pages.detail.entry.as_ref().unwrap_or(d), &s.ui.pages.pull_requests.hosts);
-    let short = if url.contains("/-/merge_requests/") { "MR" } else { "PR" };
+    let short = super::pr_actions::short_label(d);
     let (open_url, copy_url, number) = (url.clone(), url, format!("#{}", d["number"]));
+    let mut copy_link = MenuItem::new("Copy link").icon(&i::LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        tx.copy(copy_url.clone());
+        ui(s).menu = false;
+        crate::shell::palette::toast(s, &format!("{short} link copied"), None);
+    });
+    let mut copy_number = MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        tx.copy(number.clone());
+        ui(s).menu = false;
+        crate::shell::palette::toast(s, &format!("{short} number copied"), None);
+    });
+    let link_keys = crate::shell::palette::shortcut_label(s, "thread.copyReference");
+    if !link_keys.is_empty() {
+        copy_link = copy_link.shortcut(link_keys);
+    }
+    let number_keys = crate::shell::palette::shortcut_label(s, "pullRequest.copyNumber");
+    if !number_keys.is_empty() {
+        copy_number = copy_number.shortcut(number_keys);
+    }
     menu = menu
-        .separator()
         .item(MenuItem::new(on_host).icon(&i::EXTERNAL_LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             let _ = tx.open_url(&open_url);
             ui(s).menu = false;
         }))
-        .item(MenuItem::new("Copy link").icon(&i::LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
-            tx.copy(&copy_url);
-            ui(s).menu = false;
-        }))
-        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
-            tx.copy(&number);
-            ui(s).menu = false;
-        }));
-    let mut tail = Vec::new();
+        .item(copy_link)
+        .item(copy_number);
     if open && can(d, "close") {
-        let label = if u.confirm == Some("close") { "Confirm close?" } else { "Close pull request" };
-        tail.push(MenuItem::new(label).icon(&i::GIT_PULL_REQUEST_CLOSED).danger(true).on_select(|s: &mut App| {
-            if ui(s).confirm == Some("close") {
-                run(s, "close");
-            } else {
-                ui(s).confirm = Some("close");
-            }
-        }));
+        menu = menu.separator().item(confirming("close", format!("Close {term}"), "Confirm close?", &i::GIT_PULL_REQUEST_CLOSED).danger(true));
+    } else if state == "closed" && can(d, "reopen") {
+        menu = menu.separator().item(MenuItem::new(format!("Reopen {term}")).icon(&i::GIT_PULL_REQUEST_ARROW).disabled(busy).on_select(|s: &mut App| run(s, "reopen")));
+    } else if state == "merged" && can(d, "revert") {
+        let armed = u.menu_confirm == Some("revert");
+        menu = menu.separator().item(confirming("revert", "Revert changes".into(), "Confirm revert?", &i::ROTATE_CCW).danger(armed));
     }
-    if field(d, "state") == "closed" && can(d, "reopen") {
-        tail.push(MenuItem::new("Reopen pull request").icon(&i::GIT_PULL_REQUEST_ARROW).on_select(|s: &mut App| run(s, "reopen")));
-    }
-    if !open && can(d, "delete-branch") && d["capabilities"]["deleteBranch"].as_bool().unwrap_or(false) {
-        let label = if u.confirm == Some("delete-branch") { "Confirm delete?" } else { "Delete branch" };
-        tail.push(MenuItem::new(label).icon(&i::TRASH_2).danger(true).on_select(|s: &mut App| {
-            if ui(s).confirm == Some("delete-branch") {
-                run(s, "delete-branch");
-            } else {
-                ui(s).confirm = Some("delete-branch");
-            }
-        }));
-    }
-    if !tail.is_empty() {
-        menu = menu.separator();
-        for item in tail {
-            menu = menu.item(item);
-        }
+    if shows.delete_branch {
+        let connected = matches!(s.state().conn, s5_net::Conn::Open);
+        let label = if pending == Some("delete-branch") { "Deleting branch..." } else { "Delete branch" };
+        let detail = if connected { field(d, "headBranch").to_string() } else { "Reconnect to delete this branch".to_string() };
+        menu = menu.separator().item(
+            MenuItem::new(label)
+                .icon(&i::TRASH_2)
+                .danger(true)
+                .disabled(busy || !connected)
+                .trailing(text(detail).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0).max_w(180.0))
+                .on_select(|s: &mut App| {
+                    let u = ui(s);
+                    u.menu = false;
+                    u.delete_confirm = true;
+                }),
+        );
     }
     menu.build(&kit::theme(t), overlays)
+}
+
+/// confirmDeleteBranch: the host's branch goes only once the person confirms it.
+fn delete_branch_dialog(t: &T, d: &Value, overlays: &mut Vec<El>) {
+    let (title, description) = super::pr_actions::delete_branch_prompt(d);
+    let cancel = kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| ui(s).delete_confirm = false).build(t);
+    let delete = kit::Button::new("Delete branch")
+        .variant("destructive")
+        .on_press(|s: &mut App| {
+            ui(s).delete_confirm = false;
+            run(s, "delete-branch");
+        })
+        .build(t);
+    kit::Dialog::new("pr-delete-branch", title)
+        .alert()
+        .width(448.0)
+        .open(true)
+        .description(description)
+        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(delete))
+        .on_close(|s: &mut App| ui(s).delete_confirm = false)
+        .build(t, overlays);
 }
 
 /// Title, author and checkout, then the branches and the change size.
@@ -731,24 +877,8 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
         meta = meta.child(text(format!("updated {}", relative(at, s.now_ms))).font(theme::TEXT_XS).color(t.c.muted_foreground).shrink());
     }
     if let Some(command) = checkout_command(d) {
-        let copy = command.clone();
-        meta = meta.child(spacer()).child(
-            row()
-                .key("pr-detail-checkout")
-                .h(20.0)
-                .px(6.0)
-                .radius(radius::SM)
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .role("button")
-                .label("Copy checkout command")
-                .center_y()
-                .shrink()
-                .child(text(command).font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground).truncate())
-                .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                    tx.copy(&copy);
-                }),
-        );
+        let labels = ("Copy checkout command".to_string(), "Checkout command copied");
+        meta = meta.child(spacer()).child(copyable(s, t, "checkout", command, labels, theme::mono(theme::TEXT_XS), t.c.muted_foreground));
     }
     let branch = theme::mono(theme::TEXT_XS);
     let ink = t.c.muted_foreground.alpha_mul(0.7);
@@ -768,7 +898,7 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
                 .min_w(0.0)
                 .child(text(field(d, "baseBranch").to_string()).font(branch).color(ink).truncate().shrink())
                 .child(icon(&i::ARROW_LEFT, 14.0).color(ink.alpha_mul(0.6)))
-                .child(text(field(d, "headBranch").to_string()).font(branch).color(ink).truncate().shrink().min_w(0.0)),
+                .child(copyable(s, t, "branch", field(d, "headBranch").to_string(), (format!("Copy {} branch", super::pr_row::term(d)), "Branch name copied"), branch, ink)),
         )
         .child(
             row()
@@ -791,6 +921,32 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
         .child(branches)
 }
 
+/// PullRequestCopyableCode: the value reads "Copied" for 1.6 s after a press copies it.
+fn copyable(s: &App, t: &T, key: &'static str, value: String, (copy_label, copied_label): (String, &'static str), font: rune::TextStyle, ink: Color) -> El {
+    let copied = s.ui.pages.detail.copied.is_some_and(|(k, until)| k == key && s.now_ms < until);
+    let tip = format!("{}: {value}", if copied { "Copied" } else { copy_label.as_str() });
+    let copy = value.clone();
+    row()
+        .key(format!("pr-detail-{key}"))
+        .h(20.0)
+        .px(4.0)
+        .radius(radius::SM)
+        .hover(t.c.accent.alpha_mul(0.45))
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .label(if copied { copied_label.to_string() } else { copy_label })
+        .help(tip)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .child(text(if copied { "Copied".to_string() } else { value }).font(font).color(ink).truncate().shrink().min_w(0.0))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.copy(copy.clone());
+            ui(s).copied = Some((key, crate::data::now_ms() + 1600));
+            tx.wake_after(std::time::Duration::from_millis(1600));
+        })
+}
+
 fn tab_bar(s: &App, t: &T, d: &Value) -> El {
     let u = &s.ui.pages.detail;
     let k = kit::theme(t);
@@ -801,6 +957,16 @@ fn tab_bar(s: &App, t: &T, d: &Value) -> El {
         .build(&k);
     let mut bar = row().w_full().px(16.0).py(8.0).gap(8.0).center_y().child(tabs).child(spacer());
     match u.tab {
+        0 if super::pr_actions::shows_approve(d) => {
+            let pending = u.pending_action.as_ref().map(|(_, a)| a.as_str());
+            let label = match (pending, u.confirm) {
+                (Some("approve-workflows"), _) => "Approving...",
+                (_, Some("approve-workflows")) => "Confirm approve?",
+                _ => "Approve workflows to run",
+            };
+            let approve = kit::Button::new(label).variant("warning-outline").size("xs").icon(&i::PLAY).disabled(pending.is_some()).on_press(|s: &mut App| arm_or_run(s, "approve-workflows"));
+            bar = bar.child(approve.build(t).help(label));
+        }
         0 => {
             let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let (glyph, ink) = check_glyph(t, checks_state(checks).map(|c| match c {
@@ -897,19 +1063,12 @@ fn section(t: &T, key: &str, title: String, open: bool, toggle: fn(&mut App), ri
     out
 }
 
-fn summary(s: &App, t: &T, d: &Value) -> El {
+fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
-    let avatars = &s.ui.pages.avatars;
-    let reviewers = d["reviewers"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let reviewers_el = if reviewers.is_empty() {
-        none(t)
-    } else {
-        let mut r = row().gap(12.0).center_y();
-        for a in reviewers {
-            r = r.child(row().gap(6.0).center_y().child(avatar(avatars, a, 16.0, t)).child(text(field(a, "login").to_string()).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.85))));
-        }
-        r
-    };
+    let activity = u.activity.as_ref();
+    let requested = d["reviewers"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let reviewers = conv::reviewers(requested, conv::list(activity, "comments"), conv::list(activity, "commits"));
+    let reviewers_el = if reviewers.is_empty() { none(t) } else { conv::reviewer_avatars(&s.ui.pages.avatars, t, &reviewers) };
     let labels = d["labels"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let labels_el = if labels.is_empty() {
         none(t)
@@ -930,7 +1089,11 @@ fn summary(s: &App, t: &T, d: &Value) -> El {
         }
         r
     };
-    let mut out = col().w_full().pb(48.0).child(col().w_full().px(16.0).py(8.0).child(meta_row(t, &i::USERS, "Reviewers", reviewers_el)).child(meta_row(t, &i::TAG, "Labels", labels_el))).child(rule(t));
+    let mut meta = col().w_full().px(16.0).py(8.0).child(meta_row(t, &i::USERS, "Reviewers", reviewers_el));
+    if !labels.is_empty() || d["capabilities"]["labels"] == true {
+        meta = meta.child(meta_row(t, &i::TAG, "Labels", labels_el));
+    }
+    let mut out = col().w_full().pb(48.0).child(meta).child(rule(t));
     let body = field(d, "body").trim().to_string();
     out = out.child(section(t, "description", "Description".into(), !u.description_closed, |s| ui(s).description_closed = !ui(s).description_closed, None, || {
         markdown(t, if body.is_empty() { "_No description provided._" } else { &body })
@@ -969,55 +1132,142 @@ fn summary(s: &App, t: &T, d: &Value) -> El {
         Some(n) => format!("Comments ({n})"),
         None => "Comments".into(),
     };
-    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(order_toggle(s, t)), || comments(s, t)))
+    let items = activity.map(conv::items).unwrap_or_default();
+    let filter = conv::filter(s);
+    let kept: Vec<&conv::Item> = items.iter().filter(|i| conv::keep(i, filter)).collect();
+    let hidden = conv::comment_count(&items) - conv::comment_count(kept.iter().copied());
+    let actions = row().gap(4.0).center_y().shrink().child(conv::filter_menu(s, t, filter, hidden, overlays)).child(order_toggle(s, t));
+    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(actions), || comments(s, t, &items, &kept, hidden)))
 }
 
-fn comments(s: &App, t: &T) -> El {
+/// The Comments section: filtered, paged from the newest, and ordered by the toggle.
+fn comments(s: &App, t: &T, items: &[conv::Item], kept: &[&conv::Item], hidden: usize) -> El {
     let u = &s.ui.pages.detail;
+    let muted = |m: String| text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let Some(a) = &u.activity else {
         return match &u.activity_error {
-            Some(e) => text(e.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap(),
-            None => text("Loading comments…").font(theme::TEXT_XS).color(t.c.muted_foreground),
+            Some(e) => muted(e.clone()),
+            None => muted("Loading comments…".into()),
         };
     };
-    let mut items: Vec<(i64, El)> = Vec::new();
-    for c in a["comments"].as_array().into_iter().flatten() {
-        if c["body"].as_str().is_none_or(|b| b.trim().is_empty()) && c["reviewState"].is_null() {
-            continue;
-        }
-        items.push((ts(c, "createdAt").unwrap_or(0), comment_card(s, t, c, &[])));
-    }
-    for th in a["reviewThreads"].as_array().into_iter().flatten() {
-        let list = th["comments"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let Some(first) = list.first() else { continue };
-        items.push((ts(first, "createdAt").unwrap_or(0), comment_card(s, t, first, &list[1..]).key(format!("pr-thread-{}", field(th, "id")))));
+    let total = conv::comment_count(items);
+    let mut out = col().w_full().gap(12.0);
+    if a["commentsTruncated"] == true {
+        out = out.child(
+            row()
+                .w_full()
+                .px(8.0)
+                .py(6.0)
+                .radius(radius::MD)
+                .border(1.0, t.c.warning.alpha_mul(0.3))
+                .fill(t.c.warning_surface)
+                .child(text(conv::truncated_label(total)).font(theme::TEXT_XS).color(t.c.foreground).wrap().grow(1.0).shrink().min_w(0.0)),
+        );
     }
     if items.is_empty() {
-        return text("No comments yet.").font(theme::TEXT_XS).color(t.c.muted_foreground);
+        return out.child(muted("No comments yet.".into()));
     }
-    order(&mut items, u.oldest_first);
-    let mut out = col().w_full().gap(12.0);
-    for (_, e) in items {
-        out = out.child(e);
+    if kept.is_empty() {
+        return out.child(muted(conv::all_hidden(hidden)));
+    }
+    let count = u.conversations.max(conv::COMMENT_PAGE);
+    let (shown, older) = conv::page(kept, count);
+    let more = (older > 0).then(|| {
+        kit::Button::new(conv::older_label(older)).variant("outline").size("sm").on_press(move |s: &mut App| ui(s).conversations = count + conv::COMMENT_PAGE).build(t).w_full()
+    });
+    let mut cards: Vec<El> = shown.iter().map(|i| conversation(s, t, i)).collect();
+    let (before, after) = if u.oldest_first { (more, None) } else { (None, more) };
+    if !u.oldest_first {
+        cards.reverse();
+    }
+    out = out.children(before).children(cards).children(after);
+    if count > conv::COMMENT_PAGE {
+        out = out.child(
+            kit::Button::new(format!("Show only {} recent conversations", conv::COMMENT_PAGE))
+                .variant("ghost")
+                .size("sm")
+                .on_press(|s: &mut App| ui(s).conversations = 0)
+                .build(t)
+                .w_full(),
+        );
     }
     out
 }
 
-fn order(items: &mut [(i64, El)], oldest_first: bool) {
-    items.sort_by_key(|(at, _)| *at);
-    if !oldest_first {
-        items.reverse();
+/// A conversation: its card, or a collapsed card once resolved or dismissed.
+fn conversation(s: &App, t: &T, item: &conv::Item) -> El {
+    if conv::finished(&item.root, item.thread) {
+        return collapsed(s, t, item);
     }
+    comment_card(s, t, &item.root, &item.replies).key(format!("pr-conversation-{}", item.id))
 }
 
-fn review_label(state: &str) -> Option<(&'static str, &'static rune::Icon)> {
-    match state.to_ascii_uppercase().as_str() {
-        "APPROVED" => Some(("approved", &i::CIRCLE_CHECK)),
-        "CHANGES_REQUESTED" => Some(("requested changes", &i::CIRCLE_X)),
-        "COMMENTED" => Some(("reviewed", &i::EYE)),
-        "DISMISSED" => Some(("review dismissed", &i::CIRCLE_SLASH)),
-        _ => None,
+/// CollapsedComment: who and when, the reply count, and the state that opens it.
+fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
+    let c = &item.root;
+    let open = s.ui.pages.detail.open_comments.contains(item.id);
+    let resolved = item.thread.is_some_and(|th| th["isResolved"] == true);
+    let label = if resolved { "Resolved" } else { "Review dismissed" };
+    let muted = t.c.muted_foreground;
+    let mut head = row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(avatar(&s.ui.pages.avatars, &c["author"], 16.0, t))
+        .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink());
+    if let Some(at) = ts(c, "createdAt") {
+        head = head.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
     }
+    head = head.child(spacer());
+    let replies = item.replies.len() + item.more;
+    if replies > 0 {
+        head = head.child(text(format!("{replies} {}", if replies == 1 { "reply" } else { "replies" })).font(theme::TEXT_XS).color(muted));
+    }
+    let toggle = item.id.to_string();
+    head = head.child(
+        row()
+            .key(format!("pr-conversation-toggle-{}", item.id))
+            .h(24.0)
+            .px(8.0)
+            .gap(6.0)
+            .center_y()
+            .radius(radius::MD)
+            .hover(t.c.muted)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .label(label)
+            .child(text(label).font(theme::TEXT_XS).color(muted))
+            .child(icon(&i::CHEVRON_DOWN, 14.0).color(muted).rotate(if open { 180f32.to_radians() } else { 0.0 }))
+            .on_press(move |s: &mut App| {
+                let o = &mut ui(s).open_comments;
+                if !o.remove(&toggle) {
+                    o.insert(toggle.clone());
+                }
+            }),
+    );
+    let mut card = col().key(format!("pr-conversation-{}", item.id)).w_full().padding(12.0).radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).child(head);
+    if let Some(path) = item.thread.map(|th| field(th, "path")).or(c["path"].as_str()).filter(|p| !p.is_empty()) {
+        let line = item.thread.and_then(|th| th["line"].as_u64()).map(|l| format!(":{l}")).unwrap_or_default();
+        card = card.child(text(format!("{path}{line}")).font(theme::mono(theme::TEXT_XS)).color(muted).truncate().mt(8.0));
+    }
+    let body = conv::visible_body(field(c, "body"));
+    if !open {
+        if let Some(body) = body {
+            card = card.child(text(conv::preview(&body)).font(theme::TEXT_XS).color(muted).truncate().mt(8.0));
+        }
+        return card;
+    }
+    if let Some(body) = body {
+        card = card.child(col().w_full().mt(8.0).child(markdown(t, &body)));
+    }
+    if !item.replies.is_empty() {
+        let mut thread = col().w_full().gap(12.0);
+        for r in &item.replies {
+            thread = thread.child(markdown(t, field(r, "body").trim()));
+        }
+        card = card.child(row().w_full().mt(12.0).ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0)));
+    }
+    card
 }
 
 /// openOnHostLabel for the open pull request's host.
@@ -1054,7 +1304,7 @@ fn checkout_command(d: &Value) -> Option<String> {
     }
 }
 
-fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
+fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>]) -> El {
     let avatars = &s.ui.pages.avatars;
     let open_label = on_host(s);
     let head_line = |c: &Value, path: Option<String>| {
@@ -1064,13 +1314,11 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
             .center_y()
             .child(avatar(avatars, &c["author"], 16.0, t))
             .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink());
-        if let Some((label, glyph)) = review_label(field(c, "reviewState")) {
-            let ink = match label {
-                "approved" => success(t),
-                "requested changes" => t.c.destructive,
-                _ => t.c.muted_foreground,
-            };
-            h = h.child(icon(glyph, 12.0).color(ink)).child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground));
+        let state = field(c, "reviewState");
+        if let Some(outcome) = conv::outcome(state) {
+            h = h.child(conv::outcome_badge(t, outcome));
+        } else if !state.is_empty() {
+            h = h.child(text(conv::review_state_label(state)).font(theme::TEXT_XS).color(t.c.muted_foreground));
         }
         if let Some(path) = path {
             h = h.child(text(path).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0));
@@ -1104,14 +1352,13 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
         .border(1.0, t.c.border.alpha_mul(0.6))
         .clip_rounded(radius::LG)
         .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(c, path)));
-    let body = field(c, "body").trim();
-    if !body.is_empty() {
-        card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(markdown(t, body)));
+    if let Some(body) = conv::visible_body(field(c, "body")) {
+        card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(markdown(t, &body)));
     }
     if !replies.is_empty() {
         let mut thread = col().w_full().gap(12.0);
         for r in replies {
-            thread = thread.child(col().w_full().gap(6.0).child(head_line(r, None)).child(markdown(t, field(r, "body").trim())));
+            thread = thread.child(col().w_full().gap(6.0).child(head_line(&**r, None)).child(markdown(t, field(r, "body").trim())));
         }
         card = card.child(row().w_full().px(12.0).pb(12.0).child(row().w_full().ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))));
     }
@@ -1120,59 +1367,48 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
 
 // ---- timeline ---------------------------------------------------------------------------
 
+/// PullRequestTimelineTab: lifecycle events, commits and conversations, newest first unless the
+/// order toggle says otherwise.
 fn timeline(s: &App, t: &T) -> El {
     let u = &s.ui.pages.detail;
     let Some(a) = &u.activity else {
-        let note = u.activity_error.clone().unwrap_or_else(|| "Loading activity…".into());
-        return col().w_full().padding(16.0).child(text(note).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
+        return activity_state(s, t);
     };
-    let mut items: Vec<(i64, El)> = Vec::new();
-    for c in a["commits"].as_array().into_iter().flatten() {
-        let oid = field(c, "oid");
-        let url = format!("{}/commits/{oid}", field(u.detail.as_ref().unwrap_or(&Value::Null), "url"));
-        let mut r = row()
-            .key(format!("pr-commit-{oid}"))
-            .w_full()
-            .px(8.0)
-            .py(6.0)
-            .gap(8.0)
-            .center_y()
-            .radius(radius::MD)
-            .hover(t.c.accent.alpha_mul(0.6))
-            .cursor(Cursor::Pointer)
-            .child(icon(&i::GIT_COMMIT_HORIZONTAL, 14.0).color(t.c.muted_foreground))
-            .child(text(field(c, "messageHeadline").to_string()).font(theme::TEXT_XS).color(t.c.foreground).truncate().shrink().min_w(0.0))
-            .child(spacer())
-            .child(text(oid.chars().take(7).collect::<String>()).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground));
-        if let Some(at) = ts(c, "committedDate") {
-            r = r.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
-        }
-        r = r.on_press_tx(move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&url);
-        });
-        items.push((ts(c, "committedDate").unwrap_or(0), r));
+    let d = u.detail.as_ref().unwrap_or(&Value::Null);
+    let term = super::pr_row::term(d);
+    let mut events = conv::timeline(d, a);
+    if u.oldest_first {
+        events.reverse();
     }
-    for c in a["comments"].as_array().into_iter().flatten() {
-        if c["body"].as_str().is_none_or(|b| b.trim().is_empty()) && c["reviewState"].is_null() {
-            continue;
-        }
-        items.push((ts(c, "createdAt").unwrap_or(0), comment_card(s, t, c, &[])));
-    }
-    for th in a["reviewThreads"].as_array().into_iter().flatten() {
-        let list = th["comments"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-        if let Some(first) = list.first() {
-            items.push((ts(first, "createdAt").unwrap_or(0), comment_card(s, t, first, &list[1..]).key(format!("pr-thread-{}", field(th, "id")))));
-        }
-    }
-    if items.is_empty() {
-        return col().w_full().padding(16.0).child(text("No activity yet.").font(theme::TEXT_XS).color(t.c.muted_foreground));
-    }
-    order(&mut items, u.oldest_first);
     let mut out = col().w_full().px(16.0).pt(12.0).pb(48.0).gap(10.0);
-    for (_, e) in items {
-        out = out.child(e);
+    for e in &events {
+        out = out.child(match (&e.item, e.kind) {
+            (Some(item), _) => conversation(s, t, item),
+            (None, "commit") => conv::commit_row(s, t, e),
+            _ => conv::lifecycle_row(s, t, e, term),
+        });
     }
     out
+}
+
+/// openCommit: the Code tab, scoped to the change one commit made.
+pub(super) fn open_commit(s: &mut App, oid: String) {
+    scope_commit(s, Some(oid));
+    ui(s).tab = 2;
+}
+
+/// selectCodeCommit: a new scope drops the other scope's diff and any read still in flight.
+pub(super) fn scope_commit(s: &mut App, oid: Option<String>) {
+    let u = ui(s);
+    u.popup = None;
+    if u.commit != oid {
+        u.commit = oid;
+        u.files = None;
+        u.diff_error = None;
+        u.diff_truncated = false;
+        u.pending_diff = None;
+        u.expanded.clear();
+    }
 }
 
 // ---- code -------------------------------------------------------------------------------
@@ -1188,7 +1424,7 @@ fn code(s: &App, t: &T) -> El {
     let note = |m: String| col().w_full().padding(16.0).child(text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
     let Some(files) = &u.files else {
         return match &u.diff_error {
-            Some(e) => note(e.clone()),
+            Some(e) => diff_unavailable(s, t, e),
             None => note("Loading changes…".into()),
         };
     };
@@ -1307,8 +1543,10 @@ fn ghost(t: &T) -> El {
         .child(line(14.0, 0.6))
 }
 
-fn unavailable(t: &T, entry: &Value, error: &str) -> El {
+/// PullRequestsUnavailableState, naming a pull request the host doesn't have.
+fn unavailable(s: &App, t: &T, entry: &Value, error: &str) -> El {
     let url = field(entry, "url").to_string();
+    let (title, description) = super::pr_actions::unavailable_text(entry, s.ui.pages.detail.not_found, error);
     col()
         .w_full()
         .grow(1.0)
@@ -1316,8 +1554,8 @@ fn unavailable(t: &T, entry: &Value, error: &str) -> El {
         .gap(16.0)
         .center()
         .child(icon(&i::GIT_PULL_REQUEST_ARROW, 20.0).color(t.c.muted_foreground))
-        .child(text(format!("Could not load #{}", entry["number"])).font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD)).color(t.c.foreground))
-        .child(text(error.to_string()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(360.0))
+        .child(text(title).font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD)).color(t.c.foreground))
+        .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(360.0))
         .child(
             row()
                 .gap(8.0)
@@ -1329,6 +1567,64 @@ fn unavailable(t: &T, entry: &Value, error: &str) -> El {
                     let _ = tx.open_url(&url);
                 })),
         )
+}
+
+/// The Timeline before its activity answers: a loading note, or PullRequestActivityUnavailableState.
+fn activity_state(s: &App, t: &T) -> El {
+    let u = &s.ui.pages.detail;
+    let Some(error) = &u.activity_error else {
+        return col().w_full().padding(16.0).child(text("Loading activity…").font(theme::TEXT_XS).color(t.c.muted_foreground));
+    };
+    let term = u.detail.as_ref().or(u.entry.as_ref()).map_or("pull request", super::pr_row::term);
+    col()
+        .w_full()
+        .min_h(192.0)
+        .px(16.0)
+        .py(40.0)
+        .gap(8.0)
+        .center()
+        .child(text(format!("Could not load {term} activity")).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(error.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(448.0))
+        .child(kit::Button::new("Retry").variant("outline").size("sm").icon(&i::REFRESH_CW).on_press(retry_activity).build(t))
+}
+
+/// activityQuery.refresh.
+fn retry_activity(s: &mut App) {
+    let Some(entry) = ui(s).entry.clone() else { return };
+    if let Some(net) = super::pull_requests::net_for(s, &entry) {
+        let id = net.request("pullRequests.activity", reference(&entry));
+        let u = ui(s);
+        u.pending_activity = Some(id);
+        u.activity_error = None;
+    }
+}
+
+/// PullRequestDiffUnavailableState; Try again clears the error so the Code tab reads the diff again.
+fn diff_unavailable(s: &App, t: &T, error: &str) -> El {
+    let u = &s.ui.pages.detail;
+    let d = u.detail.as_ref().or(u.entry.as_ref()).unwrap_or(&Value::Null);
+    let provider = super::pr_row::provider_name(field(d, "provider"));
+    let (title, description) = super::pr_actions::describe_diff_error(error, provider, super::pr_row::term(d));
+    let url = field(d, "url").to_string();
+    let retry = kit::Button::new("Try again").variant("default").size("sm").icon(&i::REFRESH_CW).on_press(|s: &mut App| {
+        let u = ui(s);
+        u.diff_error = None;
+        u.files = None;
+    });
+    let open = kit::Button::new(format!("Open on {provider}")).variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+        let _ = tx.open_url(&url);
+    });
+    col()
+        .w_full()
+        .min_h(240.0)
+        .padding(24.0)
+        .gap(12.0)
+        .center()
+        .role("status")
+        .child(el().size(44.0, 44.0).radius(22.0).center().fill(t.c.warning.alpha_mul(0.16)).child(icon(&i::TRIANGLE_ALERT, 20.0).color(t.c.warning_foreground)))
+        .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(384.0))
+        .child(row().gap(8.0).child(retry.build(t)).child(open))
 }
 
 #[cfg(test)]
@@ -1348,7 +1644,7 @@ mod tests {
             for (k, v) in patch.as_object().unwrap() {
                 d[k] = v.clone();
             }
-            primary(&d)
+            primary(&d, false)
         };
         assert_eq!(with(json!({"state": "merged"})), Some(Primary::Merged));
         assert_eq!(with(json!({"state": "closed"})), Some(Primary::Closed));
@@ -1360,6 +1656,13 @@ mod tests {
         assert_eq!(with(json!({})), Some(Primary::EnableAutoMerge));
         assert_eq!(with(json!({"checks": []})), Some(Primary::Merge));
         assert_eq!(with(json!({"checks": [], "mergeCapabilities": {"merge": false, "squash": false, "rebase": false}})), None);
+        // A stack that owns the merge leaves neither merging nor arming to this header.
+        let mut d = base.clone();
+        assert_eq!(primary(&d, true), None);
+        d["checks"] = json!([]);
+        assert_eq!(primary(&d, true), None);
+        d["autoMergeEnabled"] = json!(true);
+        assert_eq!(primary(&d, true), Some(Primary::Armed));
     }
 
     #[test]
@@ -1386,13 +1689,25 @@ mod tests {
     }
 
     #[test]
-    fn merge_methods_keep_the_hosts_order_and_honour_a_pick() {
+    fn the_merge_method_follows_the_pick_then_the_armed_method_then_last_used() {
+        let mut s = App::new();
+        let last = super::super::pr_actions::LAST_MERGE_METHOD;
+        s.client_settings.values.remove(last);
         let d = recorded()["detail"].clone();
-        assert_eq!(merge_method(&d, None), "squash");
-        assert_eq!(merge_method(&d, Some("rebase".into())), "rebase");
-        let mut no_squash = d.clone();
+        assert_eq!(merge_method(&s, &d), "squash");
+        s.client_settings.values.insert(last.into(), json!("rebase"));
+        assert_eq!(merge_method(&s, &d), "rebase");
+        let mut armed = d.clone();
+        armed["autoMergeMethod"] = json!("merge");
+        follow_auto_merge(&mut s.ui.pages.detail, &armed);
+        assert_eq!(merge_method(&s, &armed), "merge", "a newly armed method becomes the pick");
+        s.ui.pages.detail.detail = Some(armed.clone());
+        s.ui.pages.detail.merge_method = Some("squash".into());
+        follow_auto_merge(&mut s.ui.pages.detail, &armed);
+        assert_eq!(merge_method(&s, &armed), "squash", "a later pick holds while the armed method stays");
+        let mut no_squash = armed.clone();
         no_squash["mergeCapabilities"]["squash"] = json!(false);
-        assert_eq!(merge_method(&no_squash, Some("squash".into())), "merge");
+        assert_eq!(merge_method(&s, &no_squash), "rebase", "a pick the host no longer allows falls through");
     }
 
     #[test]

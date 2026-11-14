@@ -15,6 +15,7 @@ pub struct Dialog {
     scroll_all: bool,
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
+    glyph: Option<El>,
 }
 impl Dialog {
     pub fn new(key: impl Into<String>, title: impl Into<String>) -> Self {
@@ -29,10 +30,16 @@ impl Dialog {
             scroll_all: false,
             close: None,
             button: None,
+            glyph: None,
         }
     }
     pub fn open(mut self, open: bool) -> Self {
         self.open = open;
+        self
+    }
+    /// Shown before the title (web `DialogHeader`'s leading icon).
+    pub fn title_icon(mut self, glyph: El) -> Self {
+        self.glyph = Some(glyph);
         self
     }
     pub fn description(mut self, description: impl Into<String>) -> Self {
@@ -81,12 +88,14 @@ impl Dialog {
             }
             .pin(None, Some(8.), Some(8.), None)
         });
-        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(
-            text(&self.title)
-                .font(theme::weight(theme::TEXT_LG, 600.))
-                .color(t.c.contrast_foreground)
-                .wrap(),
-        );
+        let title = text(&self.title)
+            .font(theme::weight(theme::TEXT_LG, 600.))
+            .color(t.c.contrast_foreground)
+            .wrap();
+        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(match self.glyph {
+            Some(glyph) => row().gap(8.).center_y().child(glyph).child(title.shrink()),
+            None => title,
+        });
         if let Some(description) = self.description {
             heading = heading.child(
                 text(description)

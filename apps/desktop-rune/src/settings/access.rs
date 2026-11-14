@@ -896,6 +896,15 @@ mod tests {
         let modern = json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}});
         assert!(!grants(&modern, "filesystem:write"));
         assert!(!grants(&json!({"authenticated": false, "scopes": ["orchestration:read"]}), "orchestration:read"));
+        let w = "source-control:write";
+        assert!(grants(&json!({"authenticated": true, "scopes": [w]}), w));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {}}), w));
+        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "server:update"}}), w));
+        assert!(!grants(&json!({"authenticated": true, "scopes": [w], "permissions": ["orchestration:read"]}), w));
+        assert!(!grants(&json!({"authenticated": false, "scopes": [w]}), w));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"]}), "settings:write"));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["terminal:operate"]}), "terminal:read"));
+        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:read"]}), "settings:write"));
         let picked = selected(&STANDARD, &delegatable(Some(&Ok(session))));
         assert_eq!(picked, ["terminal:read"]);
     }
