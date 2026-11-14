@@ -160,6 +160,8 @@ pub struct Ui {
     cursor_seen: (u64, bool),
     /// The person's last input to a page, which dims the agent's cursor (Electron's `human`).
     human: Option<(TabId, std::time::Instant)>,
+    /// The display scale the running Chrome launched at, which its frames keep.
+    chrome_scale: Option<f32>,
     /// Other environments whose preview sessions this panel follows, as streams.
     remote_watched: Vec<String>,
 }
@@ -221,6 +223,7 @@ pub fn import(app: &mut App, scale: f32, source: &'static browser_import::Source
     if !ui.browser.started() {
         ui.browser.start(waker.clone());
         ui.browser.send(Cmd::Viewport { w: 0., h: 0., scale });
+        ui.chrome_scale = Some(scale);
     }
     Some(browser_import::start(source, directory, ui.browser.sender()?, waker))
 }
@@ -232,10 +235,11 @@ fn restart(app: &mut App) {
     ui.browser = browser::Browser::default();
     ui.browser.start(waker);
     ui.restarts += 1;
+    ui.chrome_scale = None;
     // The new worker hasn't been told which tab shows or is tracked; poll resends both.
     ui.shown = None;
     ui.tracked = None;
-    let tabs: Vec<TabId> = ui.tabs.keys().copied().collect();
+    let tabs: Vec<TabId> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none()).map(|(id, _)| *id).collect();
     for tab in tabs {
         let pixels = Pixels::new();
         let mut fresh = Tab::new(pixels.clone());
@@ -243,6 +247,51 @@ fn restart(app: &mut App) {
         ui.tabs.insert(tab, fresh);
         ui.browser.send(Cmd::Open(tab, pixels));
     }
+}
+
+/// The headless shell paints at the scale it launched with, so a window that moved to a display
+/// of another scale gets a new Chrome at that scale. Each tab keeps its frame on screen and opens
+/// its page again, at its zoom and device size; an agent's session re-binds to the new page.
+fn relaunch(app: &mut App, scale: f32) {
+    let Some(waker) = app.ui.panel.waker.clone() else { return };
+    let before = app.ui.panel.browser.browser.shared.lock().unwrap().tabs.clone();
+    browser::shutdown();
+    let ui = &mut app.ui.panel.browser;
+    ui.browser = browser::Browser::default();
+    ui.browser.start(waker);
+    ui.chrome_scale = Some(scale);
+    ui.shown = None;
+    ui.tracked = None;
+    let mut tabs: Vec<(TabId, Pixels)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none()).map(|(id, t)| (*id, t.pixels.clone())).collect();
+    tabs.sort_by_key(|(id, _)| *id);
+    // The address bars keep their pages while the new Chrome starts.
+    ui.browser.shared.lock().unwrap().tabs = tabs.iter().filter_map(|(id, _)| Some((*id, Status { loading: true, ..before.get(id)?.clone() }))).collect();
+    for (tab, pixels) in tabs {
+        ui.browser.send(Cmd::Open(tab, pixels));
+        for cmd in before.get(&tab).map(|status| reopen(tab, status)).unwrap_or_default() {
+            ui.browser.send(cmd);
+        }
+    }
+}
+
+/// What a tab needs to show its page again in a new Chrome.
+fn reopen(tab: TabId, status: &Status) -> Vec<Cmd> {
+    let mut out = vec![];
+    match &status.failure {
+        Some(failure) => out.push(Cmd::Navigate(tab, failure.url.clone())),
+        None if !idle(status) => out.push(Cmd::Navigate(tab, status.url.clone())),
+        None => {}
+    }
+    if (status.zoom - 1.).abs() > 0.001 {
+        out.push(Cmd::Zoom(tab, status.zoom));
+    }
+    if status.device.is_some() {
+        out.push(Cmd::Device(tab, status.device));
+    }
+    if status.muted {
+        out.push(Cmd::Mute(tab, true));
+    }
+    out
 }
 
 /// Chrome could not start or its connection dropped, so an import's writes never land.
@@ -375,6 +424,15 @@ fn send(app: &mut App, cmd: Cmd) {
     };
     if let Some(tab) = app.ui.panel.browser.shown.filter(|_| human) {
         app.ui.panel.browser.human = Some((tab, std::time::Instant::now()));
+    }
+    if let Cmd::Viewport { scale, .. } = &cmd {
+        let (started, launched) = (app.ui.panel.browser.browser.started(), app.ui.panel.browser.chrome_scale);
+        match launched {
+            _ if !started => {}
+            Some(launched) if (launched - scale).abs() > 0.01 => relaunch(app, *scale),
+            Some(_) => {}
+            None => app.ui.panel.browser.chrome_scale = Some(*scale),
+        }
     }
     let ui = &app.ui.panel.browser;
     let tab = match &cmd {
@@ -2801,6 +2859,17 @@ mod tests {
         let failed = super::super::stream::State { ended: true, error: Some("The server needs a Chrome sandbox.".into()), ..Default::default() };
         assert_eq!(stream_status(&snapshot, &failed).failure.unwrap().description, "The server needs a Chrome sandbox.");
         assert!(idle(&stream_status(&json!({ "navStatus": { "_tag": "Idle" } }), &state)));
+    }
+
+    #[test]
+    fn a_new_chrome_reopens_each_page_as_it_was() {
+        let page = Status { url: "https://a.dev/x".into(), zoom: 1.25, device: Some((390, 844)), muted: true, ..Status::default() };
+        let cmds = reopen(3, &page);
+        assert!(matches!(&cmds[..], [Cmd::Navigate(3, url), Cmd::Zoom(3, z), Cmd::Device(3, Some((390, 844))), Cmd::Mute(3, true)] if url == "https://a.dev/x" && *z == 1.25));
+        // A page that failed to load tries its address again; a blank tab stays blank.
+        let failed = Status { url: "about:blank".into(), failure: Some(browser::Failure { url: "http://localhost:5173/".into(), description: "ERR_CONNECTION_REFUSED".into() }), ..Status::default() };
+        assert!(matches!(&reopen(4, &failed)[..], [Cmd::Navigate(4, url)] if url == "http://localhost:5173/"));
+        assert!(reopen(5, &Status::default()).is_empty());
     }
 
     #[test]

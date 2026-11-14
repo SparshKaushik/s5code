@@ -213,10 +213,13 @@ fn chrome_path() -> String {
 
 static CHROME: Mutex<Option<Child>> = Mutex::new(None);
 
-/// Stops the headless Chrome this process started; called once the window loop returns.
+/// Stops the headless Chrome this process started: once the window loop returns, or before a
+/// relaunch at a new display scale.
 pub fn shutdown() {
     if let Some(mut child) = CHROME.lock().unwrap().take() {
         let _ = child.kill();
+        // Reaped, so a relaunch finds the profile free.
+        let _ = child.wait();
     }
 }
 
