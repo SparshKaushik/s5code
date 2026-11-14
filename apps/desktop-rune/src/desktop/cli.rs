@@ -16,6 +16,8 @@ pub struct State {
     /// None without a bundled server, which is when Electron reports the command unsupported.
     status: Option<Status>,
     error: Option<String>,
+    /// Whether `status` saw the login shell's PATH, which a terminal will have.
+    pub(super) login_path: bool,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -28,6 +30,7 @@ struct Status {
 impl State {
     /// Keeps an installed launcher pointing at this build's server, as Electron does each launch.
     pub(super) fn load(&mut self) {
+        self.login_path = super::shell_path::get().is_some();
         let Some((paths, script)) = current() else { return };
         if paths.launcher.exists() {
             let _ = write_launcher(&paths.launcher, &script);
@@ -77,7 +80,7 @@ fn current() -> Option<(Paths, String)> {
     let paths = Paths {
         launcher: t3_home.join("bin").join("t3"),
         candidates: candidates(&home),
-        path_env: std::env::var("PATH").unwrap_or_default(),
+        path_env: super::shell_path::current(),
     };
     let script = launcher_script(&paths.launcher, &t3_home, &binary);
     Some((paths, script))

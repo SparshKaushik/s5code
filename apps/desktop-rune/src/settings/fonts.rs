@@ -64,6 +64,43 @@ pub fn terminal_size(values: &Map<String, Value>) -> f32 {
     }
 }
 
+/// Which font the terminal draws in (`resolveTerminalFontPreference`, then ghostty's
+/// `terminalFontFamily`): the code font, or under advanced typography the terminal's own first
+/// installed family, else the default terminal stack.
+#[derive(Debug, PartialEq)]
+enum TerminalFont {
+    Code,
+    Default,
+    Named(String),
+}
+
+fn terminal_font(values: &Map<String, Value>, installed: impl Fn(&str) -> bool) -> TerminalFont {
+    if values.get("typographyAdvanced").and_then(Value::as_bool) != Some(true) {
+        return TerminalFont::Code;
+    }
+    named(field(values, "fontFamilyTerminal")).into_iter().find(|name| installed(name)).map_or(TerminalFont::Default, TerminalFont::Named)
+}
+
+/// The terminal's Rune family for these client settings.
+pub fn terminal_family(values: &Map<String, Value>) -> rune::Family {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let loaded = |name: &str| LAUNCHED.get().is_some_and(|l| l.iter().any(|(n, ok)| *ok && *n == name.to_lowercase()));
+    match terminal_font(values, loaded) {
+        TerminalFont::Code => rune::Family::Mono,
+        TerminalFont::Default => rune::Family::SystemMono,
+        TerminalFont::Named(name) => {
+            let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+            // `Family::Named` wants a static name; each distinct family leaks once.
+            let found = names.iter().copied().find(|n| *n == name);
+            rune::Family::Named(found.unwrap_or_else(|| {
+                let leaked: &'static str = Box::leak(name.into_boxed_str());
+                names.push(leaked);
+                leaked
+            }))
+        }
+    }
+}
+
 /// The sans and mono slots for these client settings.
 pub fn families(values: &Map<String, Value>) -> (String, String) {
     (css(field(values, "fontFamilySans"), crate::theme::SANS), css(field(values, "fontFamilyCode"), "ui-monospace"))
@@ -105,28 +142,6 @@ pub fn launch() -> (&'static [&'static [u8]], (&'static str, &'static str)) {
     }
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     (Box::leak(fonts.into_boxed_slice()), (leak(sans), leak(mono)))
-}
-
-/// The terminal's family (`resolveTerminalFontPreference`): the first one its field names that
-/// loaded at launch, else the platform's monospaced font.
-pub fn terminal_family(values: &Map<String, Value>) -> rune::Family {
-    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let advanced = values.get("typographyAdvanced").and_then(Value::as_bool).unwrap_or(false);
-    let key = if advanced { "fontFamilyTerminal" } else { "fontFamilyCode" };
-    let loaded = |name: &String| LAUNCHED.get().is_some_and(|l| l.iter().any(|(n, ok)| *ok && *n == name.to_lowercase()));
-    let Some(name) = named(field(values, key)).into_iter().find(loaded) else {
-        return rune::Family::SystemMono;
-    };
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let name = match names.iter().find(|n| **n == name) {
-        Some(n) => *n,
-        None => {
-            let leaked: &'static str = Box::leak(name.into_boxed_str());
-            names.push(leaked);
-            leaked
-        }
-    };
-    rune::Family::Named(name)
 }
 
 /// Points the slots at the current settings' families; free when they already hold them.
@@ -211,6 +226,17 @@ mod tests {
         assert_eq!(squash("Segoe UI-Bold"), "segoeuibold");
         let advanced = json!({"typographyAdvanced": true, "fontFamilyTerminal": "Not Loaded Mono"}).as_object().unwrap().clone();
         assert_eq!(terminal_family(&advanced), rune::Family::SystemMono, "a family that never loaded falls back");
+    }
+
+    #[test]
+    fn terminal_font_follows_code_unless_advanced_names_an_installed_family() {
+        let values = |v: Value| v.as_object().unwrap().clone();
+        let installed = |name: &str| name == "Iosevka";
+        assert_eq!(terminal_font(&values(json!({"fontFamilyTerminal": "Iosevka"})), installed), TerminalFont::Code);
+        let advanced = |family: &str| values(json!({"typographyAdvanced": true, "fontFamilyTerminal": family}));
+        assert_eq!(terminal_font(&advanced("Missing Mono, Iosevka, monospace"), installed), TerminalFont::Named("Iosevka".into()));
+        assert_eq!(terminal_font(&advanced(""), installed), TerminalFont::Default);
+        assert_eq!(terminal_font(&advanced("Missing Mono"), installed), TerminalFont::Default);
     }
 
     #[test]

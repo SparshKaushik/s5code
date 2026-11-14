@@ -1316,7 +1316,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
     let a = seg.account;
     let w = &seg.member.window;
     let u = &s.ui.pages.usage;
-    let hour12 = s.client_settings.values.get("timestampFormat").and_then(Value::as_str).unwrap_or("locale") != "24-hour";
+    let hour12 = crate::desktop::locale::hour12(s.client_settings.values.get("timestampFormat").and_then(Value::as_str));
     let name = a.display_name.clone().unwrap_or_else(|| driver_label(&a.driver).unwrap_or(a.driver.as_str()).to_string());
     let avatar = if a.redeem.is_some() { Some(el().size(20.0, 20.0).center().child(provider_icon(t, &a.driver, 16.0))) } else { a.email.as_deref().map(chip) };
     let mut head = col()
