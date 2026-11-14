@@ -125,7 +125,6 @@ fn has_desktop(mode: &str) -> bool {
 }
 
 pub fn window_focus(s: &mut App, focused: bool) {
-    eprintln!("TRACE notify focus={focused}");
     s.ui.notify.background = !focused;
     if focused {
         clear_pending(s);
@@ -198,9 +197,6 @@ fn observe(s: &mut App, now: i64) -> bool {
     }
     let st = s.state();
     let sequence = (st.shell_sequence, s.ui.env.merges);
-    if s.ui.notify.sequence != Some(sequence) {
-        eprintln!("TRACE notify observe mode={mode} in_app={} live={} ready={} seq={:?} last={:?} rows={}", in_app(s), matches!(s.src, data::Source::Live(_)), st.shell_ready, sequence, s.ui.notify.sequence, st.threads.len());
-    }
     if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(sequence) {
         return false;
     }
@@ -213,9 +209,6 @@ fn observe(s: &mut App, now: i64) -> bool {
         // Subagents and side chats surface on their parent.
         if thread.hidden {
             continue;
-        }
-        if ui.previous.get(&thread.id) != Some(&observation) {
-            eprintln!("TRACE notify row {} prior={:?} next={:?}", thread.title, ui.previous.get(&thread.id), observation);
         }
         if let Some(kind) = ui.gate.observe(&thread.id, ui.previous.get(&thread.id), &observation, thread.archived, quiet) {
             presented.push((thread.id.clone(), thread.title.clone(), status, kind));
@@ -244,7 +237,6 @@ fn title_for(kind: Kind, status: Status) -> &'static str {
 
 fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kind, now: i64) {
     let title = title_for(kind, status);
-    eprintln!("TRACE notify present {title} {description} focused={} in_app={}", !s.ui.notify.background, in_app(s));
     let mode = mode(s).to_string();
     if has_sound(&mode) {
         play_sound(s, kind);
