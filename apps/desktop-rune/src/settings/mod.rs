@@ -1750,16 +1750,7 @@ mod reveal_tests {
     }
 
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
-    const UNBUILT: &[&str] = &[
-        "Compact idle threads",
-        "Cursor account usage",
-        "Health check interval",
-        "Mobile app",
-        "Project defaults and overrides",
-        "Source control writer model",
-        "Thread details",
-        "Usage providers",
-    ];
+    const UNBUILT: &[&str] = &["Cursor account usage", "Project defaults and overrides"];
     /// Drawn only in other states: the desktop CLI row, the managed host's local environment, and
     /// Linked environments behind its Labs flag.
     const HIDDEN_HERE: &[&str] = &["Linked environments", "Local environment", "t3 command"];
