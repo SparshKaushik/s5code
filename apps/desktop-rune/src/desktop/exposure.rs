@@ -36,7 +36,7 @@ const SERVE_SETTLE: Duration = Duration::from_secs(20);
 pub struct State {
     network: bool,
     /// Where other devices reach this machine, while shared.
-    host: Option<Ipv4Addr>,
+    host: Option<String>,
     serve: bool,
     serve_port: u16,
     /// The mode the confirm dialog asks to switch to.
@@ -90,8 +90,10 @@ pub struct Endpoint {
 impl State {
     pub(super) fn load(&mut self) {
         let settings = settings();
-        self.network = settings.get::<String>(KEY).as_deref() == Some(NETWORK);
-        self.serve = settings.get::<bool>(SERVE_KEY) == Some(true);
+        // What the server runs with: a policy without remote clients holds both off.
+        let remote = super::policy::current().allows_remote();
+        self.network = remote && settings.get::<String>(KEY).as_deref() == Some(NETWORK);
+        self.serve = remote && settings.get::<bool>(SERVE_KEY) == Some(true);
         self.serve_port = serve_port(settings.get::<u64>(SERVE_PORT_KEY));
         self.host = self.network.then(lan_address).flatten();
         self.default_key = super::prefs().get(DEFAULT_ENDPOINT_KEY);
@@ -111,19 +113,35 @@ fn serve_port(value: Option<u64>) -> u16 {
 }
 
 /// What the bundled server binds on its next start.
+/// A policy without remote clients holds it on loopback whatever the saved choice.
 pub fn bind_host() -> &'static str {
-    if settings().get::<String>(KEY).as_deref() == Some(NETWORK) { "0.0.0.0" } else { "127.0.0.1" }
+    let network = settings().get::<String>(KEY).as_deref() == Some(NETWORK);
+    if network && super::policy::current().allows_remote() { "0.0.0.0" } else { "127.0.0.1" }
 }
 
 /// The Serve settings the bundled server starts with.
 pub fn tailscale_serve() -> (bool, u16) {
     let settings = settings();
-    (settings.get::<bool>(SERVE_KEY) == Some(true), serve_port(settings.get::<u64>(SERVE_PORT_KEY)))
+    let serve = settings.get::<bool>(SERVE_KEY) == Some(true) && super::policy::current().allows_remote();
+    (serve, serve_port(settings.get::<u64>(SERVE_PORT_KEY)))
 }
 
-/// The default route's IPv4 (connecting a UDP socket sends nothing), as Electron's
-/// `resolveLanAdvertisedHost`: never loopback, link-local or a Tailscale address.
-fn lan_address() -> Option<Ipv4Addr> {
+/// Electron's `resolveLanAdvertisedHost`: `T3CODE_DESKTOP_LAN_HOST` when set, else the default
+/// route's address.
+fn lan_address() -> Option<String> {
+    lan_host(std::env::var("T3CODE_DESKTOP_LAN_HOST").ok().as_deref(), default_route_ipv4)
+}
+
+fn lan_host(explicit: Option<&str>, detect: impl FnOnce() -> Option<Ipv4Addr>) -> Option<String> {
+    match explicit.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(host) => Some(host.to_owned()),
+        None => detect().map(|ip| ip.to_string()),
+    }
+}
+
+/// The default route's IPv4 (connecting a UDP socket sends nothing): never loopback,
+/// link-local or a Tailscale address.
+fn default_route_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
     match socket.local_addr().ok()?.ip() {
@@ -254,7 +272,7 @@ pub(super) fn poll(s: &mut App) -> bool {
 }
 
 /// Electron's `resolveDesktopCoreAdvertisedEndpoints` and the Tailscale provider's, in its order.
-fn endpoints(port: u16, network: bool, lan: Option<Ipv4Addr>, custom: &[String], tailscale: Option<&Tailscale>, serve: bool, serve_port: u16) -> Vec<Endpoint> {
+fn endpoints(port: u16, network: bool, lan: Option<&str>, custom: &[String], tailscale: Option<&Tailscale>, serve: bool, serve_port: u16) -> Vec<Endpoint> {
     let endpoint = |key: String, label: &str, url: String| Endpoint {
         key,
         label: label.into(),
@@ -341,7 +359,7 @@ struct View {
 
 fn view(s: &App) -> View {
     let ui = &s.ui.desktop.exposure;
-    let all = endpoints(port(s).unwrap_or(0), ui.network, ui.host, &custom_endpoints(), ui.tailscale.as_ref(), ui.serve, ui.serve_port);
+    let all = endpoints(port(s).unwrap_or(0), ui.network, ui.host.as_deref(), &custom_endpoints(), ui.tailscale.as_ref(), ui.serve, ui.serve_port);
     let (https, rest): (Vec<Endpoint>, Vec<Endpoint>) = all.into_iter().partition(|e| e.tailscale_https);
     View { network: if ui.network { rest } else { vec![] }, tailscale_https: https.into_iter().next() }
 }
@@ -352,7 +370,7 @@ pub fn scene(s: &mut App) {
     let ui = &mut s.ui.desktop.exposure;
     ui.scene = true;
     ui.network = true;
-    ui.host = Some(Ipv4Addr::new(192, 168, 1, 20));
+    ui.host = Some("192.168.1.20".into());
 }
 
 /// Where pairing links point: web's `defaultDesktopAdvertisedEndpoint`. None while this window
@@ -366,7 +384,7 @@ pub fn pairing_endpoint(s: &App) -> Option<Endpoint> {
     select(&v.network, key).or_else(|| select(v.tailscale_https.as_slice(), key)).cloned()
 }
 
-fn describe(network: bool, host: Option<Ipv4Addr>, port: Option<u16>) -> String {
+fn describe(network: bool, host: Option<&str>, port: Option<u16>) -> String {
     match (network, host, port) {
         (false, ..) => "Limited to this machine.".into(),
         (true, Some(host), Some(port)) => format!("Reachable at http://{host}:{port}"),
@@ -442,7 +460,7 @@ pub fn network_row(s: &App, t: &T) -> Option<El> {
             }
             copy.child(line)
         }
-        None => copy.child(muted(describe(on, ui.host, port(s)), t)),
+        None => copy.child(muted(describe(on, ui.host.as_deref(), port(s)), t)),
     };
     if let Some(error) = &ui.error {
         copy = copy.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
@@ -651,6 +669,10 @@ fn set(s: &mut App, network: bool) {
     let ui = &mut s.ui.desktop.exposure;
     ui.pending = None;
     ui.error = None;
+    if network && let Some(note) = super::policy::current().exposure_note() {
+        ui.error = Some(note);
+        return;
+    }
     let host = lan_address();
     if network && host.is_none() {
         let on = port.map_or_else(String::new, |p| format!(" on port {p}"));
@@ -676,6 +698,10 @@ fn set_serve(s: &mut App, enabled: bool, port: Option<u16>) {
     let ui = &mut s.ui.desktop.exposure;
     ui.serve_dialog = None;
     ui.error = None;
+    if enabled && let Some(note) = super::policy::current().exposure_note() {
+        ui.error = Some(note);
+        return;
+    }
     let port = port.unwrap_or(ui.serve_port);
     if ui.serve == enabled && ui.serve_port == port && (!enabled || ui.tailscale.as_ref().is_some_and(|ts| ts.serving)) {
         return;
@@ -718,8 +744,18 @@ mod tests {
     }
 
     #[test]
+    fn the_lan_host_override_wins_as_electrons_does() {
+        let detected = || Some(Ipv4Addr::new(192, 168, 1, 20));
+        assert_eq!(lan_host(Some(" box.lan "), detected).as_deref(), Some("box.lan"));
+        assert_eq!(lan_host(Some("  "), detected).as_deref(), Some("192.168.1.20"));
+        assert_eq!(lan_host(None, detected).as_deref(), Some("192.168.1.20"));
+        assert_eq!(lan_host(Some("10.1.2.3"), || None).as_deref(), Some("10.1.2.3"));
+        assert_eq!(lan_host(None, || None), None);
+    }
+
+    #[test]
     fn describes_the_exposure_as_electron_does() {
-        let lan = Some(Ipv4Addr::new(192, 168, 1, 20));
+        let lan = Some("192.168.1.20");
         assert_eq!(describe(false, lan, Some(3773)), "Limited to this machine.");
         assert_eq!(describe(true, lan, Some(3773)), "Reachable at http://192.168.1.20:3773");
         assert_eq!(describe(true, lan, None), "Exposed on all interfaces. Pairing links use 192.168.1.20.");
@@ -753,7 +789,7 @@ mod tests {
 
     #[test]
     fn lists_endpoints_and_picks_the_pairing_default_as_web_does() {
-        let lan = Some(Ipv4Addr::new(192, 168, 1, 20));
+        let lan = Some("192.168.1.20");
         let ts = Tailscale { dns_name: Some("box.ts.net".into()), ips: vec![Ipv4Addr::new(100, 101, 5, 6)], serving: true };
         let custom = vec!["https://t3.example.com".to_owned(), "http://box.lan:3773".to_owned()];
         let all = endpoints(3773, true, lan, &custom, Some(&ts), true, 443);

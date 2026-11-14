@@ -811,10 +811,13 @@ mod ansi {
                 if p == Pen::default() {
                     continue;
                 }
-                match runs.last_mut() {
-                    Some((range, last)) if *last == p && range.end == start => range.end = text.len(),
-                    _ if runs.len() < MAX_RUNS => runs.push((start..text.len(), p)),
-                    _ => {}
+                let joins = runs.last().is_some_and(|(range, last)| *last == p && range.end == start);
+                if joins {
+                    if let Some((range, _)) = runs.last_mut() {
+                        range.end = text.len();
+                    }
+                } else if runs.len() < MAX_RUNS {
+                    runs.push((start..text.len(), p));
                 }
             }
         }

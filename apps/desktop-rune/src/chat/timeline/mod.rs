@@ -134,7 +134,7 @@ pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::det
         .size("xs")
         .icon(&icons::CHEVRON_DOWN)
         .build(t)
-        .on_press_tx(move |_: &mut App, tx| tx.scroll_to_bottom(list.clone()));
+        .on_press_tx(move |_: &mut App, tx| tx.scroll_to_bottom_instant(list.clone()));
     if queued > 0 {
         button = button
             .label(format!("Scroll to end, {queued} queued"))

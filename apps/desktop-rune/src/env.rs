@@ -20,6 +20,7 @@ use crate::theme::{self, T};
 use crate::{App, Route, kit};
 
 pub mod ssh;
+mod catalog;
 
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
@@ -50,8 +51,6 @@ pub struct Ui {
     /// Rows copied into `App::src`, and which environment owns each copied id.
     foreign: usize,
     owners: HashMap<String, String>,
-    /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
-    pub merges: u64,
     pub ssh: ssh::Ui,
     /// Saved environments switched off in Settings: kept, but not connected.
     pub off: Vec<String>,
@@ -60,7 +59,7 @@ pub struct Ui {
 fn path() -> PathBuf {
     match std::env::var_os("S5_ENVIRONMENTS") {
         Some(path) => path.into(),
-        None => crate::settings::client::config_path().with_file_name("environments.json"),
+        None => crate::settings::client::sibling_path("environments.json"),
     }
 }
 
@@ -100,9 +99,16 @@ fn encode(saved: &[Saved], off: &[String]) -> Value {
     json!({ "version": 1, "environments": rows })
 }
 
-/// Bearer tokens are credentials: the file is the user's alone.
+/// Bearer tokens are credentials: the file is the user's alone. Electron's catalog follows.
 fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
     let path = path();
+    let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
+    write(&path, saved, off)?;
+    catalog::export(&old, saved);
+    Ok(())
+}
+
+fn write(path: &std::path::Path, saved: &[Saved], off: &[String]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -113,7 +119,7 @@ fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
     std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())
+    std::fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 
 fn connect(s: &App, env: &Saved) -> Source {
@@ -137,6 +143,28 @@ pub fn start(s: &mut App) {
     s.ui.env.saved.extend(saved);
     s.ui.env.off = off;
     ssh::start(s);
+    if !rune::is_headless() {
+        std::thread::spawn(|| *CATALOG.lock().unwrap() = Some(catalog::read()));
+    }
+}
+
+/// Electron's saved connections, read off the UI thread at launch.
+static CATALOG: std::sync::Mutex<Option<Vec<Saved>>> = std::sync::Mutex::new(None);
+
+/// Connections paired in the Electron app that this list lacks join it, and connect.
+fn adopt_catalog(s: &mut App) -> bool {
+    let Some(found) = CATALOG.lock().unwrap().take() else { return false };
+    let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
+    if new.is_empty() {
+        return false;
+    }
+    for env in new {
+        let src = connect(s, &env);
+        s.ui.env.parked.push((env.id.clone(), src));
+        s.ui.env.saved.push(env);
+    }
+    s.ui.env.error = save(&s.ui.env.saved, &s.ui.env.off).err().map(|e| format!("Could not save environments: {e}"));
+    true
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -306,11 +334,13 @@ pub fn remote_label(s: &App, row: &Value) -> Option<String> {
     (key != LOCAL).then(|| label(s, &key))
 }
 
-/// Every environment this window knows: this machine first, then the saved ones by label.
+/// Every environment this window knows: this machine first, then the saved ones by label. With
+/// the local environment off there is no primary environment, as web's `readPrimaryEnvironmentTarget`.
 pub fn keys(s: &App) -> Vec<String> {
     let mut saved: Vec<&Saved> = s.ui.env.saved.iter().collect();
     saved.sort_by(|a, b| a.label.cmp(&b.label));
-    std::iter::once(LOCAL.to_owned()).chain(saved.into_iter().map(|e| e.id.clone())).collect()
+    let local = (!s.ui.desktop.local_off).then(|| LOCAL.to_owned());
+    local.into_iter().chain(saved.into_iter().map(|e| e.id.clone())).collect()
 }
 
 /// Whether the environment is connected and has its shell (`canCreateProjectInEnvironment`).
@@ -397,7 +427,6 @@ fn merge(s: &mut App) -> bool {
             }
         }
     }
-    env.merges += 1;
     true
 }
 
@@ -519,7 +548,7 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s);
+    let changed = ssh::poll(s) | adopt_catalog(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
@@ -647,6 +676,10 @@ mod tests {
         remote.shell_revision = 1;
         s.ui.env.saved.push(saved("a"));
         s.ui.env.parked.push(("a".into(), Source::Fixture(remote)));
+        assert_eq!(keys(&s), [LOCAL, "a"]);
+        s.ui.desktop.local_off = true;
+        assert_eq!(keys(&s), ["a"], "web drops the primary environment while it is off");
+        s.ui.desktop.local_off = false;
         let ids = |s: &App| s.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).collect::<Vec<_>>();
 
         assert!(drain(&mut s));
