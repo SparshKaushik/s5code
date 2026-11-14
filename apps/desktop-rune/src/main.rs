@@ -191,6 +191,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);
+    changed |= settings::codex_callback::poll(s);
     changed |= wizard::poll(s);
     changed |= search::poll(s);
     changed |= desktop::poll(s, tx);

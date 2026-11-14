@@ -7,6 +7,7 @@
 //! Web pages the OS hands over (macOS: http links and `.html` files) open in a thread's browser,
 //! as DesktopWebLinkCoordinator's `openInBrowser`.
 
+use crate::settings::codex_callback;
 use crate::{App, Route, data};
 
 /// `PROMPT_LINK_MAX_PROMPT_LENGTH`.
@@ -134,9 +135,21 @@ fn is_web_page_file(path: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| matches!(ext, "htm" | "html" | "xhtm" | "xhtml"))
 }
 
-/// Prompt links and pairing links: what a second launch hands to the running app.
+/// Prompt, pairing, ChatGPT handoff and sign-in return links: what a second launch hands to
+/// the running app.
 pub fn is_app_link(url: &str) -> bool {
-    parse(url).is_some() || pairing_link(url).is_some()
+    parse(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || resume_route(url).is_some()
+}
+
+/// `resumeProviderAuth`: a sign-in page sending the person back to the app's settings.
+fn resume_route(url: &str) -> Option<Route> {
+    let sanitized = codex_callback::return_url(url)?;
+    let path = sanitized.strip_prefix("s5code://app")?.split(['?', '#']).next().unwrap_or("");
+    Some(match path.strip_prefix("/settings").map(|p| p.trim_start_matches('/')) {
+        Some("") => Route::Settings("general".into()),
+        Some(page) => Route::Settings(page.split('/').next().unwrap_or(page).into()),
+        None => Route::Home { project_id: None },
+    })
 }
 
 /// `promptLinkAppPath` + `parseNewThreadLink` for new-thread links. `None` when `url` is not a
@@ -178,6 +191,14 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
 /// Opens a prompt link from anywhere (a second launch, the OS's URL handler), on the UI thread:
 /// the draft lands now, or once the shell has loaded. False when `url` is no prompt link.
 pub fn open(s: &mut App, url: &str) -> bool {
+    if let Some(handoff) = codex_callback::read_handoff(url) {
+        codex_callback::handoff(s, handoff);
+        return true;
+    }
+    if let Some(route) = resume_route(url) {
+        s.navigate(route);
+        return true;
+    }
     if let Some(pairing_url) = pairing_link(url) {
         // A repeated click would only ask again and then fail on the spent one-time token.
         if s.ui.links.paired.contains(&pairing_url) {
@@ -387,6 +408,17 @@ pub fn poll(s: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_return_links_resume_in_settings() {
+        assert_eq!(resume_route("s5code://app/settings/providers?instanceId=work"), Some(Route::Settings("providers".into())));
+        assert_eq!(resume_route("s5code://app/settings"), Some(Route::Settings("general".into())));
+        assert_eq!(resume_route("s5code://app/welcome#agents:env-1"), Some(Route::Home { project_id: None }));
+        for other in ["t3code://app/settings", "s5code://app/threads/1", "https://app.t3.codes/settings", "s5code://new?prompt=x"] {
+            assert_eq!(resume_route(other), None, "{other}");
+        }
+        assert!(is_app_link("s5code://app/settings/providers"));
+    }
 
     #[test]
     fn web_pages_follow_electrons_link_and_file_rules() {
