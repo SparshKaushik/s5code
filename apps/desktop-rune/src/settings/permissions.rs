@@ -1,51 +1,87 @@
-//! Web's client permission gating: the connection's session (`GET /api/auth/session`) checked
-//! against contracts `CLIENT_GUARDED_RPC_SCOPES`. The server still authorizes every request.
+//! Web's client permission gating: each environment's session (`GET /api/auth/session`)
+//! checked against contracts `CLIENT_GUARDED_RPC_SCOPES`, for the environment a control acts on.
+//! The server still authorizes every request.
 use crate::{App, theme::T};
 use rune::El;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Session {
-    reply: Option<Result<Value, Value>>,
-    pending: Option<u64>,
+    /// Each environment's last answer and the request in flight, by environment key.
+    by_env: HashMap<String, Entry>,
     /// The inert control under the pointer: its row key and the reason it is inert.
     tip: Option<(String, String)>,
 }
 
-/// Refetches the session; the last answer stays readable while the new one is in flight.
+#[derive(Default)]
+struct Entry {
+    reply: Option<Result<Value, Value>>,
+    pending: Option<u64>,
+}
+
+/// Refetches every connected environment's session; last answers stay readable meanwhile.
 pub fn load(s: &mut App) {
-    if s.ui.settings.session.pending.is_some() {
+    for key in crate::env::keys(s) {
+        fetch(s, &key);
+    }
+}
+
+fn fetch(s: &mut App, key: &str) {
+    if s.ui.settings.session.by_env.get(key).is_some_and(|e| e.pending.is_some()) {
         return;
     }
-    let id = s.src.net().map(|net| net.http_request("GET", "/api/auth/session", json!({})));
-    s.ui.settings.session.pending = id;
+    let Some(id) = crate::env::net_of(s, key).map(|net| net.http_request("GET", "/api/auth/session", json!({}))) else { return };
+    s.ui.settings.session.by_env.entry(key.to_owned()).or_default().pending = Some(id);
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let Some(id) = s.ui.settings.session.pending else { return false };
-    let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
-    let session = &mut s.ui.settings.session;
-    session.pending = None;
-    session.reply = Some(reply);
-    true
+    // An environment switched to, or connected since, is asked once.
+    let target = target(s);
+    if !s.ui.settings.session.by_env.contains_key(&target) {
+        fetch(s, &target);
+    }
+    let pending: Vec<(String, u64)> = s.ui.settings.session.by_env.iter().filter_map(|(k, e)| Some((k.clone(), e.pending?))).collect();
+    let mut changed = false;
+    for (key, id) in pending {
+        let Some(reply) = crate::env::net_of(s, &key).and_then(|net| net.take_reply(id)) else { continue };
+        let entry = s.ui.settings.session.by_env.entry(key).or_default();
+        entry.pending = None;
+        entry.reply = Some(reply);
+        changed = true;
+    }
+    changed
 }
 
-/// The last answer to the session request, failed or not.
+/// The environment the settings on screen write to: the scoped project's, else the one on screen.
+pub fn target(s: &App) -> String {
+    match &s.ui.settings.project {
+        Some(project) => crate::env::owner(s, project),
+        None => s.ui.env.active.clone(),
+    }
+}
+
+/// The last answer to the target environment's session request, failed or not.
 pub fn reply(s: &App) -> Option<&Result<Value, Value>> {
-    s.ui.settings.session.reply.as_ref()
+    reply_on(s, &target(s))
 }
 
-/// The session as the server last answered it.
-pub fn session(s: &App) -> Option<&Value> {
-    s.ui.settings.session.reply.as_ref()?.as_ref().ok()
+fn reply_on<'a>(s: &'a App, key: &str) -> Option<&'a Result<Value, Value>> {
+    s.ui.settings.session.by_env.get(key)?.reply.as_ref()
 }
 
-/// Web `useEnvironmentScope`: denied until the session answers, and when it fails. Fixtures
-/// have no server and grant everything.
+/// Web `useEnvironmentScope` for the target environment.
 pub fn can(s: &App, scope: &str) -> bool {
-    match &s.src {
-        crate::data::Source::Fixture(_) => true,
-        crate::data::Source::Live(_) => session(s).is_some_and(|session| grants(session, scope)),
+    can_on(s, &target(s), scope)
+}
+
+/// Web `useEnvironmentScope(environmentId, scope)`: denied until that session answers, and when
+/// it fails. Fixtures have no server and grant everything.
+pub fn can_on(s: &App, key: &str, scope: &str) -> bool {
+    match crate::env::source(s, key) {
+        Some(crate::data::Source::Fixture(_)) => true,
+        Some(crate::data::Source::Live(_)) => reply_on(s, key).and_then(|r| r.as_ref().ok()).is_some_and(|session| grants(session, scope)),
+        None => false,
     }
 }
 
@@ -133,7 +169,7 @@ pub fn required(method: &str) -> Option<&'static str> {
 
 /// Web `SettingsRow`'s reason a server-saved row's control is inert, if it is.
 pub fn row_lock(s: &App, key: &str) -> Option<String> {
-    let label = || crate::env::label(s, crate::env::LOCAL);
+    let label = || crate::env::label(s, &target(s));
     lock_message(
         can_write_settings(s),
         locked_by(s.state().config.as_ref().map(|c| &c["managedPolicy"]), key),

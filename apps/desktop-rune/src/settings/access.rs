@@ -68,6 +68,8 @@ pub struct State {
     /// The pairing link whose share panel is open, and the endpoint its QR code uses.
     share: Option<String>,
     share_endpoint: Option<String>,
+    /// Scenes: an access snapshot standing in for the server's.
+    scene: Option<Value>,
 }
 
 pub(super) fn poll(s: &mut App) -> bool {
@@ -340,7 +342,7 @@ fn permissions(s: &App, t: &T) -> El {
 /// Web `FoldedSettingsSection` "Authorized clients".
 fn clients(s: &App, t: &T) -> El {
     let state = &s.ui.settings.connections.access;
-    let snapshot = super::resource(s, "subscribeAuthAccess", json!({}));
+    let snapshot = super::resource(s, "subscribeAuthAccess", json!({})).or(state.scene.as_ref());
     let now = s.now_ms;
     let mut links: Vec<&Value> = snapshot
         .into_iter()
@@ -893,11 +895,14 @@ fn machine_menu(s: &App, t: &T, layers: &mut Vec<El>) {
         state.menu = false;
         state.icon_menu = false;
     };
-    let entries = KINDS
+    let lock = super::connections::icon_lock(s.state().config.is_some(), super::permissions::can(s, "settings:write"));
+    let mut entries: Vec<MenuEntry> = lock
         .into_iter()
-        .map(|(kind, label)| {
+        .flat_map(|lock| [MenuEntry::item(MenuItem::new(lock).disabled(true)), MenuEntry::Separator])
+        .collect();
+    entries.extend(KINDS.into_iter().map(|(kind, label)| {
             let detected = detected.to_owned();
-            let mut item = MenuItem::new(label).icon(machine_icon(kind)).radio(kind == resolved);
+            let mut item = MenuItem::new(label).icon(machine_icon(kind)).radio(kind == resolved).disabled(lock.is_some());
             if kind == detected {
                 item = item.trailing(
                     text(if known { "detected" } else { "default" }).font(theme::TEXT_XS).color(t.c.muted_foreground),
@@ -907,8 +912,7 @@ fn machine_menu(s: &App, t: &T, layers: &mut Vec<El>) {
                 update(s, "environmentIcon", icon_setting(kind, &detected));
                 close(s);
             }))
-        })
-        .collect();
+        }));
     Menu::new("access-machine-menu")
         .anchor("access-machine-more")
         .width(200.0)
@@ -1011,4 +1015,18 @@ mod tests {
         assert_eq!(icon_setting("cloud", "server"), json!("cloud"));
         assert_eq!(unavailable(true, true, false), "Could not verify your permissions. Retrying automatically.");
     }
+}
+
+/// Scene: a pairing link this window just created, its QR share panel open.
+pub(super) fn scene_share(s: &mut App) {
+    // Without the page, the first poll resets this state as a page change.
+    s.ui.settings.connections.page = Some("access".into());
+    let state = &mut s.ui.settings.connections.access;
+    state.scene = Some(json!({"payload": {
+        "pairingLinks": [{"id": "link-1", "label": "Phone", "scopes": ["orchestration:read", "orchestration:operate"]}],
+        "clientSessions": [{"sessionId": "s-1", "current": true, "connected": true, "client": {"label": "This desktop", "os": "Linux"}}],
+    }}));
+    state.clients_open = true;
+    state.credentials.insert("link-1".into(), "ABCD-EFGH-JKLM".into());
+    state.share = Some("link-1".into());
 }

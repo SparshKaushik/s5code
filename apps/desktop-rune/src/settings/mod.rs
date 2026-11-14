@@ -24,6 +24,7 @@ mod icon_index;
 mod pages;
 pub(crate) mod permissions;
 mod qr;
+pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;
@@ -109,6 +110,7 @@ pub struct Ui {
     pub secrets: secrets::Ui,
     pub diagnostics: diagnostics::Ui,
     pub licenses: licenses::Ui,
+    pub telemetry: telemetry::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -540,7 +542,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && diagnostics::tick(s);
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -638,7 +640,7 @@ pub const NAV: &[(&str, &[(&str, &str)])] = &[
             ("maintenance", "Maintenance"),
             ("labs", "Labs"),
             ("about", "About"),
-            ("archived", "Archived threads"),
+            ("archived", "Archive"),
         ],
     ),
 ];
@@ -1135,6 +1137,19 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-secrets-dialog", |s| {
         scene(s, "secrets");
         secrets::scene(s, true);
+    }),
+    ("settings-access-share", |s| {
+        scene(s, "access");
+        crate::desktop::exposure::scene(s);
+        access::scene_share(s);
+    }),
+    ("settings-connections-routes", |s| {
+        scene(s, "connections");
+        connections::scene(s, "routes");
+    }),
+    ("settings-connections-route-remove", |s| {
+        scene(s, "connections");
+        connections::scene(s, "route-remove");
     }),
     ("settings-maintenance", |s| scene(s, "maintenance")),
     ("settings-labs", |s| scene(s, "labs")),
