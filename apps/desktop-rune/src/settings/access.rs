@@ -263,7 +263,8 @@ pub(super) fn view(s: &App, t: &T) -> El {
     } else {
         el()
     };
-    let mut rows = vec![about_row(t, "Version", if version.is_empty() { "Loading…" } else { version.as_str() }, status)];
+    let mut rows: Vec<El> = config.and_then(|c| managed_notice(&c["managedPolicy"], t)).into_iter().collect();
+    rows.push(about_row(t, "Version", if version.is_empty() { "Loading…" } else { version.as_str() }, status));
     rows.extend(crate::desktop::exposure::rows(s, t));
     rows.push(permissions(s, t));
     col()
@@ -271,6 +272,39 @@ pub(super) fn view(s: &App, t: &T) -> El {
         .gap(32.0)
         .child(col().w_full().gap(10.0).child(header).child(c::card(rows, t)))
         .child(clients(s, t))
+}
+
+/// Web `ManagedByOrganization` in a `ManagedNotice`, above the machine's rows.
+fn managed_notice(policy: &Value, t: &T) -> Option<El> {
+    let organization = policy["organization"].as_str()?.to_owned();
+    let mut line = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .flex_wrap()
+        .child(text(format!("This environment is managed by {organization}.")).font(theme::TEXT_XS.lh(19.5)).color(t.c.muted_foreground));
+    if let Some(url) = policy["supportUrl"].as_str().filter(|u| !u.is_empty()) {
+        let url = url.to_owned();
+        line = line.child(
+            text("Get help")
+                .font(theme::TEXT_XS.lh(19.5))
+                .color(t.c.foreground)
+                .role("link")
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press(move |s: &mut App| super::auth::open_url(s, &url)),
+        );
+    }
+    Some(
+        row()
+            .w_full()
+            .px(16.0)
+            .py(8.0)
+            .gap(8.0)
+            .items_start()
+            .child(icon(&icons::BUILDING, 14.0).color(t.c.muted_foreground).mt(3.0))
+            .child(line),
+    )
 }
 
 /// Web's `<details>` "Permissions" with `SessionPermissions`.
@@ -1029,4 +1063,13 @@ pub(super) fn scene_share(s: &mut App) {
     state.clients_open = true;
     state.credentials.insert("link-1".into(), "ABCD-EFGH-JKLM".into());
     state.share = Some("link-1".into());
+}
+
+/// Scene: this machine run under an organization's managed policy.
+pub(super) fn scene_managed(s: &mut App) {
+    if let crate::data::Source::Fixture(state) = &mut s.src {
+        if let Some(config) = state.config.as_mut() {
+            config["managedPolicy"] = json!({"organization": "Acme Corp", "supportUrl": "https://acme.example/help"});
+        }
+    }
 }

@@ -14,6 +14,9 @@ use crate::{App, icons};
 use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
+mod usage;
+pub use usage::IDLE_KEY;
+
 /// Driver definitions in `providerClients` order: kind, label, whether it has a default slot.
 const DRIVERS: &[(&str, &str, bool)] = &[
     ("codex", "Codex", true),
@@ -49,6 +52,7 @@ pub struct Ui {
     pub confirm: Option<(String, bool)>,
     /// Scenes only: open the detail pane scrolled to its end, where Models sits.
     pub scene_bottom: bool,
+    pub usage: usage::Ui,
 }
 
 /// `ProviderEnvironmentEditor`'s rows while they differ from what was published: blank rows,
@@ -224,6 +228,9 @@ pub fn field_key(id: &str, field: &str) -> String {
 }
 
 pub fn field_value(s: &App, id: &str, field: &str) -> Value {
+    if id == usage::PAGE {
+        return usage::value(s, field);
+    }
     if let Some((index, part)) = env_field(field) {
         let row = env_rows(s, id).get(index).cloned().unwrap_or(Value::Null);
         return match part {
@@ -237,7 +244,12 @@ pub fn field_value(s: &App, id: &str, field: &str) -> Value {
         return json!("");
     }
     let entry = &server_settings(s)["providerInstances"][id];
-    if top_level(field) { entry[field].clone() } else { entry["config"][field].clone() }
+    match (field, &entry["config"][field]) {
+        // The select's first option stands for an omitted field.
+        ("idleCompaction", Value::Null) => json!("default"),
+        _ if top_level(field) => entry[field].clone(),
+        (_, value) => value.clone(),
+    }
 }
 
 /// Fields that sit on the instance itself rather than in its driver `config`.
@@ -272,6 +284,11 @@ pub fn config_patch(settings: &Value, id: &str, driver: &str, field: &str, value
 }
 
 pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
+    if id == usage::PAGE {
+        return usage::set(s, field, value);
+    }
+    // Choosing "Use default" omits the field (`clearWhenEmpty: "omit"`).
+    let value = if field == "idleCompaction" && value == "default" { json!("") } else { value };
     if let Some((index, part)) = env_field(field) {
         let mut rows = env_rows(s, id);
         if rows.get_mut(index).is_some_and(|row| edit_row(row, part, value.as_str().unwrap_or(""))) {
@@ -642,10 +659,11 @@ fn list(s: &App, t: &T, rows: &[Row], selected: Option<&str>) -> El {
         }
         items = items.child(list_row(s, t, r, selected == Some(r.id.as_str())));
     }
-    if !rows.is_empty() {
+    if !rows.is_empty() && !usage::read_only(s) {
         items = items.child(divider());
     }
-    items = items.child(
+    if !usage::read_only(s) {
+        items = items.child(
         row()
             .key("providers-add-row")
             .w_full()
@@ -661,7 +679,8 @@ fn list(s: &App, t: &T, rows: &[Row], selected: Option<&str>) -> El {
             .on_press(super::add_provider::open)
             .child(icon(&icons::PLUS, 16.0).color(t.c.muted_foreground))
             .child(text("Add provider").font(theme::TEXT_SM).color(t.c.muted_foreground)),
-    );
+        );
+    }
     col()
         .w(272.0)
         .h_full()
@@ -747,13 +766,13 @@ pub(super) fn runtime_fields(driver: &str, config: &Value) -> Vec<(&'static str,
                 "Custom Claude home and config directory. Keeps .claude.json and .claude separate.",
                 "~/.claude",
             ),
-            launch("Additional CLI arguments passed on session start.", "e.g. --chrome"),
             (
                 "autoCompactWindow",
                 "Auto-compact after",
                 "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.",
                 "e.g. 300000",
             ),
+            launch("Additional CLI arguments passed on session start.", "e.g. --chrome"),
         ],
         "opencode" => vec![
             binary("Path to the OpenCode binary.", "opencode"),
@@ -1529,8 +1548,11 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         ],
         t,
     )];
-    if let Some(p) = live.filter(|p| p["setup"]["canAuthenticate"] == true) {
+    let read_only = usage::read_only(s);
+    if let Some(p) = live.filter(|p| p["setup"]["canAuthenticate"] == true && !read_only) {
         sections.push(flat_section(heading("Setup", t), None, vec![col().w_full().px(16.0).child(super::auth::view(s, t, p))], t));
+    } else if r.driver == "cursor" && !read_only && live.is_some_and(|p| p["setup"]["canAuthenticate"] == false) {
+        sections.push(flat_section(heading("Setup", t), None, vec![cursor_account(t)], t));
     }
     let fields = runtime_fields(&r.driver, &instance["config"]);
     if !fields.is_empty() || !DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {
@@ -1550,7 +1572,13 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
                     ),
             ]
         } else {
-            fields.into_iter().map(|(field, title, description, placeholder)| text_row(s, cx, t, &r.id, field, title, description, placeholder)).collect()
+            let mut rows: Vec<El> =
+                fields.into_iter().map(|(field, title, description, placeholder)| text_row(s, cx, t, &r.id, field, title, description, placeholder)).collect();
+            // Contracts `ClaudeSettings` order: binary, home, auto-compact, idle compaction, launch.
+            if r.driver == "claudeAgent" {
+                rows.insert(3.min(rows.len()), usage::instance_idle_row(s, cx, t, &r.id));
+            }
+            rows
         };
         sections.push(flat_section(heading("Runtime", t), None, rows, t));
     }
@@ -1559,6 +1587,22 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         sections.push(flat_section(heading("Models", t), None, vec![models_section(s, t, &r.id, &r.driver, live, &instance)], t));
     }
     sections
+}
+
+/// Web's Cursor setup row while `CURSOR_API_KEY` stands in for browser sign-in.
+fn cursor_account(t: &T) -> El {
+    col()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(4.0)
+        .child(text("Cursor account").font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(
+            text("Using CURSOR_API_KEY. Remove it from this provider's environment to use browser sign-in.")
+                .font(theme::TEXT_XS.lh(18.0))
+                .color(t.c.muted_foreground)
+                .wrap(),
+        )
 }
 
 // --- Page -------------------------------------------------------------------------------------
@@ -1699,15 +1743,41 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
             .color(t.c.muted_foreground),
         ),
     };
-    let body = card(card_height(cx), t)
+    let card = card(card_height(cx), t)
         .child(list(s, t, &rows, selected.as_deref()))
         .child(el().w(1.0).h_full().fill(t.c.border.alpha_mul(0.6)))
         .child(col().grow(1.0).min_w(0.0).h_full().child(detail));
-    section(Some(add), Some(row().mr(-8.0).child(refresh.build(t))), body, t)
+    let body = col().w_full().gap(12.0).children(usage::limited(s, t)).child(card);
+    let add = (!usage::read_only(s)).then_some(add);
+    col()
+        .w_full()
+        .gap(32.0)
+        .child(section(add, Some(row().mr(-8.0).child(refresh.build(t))), body, t))
+        .child(usage::section(s, t))
+        .child(usage::advanced(s, cx, t))
+}
+
+/// Escape closes this page's open dialog, if any.
+pub fn escape(s: &mut App) -> bool {
+    s.ui.settings.providers_ui.confirm.take().is_some() || usage::escape(s)
+}
+
+pub fn poll(s: &mut App) -> bool {
+    usage::poll(s)
+}
+
+/// The compact idle threads "Never" option on a server that can't store it.
+pub fn idle_never_unavailable(s: &App) -> bool {
+    usage::never_unavailable(s)
+}
+
+pub fn scene_usage(s: &mut App, open: &str) {
+    usage::scene(s, open);
 }
 
 /// The remove and reset confirmations (`confirmProviderInstanceRemoval`).
 pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
+    usage::overlays(s, t, layers);
     let Some((id, reset)) = s.ui.settings.providers_ui.confirm.clone() else { return };
     let driver = driver_of(s, &id);
     let instance = instance_of(s, &id, &driver);

@@ -334,6 +334,13 @@
           ]
         },
         {
+          "key": "threadDetailsItems",
+          "title": "Thread details",
+          "description": "Choose what the thread details card shows. You can also right-click the card.",
+          "kind": "thread-details",
+          "options": []
+        },
+        {
           "key": "effortDisplay",
           "title": "Effort display",
           "description": "Show reasoning effort in the composer as its name, such as High, or as bars.",
@@ -943,24 +950,6 @@
       ]
     }
   ],
-  "snap-shot": [
-    {
-      "title": "SnapShots",
-      "rows": [
-        {
-          "key": "snapShotEnabled",
-          "title": "SnapShots",
-          "description": "",
-          "kind": "switch",
-          "options": []
-        }
-      ]
-    },
-    {
-      "title": "Capture",
-      "rows": []
-    }
-  ],
   "threads": [
     {
       "title": "New projects",
@@ -1068,6 +1057,7 @@
     },
     {
       "title": "Auto-settle",
+      "requiresServer": true,
       "rows": [
         {
           "key": "sidebarAutoSettleOnMerge",
@@ -1101,6 +1091,7 @@
           "description": "Inactivity does not settle threads with a pull request. Merge and close still do.",
           "kind": "switch",
           "options": [],
+          "capability": "threadAutoSettlementScope",
           "unless": [
             "sidebarAutoSettleAfterDays",
             null
@@ -1254,6 +1245,17 @@
           "options": []
         },
         {
+          "key": "reviewGuideModelSelection",
+          "title": "Review guide model",
+          "description": "Model that reads a pull request to write its review guide. It reads the change itself over many steps, so a stronger model helps. Off uses the source control writer model.",
+          "kind": "model",
+          "options": [],
+          "when": [
+            "reviewGuidesEnabled",
+            true
+          ]
+        },
+        {
           "key": "reviewGuideInstructions",
           "title": "Review guide instructions",
           "description": "Your preferences for review guides: what to show first, dwell on, or skip. The guide's format and coverage stay the same.",
@@ -1275,6 +1277,13 @@
           "title": "Follow change request templates",
           "description": "Use the repository's template for change request descriptions when available.",
           "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "sourceControlWriterModelSelection",
+          "title": "Source control writer model",
+          "description": "Model for source control text and branch or bookmark names. When disabled, use the text generation model configured for this environment.",
+          "kind": "model",
           "options": []
         }
       ]

@@ -361,16 +361,9 @@ fn search_template<'a>(engine: &str, custom: &'a str) -> &'a str {
         "brave" => "https://search.brave.com/search?q=%s",
         "kagi" => "https://kagi.com/search?q=%s",
         "ecosia" => "https://www.ecosia.org/search?q=%s",
-        "custom" if valid_template(custom.trim()) => custom.trim(),
+        "custom" if crate::settings::valid_search_template(custom.trim()) => custom.trim(),
         _ => "https://duckduckgo.com/?q=%s",
     }
-}
-
-/// `%s` must sit after the authority, or the query would pick the host.
-fn valid_template(template: &str) -> bool {
-    let Some((scheme, rest)) = template.split_once("://") else { return false };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") && template.contains("%s") && !authority.contains("%s") && !authority.is_empty()
 }
 
 /// `resolveAddressBarInput`: a URL, a bare host (`localhost:5173`, `example.com`), or a search.

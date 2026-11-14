@@ -92,7 +92,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
             let title = section["title"].as_str().unwrap_or("");
             // Snooze options and the fallback model are environment-wide; project scope hides them.
             let project = s.ui.settings.project.is_some();
-            if project && title == "Snooze" {
+            if project && title == "Snooze" || !c::supported(s.state().config.as_ref(), section) {
                 continue;
             }
             let rows = section["rows"]
@@ -153,6 +153,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "projects" => super::projects::view(s, cx, t),
         "archived" => super::projects::archived(s, t),
         "about" => super::about::view(s, t),
+        "snap-shot" => super::snapshots::view(s, t),
         "secrets" => super::secrets::view(s, t),
         "diagnostics" => super::diagnostics::view(s, cx, t),
         super::licenses::PATH => super::licenses::view(s, t),

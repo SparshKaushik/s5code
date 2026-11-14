@@ -13,11 +13,15 @@ mod balance;
 pub mod client;
 mod connections;
 mod controls;
+pub(crate) use controls::valid_search_template;
+mod restore;
+mod thread_details;
 mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
 mod keybindings;
+mod machines;
 mod models;
 mod host_logos;
 mod icon_index;
@@ -30,6 +34,7 @@ mod projects;
 mod providers;
 mod scope;
 pub mod search;
+mod snapshots;
 mod snooze;
 mod source_control;
 mod storage;
@@ -62,14 +67,15 @@ pub struct Ui {
     pub results: HashMap<String, Value>,
     pub form: HashMap<String, Value>,
     pub select_options: Vec<(Value, String)>,
-    pub task_editor: Option<Value>,
-    pub delete_task: Option<(Value, String)>,
+    pub tasks: tasks::Ui,
     pub auth: auth::Ui,
     pub acp_icons: acp_icons::AcpIcons,
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
     pub delete_thread: Option<(String, String)>,
+    /// The archived thread whose right-click menu is open: id, title, and where.
+    pub archive_menu: Option<(String, String, f32, f32)>,
     /// The project the Danger section is confirming removal of: id and title.
     pub delete_project: Option<(String, String)>,
     pub icon_picker: Option<project_icon::Draft>,
@@ -111,6 +117,12 @@ pub struct Ui {
     pub diagnostics: diagnostics::Ui,
     pub licenses: licenses::Ui,
     pub telemetry: telemetry::Ui,
+    /// General's Restore device defaults confirmation is open.
+    pub restore_confirm: bool,
+    /// The custom theme whose removal is being confirmed.
+    pub theme_remove: Option<String>,
+    pub thread_details_open: bool,
+    pub about: about::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -135,7 +147,7 @@ fn apply_patch(settings: &mut Value, patch: &Value) {
     for (key, next) in patch.as_object().into_iter().flatten() {
         if matches!(
             key.as_str(),
-            "providerInstances" | "projectSettingsOverrides" | "secretProviders"
+            "providerInstances" | "projectSettingsOverrides" | "secretProviders" | "usageLimitSources"
         ) {
             if !settings[key].is_object() {
                 settings[key] = json!({});
@@ -502,7 +514,6 @@ pub fn poll(s: &mut App) -> bool {
     let mut wanted = Vec::new();
     if let Route::Settings(path) = &s.route {
         match path.as_str() {
-            "scheduled-tasks" => wanted.push(("scheduledTasks.subscribe".to_owned(), json!({}))),
             "access" => wanted.push(("subscribeAuthAccess".to_owned(), json!({}))),
             "devices" => wanted.push(("subscribeDeviceState".to_owned(), json!({}))),
             "maintenance" | "storage" => wanted.extend(storage::report_resource(s)),
@@ -542,7 +553,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && diagnostics::tick(s);
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -550,9 +561,6 @@ pub fn poll(s: &mut App) -> bool {
                 Ok(result) => {
                     if method == "server.updateSettings" {
                         s.ui.settings.error = None;
-                    }
-                    if method == "scheduledTasks.upsert" {
-                        s.ui.settings.task_editor = None;
                     }
                     if matches!(method.as_str(), "server.upsertKeybinding" | "server.removeKeybinding") {
                         keybindings::saved(s, method == "server.upsertKeybinding");
@@ -923,28 +931,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .variant("ghost")
                 .size("xs")
                 .icon(&icons::ROTATE_CCW)
-                .disabled(
-                    !client::ClientSettings::default()
-                        .values
-                        .iter()
-                        .any(|(key, v)| s.client_settings.values.get(key) != Some(v)),
-                )
+                .disabled(restore::changed_labels(s).is_empty())
                 .build(t)
-                .on_press_tx(|s: &mut App, tx: &mut rune::Tx| {
-                    // Restoring the interface size zooms the window; land it at once.
-                    if s.client_settings.values.get(fonts::ZOOM_KEY) != client::ClientSettings::default().values.get(fonts::ZOOM_KEY) {
-                        tx.instant();
-                    }
-                    let defaults = client::ClientSettings::default();
-                    s.client_settings.values.extend(defaults.values);
-                    s.client_settings
-                        .values
-                        .insert("appearance".into(), json!("system"));
-                    s.appearance = Appearance::System;
-                    if matches!(s.src, crate::data::Source::Live(_)) {
-                        s.client_settings.save();
-                    }
-                }),
+                .on_press(|s: &mut App| s.ui.settings.restore_confirm = !restore::changed_labels(s).is_empty()),
         );
     }
     header = header.child(
@@ -1003,6 +992,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     auth::confirm(s, t, &mut overlays);
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
+    projects::archive_menu(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
     secrets::overlays(s, t, &mut overlays);
     diagnostics::overlays(s, t, &mut overlays);
@@ -1014,6 +1004,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     tasks::editor(s, t, &mut overlays);
     background::overlays(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
+    about::overlays(s, t, &mut overlays);
+    restore::confirm(s, t, &mut overlays);
+    thread_details::overlay(s, t, &mut overlays);
+    themes::remove_dialog(s, t, &mut overlays);
     crate::desktop::exposure::confirm(s, t, &mut overlays);
     connections::overlays(s, t, &mut overlays);
     crate::env::ssh::password_dialog(s, t, &mut overlays);
@@ -1121,6 +1115,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-threads", |s| scene(s, "threads")),
     ("settings-devices", |s| scene(s, "devices")),
     ("settings-scheduled-tasks", |s| scene(s, "scheduled-tasks")),
+    ("settings-scheduled-tasks-menu", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "menu");
+    }),
+    ("settings-scheduled-tasks-editor", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "editor");
+    }),
+    ("settings-scheduled-tasks-webhook", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "webhook");
+    }),
+    ("settings-scheduled-tasks-deliveries", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "deliveries");
+    }),
     ("settings-projects", |s| scene(s, "projects")),
     ("settings-source-control", |s| scene(s, "source-control")),
     ("settings-worktrees", |s| scene(s, "worktrees")),
@@ -1143,6 +1153,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         crate::desktop::exposure::scene(s);
         access::scene_share(s);
     }),
+    ("settings-access-managed", |s| {
+        scene(s, "access");
+        access::scene_managed(s);
+    }),
     ("settings-connections-routes", |s| {
         scene(s, "connections");
         connections::scene(s, "routes");
@@ -1151,10 +1165,59 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "connections");
         connections::scene(s, "route-remove");
     }),
+    ("settings-connections-machines", |s| {
+        scene(s, "connections");
+        connections::scene(s, "machines");
+    }),
+    ("settings-connections-update-confirm", |s| {
+        scene(s, "connections");
+        connections::scene(s, "update-confirm");
+    }),
     ("settings-maintenance", |s| scene(s, "maintenance")),
+    ("settings-maintenance-database", |s| {
+        scene(s, "maintenance");
+        storage::scene_database(s);
+    }),
     ("settings-labs", |s| scene(s, "labs")),
     ("settings-about", |s| scene(s, "about")),
+    ("settings-about-managed", |s| {
+        scene(s, "about");
+        about::scene(s, false);
+    }),
+    ("settings-about-track-switch", |s| {
+        scene(s, "about");
+        about::scene(s, true);
+    }),
+    ("settings-general-restore", |s| {
+        scene(s, "general");
+        restore::scene(s);
+    }),
+    ("settings-appearance-theme-remove", |s| {
+        scene(s, "appearance");
+        themes::scene_remove(s);
+    }),
+    ("settings-appearance-thread-details", |s| {
+        scene(s, "appearance");
+        s.ui.settings.thread_details_open = true;
+    }),
+    ("settings-browser-custom-search", |s| {
+        scene(s, "browser");
+        s.client_settings.values.insert("browserSearchEngine".into(), json!("custom"));
+        s.client_settings.values.insert("browserCustomSearchUrl".into(), json!("https://%s.example.com/"));
+    }),
     ("settings-archived", |s| scene(s, "archived")),
+    ("settings-archived-groups", |s| {
+        scene(s, "archived");
+        projects::scene_archive(s, false);
+    }),
+    ("settings-archived-menu", |s| {
+        scene(s, "archived");
+        projects::scene_archive(s, true);
+    }),
+    ("settings-projects-picked", |s| {
+        scene(s, "projects");
+        s.ui.settings.project = s.state().projects.first().map(|p| crate::data::s(p, "id").to_owned());
+    }),
     ("settings-storage", |s| scene(s, "storage")),
     ("settings-diagnostics", |s| {
         scene(s, "diagnostics");
@@ -1229,6 +1292,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-providers-custom-model-light", |s| providers_custom_model(s, true)),
     ("settings-providers-delete", |s| providers_delete(s, false)),
     ("settings-providers-delete-light", |s| providers_delete(s, true)),
+    ("settings-providers-add-hub", |s| {
+        scene(s, "providers");
+        providers::scene_usage(s, "add");
+    }),
+    ("settings-providers-remove-hub", |s| {
+        scene(s, "providers");
+        providers::scene_usage(s, "remove");
+    }),
     ("settings-providers-unavailable", |s| providers_state(s, false, s5_net::Conn::Open)),
     ("settings-providers-unavailable-light", |s| providers_state(s, true, s5_net::Conn::Open)),
     ("settings-providers-loading", |s| providers_state(s, false, s5_net::Conn::Connecting)),
@@ -1403,7 +1474,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
             || browser_profiles::escape(s)
             || connections::escape(s)
             || devices::escape(s)
-            || s.ui.settings.providers_ui.confirm.take().is_some()
+            || providers::escape(s)
         {
             return true;
         }
@@ -1412,6 +1483,13 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         }
         if s.ui.settings.theme_import_open {
             s.ui.settings.theme_import_open = false;
+            return true;
+        }
+        if std::mem::take(&mut s.ui.settings.restore_confirm)
+            || std::mem::take(&mut s.ui.settings.thread_details_open)
+            || s.ui.settings.theme_remove.take().is_some()
+            || about::escape(s)
+        {
             return true;
         }
         if s.ui.settings.environment_scope_open {
@@ -1425,12 +1503,12 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
             || s.ui.settings.delete_thread.take().is_some()
+            || s.ui.settings.archive_menu.take().is_some()
             || s.ui.settings.delete_project.take().is_some()
-            || s.ui.settings.delete_task.take().is_some()
         {
             return true;
         }
-        if s.ui.settings.task_editor.take().is_some() || secrets::escape(s) || licenses::escape(s) {
+        if tasks::escape(s) || secrets::escape(s) || licenses::escape(s) {
             return true;
         }
         if s.ui.settings.open_select.take().is_some() {

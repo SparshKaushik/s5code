@@ -65,7 +65,7 @@ fn toggle_grouping(current: &str, on: bool) -> &'static str {
 
 pub fn select_width(key: &str) -> f32 {
     match key {
-        "notificationMode" | "sourceControlWritingStyle.mode" => 224.0,
+        "notificationMode" | "sourceControlWritingStyle.mode" | super::providers::IDLE_KEY => 224.0,
         "sidebarProjectSortOrder" => 176.0,
         // Web `w-auto`: the trigger fits the current label.
         "sendShortcut" | "followUpBehavior" => 0.0,
@@ -145,6 +145,10 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         for (_, label, description, glyph) in crate::chat::composer::RUNTIME_MODES {
             select = select.option_detail(label, glyph, description);
         }
+    }
+    // A server from before idle compaction modes only has the on/off switch.
+    if key == super::providers::IDLE_KEY && super::providers::idle_never_unavailable(s) {
+        select = select.disabled_option("Never");
     }
     let _trigger = select
         .current(Some(&current_label(s, key, options)))
@@ -238,11 +242,19 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             .color(t.c.foreground),
     );
     // Web resets the auto-settle day count from its switch row only, and has no reset for the
-    // Separate fonts switch; a font row resets its family and size together.
+    // Separate fonts switch or a dedicated model, whose own switch turns it off; a font row
+    // resets its family and size together.
     let size_key = spec["size"].as_str().filter(|_| spec["kind"] == "font").map(str::to_owned);
-    let customized = super::scope::customized(s, key) || size_key.as_deref().is_some_and(|k| super::scope::customized(s, k));
+    let customized = if key == "threadDetailsItems" {
+        super::thread_details::customized(s)
+    } else {
+        super::scope::customized(s, key) || size_key.as_deref().is_some_and(|k| super::scope::customized(s, k))
+    };
     let lock = row_lock(s, key);
-    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced") && customized && lock.is_none() {
+    // Web's project-scoped Workspace row has no reset either.
+    let project_workspace = key == "defaultThreadEnvMode" && s.ui.settings.project.is_some();
+    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced" | "sourceControlWriterModelSelection" | "reviewGuideModelSelection")
+        && !project_workspace && customized && lock.is_none() {
         let owned = key.to_owned();
         let size_key = size_key.clone();
         heading = heading.child(
@@ -252,6 +264,9 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 .icon(&icons::UNDO_2)
                 .build(t)
                 .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+                    if owned == "threadDetailsItems" {
+                        return super::thread_details::reset(s);
+                    }
                     super::scope::reset(s, &owned);
                     if let Some(size) = &size_key {
                         if size == super::fonts::ZOOM_KEY {
@@ -301,7 +316,11 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         }
         copy = copy.child(body);
     }
+    if let Some(status) = status(s, key) {
+        copy = copy.child(text(status).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().pt(2.0));
+    }
     let (ctrl, children) = match spec["kind"].as_str() {
+        Some("thread-details") => (super::thread_details::control(s, t), None),
         Some("snooze") => super::snooze::parts(s, t),
         Some("profiles") => super::browser_profiles::parts(s, t),
         Some("textarea") => (el(), Some(textarea(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")))),
@@ -398,7 +417,7 @@ fn font_placeholder(interface: &Value, slot: &str) -> String {
 }
 
 /// A row's `when` / `unless` condition, `[key, value]`: shown only while the setting equals
-/// (or doesn't equal) the value.
+/// (or doesn't equal) the value. A `capability` row also needs the environment to report it.
 pub fn visible(s: &App, spec: &Value) -> bool {
     let holds = |condition: &Value| {
         condition
@@ -406,7 +425,15 @@ pub fn visible(s: &App, spec: &Value) -> bool {
             .filter(|c| c.len() == 2)
             .map(|c| value(s, c[0].as_str().unwrap_or("")) == c[1])
     };
-    holds(&spec["when"]).unwrap_or(true) && !holds(&spec["unless"]).unwrap_or(false)
+    holds(&spec["when"]).unwrap_or(true) && !holds(&spec["unless"]).unwrap_or(false) && supported(s.state().config.as_ref(), spec)
+}
+
+/// Web gates some rows on `serverConfig.environment.capabilities`, e.g. Keep threads with a PR on
+/// `threadAutoSettlementScope`; and some sections on a connected server at all.
+pub fn supported(config: Option<&Value>, spec: &Value) -> bool {
+    let needs_server = spec["requiresServer"] == true || spec["capability"].is_string();
+    let capable = spec["capability"].as_str().is_none_or(|name| config.is_some_and(|c| c["environment"]["capabilities"][name] == true));
+    (!needs_server || config.is_some()) && capable
 }
 
 /// Web `Textarea` under a row: multi-line, committed when it loses focus (the settings poll's
@@ -551,9 +578,83 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         )
 }
 
+/// Web `SettingsRow`'s `status` line under the description.
+fn status(s: &App, key: &str) -> Option<&'static str> {
+    match key {
+        "browserCustomSearchUrl" if !valid_search_template(value(s, key).as_str().unwrap_or("")) => {
+            Some("Enter an http or https URL containing %s. Searches use DuckDuckGo until then.")
+        }
+        _ => None,
+    }
+}
+
+/// Web `isValidSearchUrlTemplate`: an http(s) URL with `%s` where the query goes. `%s` in the
+/// host or credentials is rejected, since two queries would then reach different authorities.
+pub fn valid_search_template(template: &str) -> bool {
+    if !template.contains("%s") {
+        return false;
+    }
+    let a = authority(&template.replace("%s", "a"));
+    a.is_some() && a == authority(&template.replace("%s", "b"))
+}
+
+/// What `new URL(url)` reads as `username:password@host` for an http(s) URL, or None when it
+/// doesn't parse as one.
+fn authority(url: &str) -> Option<String> {
+    let url: String = url.trim_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let (scheme, rest) = url.split_once(':')?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    // Special schemes skip any run of slashes before the authority.
+    let rest = rest.trim_start_matches(['/', '\\']);
+    let auth = &rest[..rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len())];
+    let (userinfo, hostport) = auth.rsplit_once('@').unwrap_or(("", auth));
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((host, port)) if !port.contains(']') => (host, port),
+        _ => (hostport, ""),
+    };
+    let bracketed = host.len() > 2 && host.starts_with('[') && host.ends_with(']');
+    if host.is_empty() || (!bracketed && host.chars().any(|c| c <= ' ' || "#%/:<>?@[\\]^|".contains(c))) {
+        return None;
+    }
+    if !port.is_empty() && (!port.chars().all(|c| c.is_ascii_digit()) || port.parse::<u32>().map_or(true, |p| p > 65535)) {
+        return None;
+    }
+    Some(format!("{userinfo}@{}:{port}", host.to_ascii_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_custom_search_url_needs_the_query_after_an_http_authority() {
+        for valid in [
+            "https://s.example/?q=%s",
+            "HTTPS://Example.com/search?q=%s",
+            "http://localhost:8080/search/%s",
+            "https:example.com/?q=%s",
+            "  https://s.example/?q=%s  ",
+            "https://s.example/#%s",
+        ] {
+            assert!(valid_search_template(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "https://s.example/?q=",
+            "https://%s.example/",
+            "https://user:%s@s.example/",
+            "https://s.example:%s/",
+            "ftp://s.example/?q=%s",
+            "s.example/?q=%s",
+            "https:///?q=%s",
+            "https://exa mple.com/?q=%s",
+            "https://s.example:99999/?q=%s",
+        ] {
+            assert!(!valid_search_template(invalid), "{invalid}");
+        }
+    }
 
     #[test]
     fn grouping_back_on_restores_the_path_mode() {
@@ -573,5 +674,17 @@ mod tests {
             tail(Some("mod-enter-multiline")),
             "Press Ctrl + Enter for single-line prompts or Ctrl + Shift + Enter for multiline prompts to do the opposite for one message."
         );
+    }
+    #[test]
+    fn auto_settle_needs_a_server_and_keep_prs_its_scope_capability() {
+        let section = json!({"requiresServer": true});
+        let keep = json!({"capability": "threadAutoSettlementScope"});
+        let scoped = json!({"environment": {"capabilities": {"threadAutoSettlementScope": true}}});
+        let older = json!({"environment": {"capabilities": {"threadAutoSettlement": true}}});
+        assert!(!supported(None, &section), "no connected environment hides Auto-settle");
+        assert!(supported(Some(&older), &section));
+        assert!(supported(Some(&scoped), &keep));
+        assert!(!supported(Some(&older), &keep), "a server without the scope capability can't keep PR threads");
+        assert!(supported(None, &json!({})), "ordinary rows need nothing");
     }
 }

@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
 
 use rune::{El, TextEdit, col, row, text};
 use serde_json::{Value, json};
@@ -49,6 +50,8 @@ pub struct Ui {
     pub alternates: HashMap<String, Vec<Alt>>,
     /// When each environment last fell back to another route.
     fell_back: HashMap<String, std::time::Instant>,
+    /// Checks of the routes preferred over the one in use, by environment.
+    better: HashMap<String, Better>,
     /// The environment a pairing in flight adds a route to, and the label of one just added.
     pub route_for: Option<String>,
     pub route_added: Option<String>,
@@ -537,6 +540,18 @@ pub(crate) fn add_route(s: &mut App, id: &str) {
     }
 }
 
+/// Web's Add route over SSH: the tunnel joins `id`'s routes when it reaches the same machine.
+pub(crate) fn add_ssh_route(s: &mut App, id: &str) {
+    if s.ui.env.pairing.is_some() || ssh::adding(s) {
+        return;
+    }
+    s.ui.env.route_for = Some(id.to_owned());
+    ssh::add(s);
+    if !ssh::adding(s) {
+        s.ui.env.route_for = None;
+    }
+}
+
 pub(crate) fn add(s: &mut App) {
     if s.ui.env.pairing.is_some() {
         return;
@@ -721,6 +736,144 @@ pub fn set_routes(s: &mut App, id: &str, routes: Vec<Alt>) {
     s.ui.env.error = persist(s);
 }
 
+/// Web supervisor's `BETTER_ROUTE_CHECK_INTERVAL_MS`, `SILENT_ROUTE_BACKOFF_MAX_MS`,
+/// `BETTER_ROUTE_COOLDOWN_MS` and the driver's `ROUTE_CHECK_TIMEOUT_MS`.
+const BETTER_ROUTE_CHECK: Duration = Duration::from_secs(60);
+const SILENT_ROUTE_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+const BETTER_ROUTE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const ROUTE_CHECK_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Web supervisor's `checkBetterRoutes` state for one environment.
+#[derive(Default)]
+struct Better {
+    /// The last check, or when the connection settled on a fallback route.
+    last: Option<Instant>,
+    /// Routes that stayed silent: failures in a row, and when to check again.
+    silent: HashMap<String, (u32, Instant)>,
+    /// Routes that answered but then failed to connect.
+    cooldown: HashMap<String, Instant>,
+    /// The route a check moved to, until it connects.
+    switched: Option<String>,
+    checking: Option<(Vec<Alt>, Receiver<Vec<bool>>)>,
+}
+
+/// Web `backOffSilentRoute`: each silent check doubles the wait, up to half an hour.
+fn back_off(previous: Option<u32>) -> (u32, Duration) {
+    let failures = previous.unwrap_or(0) + 1;
+    let delay = BETTER_ROUTE_CHECK.saturating_mul(2u32.saturating_pow(failures)).min(SILENT_ROUTE_BACKOFF_MAX);
+    (failures, delay)
+}
+
+fn trimmed(base: &str) -> &str {
+    base.trim_end_matches('/')
+}
+
+/// The routes preferred over the one at `current` that are due a check.
+fn candidates(routes: &[Alt], current: usize, better: &Better, now: Instant) -> Vec<Alt> {
+    routes[..current.min(routes.len())]
+        .iter()
+        .filter(|r| {
+            let key = trimmed(&r.base);
+            better.cooldown.get(key).is_none_or(|until| *until <= now) && better.silent.get(key).is_none_or(|(_, until)| *until <= now)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Records a check's answers; the first route that answered is the one to move to.
+fn record(better: &mut Better, checked: &[Alt], answered: &[bool], now: Instant) -> Option<Alt> {
+    for (route, ok) in checked.iter().zip(answered) {
+        let key = trimmed(&route.base).to_owned();
+        if *ok {
+            better.silent.remove(&key);
+        } else {
+            let (failures, delay) = back_off(better.silent.get(&key).map(|(f, _)| *f));
+            better.silent.insert(key, (failures, now + delay));
+        }
+    }
+    checked.iter().zip(answered).find(|(_, ok)| **ok).map(|(route, _)| route.clone())
+}
+
+/// Web driver `checkDescriptor`: the route answers as this environment, uncached.
+fn answers(base: &str, id: &str) -> bool {
+    let url = format!("{}/.well-known/t3/environment", trimmed(base));
+    ureq::AgentBuilder::new()
+        .timeout(ROUTE_CHECK_TIMEOUT)
+        .build()
+        .get(&url)
+        .set("Cache-Control", "no-store")
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+        .is_some_and(|v| v["environmentId"] == id)
+}
+
+/// Web supervisor's better-route checks: while connected over a fallback route, the routes
+/// preferred over it are checked every minute, and the first that answers takes over.
+fn return_to_preferred(s: &mut App) -> bool {
+    let now = Instant::now();
+    let ids: Vec<String> = s.ui.env.alternates.iter().filter(|(_, a)| !a.is_empty()).map(|(id, _)| id.clone()).collect();
+    s.ui.env.better.retain(|id, _| ids.contains(id));
+    let mut changed = false;
+    for id in ids {
+        if s.ui.env.off.contains(&id) {
+            s.ui.env.better.remove(&id);
+            continue;
+        }
+        let current = route_in_use(s, &id);
+        let routes = routes(s, &id);
+        let better = s.ui.env.better.entry(id.clone()).or_default();
+        if let Some((checked, rx)) = &better.checking {
+            match rx.try_recv() {
+                Ok(answered) => {
+                    let checked = checked.clone();
+                    better.checking = None;
+                    let next = record(better, &checked, &answered, now).filter(|_| current.is_some_and(|c| c > 0));
+                    if let Some(route) = next {
+                        better.switched = Some(trimmed(&route.base).to_owned());
+                        let src = connect_to(s, &route.base, &route.bearer);
+                        if let Some(slot) = source_mut(s, &id) {
+                            *slot = src;
+                        }
+                        changed = true;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => better.checking = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            continue;
+        }
+        let Some(current) = current else { continue };
+        if better.switched.as_deref() == Some(trimmed(&routes[current].base)) {
+            better.switched = None;
+        }
+        if current == 0 {
+            better.last = None;
+            continue;
+        }
+        let last = *better.last.get_or_insert(now);
+        if now.duration_since(last) < BETTER_ROUTE_CHECK {
+            continue;
+        }
+        better.last = Some(now);
+        let checked = candidates(&routes, current, better, now);
+        if checked.is_empty() {
+            continue;
+        }
+        let (tx, rx) = channel();
+        let (bases, owner, waker) = (checked.iter().map(|r| r.base.clone()).collect::<Vec<_>>(), id.clone(), s.ui.panel.waker.clone());
+        better.checking = Some((checked, rx));
+        std::thread::spawn(move || {
+            let answered = bases.iter().map(|base| answers(base, &owner)).collect();
+            let _ = tx.send(answered);
+            if let Some(w) = waker {
+                w();
+            }
+        });
+    }
+    changed
+}
+
 /// Web's supervisor tries an environment's routes in order: one that fails hands over to the next,
 /// at most every ten seconds each.
 fn fall_back(s: &mut App) -> bool {
@@ -740,9 +893,14 @@ fn fall_back(s: &mut App) -> bool {
         let routes = routes(s, id);
         let current = net.base_url().trim_end_matches('/');
         let at = routes.iter().position(|r| r.base.trim_end_matches('/') == current).unwrap_or(0);
-        moves.push((id.clone(), routes[(at + 1) % routes.len()].clone()));
+        moves.push((id.clone(), routes[(at + 1) % routes.len()].clone(), current.to_owned()));
     }
-    for (id, route) in &moves {
+    for (id, route, from) in &moves {
+        // A better route that answered its check but then failed rests a while.
+        if let Some(better) = s.ui.env.better.get_mut(id).filter(|b| b.switched.as_deref() == Some(from.as_str())) {
+            better.switched = None;
+            better.cooldown.insert(from.clone(), now + BETTER_ROUTE_COOLDOWN);
+        }
         s.ui.env.fell_back.insert(id.clone(), now);
         let src = connect_to(s, &route.base, &route.bearer);
         if let Some(slot) = source_mut(s, id) {
@@ -754,7 +912,7 @@ fn fall_back(s: &mut App) -> bool {
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s) | adopt_catalog(s) | fall_back(s);
+    let changed = ssh::poll(s) | adopt_catalog(s) | fall_back(s) | return_to_preferred(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
@@ -840,6 +998,31 @@ mod tests {
         assert!(encode(&list, &off, &none).to_string().find("alternateRoutes").is_none());
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
+    }
+
+    #[test]
+    fn fallback_routes_return_to_a_preferred_route_that_answers_like_the_web_supervisor() {
+        let alt = |base: &str| Alt { base: base.into(), bearer: "b".into() };
+        let routes = [alt("http://192.168.1.20:3773/"), alt("https://box.ts.net"), alt("https://box.example.com")];
+        let now = Instant::now();
+        let mut better = Better::default();
+        // On the third route both preferred ones are checked; on the first there is nothing better.
+        assert_eq!(candidates(&routes, 2, &better, now).len(), 2);
+        assert!(candidates(&routes, 0, &better, now).is_empty());
+        // The first route that answered takes over; a silent one waits twice the interval.
+        let checked = candidates(&routes, 2, &better, now);
+        assert_eq!(record(&mut better, &checked, &[false, true], now), Some(routes[1].clone()));
+        assert_eq!(better.silent["http://192.168.1.20:3773"], (1, now + Duration::from_secs(120)));
+        assert_eq!(candidates(&routes, 2, &better, now), [routes[1].clone()], "the silent route rests");
+        assert_eq!(candidates(&routes, 2, &better, now + Duration::from_secs(120)).len(), 2);
+        // Each silent check doubles the wait, up to half an hour; an answer clears it.
+        assert_eq!(back_off(Some(1)), (2, Duration::from_secs(240)));
+        assert_eq!(back_off(Some(9)).1, SILENT_ROUTE_BACKOFF_MAX);
+        assert_eq!(record(&mut better, &checked, &[true, false], now), Some(routes[0].clone()));
+        assert!(!better.silent.contains_key("http://192.168.1.20:3773"));
+        // A route that answered but failed to connect rests five minutes.
+        better.cooldown.insert("https://box.ts.net".into(), now + BETTER_ROUTE_COOLDOWN);
+        assert_eq!(candidates(&routes, 2, &better, now).len(), 1);
     }
 
     #[test]

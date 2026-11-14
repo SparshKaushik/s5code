@@ -31,6 +31,11 @@ const KEEP_WHEN: [(&str, &str); 3] = [
 pub struct Maintenance {
     run: Option<u64>,
     report: Option<Value>,
+    /// Environments whose database notice was dismissed (web localStorage
+    /// `database-storage-notice-dismissed`), read once.
+    dismissed: Option<Vec<String>>,
+    /// Scenes: a database status standing in for the server's.
+    scene: Option<Value>,
     pub(super) dialog: bool,
     pub(super) tip: bool,
 }
@@ -189,12 +194,98 @@ pub fn set(s: &mut App, key: &str, next: Value) {
 }
 
 /// The last-run subscription the Maintenance page watches.
-pub fn report_resource(s: &App) -> Option<(String, Value)> {
-    capability(s, "storageCleanupRun").then(|| (REPORT.to_owned(), json!({})))
+pub fn report_resource(s: &App) -> Vec<(String, Value)> {
+    let report = capability(s, "storageCleanupRun").then(|| (REPORT.to_owned(), json!({})));
+    let database = (capability(s, "databaseStorage") && !project_scope(s)).then(|| (DATABASE.to_owned(), json!({})));
+    report.into_iter().chain(database).collect()
+}
+
+const DATABASE: &str = "server.getDatabaseStorage";
+/// Contracts' `DATABASE_COMPACTION_RECOMMENDED_BYTES`.
+const COMPACTION_RECOMMENDED_BYTES: f64 = 1024.0 * 1024.0 * 1024.0;
+const DISMISSED_KEY: &str = "databaseStorageNoticeDismissed";
+
+fn ui_prefs() -> rune::prefs::Prefs {
+    if rune::is_headless() {
+        return rune::prefs::Prefs::memory();
+    }
+    rune::prefs::Prefs::at(crate::host::t3_home().join("userdata").join("desktop-rune-ui.json"))
+}
+
+/// Contracts' `shouldRecommendDatabaseCompaction`.
+fn recommend(status: &Value) -> bool {
+    status["incrementalVacuumEnabled"] == false && status["reclaimableBytes"].as_f64().is_some_and(|b| b >= COMPACTION_RECOMMENDED_BYTES)
+}
+
+/// Web `DatabaseStorageNotice`: suggests `t3 doctor` while the database holds at least 1 GiB of
+/// freed pages, until dismissed for that environment.
+fn database(s: &App, t: &T) -> Option<El> {
+    let status = super::resource(s, DATABASE, json!({})).or(s.ui.settings.maintenance.scene.as_ref()).filter(|v| recommend(v))?;
+    let config = s.state().config.as_ref()?;
+    let id = config["environment"]["environmentId"].as_str()?.to_owned();
+    if s.ui.settings.maintenance.dismissed.as_ref().is_some_and(|d| d.contains(&id)) {
+        return None;
+    }
+    let gib = status["reclaimableBytes"].as_f64().unwrap_or_default() / COMPACTION_RECOMMENDED_BYTES;
+    let label = config["environment"]["label"].as_str().unwrap_or(&id).to_owned();
+    let command = status["compactCommand"].as_str().unwrap_or_default().to_owned();
+    let header = super::connections::info_row(
+        t,
+        "Reclaim freed database space",
+        "Old history is cleaned up automatically, but these databases still hold the freed space. Run the command on each machine to return it to disk; it pauses and restarts the background service. Quit the desktop app first if it hosts the environment.",
+    );
+    let copy = command.clone();
+    let controls = row()
+        .gap(6.0)
+        .child(
+            crate::kit::Button::new("Copy command")
+                .variant("outline")
+                .size("xs")
+                .build(t)
+                .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copy.clone())),
+        )
+        .child(crate::kit::Button::new("Dismiss").variant("ghost").size("xs").on_press(move |s: &mut App| dismiss(s, &id)).build(t));
+    let machine = row()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text(format!("{gib:.1} GiB on {label}")).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(command).font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground).wrap().selectable(true)),
+        )
+        .child(controls);
+    Some(c::section("Database", vec![header, machine], t))
+}
+
+/// Scene: a database still holding freed pages.
+pub(super) fn scene_database(s: &mut App) {
+    s.ui.settings.maintenance.scene = Some(json!({
+        "databaseBytes": 6.2 * COMPACTION_RECOMMENDED_BYTES,
+        "reclaimableBytes": 2.4 * COMPACTION_RECOMMENDED_BYTES,
+        "incrementalVacuumEnabled": false,
+        "compactCommand": "npx t3 doctor --compact-database",
+    }));
+}
+
+fn dismiss(s: &mut App, id: &str) {
+    let dismissed = s.ui.settings.maintenance.dismissed.get_or_insert_with(Vec::new);
+    if !dismissed.iter().any(|d| d == id) {
+        dismissed.push(id.to_owned());
+    }
+    let _ = ui_prefs().set(DISMISSED_KEY, dismissed);
 }
 
 /// The manual run's reply: its failures and errors toast like web's.
 pub fn poll(s: &mut App) -> bool {
+    if s.ui.settings.maintenance.dismissed.is_none() && matches!(&s.route, crate::Route::Settings(p) if p == "maintenance") {
+        s.ui.settings.maintenance.dismissed = Some(ui_prefs().get::<Vec<String>>(DISMISSED_KEY).unwrap_or_default());
+    }
     let Some(id) = s.ui.settings.maintenance.run else { return false };
     let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) else { return false };
     s.ui.settings.maintenance.run = None;
@@ -257,7 +348,7 @@ fn grouped(n: i64) -> String {
 }
 
 /// `formatRelativeTimeLabel`.
-fn relative(iso: &str, now: i64) -> String {
+pub(super) fn relative(iso: &str, now: i64) -> String {
     let Some(at) = crate::data::iso_ms(iso) else { return String::new() };
     let minutes = (now - at).max(0) / 60_000;
     match minutes {
@@ -429,12 +520,16 @@ pub fn maintenance(s: &App, cx: &Cx<App>, t: &T) -> Vec<El> {
     if project_scope(s) {
         return vec![];
     }
+    let database: Vec<El> = database(s, t).into_iter().collect();
     if !capability(s, "storageCleanup") {
-        return vec![notice(
-            "Artifacts and logs",
-            "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
-            t,
-        )];
+        return database
+            .into_iter()
+            .chain([notice(
+                "Artifacts and logs",
+                "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
+                t,
+            )])
+            .collect();
     }
     let artifacts = setting(
         cx,
@@ -452,7 +547,8 @@ pub fn maintenance(s: &App, cx: &Cx<App>, t: &T) -> Vec<El> {
         "Delete inactive rotated log files after this many days. Current logs are kept.",
         retention(s, t, "logsAfterDays", "Delete old rotated logs"),
     );
-    let mut out = vec![c::section("Artifacts and logs", vec![artifacts, logs], t)];
+    let mut out = database;
+    out.push(c::section("Artifacts and logs", vec![artifacts, logs], t));
     if capability(s, "storageCleanupRun") {
         out.push(cleanup(s, cx, t));
     }
@@ -689,6 +785,15 @@ mod tests {
         assert_eq!(custom["worktreeOnDelete"], true);
         assert_eq!(custom["worktreeOnMerge"], false, "custom rules don't fall back to the machine's");
         assert_eq!(custom["worktreeKeepWhen"], "uncommitted-changes");
+    }
+
+    #[test]
+    fn database_compaction_is_suggested_from_a_gibibyte_of_freed_pages_without_incremental_vacuum() {
+        let status = |bytes: f64, incremental: bool| json!({"reclaimableBytes": bytes, "incrementalVacuumEnabled": incremental});
+        assert!(recommend(&status(COMPACTION_RECOMMENDED_BYTES, false)));
+        assert!(!recommend(&status(COMPACTION_RECOMMENDED_BYTES - 1.0, false)));
+        assert!(!recommend(&status(4.0 * COMPACTION_RECOMMENDED_BYTES, true)), "incremental vacuum returns it already");
+        assert!(!recommend(&Value::Null));
     }
 
     #[test]

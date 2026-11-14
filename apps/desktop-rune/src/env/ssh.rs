@@ -372,6 +372,9 @@ fn repair(s: &mut App) -> bool {
 }
 
 fn fail(s: &mut App, job: &Job, error: String) {
+    if job.kind == Kind::Add && s.ui.env.pairing.is_none() {
+        s.ui.env.route_for = None;
+    }
     let ui = &mut s.ui.env.ssh;
     match &job.kind {
         Kind::Add => ui.error = Some(error),
@@ -385,8 +388,20 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
     match result {
         Ok(Done::Added(target, env)) => {
             let id = env.id.clone();
+            let route = s.ui.env.route_for.clone();
+            let previous = s.ui.env.ssh.targets.iter().find(|(k, _)| *k == id).cloned();
+            if route.as_deref() == Some(id.as_str()) {
+                // Known before it joins, so the tunnel ranks as SSH among the routes.
+                s.ui.env.ssh.targets.retain(|(k, _)| *k != id);
+                s.ui.env.ssh.targets.push((id.clone(), target.clone()));
+            }
             super::paired(s, Ok(env));
-            if s.ui.env.saved.iter().any(|e| e.id == id) {
+            let landed = if route.is_some() { s.ui.env.route_added.is_some() } else { s.ui.env.saved.iter().any(|e| e.id == id) };
+            if !landed && route.is_some() {
+                s.ui.env.ssh.targets.retain(|(k, _)| *k != id);
+                s.ui.env.ssh.targets.extend(previous);
+            }
+            if landed {
                 let ui = &mut s.ui.env.ssh;
                 ui.targets.retain(|(k, _)| *k != id);
                 ui.targets.push((id.clone(), target));
@@ -520,13 +535,12 @@ pub fn alias<'a>(s: &'a App, id: &str) -> Option<&'a str> {
     s.ui.env.ssh.targets.iter().find(|(k, _)| k == id).map(|(_, t)| t.alias.as_str())
 }
 
-/// Web `handleSelectSshHostSuggestion`: a picked host connects at once.
+/// Web `handleSelectSshHostSuggestion`: a picked host fills the fields; the caller connects.
 pub fn pick(s: &mut App, alias: &str) {
     let ui = &mut s.ui.env.ssh;
     ui.host = TextEdit::new(alias.to_owned());
     ui.username.clear();
     ui.port.clear();
-    add(s);
 }
 
 /// The web's SshPasswordPromptDialog.

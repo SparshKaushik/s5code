@@ -83,6 +83,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
                 ),
         )
         .child(c::card(overview, t))
+        .child(new_threads(s, cx, t))
         .child(actions(s, t, project));
 
     let checkout = super::about::about_row(t, &environment, &root, el());
@@ -102,7 +103,20 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(c::section("Danger", vec![danger], t))
 }
 
-/// Subagents and side chats live inside their parent's view (`isListedThreadLineage`).
+/// Web `ProjectDefaultsSettings` with category "project": the picked project's own model and
+/// workspace for new threads, read from and written to its `projectSettingsOverrides` entry.
+/// The fallback model is environment-wide, so it stays on Threads.
+fn new_threads(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
+    let rows = [
+        json!({"key": "defaultModelSelection", "title": "Model", "kind": "model", "options": [],
+            "description": "Model for new threads in this project."}),
+        json!({"key": "defaultThreadEnvMode", "title": "Workspace", "kind": "select",
+            "options": [["local", "Current checkout"], ["worktree", "New worktree"]],
+            "description": "Where new threads in this project start."}),
+    ];
+    c::section("New threads", rows.iter().map(|spec| c::setting_row(s, cx, t, spec)).collect(), t)
+}
+
 /// Web's unscoped Projects page: every project as a row that picks it in the scope sentence.
 fn chooser(s: &App, t: &T) -> El {
     let rows: Vec<El> = s
@@ -153,6 +167,7 @@ fn chooser(s: &App, t: &T) -> El {
     page
 }
 
+/// Subagents and side chats live inside their parent's view (`isListedThreadLineage`).
 fn listed(thread: &Value) -> bool {
     thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
 }
@@ -359,71 +374,148 @@ fn archived_rows(fetched: &[Value], live: &[Value], active: &[Value]) -> Vec<Val
     rows
 }
 
-pub fn archived(s: &App, t: &T) -> El {
-    let fetched = s.ui.settings.results.get(ARCHIVED_SNAPSHOT).and_then(|r| r["threads"].as_array());
-    let fetched = fetched.map(Vec::as_slice).unwrap_or_default();
-    let threads: Vec<_> = archived_rows(fetched, &s.state().archived, &s.state().threads)
-        .into_iter()
-        .filter(|thread| {
-            s.ui.settings
-                .project
-                .as_ref()
-                .is_none_or(|id| thread["projectId"] == *id)
+/// Web `ArchivedThreadsPanel`'s groups: each project with archived threads, in project order,
+/// its threads newest-archived first (then by id, as web's `localeCompare` tiebreak).
+fn archive_groups(projects: &[Value], threads: &[Value]) -> Vec<(Value, Vec<Value>)> {
+    let key = |t: &Value| t["archivedAt"].as_str().or(t["createdAt"].as_str()).unwrap_or("").to_owned();
+    let mut seen = std::collections::HashSet::new();
+    projects
+        .iter()
+        .filter(|p| seen.insert(crate::data::s(p, "id").to_owned()))
+        .filter_map(|project| {
+            let mut rows: Vec<Value> = threads.iter().filter(|t| t["projectId"] == project["id"]).cloned().collect();
+            rows.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| crate::data::s(b, "id").cmp(crate::data::s(a, "id"))));
+            (!rows.is_empty()).then(|| (project.clone(), rows))
         })
+        .collect()
+}
+
+pub fn archived(s: &App, t: &T) -> El {
+    let result = s.ui.settings.results.get(ARCHIVED_SNAPSHOT);
+    let fetched = result.and_then(|r| r["threads"].as_array()).map(Vec::as_slice).unwrap_or_default();
+    // The archive snapshot names the projects; live ones cover threads archived since it was fetched.
+    let projects: Vec<Value> = result
+        .and_then(|r| r["projects"].as_array())
+        .into_iter()
+        .flatten()
+        .chain(&s.state().projects)
+        .filter(|p| s.ui.settings.project.as_ref().is_none_or(|id| p["id"] == *id))
+        .cloned()
         .collect();
-    if threads.is_empty() {
-        return c::section(
-            "Archive",
-            vec![
-                col()
-                    .padding(16.0)
-                    .gap(4.0)
-                    .child(
-                        text("No archived threads")
-                            .font(theme::SM_MEDIUM)
-                            .color(t.c.foreground),
-                    )
-                    .child(
-                        text("Archived threads will appear here.")
-                            .font(theme::TEXT_XS)
-                            .color(t.c.muted_foreground),
-                    ),
-            ],
-            t,
-        );
+    let threads = archived_rows(fetched, &s.state().archived, &s.state().threads);
+    let groups = archive_groups(&projects, &threads);
+    if groups.is_empty() {
+        let loading = result.is_none() && s.ui.settings.pending.values().any(|m| m == ARCHIVED_SNAPSHOT);
+        let (glyph, title, description) = if loading {
+            (crate::kit::Spinner::new().size("sm").tone("muted").build(&crate::kit::theme(t)), "Loading archived threads", "Checking connected environments.")
+        } else {
+            (rune::icon(&crate::icons::ARCHIVE, 14.0).color(t.c.muted_foreground), "No archived threads", "Archived threads will appear here.")
+        };
+        let row = col()
+            .padding(16.0)
+            .gap(4.0)
+            .child(row().gap(8.0).center_y().child(glyph).child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground)))
+            .child(text(description).font(theme::TEXT_XS).color(t.c.muted_foreground));
+        return c::section("Archived threads", vec![row], t);
     }
-    let mut rows = Vec::new();
-    for thread in &threads {
-        let restore = crate::data::s(thread, "id").to_owned();
-        let delete = restore.clone();
-        let title = crate::data::s(thread, "title").to_owned();
-        rows.push(
-            row()
-                .w_full()
-                .padding(16.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(title.clone())
-                        .font(theme::TEXT_SM)
-                        .color(t.c.foreground)
-                        .grow(1.0),
-                )
-                .child(c::button("Restore", t).on_press(move |s: &mut App| {
-                    dispatch(s, json!({"type":"thread.unarchive","threadId":restore}))
-                }))
-                .child(
-                    crate::kit::Button::new("Delete")
-                        .variant("ghost-destructive")
-                        .size("sm")
-                        .on_press(move |s: &mut App| {
-                            s.ui.settings.delete_thread = Some((delete.clone(), title.clone()))
-                        })
-                        .build(t),
-                ),
-        );
+    let mut page = col().w_full().gap(24.0);
+    for (project, threads) in &groups {
+        let header = row()
+            .w_full()
+            .h(28.0)
+            .px(16.0)
+            .gap(8.0)
+            .center_y()
+            .child(crate::shell::sidebar::favicon::view(s, t, project, 16.0))
+            .child(
+                text(crate::data::s(project, "title").to_owned())
+                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
+                    .color(t.c.foreground)
+                    .truncate()
+                    .min_w(0.0),
+            );
+        let rows = threads.iter().map(|thread| archived_row(s, t, thread)).collect();
+        page = page.child(col().w_full().gap(10.0).child(header).child(c::card(rows, t)));
     }
-    c::section("Archived threads", rows, t)
+    page
+}
+
+/// Web's archived `SettingsRow`: when it was archived and created, Unarchive, and a right-click
+/// menu.
+fn archived_row(s: &App, t: &T, thread: &Value) -> El {
+    let id = crate::data::s(thread, "id").to_owned();
+    let title = crate::data::s(thread, "title").to_owned();
+    let created = crate::data::s(thread, "createdAt");
+    let archived_at = thread["archivedAt"].as_str().unwrap_or(created);
+    let description = format!(
+        "Archived {} \u{b7} Created {}",
+        super::storage::relative(archived_at, s.now_ms),
+        super::storage::relative(created, s.now_ms)
+    );
+    let restore = id.clone();
+    let menu = (id, title.clone());
+    row()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(description).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+        )
+        .child(
+            crate::kit::Button::new("Unarchive")
+                .variant("outline")
+                .size("sm")
+                .icon(&crate::icons::ARCHIVE_X)
+                .on_press(move |s: &mut App| unarchive(s, &restore))
+                .build(t),
+        )
+        .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| {
+            s.ui.settings.archive_menu = Some((menu.0.clone(), menu.1.clone(), at.x, at.y));
+        })
+}
+
+fn unarchive(s: &mut App, id: &str) {
+    dispatch(s, json!({"type": "thread.unarchive", "threadId": id}));
+}
+
+/// Web `useThreadActions.confirmAndDeleteThread`: asks first while `confirmThreadDelete` is on.
+fn request_delete(s: &mut App, id: String, title: String) {
+    let key = "confirmThreadDelete";
+    let confirm = s.client_settings.values.get(key).or_else(|| super::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false);
+    if confirm {
+        s.ui.settings.delete_thread = Some((id, title));
+    } else {
+        dispatch(s, json!({"type": "thread.delete", "threadId": id}));
+    }
+}
+
+/// The archived thread's right-click menu: Unarchive, then Delete.
+pub fn archive_menu(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some((id, title, x, y)) = s.ui.settings.archive_menu.clone() else { return };
+    let close = |s: &mut App| s.ui.settings.archive_menu = None;
+    let restore = id.clone();
+    crate::kit::Menu::new("archived-thread-menu")
+        .native(true)
+        .width(198.0)
+        .open(true)
+        .on_close(close)
+        .at(x, y)
+        .item(crate::kit::MenuItem::new("Unarchive").on_select(move |s: &mut App| {
+            close(s);
+            unarchive(s, &restore);
+        }))
+        .item(crate::kit::MenuItem::new("Delete").variant("destructive").on_select(move |s: &mut App| {
+            close(s);
+            request_delete(s, id.clone(), title.clone());
+        }))
+        .overlay(&crate::kit::theme(t), layers);
 }
 fn dispatch(s: &mut App, command: Value) {
     if let Some(net) = s.src.net() {
@@ -436,14 +528,18 @@ pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
         return;
     };
     let id = id.clone();
-    crate::kit::Dialog::new("delete-thread", "Delete thread?")
+    // Web's destructive `dialogs.confirm` from `confirmAndDeleteThread`.
+    crate::kit::Dialog::new("delete-thread", format!("Delete thread \"{title}\"?"))
         .open(true)
         .alert()
-        .description(format!("Permanently delete {title} and its chat history?"))
+        .width(448.0)
+        .description("This permanently clears conversation history for this thread.")
         .on_close(|s: &mut App| s.ui.settings.delete_thread = None)
         .child(
             row()
+                .w_full()
                 .gap(8.0)
+                .justify_end()
                 .child(
                     crate::kit::Button::new("Cancel")
                         .variant("outline")
@@ -463,9 +559,36 @@ pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
+/// Scenes: the fixture's threads, archived under their projects, with the first one's right-click
+/// menu open when `menu`.
+pub(super) fn scene_archive(s: &mut App, menu: bool) {
+    let threads: Vec<Value> = s
+        .state()
+        .threads
+        .iter()
+        .filter(|t| listed(t))
+        .take(5)
+        .enumerate()
+        .map(|(i, t)| {
+            let mut t = t.clone();
+            t["id"] = json!(format!("archived-{i}"));
+            t["archivedAt"] = t["updatedAt"].clone();
+            t
+        })
+        .collect();
+    if menu {
+        if let Some(first) = threads.first() {
+            s.ui.settings.archive_menu = Some((crate::data::s(first, "id").to_owned(), crate::data::s(first, "title").to_owned(), 720.0, 220.0));
+        }
+    }
+    let projects = s.state().projects.clone();
+    s.ui.settings.results.insert(ARCHIVED_SNAPSHOT.into(), json!({"projects": projects, "threads": threads}));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{archived_rows, removal_message};
+    use super::{archive_groups, archived_rows, removal_message, request_delete};
+    use crate::App;
     use serde_json::json;
 
     #[test]
@@ -495,5 +618,36 @@ mod tests {
         let ids: Vec<_> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["new", "renamed", "old"]);
         assert_eq!(rows[1]["title"], "live");
+    }
+
+    #[test]
+    fn archived_threads_group_under_their_projects_like_web() {
+        let projects = [json!({"id":"a","title":"api"}), json!({"id":"b","title":"web"}), json!({"id":"a"}), json!({"id":"c"})];
+        let threads = [
+            json!({"id":"1","projectId":"a","archivedAt":"2026-11-01T00:00:00Z","createdAt":"2026-10-01T00:00:00Z"}),
+            json!({"id":"2","projectId":"b","archivedAt":null,"createdAt":"2026-11-05T00:00:00Z"}),
+            json!({"id":"3","projectId":"a","archivedAt":"2026-11-03T00:00:00Z","createdAt":"2026-10-01T00:00:00Z"}),
+            json!({"id":"4","projectId":"a","archivedAt":"2026-11-03T00:00:00Z","createdAt":"2026-10-01T00:00:00Z"}),
+            json!({"id":"5","projectId":"gone","archivedAt":"2026-11-09T00:00:00Z"}),
+        ];
+        let groups = archive_groups(&projects, &threads);
+        let shape: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(p, rows)| (p["id"].as_str().unwrap(), rows.iter().map(|r| r["id"].as_str().unwrap()).collect()))
+            .collect();
+        // Project order, each project once, empty ones and orphans dropped; newest archived first,
+        // ties by id descending, and a missing archivedAt falls back to createdAt.
+        assert_eq!(shape, [("a", vec!["4", "3", "1"]), ("b", vec!["2"])]);
+    }
+
+    #[test]
+    fn deleting_from_the_archive_asks_only_while_confirm_thread_delete_is_on() {
+        let mut s = App::new();
+        request_delete(&mut s, "t".into(), "Fix it".into());
+        assert_eq!(s.ui.settings.delete_thread, Some(("t".into(), "Fix it".into())), "on by default");
+        s.ui.settings.delete_thread = None;
+        s.client_settings.values.insert("confirmThreadDelete".into(), json!(false));
+        request_delete(&mut s, "t".into(), "Fix it".into());
+        assert_eq!(s.ui.settings.delete_thread, None);
     }
 }

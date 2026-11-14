@@ -121,7 +121,7 @@ pub fn from_window(x: f32, y: f32) -> (f32, f32) {
 
 /// Window state that outlives a launch: the app zoom everywhere, the window size where Rune
 /// can't hand it to AppKit's frame autosave. In the T3 home, so a dev worktree keeps its own.
-fn prefs() -> rune::prefs::Prefs {
+pub(crate) fn prefs() -> rune::prefs::Prefs {
     if rune::is_headless() {
         return rune::prefs::Prefs::memory();
     }

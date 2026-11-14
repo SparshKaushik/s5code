@@ -89,6 +89,7 @@ pub struct Ui {
     mint_failed: Vec<String>,
     forget: Option<(String, String)>,
     pub(super) access: super::access::State,
+    pub(super) machines: super::machines::Ui,
 }
 
 pub(super) fn desktop_settings() -> rune::prefs::Prefs {
@@ -152,8 +153,14 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     if let Some(label) = s.ui.env.route_added.take() {
+        let ui = &s.ui.settings.connections;
+        let alias = ui.route_target.as_deref().filter(|_| ui.ssh).and_then(|id| env::ssh::alias(s, id)).map(str::to_owned);
         close_add(s);
-        toast(s, "Route added", Some(&format!("{label} now has another way to connect.")));
+        let description = match alias {
+            Some(alias) => format!("{label} can now be reached over SSH {alias}."),
+            None => format!("{label} now has another way to connect."),
+        };
+        toast(s, "Route added", Some(&description));
         changed = true;
     }
     let added = match &s.ui.settings.connections.adding {
@@ -194,7 +201,7 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
-    changed | super::access::poll(s)
+    changed | super::machines::poll(s) | super::access::poll(s)
 }
 
 pub fn escape(s: &mut App) -> bool {
@@ -207,7 +214,9 @@ pub fn escape(s: &mut App) -> bool {
         || std::mem::take(&mut ui.local_confirm)
         || std::mem::take(&mut ui.ssh_suggest)
         || ui.adding.take().is_some()
-        || std::mem::take(&mut ui.link_machine_open);
+        || std::mem::take(&mut ui.link_machine_open)
+        || ui.machines.select.take().is_some()
+        || ui.machines.confirm.take().is_some();
     if closed {
         return true;
     }
@@ -231,6 +240,8 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             route_remove_dialog(s, t, layers);
             link_dialog(s, t, layers);
             forget_dialog(s, t, layers);
+            super::machines::confirm_dialog(s, t, layers);
+            let _ = super::machines::sections(s, t, layers);
         }
         Some("access") => super::access::overlays(s, t, layers),
         _ => {}
@@ -263,11 +274,13 @@ pub fn view(s: &App, t: &T) -> El {
     } else {
         s.ui.env.saved.iter().map(|env| saved_row(s, t, env)).collect()
     };
-    page = page.child(c::section_with_actions("Environments", vec![add], rows, t));
+    let actions = super::machines::update_all_button(s, t).into_iter().chain([add]).collect();
+    page = page.child(c::section_with_actions("Environments", actions, rows, t));
     if offers_links(s) {
         page = page.child(linked(s, t));
     }
-    page
+    // The open select's popup is mounted from `overlays`.
+    page.children(super::machines::sections(s, t, &mut Vec::new()))
 }
 
 fn local_row(s: &App, t: &T) -> El {
@@ -488,7 +501,7 @@ fn toggle_routes(s: &mut App, id: &str) {
 const ROUTE_ROW: f32 = 48.0;
 
 /// Web `connectionRouteLabel` and `connectionRouteAddress` for a saved route.
-fn route_presentation(s: &App, id: &str, route: &env::Alt) -> (String, String) {
+pub(super) fn route_presentation(s: &App, id: &str, route: &env::Alt) -> (String, String) {
     if !env::ssh::is_tunnel(s, id, &route.base) {
         return (route_label(&route.base), route.base.clone());
     }
@@ -821,7 +834,10 @@ fn add_remote(s: &mut App) {
 
 fn add_ssh(s: &mut App) {
     s.ui.settings.connections.ssh_suggest = false;
-    env::ssh::add(s);
+    match s.ui.settings.connections.route_target.clone() {
+        Some(id) => env::add_ssh_route(s, &id),
+        None => env::ssh::add(s),
+    }
 }
 
 /// Web `AddEnvironmentDialog`: a Remote link or SSH mode card, then that mode's fields. Pairing
@@ -840,11 +856,7 @@ fn add_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         ),
         None => ("Add Environment".to_owned(), "Pair another environment to this client."),
     };
-    // Rune adds routes by address; an SSH route would need a second tunnel per environment.
-    let mut modes = row().w_full().gap(12.0).child(mode_card(t, false, !ui.ssh, busy));
-    if route.is_none() {
-        modes = modes.child(mode_card(t, true, ui.ssh, busy));
-    }
+    let modes = row().w_full().gap(12.0).child(mode_card(t, false, !ui.ssh, busy)).child(mode_card(t, true, ui.ssh, busy));
     kit::Dialog::new("add-environment", title)
         .open(true)
         .description(description)
@@ -1005,6 +1017,7 @@ fn ssh_fields(s: &App, t: &T) -> El {
             list = list.child(item.on_press(move |s: &mut App| {
                 s.ui.settings.connections.ssh_suggest = false;
                 env::ssh::pick(s, &picked);
+                add_ssh(s);
             }));
         }
         host_field = host_field.child(list);
@@ -1043,7 +1056,11 @@ fn ssh_fields(s: &App, t: &T) -> El {
         );
     }
     body.child(
-        kit::Button::new(if adding { "Adding…" } else { "Add environment" })
+        kit::Button::new(match (adding, s.ui.settings.connections.route_target.is_some()) {
+            (true, _) => "Adding…",
+            (false, true) => "Add route",
+            (false, false) => "Add environment",
+        })
             .variant("outline")
             .icon(&icons::PLUS)
             .disabled(adding)
@@ -1548,6 +1565,7 @@ pub(super) fn scene(s: &mut App, open: &str) {
             let alt = |base: &str| env::Alt { base: base.into(), bearer: "token".into() };
             s.ui.env.alternates.insert("env-box".into(), vec![alt("http://192.168.1.20:3773"), alt("https://box.example.com")]);
         }
+        "machines" | "update-confirm" => super::machines::scene(s, open),
         "link" => {
             // A second machine with the same name, told apart by its address.
             s.ui.env.saved.push(Saved { id: "env-box-2".into(), label: "Hetzner box".into(), base: "http://10.0.0.7:3773".into(), bearer: String::new() });
