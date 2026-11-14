@@ -120,7 +120,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         }
         for (title, children) in groups {
             if !children.is_empty() {
-                page = page.child(c::section(title, children, t));
+                let section = c::section(title, children, t);
+                // Search's "Project defaults and overrides" lands on these defaults (web `#project-defaults`).
+                page = page.child(if path == "threads" && title == "New threads" {
+                    col().w_full().key(super::title_key("Project defaults and overrides")).child(section)
+                } else {
+                    section
+                });
             }
             // Web's server scan sits between Repositories and Writing & review.
             if path == "source-control" && title == "Repositories" {

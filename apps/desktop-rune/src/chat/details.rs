@@ -1057,14 +1057,25 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         "Choose editor",
         Menu::Editor,
     );
-    let script = scripts::view(s, t);
-    let general = col().w_full().padding(8.0).pb(10.0).child(run_context).child(editor).child(script);
-
-    let mut body = col().w_full().child(general);
+    let show = Show::read(|id| crate::settings::thread_details::shows(s, id));
+    let mut general = col().w_full().padding(8.0).pb(10.0);
+    if show.environment {
+        general = general.child(run_context);
+    }
+    if show.open_in {
+        general = general.child(editor);
+    }
+    if show.scripts {
+        general = general.child(scripts::view(s, t));
+    }
+    let mut body = col().w_full();
+    if show.workspace() {
+        body = body.child(general);
+    }
 
     // A failed status stream still shows the section, with Commit disabled and +0 -0.
     let failed = (vcs(s).is_none() && git::status_error(s).is_some()).then(|| json!({"isRepo": true}));
-    if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true) {
+    if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true).filter(|_| show.vcs()) {
         let current = data::s(v, "refName").to_string();
         // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
         let branch = match run.as_ref().filter(|r| r.worktree) {
@@ -1076,24 +1087,32 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             None if current.is_empty() => "Select ref".into(),
             None => current,
         };
-        let mut section = col()
-            .w_full()
-            .px(8.0)
-            .pt(9.0)
-            .pb(10.0)
-            .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)))
-            .child(
+        let mut section = col().w_full().px(8.0).pt(if show.workspace() { 9.0 } else { 8.0 }).pb(10.0);
+        // No empty section above steals the divider rule.
+        if show.workspace() {
+            section = section.child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)));
+        }
+        if show.branch {
+            section = section.child(
                 branch_row(t, &branch, fg, muted)
                     .help(with_shortcut(s, &branch, "composer.branch"))
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
-        if let Some(prs) = pr::rows(s, t) {
-            section = section.child(prs);
+            if let Some(prs) = pr::rows(s, t) {
+                section = section.child(prs);
+            }
         }
         // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
-        let Some(git) = git::view(s, t, v, draft) else { return Some(frame(t, body.child(section), cap)) };
-        section = section.child(git);
+        let Some(git) = git::view(s, t, v, draft).filter(|_| show.git_actions || show.changes) else {
+            if show.branch {
+                body = body.child(section);
+            }
+            return Some(frame(t, with_fallback(t, body, &show), cap));
+        };
+        if show.git_actions {
+            section = section.child(git);
+        }
         let (add, del) = git::changes_totals(v);
         let stat = theme::mono(theme::XS_MEDIUM);
         let changes = action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
@@ -1104,10 +1123,54 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
                     .child(text(format!("+{}", thousands(add))).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
                     .child(text(format!("-{}", thousands(del))).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
             );
-        section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
+        if show.changes {
+            section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
+        }
         body = body.child(section);
     }
-    Some(frame(t, body, cap))
+    Some(frame(t, with_fallback(t, body, &show), cap))
+}
+
+/// Web `ThreadDetailsPanel`'s `show`: the card items the user keeps on (Settings › Appearance ›
+/// Thread details). Rune's card has no servers, automations, lineage, side chats, usage or context.
+#[derive(Debug, PartialEq)]
+struct Show {
+    environment: bool,
+    open_in: bool,
+    scripts: bool,
+    branch: bool,
+    git_actions: bool,
+    changes: bool,
+}
+
+impl Show {
+    fn read(shows: impl Fn(&str) -> bool) -> Self {
+        Self {
+            environment: shows("environment"),
+            open_in: shows("openIn"),
+            scripts: shows("scripts"),
+            branch: shows("branch"),
+            git_actions: shows("gitActions"),
+            changes: shows("changes"),
+        }
+    }
+    fn workspace(&self) -> bool {
+        self.environment || self.open_in || self.scripts
+    }
+    fn vcs(&self) -> bool {
+        self.branch || self.git_actions || self.changes
+    }
+}
+
+/// Web's "Choose what to show", only while every item is off, so an emptied card can be refilled.
+fn with_fallback(t: &T, body: El, show: &Show) -> El {
+    if show.workspace() || show.vcs() {
+        return body;
+    }
+    let muted = t.c.muted_foreground;
+    let choose = action(t, "details-choose", icon(&icons::SLIDERS_HORIZONTAL, 16.0).color(muted), "Choose what to show", t.c.foreground.alpha_mul(0.8))
+        .on_press(|s: &mut App| crate::settings::open_setting(s, "appearance", "Thread details"));
+    body.child(col().w_full().padding(8.0).child(choose))
 }
 
 /// The open card menu, anchored under its trigger. Attach after the card so it draws above.
@@ -1429,6 +1492,21 @@ mod tests {
     use super::{DraftRun, Item, Pending, Ref, Shown, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
     use serde_json::{Value, json};
     use crate::{App, Route, data};
+
+    #[test]
+    fn the_card_shows_only_the_thread_details_items_kept_on() {
+        let mut s = App::new();
+        let show = |s: &App| super::Show::read(|id| crate::settings::thread_details::shows(s, id));
+        let all = show(&s);
+        assert!(all.workspace() && all.vcs(), "every card item starts on");
+        s.client_settings.values.insert("threadDetailsItems".into(), json!({"environment": false, "openIn": false, "scripts": false, "gitActions": false}));
+        let some = show(&s);
+        assert!(!some.workspace(), "an emptied workspace section is dropped, not left as a gap");
+        assert!(some.vcs() && some.branch && some.changes && !some.git_actions);
+        s.client_settings.values.insert("threadDetailsItems".into(), json!({"branch": false, "changes": false}));
+        let git_only = show(&s);
+        assert!(git_only.vcs() && git_only.git_actions && !git_only.branch && !git_only.changes, "git actions alone keep the section");
+    }
 
     #[test]
     fn visibility_is_per_thread_and_a_narrow_lane_opens_a_popover() {
