@@ -183,6 +183,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s, tx);
     changed |= chat::composer::poll(s);
+    changed |= chat::side::poll(s);
     changed |= chat::remember_route(s);
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);

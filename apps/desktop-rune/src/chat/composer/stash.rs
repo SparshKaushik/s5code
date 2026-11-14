@@ -40,6 +40,11 @@ pub fn stash(s: &mut App) {
         }
         return;
     };
+    // Stashed files keep their paths, so one already gone could never come back.
+    if d.attachments.iter().any(|p| attachments::needs_reattach(p)) {
+        crate::shell::palette::toast(s, "Attach dropped files again or remove them before stashing", None);
+        return;
+    }
     let entry = json!({"id": s5_net::uuid(), "createdAt": s.now_ms, "draft": stored_draft(d)});
     let d = draft_mut(s);
     d.edit.clear();
@@ -62,7 +67,8 @@ pub fn toggle(s: &mut App) {
     stash.active = 0;
 }
 
-/// Takes entry `index` out of the stash and into the open draft.
+/// Takes entry `index` out of the stash and into the open draft; a file gone from disk since
+/// comes back as a row to attach again, and Send waits on it.
 pub fn restore(s: &mut App, index: usize) {
     let stash = &mut s.ui.chat.composer.stash;
     if index >= stash.entries.len() {
@@ -354,6 +360,34 @@ mod tests {
         let delete_key = KeyEvent { key: Key::Backspace, mods: rune::Mods { cmd: true, ..Default::default() } };
         assert!(on_key(&mut s, &delete_key));
         assert_eq!(s.ui.chat.composer.stash.entries.iter().map(|e| data::s(&e["draft"], "prompt")).collect::<Vec<_>>(), ["two"]);
+    }
+
+    #[test]
+    fn a_stashed_file_gone_from_disk_restores_as_one_to_attach_again() {
+        let mut s = App::new();
+        on_thread(&mut s);
+        let dir = std::env::temp_dir().join(format!("s5-stash-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("trace.json");
+        std::fs::write(&file, "{}").unwrap();
+        let path = file.display().to_string();
+        let d = draft_mut(&mut s);
+        d.edit.insert("check this");
+        d.attachments.push(path.clone());
+        stash(&mut s);
+        assert_eq!(s.ui.chat.composer.stash.entries.len(), 1);
+        std::fs::remove_file(&file).unwrap();
+        restore(&mut s, 0);
+        let d = draft(&s).unwrap();
+        assert_eq!(d.attachments, [path.clone()]);
+        assert_eq!(attachments::status(&path), attachments::Status::Reattach);
+        assert!(attachments::block_reason(&d.attachments).is_some());
+
+        // A draft holding a missing file is not stashed.
+        stash(&mut s);
+        assert!(s.ui.chat.composer.stash.entries.is_empty());
+        assert_eq!(draft(&s).unwrap().edit.text, "check this");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
 mod attachments;
+pub mod banners;
 pub mod chips;
 mod context;
 mod menu;
@@ -11,6 +12,7 @@ mod picker;
 pub mod provider_icons;
 mod search;
 mod stash;
+mod usage_limits;
 
 use std::collections::HashMap;
 
@@ -27,6 +29,26 @@ use crate::{App, Route};
 pub const PLACEHOLDER: &str = "Ask anything. @ files, $ skills, / commands";
 /// Distance from the composer to the bottom of the chat area (`pb-5`).
 pub const BOTTOM: f32 = 20.0;
+
+/// The new-thread draft centres its composer under the hero (ChatView's isDraftHeroState).
+pub fn draft_hero(s: &App) -> bool {
+    !matches!(s.frame_route(), Route::Thread(_))
+}
+
+/// Distance from the composer card to the bottom of the chat area: `BOTTOM`, or on the draft
+/// hero what centres the card and its `BOTTOM` spacer in the area.
+pub fn bottom_inset(s: &App, cx: &mut Cx<App>) -> f32 {
+    if !draft_hero(s) {
+        return BOTTOM;
+    }
+    let area = cx.layout_with("chat-body", |r| r[3]).unwrap_or(848.0);
+    let card = cx.layout_with("composer", |r| r[3]).unwrap_or(112.0);
+    hero_bottom(area, card)
+}
+
+fn hero_bottom(area: f32, card: f32) -> f32 {
+    ((area - card + BOTTOM) / 2.0).max(BOTTOM).round()
+}
 
 pub struct Draft {
     pub edit: TextEdit,
@@ -71,6 +93,13 @@ pub struct Ui {
     pub stash: stash::Stash,
     /// The permissions menu opened from the footer chip.
     pub permissions_open: bool,
+    /// The overflow menu a narrow footer folds its mode controls into (CompactComposerControlsMenu).
+    pub more_open: bool,
+    /// The usage limits panel `/usage-limits` opened.
+    pub usage: usage_limits::Panel,
+    /// Threads whose send (composer.sendAndNewThread) opens their project's new-thread draft once
+    /// it lands: the thread and its project.
+    new_after: Vec<(String, String)>,
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
     /// Messages waiting on their attachments to be stored.
@@ -332,6 +361,31 @@ pub fn effort_descriptor(s: &App) -> Option<Value> {
     descriptors(s).into_iter().find(|d| data::s(d, "type") != "boolean" && is_reasoning(d) && d["options"].is_array())
 }
 
+/// The effort column's control (columnControls' effort): the reasoning select, else a reasoning
+/// switch such as Claude's `thinking`.
+pub fn reasoning_control(s: &App) -> Option<Value> {
+    let fast = speed_descriptor(s).map(|d| data::s(&d, "id").to_owned());
+    effort_descriptor(s)
+        .or_else(|| descriptors(s).into_iter().find(|d| data::s(d, "type") == "boolean" && is_reasoning(d) && Some(data::s(d, "id")) != fast.as_deref()))
+}
+
+pub const ULTRATHINK_IN_BODY_NOTE: &str = "Your prompt contains \"ultrathink\" in the text. Remove it to change this option.";
+
+/// readPromptUltrathink is "body": the word stays once an `Ultrathink:` prefix is set aside.
+fn ultrathink_in_body(prompt: &str) -> bool {
+    let body = prompt.get(..11).filter(|p| p.eq_ignore_ascii_case("ultrathink:")).map_or(prompt, |_| prompt[11..].trim_start());
+    mentions_ultrathink(prompt) && mentions_ultrathink(body)
+}
+
+/// The prompt's own "ultrathink" picks the level, so the levels lock (ultrathinkInBodyText):
+/// only when the keyword drives the model's primary select.
+pub fn effort_locked(s: &App) -> bool {
+    let Some(d) = effort_descriptor(s) else { return false };
+    let primary = descriptors(s).into_iter().find(|p| data::s(p, "type") == "select").is_some_and(|p| p["id"] == d["id"]);
+    let injected = d["promptInjectedValues"].as_array().is_some_and(|v| !v.is_empty());
+    primary && injected && draft(s).is_some_and(|d| ultrathink_in_body(&d.edit.text))
+}
+
 /// The selected model's effort descriptor id and its options, without the values a prompt
 /// keyword turns on (ultrathink).
 pub fn effort_options(s: &App) -> Option<(String, Vec<Value>)> {
@@ -351,7 +405,7 @@ pub fn speed_descriptor(s: &App) -> Option<Value> {
 
 /// The options the effort column lists below the levels: everything but the levels and speed.
 pub fn column_options(s: &App) -> Vec<Value> {
-    let effort = effort_descriptor(s).map(|d| data::s(&d, "id").to_owned());
+    let effort = reasoning_control(s).map(|d| data::s(&d, "id").to_owned());
     let speed = speed_descriptor(s).map(|d| data::s(&d, "id").to_owned());
     descriptors(s)
         .into_iter()
@@ -395,6 +449,9 @@ fn stepped(ids: &[String], current: Option<&str>, step: isize) -> Option<String>
 
 /// `composer.increaseEffort` / `composer.decreaseEffort` (stepReasoningEffort).
 fn step_effort(s: &mut App, step: isize) {
+    if effort_locked(s) {
+        return;
+    }
     let Some((_, options)) = effort_options(s) else { return };
     let ids: Vec<String> = options.iter().map(|o| data::s(o, "id").to_owned()).collect();
     if let Some(next) = stepped(&ids, effort(s).as_deref(), step) {
@@ -468,6 +525,9 @@ pub fn selection(s: &App) -> Option<(String, String)> {
     let c = ctx(s);
     if let Some(t) = c.thread {
         return selection_of(&t["modelSelection"]);
+    }
+    if let Some(m) = banners::draft_fallback_selection(s) {
+        return Some(m);
     }
     if let Some(p) = c.project {
         let pid = data::s(p, "id");
@@ -751,9 +811,25 @@ fn send(s: &mut App, alternate: bool) {
     send_with(s, alternate, false);
 }
 
-/// Sends the draft; `background` launches a new thread without opening it (composer.sendBackground).
+/// Files gone from disk hold Send until they are attached again or removed.
+fn attachment_block(s: &App) -> Option<&'static str> {
+    draft(s).and_then(|d| attachments::block_reason(&d.attachments))
+}
+
+/// Sends the draft; `background` launches a new thread without opening it (composer.sendBackground),
+/// or from a thread, sends and then opens its project's new-thread draft (composer.sendAndNewThread).
 fn send_with(s: &mut App, alternate: bool, background: bool) {
-    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) {
+    // `/usage-limits` alone opens the panel instead of reaching the agent.
+    if editing_run(s).is_none() && usage_limits::takes_prompt(s) {
+        if usage_limits::open(s) {
+            draft_mut(s).edit.clear();
+        }
+        return;
+    }
+    if editing_run(s).is_none() && banners::send_feedback(s) {
+        return;
+    }
+    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) || attachment_block(s).is_some() {
         return;
     }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
@@ -776,6 +852,12 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     let mut text = text.trim().to_string();
     if prompt_length_message(&text).is_some() {
         s.ui.chat.composer.length_error = Some(key);
+        return;
+    }
+    // `/side` and `/btw` start a side chat, ahead of an open question or a plan follow-up.
+    if crate::chat::side::parse(&text).is_some() {
+        let attached = !d.attachments.is_empty() || !contexts.is_empty();
+        crate::chat::side::send_command(s, &text, attached);
         return;
     }
     if let Some(mode) = standalone_mode(&text).filter(|_| supports_plan(s) && d.attachments.is_empty() && contexts.is_empty()) {
@@ -836,6 +918,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     let (runtime, interaction) = (effective_runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
+    let new_after = project_id.clone().filter(|_| background && matches!(route, Route::Thread(_)));
     let message_id = s5_net::uuid();
     let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
@@ -880,6 +963,9 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     let launch = launch.then(|| thread_id.clone());
     if background && launch.is_some() {
         s.ui.chat.composer.background.push(thread_id.clone());
+    }
+    if let Some(project) = new_after {
+        s.ui.chat.composer.new_after.push((thread_id.clone(), project));
     }
     s.ui.chat.composer.length_error = None;
     crate::chat::timeline::error_banner::set_local(s, &key, None);
@@ -1052,6 +1138,7 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     let mut opened = None;
+    let mut landed = Vec::new();
     let composer = &mut s.ui.chat.composer;
     let mut i = 0;
     while i < composer.sends.len() {
@@ -1068,6 +1155,7 @@ pub fn poll(s: &mut App) -> bool {
         }
         match (reply, launch) {
             (Ok(v), Some(thread_id)) if !quiet => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
+            (Ok(_), _) if !outgoing.draft.is_null() => landed.push(outgoing.key),
             (Ok(_), _) => {}
             (Err(e), _) => failed.push((outgoing, e)),
         }
@@ -1075,6 +1163,9 @@ pub fn poll(s: &mut App) -> bool {
     }
     for (outgoing, error) in failed {
         send_failed(s, outgoing, &error);
+    }
+    for key in landed {
+        changed |= new_thread_after(s, &key);
     }
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
@@ -1084,6 +1175,19 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     changed
+}
+
+/// composer.sendAndNewThread's second half: once the send landed, and only while its thread is
+/// still open, the thread's project opens a new-thread draft (handleNewThreadInActiveProject).
+fn new_thread_after(s: &mut App, key: &str) -> bool {
+    let Some(at) = s.ui.chat.composer.new_after.iter().position(|(thread, _)| thread == key) else { return false };
+    let (thread, project) = s.ui.chat.composer.new_after.remove(at);
+    if !matches!(s.frame_route(), Route::Thread(id) if *id == thread) {
+        return false;
+    }
+    s.ui.chat.home.workspace = None;
+    s.navigate(Route::Home { project_id: Some(project) });
+    true
 }
 
 /// Drafts on disk, as the web composer draft store persists them: each draft's prompt with its
@@ -1118,6 +1222,7 @@ fn watch(s: &mut App, request: u64, key: &str) {
 
 /// A failed send shows in its route's banner, and its draft comes back unless a new one was started.
 fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
+    s.ui.chat.composer.new_after.retain(|(thread, _)| *thread != outgoing.key);
     let message = crate::shell::palette::error_message(error, "Failed to send message.");
     crate::chat::timeline::error_banner::set_local(s, &outgoing.key, Some(&message));
     if outgoing.draft.is_null() {
@@ -1273,6 +1378,9 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             } else if e.mods.cmd && !matches!(s.frame_route(), Route::Thread(_)) {
                 // composer.sendBackground: a new thread starts without leaving the draft.
                 send_with(s, false, true);
+            } else if e.mods.cmd && e.mods.alt {
+                // composer.sendAndNewThread: sent, then on to a new thread in the same project.
+                send_with(s, false, true);
             } else {
                 // Mod+Enter while a turn runs is the alternate follow-up (steer <-> queue).
                 send(s, e.mods.cmd);
@@ -1419,11 +1527,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     if !d.attachments.is_empty() {
         body = body.child(attachment_chips(t, &d.attachments));
     }
-    let body = body.child(editor).child(footer(s, t));
+    let folded = controls_folded(s, cx);
+    let body = body.child(editor).child(footer(s, t, folded));
 
     // The @ menu wins over the stash drawer (isStashMenuOpen && !composerMenuOpen).
     let menu = if question::active(s).is_some() { None } else { menu::view(s, cx, t) };
-    let mut stack = col().key("composer-lane").w(lane.width).pin(Some(lane.left), None, None, Some(BOTTOM));
+    let mut stack = col().key("composer-lane").w(lane.width).pin(Some(lane.left), None, None, Some(bottom_inset(s, cx)));
     if let Some(menu) = menu {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
     } else if let Some(stash) = stash::menu(s, t) {
@@ -1433,6 +1542,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
     let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
+    let docked = usage_limits::banner(s, cx, t).or(docked);
+    let docked = banners::dock(s, t, docked);
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !s.ui.chat.composer.stash.open);
     match (docked, badge) {
@@ -1449,7 +1561,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut layers = picker::view(s, cx, t);
-    if s.ui.chat.composer.permissions_open {
+    let c = &s.ui.chat.composer;
+    // A folded footer keeps Permissions in its overflow menu, so composer.mode lands there too.
+    if (c.more_open || c.permissions_open) && controls_folded(s, cx) {
+        layers.push(more_menu(s, t).modal(true, |s: &mut App| {
+            s.ui.chat.composer.more_open = false;
+            s.ui.chat.composer.permissions_open = false;
+        }));
+    } else if s.ui.chat.composer.permissions_open {
         let menu = picker::runtime_menu(t, &runtime_mode_options(s), &effective_runtime_mode(s), "composer-permissions-menu", "composer-permissions", rune::Align::Start);
         layers.push(menu.modal(true, |s: &mut App| s.ui.chat.composer.permissions_open = false));
     }
@@ -1530,7 +1649,12 @@ fn chip_suffix(s: &App, t: &T) -> Vec<El> {
                 None => word(label),
             })
         });
-        out.extend(effort);
+        // A reasoning switch reads "Thinking On" (describeComposerEffort).
+        let switch = || {
+            let d = reasoning_control(s).filter(|d| data::s(d, "type") == "boolean")?;
+            Some(word(format!("{} {}", data::s(&d, "label"), if option_value(s, &d) == true { "On" } else { "Off" })))
+        };
+        out.extend(effort.or_else(switch));
     }
     let fast = speed_descriptor(s).is_some_and(|d| {
         if data::s(&d, "type") == "boolean" { option_value(s, &d) == true } else { option_label(s, &d).is_some_and(|l| l == "Fast" || l == "Ultrafast") }
@@ -1554,9 +1678,83 @@ fn provider_unavailable(s: &App, t: &T) -> El {
     if setup { control.on_press(|s: &mut App| s.navigate(Route::Settings("providers".into()))) } else { control.opacity(0.64) }
 }
 
-/// [attach] … [model][permissions][Build/Plan] [meter][send] (ChatComposer's footer).
-fn footer(s: &App, t: &T) -> El {
-    let attach = icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx));
+/// The footer around the model chip and the mode block: its padding, Attach, and the gaps.
+const FOOTER_CHROME: f32 = 2.0 + 16.0 + 28.0 + 3.0 * 8.0 + 2.0 * 2.0;
+
+/// The mode block's width: the permissions chip and the Build/Plan toggle, as `control` lays
+/// them out (16-point icon, 6-point gap, 8-point sides).
+fn mode_block_width(s: &App) -> f32 {
+    let label = |l: &str| rune::text::measure(l, &[], theme::SM_MEDIUM, None).0 + 16.0 + 6.0 + 16.0;
+    let mut w = 0.0;
+    if permissions_chip_shown(s) {
+        let mode = effective_runtime_mode(s);
+        w += label(RUNTIME_MODES.iter().find(|m| m.0 == mode).map_or(RUNTIME_MODES[0].1, |m| m.1)) - 2.0;
+    }
+    if supports_plan(s) {
+        w += label(if interaction_mode(s) == "plan" { "Plan" } else { "Build" });
+    }
+    w
+}
+
+/// resolveComposerControlsOwnership's overflow: the mode block folds into one menu when it no
+/// longer fits beside the model chip and the send side.
+fn folds_mode_block(composer_w: f32, fixed_w: f32, mode_w: f32) -> bool {
+    mode_w > 0.0 && FOOTER_CHROME + fixed_w + mode_w > composer_w
+}
+
+/// The footer is too narrow for its mode block, measured on the last layout.
+fn controls_folded(s: &App, cx: &mut Cx<App>) -> bool {
+    let Some(width) = cx.layout_with("composer", |r| r[2]) else { return false };
+    let chip = cx.layout_with("composer-model-chip", |r| r[2]).unwrap_or(0.0);
+    let right = cx.layout_with("composer-footer-right", |r| r[2]).unwrap_or(32.0);
+    folds_mode_block(width, chip + right, mode_block_width(s))
+}
+
+/// CompactComposerControlsMenu: Chat or Plan, then Permissions.
+fn more_menu(s: &App, t: &T) -> El {
+    let mut menu = picker::menu_card(t, "composer-more-menu").anchored("composer-more", rune::Side::Top, rune::Align::Start, 4.0);
+    let heading = |label: &str| text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.muted_foreground).px(8.0).pt(6.0).pb(4.0);
+    if supports_plan(s) {
+        menu = menu.child(heading("Mode"));
+        let current = interaction_mode(s);
+        for (mode, label) in [("default", "Chat"), ("plan", "Plan")] {
+            let mut item = row()
+                .key(format!("composer-more-{mode}"))
+                .w_full()
+                .h(32.0)
+                .px(8.0)
+                .gap(8.0)
+                .center_y()
+                .radius(radius::MD)
+                .hover(t.c.accent)
+                .cursor(Cursor::Pointer)
+                .role("menuitemradio")
+                .child(text(label).font(theme::TEXT_SM).color(t.c.foreground))
+                .child(spacer())
+                .on_press(move |s: &mut App| {
+                    if interaction_mode(s) != mode {
+                        set_interaction_mode(s, mode);
+                    }
+                    s.ui.chat.composer.more_open = false;
+                });
+            if (current == "plan") == (mode == "plan") {
+                item = item.child(icon(&icons::CHECK, 14.0).color(t.c.foreground));
+            }
+            menu = menu.child(item);
+        }
+    }
+    if permissions_chip_shown(s) {
+        if supports_plan(s) {
+            menu = menu.child(el().w_full().h(1.0).my(4.0).fill(t.c.border));
+        }
+        menu = menu.child(heading("Permissions")).children(picker::runtime_rows(t, &runtime_mode_options(s), &effective_runtime_mode(s)));
+    }
+    menu
+}
+
+/// [attach] … [model][permissions][Build/Plan] [meter][send] (ChatComposer's footer). A narrow
+/// footer folds permissions and Build/Plan into "More composer controls".
+fn footer(s: &App, t: &T, folded: bool) -> El {
     let mut controls = row().gap(2.0).center_y().shrink().min_w(0.0);
     if no_provider(s) {
         controls = controls.child(provider_unavailable(s, t));
@@ -1580,7 +1778,14 @@ fn footer(s: &App, t: &T) -> El {
                 .on_press(|s: &mut App| picker::toggle(s)),
         );
     }
-    if permissions_chip_shown(s) {
+    if folded {
+        controls = controls.child(
+            icon_button(t, &icons::ELLIPSIS, "More composer controls", s.ui.chat.composer.more_open, t.c.foreground.alpha_mul(0.8))
+                .key("composer-more")
+                .on_press(|s: &mut App| s.ui.chat.composer.more_open = !s.ui.chat.composer.more_open),
+        );
+    }
+    if permissions_chip_shown(s) && !folded {
         let mode = effective_runtime_mode(s);
         let (_, label, description, glyph) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[0]);
         controls = controls.child(
@@ -1593,7 +1798,7 @@ fn footer(s: &App, t: &T) -> El {
                 .on_press(|s: &mut App| s.ui.chat.composer.permissions_open = !s.ui.chat.composer.permissions_open),
         );
     }
-    if supports_plan(s) {
+    if supports_plan(s) && !folded {
         let (glyph, label, help) = if interaction_mode(s) == "plan" {
             (&icons::PENCIL_RULER, "Plan", "Plan mode. Click to return to normal build mode")
         } else {
@@ -1601,8 +1806,12 @@ fn footer(s: &App, t: &T) -> El {
         };
         controls = controls.child(control(t, glyph, label, t.c.foreground.alpha_mul(0.8)).key("composer-interaction-mode").help(help).on_press(toggle_plan));
     }
-    let right = row().h(28.0).gap(8.0).center_y().children(context::meter(s, t)).child(primary_action(s, t));
-    row().w_full().px(8.0).pt(10.0).gap(8.0).center_y().child(attach).child(spacer()).child(controls).child(right)
+    let right = row().key("composer-footer-right").h(28.0).gap(8.0).center_y().children(context::meter(s, t)).child(primary_action(s, t));
+    // A pending question's answer carries no files here, so Attach steps aside while it waits.
+    let attach = question::active(s).is_none().then(|| {
+        icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx))
+    });
+    row().w_full().px(8.0).pt(10.0).gap(8.0).center_y().children(attach).child(spacer()).child(controls).child(right)
 }
 
 /// resolveEffortGlyph over the selectable levels: `(bars, filled)`, or `None` when the level is
@@ -1685,6 +1894,8 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
         Some("Environment disconnected".to_owned())
     } else if let Some(reason) = send_block(s) {
         Some(reason)
+    } else if let Some(reason) = attachment_block(s) {
+        Some(reason.to_owned())
     } else if rewinding(s) {
         Some("Rewinding conversation".to_owned())
     } else if busy {
@@ -1724,16 +1935,23 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     }
 }
 
-/// A chip per queued file (ComposerAttachmentStrip): its name and size, or in red why it cannot
-/// be sent (moved, emptied or grown since it was added).
+/// A chip per queued file (ComposerAttachmentStrip): its name and size, "Attach again" once it
+/// is gone from disk (a picked file of that name takes its place), or "Remove to send" when it
+/// can no longer be sent.
 fn attachment_chips(t: &T, paths: &[String]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
     for (i, path) in paths.iter().enumerate() {
         let name = attachments::file_name(path);
-        let (detail, ink, help) = match attachments::check(path) {
-            Ok(size) => (attachments::format_size(size), t.c.muted_foreground, path.clone()),
-            Err(e) => ("Can't send".to_owned(), t.c.destructive, e),
+        let status = attachments::status(path);
+        let (ink, help) = match &status {
+            attachments::Status::Ready(_) => (t.c.muted_foreground, path.clone()),
+            attachments::Status::Reattach => (t.c.destructive, path.clone()),
+            attachments::Status::Remove(why) => (t.c.destructive, why.clone()),
         };
+        let mut detail = text(attachments::status_label(&status)).font(theme::TEXT_XS).color(ink);
+        if status == attachments::Status::Reattach {
+            detail = detail.cursor(Cursor::Pointer).role("button").on_press_tx(|_: &mut App, tx| attach(tx));
+        }
         chips = chips.child(
             row()
                 .key(format!("composer-attachment-{i}"))
@@ -1746,15 +1964,15 @@ fn attachment_chips(t: &T, paths: &[String]) -> El {
                 .fill(t.c.foreground.alpha_mul(0.06))
                 .help(help)
                 .child(icon(&icons::FILE, 14.0).color(ink))
-                .child(text(name).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(180.0))
-                .child(text(detail).font(theme::TEXT_XS).color(ink))
+                .child(text(name.clone()).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(180.0))
+                .child(detail)
                 .child(
                     el().size(20.0, 20.0)
                         .center()
                         .radius(radius::SM)
                         .hover(t.c.accent)
                         .cursor(Cursor::Pointer)
-                        .label("Remove attachment")
+                        .label(format!("Remove {name}"))
                         .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
                         .on_press(move |s: &mut App| {
                             let d = draft_mut(s);
@@ -2171,6 +2389,41 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_text(s, "ultrathink about the retry loop");
         picker::toggle(s);
     }),
+    ("composer-effort-thinking", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-haiku-4-5".into()));
+        picker::toggle(s);
+    }),
+    ("composer-effort-locked", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        set_text(s, "Please ultrathink about the retry loop");
+        picker::toggle(s);
+    }),
+    ("composer-usage-limits", |s| {
+        on_replay_showcase(s);
+        patch_config(s, usage_limits::scene_limits);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        set_text(s, "/usage-limits");
+        send(s, false);
+        // The windows were written for this instant.
+        if let Some(open) = s.ui.chat.composer.usage.open.as_mut() {
+            open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
+        }
+    }),
+    ("composer-draft-hero-centred", on_home),
+    ("composer-attachments-reattach", |s| {
+        stash_scene(s);
+        stash::restore(s, 1);
+    }),
+    ("composer-compact-controls", |s| {
+        on_replay_showcase(s);
+        s.ui.shell.panel_open = true;
+        let d = draft_mut(s);
+        d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        d.runtime_mode = Some("approval-required".into());
+        s.ui.chat.composer.more_open = true;
+    }),
     ("topbar-rename", |s| {
         on_replay_showcase(s);
         crate::chat::topbar::start_rename(s);
@@ -2391,6 +2644,83 @@ mod tests {
         assert_eq!(d.contexts, [record]);
         assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
         assert_eq!(d.options, [json!({"id": "fastMode", "value": true})]);
+    }
+
+    #[test]
+    fn a_thinking_switch_fills_the_effort_column_and_ultrathink_locks_the_levels() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-haiku-4-5".into()));
+        assert!(effort_descriptor(&s).is_none());
+        assert_eq!(reasoning_control(&s).map(|d| data::s(&d, "id").to_owned()).as_deref(), Some("thinking"));
+        assert!(column_options(&s).is_empty(), "the switch is the column's effort, not an option below it");
+
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        assert_eq!(reasoning_control(&s).map(|d| data::s(&d, "id").to_owned()).as_deref(), Some("effort"));
+        set_text(&mut s, "Ultrathink:\nfix the loop");
+        assert!(!effort_locked(&s), "a bare prefix leaves the levels alone");
+        set_text(&mut s, "please ultrathink about it");
+        assert!(effort_locked(&s));
+        draft_mut(&mut s).effort = Some("low".into());
+        step_effort(&mut s, 1);
+        assert_eq!(draft(&s).unwrap().effort.as_deref(), Some("low"), "locked levels do not step");
+        assert!(ultrathink_in_body("Ultrathink: then ultrathink"));
+    }
+
+    #[test]
+    fn usage_limits_command_opens_the_panel_instead_of_sending() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id));
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        set_text(&mut s, "/usage-limits");
+        assert!(!usage_limits::takes_prompt(&s), "no limits reported yet");
+        patch_config(&mut s, usage_limits::scene_limits);
+        draft_mut(&mut s).attachments.push("/tmp/a.txt".into());
+        assert!(!usage_limits::takes_prompt(&s), "anything besides the command sends as usual");
+        draft_mut(&mut s).attachments.clear();
+        send(&mut s, false);
+        assert!(draft(&s).unwrap().edit.text.is_empty());
+        assert!(s.ui.chat.composer.usage.open.is_some());
+    }
+
+    #[test]
+    fn send_waits_on_files_gone_from_disk() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id.clone()));
+        set_text(&mut s, "see attached");
+        draft_mut(&mut s).attachments.push("/nonexistent/s5/trace.json".into());
+        assert_eq!(attachment_block(&s), Some("Attach the interrupted file again or remove it"));
+        send(&mut s, false);
+        assert_eq!(draft(&s).unwrap().edit.text, "see attached", "nothing was sent");
+    }
+
+    #[test]
+    fn send_and_new_thread_opens_the_project_draft_only_from_the_thread_it_left() {
+        let mut s = App::new();
+        let thread = s.state().threads[0].clone();
+        let (id, project) = (data::s(&thread, "id").to_string(), data::s(&thread, "projectId").to_string());
+        s.navigate(Route::Thread(id.clone()));
+        s.ui.chat.composer.new_after.push((id.clone(), project.clone()));
+        assert!(!new_thread_after(&mut s, "another-thread"));
+        assert!(new_thread_after(&mut s, &id));
+        assert_eq!(s.route, Route::Home { project_id: Some(project.clone()) });
+        assert!(s.ui.chat.composer.new_after.is_empty());
+
+        // Gone elsewhere meanwhile: the user stays put.
+        s.ui.chat.composer.new_after.push((id.clone(), project));
+        assert!(!new_thread_after(&mut s, &id));
+        assert!(matches!(s.route, Route::Home { .. }));
+    }
+
+    #[test]
+    fn the_draft_hero_centres_the_card_and_narrow_footers_fold_their_mode_block() {
+        assert_eq!(hero_bottom(800.0, 120.0), 350.0);
+        assert_eq!(hero_bottom(100.0, 120.0), BOTTOM);
+        assert!(!folds_mode_block(720.0, 260.0, 0.0), "nothing to fold");
+        assert!(!folds_mode_block(720.0, 260.0, 200.0));
+        assert!(folds_mode_block(480.0, 260.0, 200.0));
     }
 
     #[test]

@@ -433,28 +433,51 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .child(el().w_full().h(1.0).fill(line))
         .child(col().w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(models));
 
-    // Effort: the selected model's reasoning levels under the header that names them, then its
-    // other options (ComposerEffortColumn).
+    // Effort: the selected model's reasoning levels (or its reasoning switch, On and Off) under
+    // the header that names them, then its other options (ComposerEffortColumn).
     let effort_label = current.as_ref().map(|(i, m)| super::model_name(s, i, m)).unwrap_or_default();
-    let reasoning = super::effort_descriptor(s);
+    let reasoning = super::reasoning_control(s);
+    let switch = reasoning.clone().filter(|d| data::s(d, "type") == "boolean");
     let efforts = super::effort_options(s).map(|(_, o)| o).unwrap_or_default();
     let others = super::column_options(s);
-    let chosen = super::effort(s);
+    // Ultrathink in the prompt locks the levels and selects none of them.
+    let locked = super::effort_locked(s);
+    let chosen = if locked { None } else { super::effort(s) };
+    let has_effort = !efforts.is_empty() || switch.is_some();
     let column_title = reasoning
         .as_ref()
+        .filter(|_| has_effort)
         .map(|d| data::s(d, "label").to_owned())
-        .filter(|l| !l.is_empty() && !efforts.is_empty())
-        .unwrap_or_else(|| if efforts.is_empty() && !others.is_empty() { "Options".to_owned() } else { "Effort".to_owned() });
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| if !has_effort && !others.is_empty() { "Options".to_owned() } else { "Effort".to_owned() });
     let mut effort_body = col().w_full().px(9.0).mt(21.0);
-    if efforts.is_empty() && others.is_empty() {
+    if !has_effort && others.is_empty() {
         effort_body = effort_body.child(row().h(32.0).px(8.0).center_y().child(text("No effort levels").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
-    let effort_count = efforts.len();
+    if locked && !efforts.is_empty() {
+        effort_body = effort_body.child(
+            text(super::ULTRATHINK_IN_BODY_NOTE).font(theme::TEXT_XS).color(t.c.muted_foreground.alpha_mul(0.8)).wrap().w_full().px(8.0).pb(6.0).key("picker-effort-locked"),
+        );
+    }
+    let effort_count = if switch.is_some() { 2 } else { efforts.len() };
+    if let Some(d) = &switch {
+        let on = super::option_value(s, d) == true;
+        for value in [true, false] {
+            let id = data::s(d, "id").to_owned();
+            let label = if value { "On" } else { "Off" };
+            let r = column_row(t, format!("picker-effort-{id}-{label}"), label, on == value, false, "");
+            effort_body = effort_body.child(r.on_press(move |s: &mut App| super::set_option(s, &id, json!(value))));
+        }
+    }
     for o in efforts {
         let id = data::s(&o, "id").to_owned();
         let selected = chosen.as_deref() == Some(id.as_str());
         let r = column_row(t, format!("picker-effort-{id}"), data::s(&o, "label"), selected, o["isDefault"] == true, data::s(&o, "description"));
-        effort_body = effort_body.child(r.on_press(move |s: &mut App| draft_mut(s).effort = Some(id.clone())));
+        effort_body = effort_body.child(if locked {
+            r.opacity(0.64).cursor(Cursor::NotAllowed)
+        } else {
+            r.on_press(move |s: &mut App| draft_mut(s).effort = Some(id.clone()))
+        });
     }
     if !others.is_empty() {
         let mut group = col().w_full().gap(2.0);
@@ -616,15 +639,17 @@ fn speed_control(s: &App, t: &T) -> Option<El> {
 /// The permissions menu above `anchor`: the picker's footer toggle or the composer's chip. Modes
 /// above an administrator's ceiling stay listed, disabled with the reason.
 pub(super) fn runtime_menu(t: &T, options: &[ModeOption], mode: &str, key: &str, anchor: &str, align: Align) -> El {
-    let mut menu = col()
-        .key(key)
-        .w(300.0)
-        .padding(4.0)
-        .radius(radius::LG)
-        .fill(t.c.popover)
-        .border(1.0, t.c.border)
-        .shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.3))
-        .anchored(anchor, Side::Top, align, 4.0);
+    menu_card(t, key).anchored(anchor, Side::Top, align, 4.0).children(runtime_rows(t, options, mode))
+}
+
+/// A composer popup menu's card.
+pub(super) fn menu_card(t: &T, key: &str) -> El {
+    col().key(key).w(300.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.3))
+}
+
+/// One row per runtime mode; a pick closes whichever menu holds them.
+pub(super) fn runtime_rows(t: &T, options: &[ModeOption], mode: &str) -> Vec<El> {
+    let mut rows = Vec::new();
     for option in options {
         let id = option.mode;
         let description = option.disabled.clone().unwrap_or_else(|| option.description.to_owned());
@@ -648,12 +673,13 @@ pub(super) fn runtime_menu(t: &T, options: &[ModeOption], mode: &str, key: &str,
                 set_runtime_mode(s, id);
                 s.ui.chat.composer.picker.runtime_open = false;
                 s.ui.chat.composer.permissions_open = false;
+                s.ui.chat.composer.more_open = false;
             })
         };
         if id == mode {
             item = item.child(icon(&icons::CHECK, 14.0).color(t.c.foreground));
         }
-        menu = menu.child(item);
+        rows.push(item);
     }
-    menu
+    rows
 }
