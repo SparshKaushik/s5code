@@ -151,7 +151,6 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
         return;
     }
     let (groups, _) = super::folders::group_of(s);
-    let can_pin = crate::shell::palette::actions::can_organize_projects(s);
     let ordered: Vec<&super::folders::Group> = ui.scope_order.iter().filter_map(|k| groups.iter().find(|g| g.key == *k)).collect();
     let shown = scope_items(&ordered.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(), &ui.scope_search.text);
     let keys: Vec<String> = shown.iter().map(|n| n.map_or_else(|| ALL.to_string(), |n| ordered[n].key.clone())).collect();
@@ -195,7 +194,7 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
             if let Some(badge) = crate::env::badge(s, &g.members) {
                 entry = entry.child(icon(&i::SERVER, 14.0).color(t.c.muted_foreground).help(badge));
             }
-            if can_pin {
+            if super::folders::can_pin(s, &g.members) {
                 entry = entry.child(scope_pin(t, g, highlighted, &pin_label));
             }
             entry = entry.child(scope_settings(t, g));
@@ -246,7 +245,7 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
             let at = active.map(|n| field_keys[n].clone());
             let group = at.as_ref().and_then(|k| field_groups.iter().find(|g| g.0 == *k));
             if let Some((_, members, _, pinned)) = group
-                && can_pin
+                && super::folders::can_pin(s, members)
                 && crate::panel::shortcut(s, e, "thread.pin")
             {
                 for m in members {

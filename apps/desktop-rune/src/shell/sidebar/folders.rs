@@ -478,6 +478,16 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
 }
 
 /// The folder's right-click menu (`SidebarProjectFolderHeader`'s context menu).
+/// `canPinProjectGroup`: every member's server organizes projects and its session lets this
+/// client change it.
+pub fn can_pin(s: &App, members: &[String]) -> bool {
+    members.iter().all(|m| {
+        let key = s.state().projects.iter().find(|p| crate::data::s(p, "id") == m).map_or_else(|| s.ui.env.active.clone(), |p| crate::env::of(s, p));
+        let config = if key == s.ui.env.active { s.state().config.as_ref() } else { crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()) };
+        config.is_some_and(|c| c["environment"]["capabilities"]["projectOrganization"] == true) && super::grants_on(s, &key, "orchestration:operate")
+    })
+}
+
 pub fn menu(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, x, y)) = s.ui.shell.sidebar.folders.menu.clone() else { return };
     let (groups, _) = group_of(s);
@@ -500,7 +510,7 @@ pub fn menu(s: &App, t: &T, overlays: &mut Vec<El>) {
         tx.copy(root.clone());
         crate::shell::palette::toast(s, "Path copied", Some(&root));
     }));
-    if crate::shell::palette::actions::can_organize_projects(s) {
+    if can_pin(s, &g.members) {
         let (members, pinned) = (g.members.clone(), g.pinned);
         menu = menu.item(MenuItem::new(if pinned { "Unpin project" } else { "Pin project" }).on_select(move |s: &mut App| {
             close(s);
@@ -576,6 +586,20 @@ mod tests {
         let saved = vec!["env:/gone".to_string(), "env:/x".to_string(), "env:/o".to_string()];
         assert_eq!(scope_members(&groups, &saved), vec!["o".to_string()]);
         assert!(scope_members(&groups, &[]).is_empty(), "no keys is all projects");
+    }
+
+    #[test]
+    fn pinning_a_project_needs_its_server_to_organize_and_its_session_to_operate() {
+        let mut s = App::new();
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!("App::new runs on fixtures") };
+        let members = vec![crate::data::s(&state.projects[0], "id").to_string()];
+        state.config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["projectOrganization"] = json!(false);
+        assert!(!can_pin(&s, &members), "FAILED: an older server cannot pin");
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!() };
+        state.config.as_mut().unwrap()["environment"]["capabilities"]["projectOrganization"] = json!(true);
+        assert!(can_pin(&s, &members));
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        assert!(!can_pin(&s, &members), "FAILED: a read-only session hides Pin project");
     }
 
     #[test]
