@@ -87,7 +87,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         page = page.child(super::themes::view(s, t));
     }
     if let Some(sections) = specs()[path].as_array() {
-        let revealing = s.ui.settings.reveal.as_deref().and_then(|title| fold_of(path, title));
         let mut groups: Vec<(&str, Vec<El>)> = Vec::new();
         for section in sections {
             let title = section["title"].as_str().unwrap_or("");
@@ -109,7 +108,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 if let Some((section, last)) = groups.last_mut() {
                     // Each section's fold opens on its own, as web's per-section `AdvancedSettings`.
                     let fold = format!("{path}/{section}");
-                    let open = s.ui.settings.advanced.contains(&fold) || revealing.as_ref() == Some(&fold);
+                    let open = s.ui.settings.advanced.contains(&fold);
                     last.push(advanced_trigger(fold, open, t));
                     if open {
                         last.extend(rows);

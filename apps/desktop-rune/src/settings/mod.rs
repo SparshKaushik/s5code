@@ -500,6 +500,9 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
+        if let (Some(page), Some(title)) = (&s.ui.settings.loaded_page, &s.ui.settings.reveal) {
+            s.ui.settings.advanced.extend(pages::fold_of(page, title));
+        }
         accent::close(s);
         s.ui.settings.icon_picker = None;
     }
@@ -769,7 +772,10 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
-    s.ui.settings.reveal = Some(search::reveal(page, title).to_owned());
+    let reveal = search::reveal(page, title);
+    // Web's `AdvancedSettings` opens on a target inside it and stays open.
+    s.ui.settings.advanced.extend(pages::fold_of(page, reveal));
+    s.ui.settings.reveal = Some(reveal.to_owned());
     // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
     if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
         update(s, "typographyAdvanced", json!(true));
@@ -996,14 +1002,16 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             stick_bottom: false,
         })
         .child(page);
+    // A marker keyed by the target, since `on_layout` reports only a new or moved element: a
+    // second result on the same page scrolls too.
     if let Some(title) = s.ui.settings.reveal.clone() {
-        let fold = pages::fold_of(path, &title);
-        scroller = scroller.on_layout_tx(move |s: &mut App, _, tx: &mut rune::Tx| {
-            s.ui.settings.reveal = None;
-            // The fold drawn open for the reveal stays open, as web's `AdvancedSettings` does.
-            s.ui.settings.advanced.extend(fold.clone());
-            tx.scroll_center_in(scroll.clone(), title_key(&title));
-        });
+        let key = title_key(&title);
+        scroller = scroller.child(el().key(format!("settings-reveal-{key}")).size(0.0, 0.0).on_layout_tx(
+            move |s: &mut App, _, tx: &mut rune::Tx| {
+                s.ui.settings.reveal = None;
+                tx.scroll_center_in(scroll.clone(), key.clone());
+            },
+        ));
     }
     content = content.child(scroller);
     let modal = row()
@@ -1627,18 +1635,22 @@ mod reveal_tests {
             }
         };
         let rect = |rt: &rune::Runtime<App>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect);
-        let in_view = |rt: &rune::Runtime<App>| {
+        let in_view = |rt: &rune::Runtime<App>, title: &str| {
             let viewport = rect(rt, "settings-scroll-general").expect("FAILED: the page scrolls");
-            let target = rect(rt, &super::title_key("Quit shortcut")).expect("FAILED: the setting's title is keyed");
+            let target = rect(rt, &super::title_key(title)).expect("FAILED: the setting's title is keyed");
             let mid = target[1] + target[3] / 2.;
             mid > viewport[1] && mid < viewport[1] + viewport[3]
         };
         settle(&mut rt);
-        assert!(!in_view(&rt), "FAILED: the setting starts below the fold");
+        assert!(!in_view(&rt, "Quit shortcut"), "FAILED: the setting starts below the fold");
         rt.update(|s, _| crate::settings::open_setting(s, "general", "Quit shortcut"));
         settle(&mut rt);
-        assert!(in_view(&rt), "FAILED: opening the result scrolls the setting into view");
+        assert!(in_view(&rt, "Quit shortcut"), "FAILED: opening the result scrolls the setting into view");
         assert!(rt.state.ui.settings.reveal.is_none(), "FAILED: the reveal runs once");
+        assert!(!in_view(&rt, "Thread notifications"), "FAILED: the first setting is scrolled away");
+        rt.update(|s, _| crate::settings::open_setting(s, "general", "Thread notifications"));
+        settle(&mut rt);
+        assert!(in_view(&rt, "Thread notifications"), "FAILED: a second result on the same page scrolls too");
     }
 
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
@@ -1652,8 +1664,9 @@ mod reveal_tests {
         "Thread details",
         "Usage providers",
     ];
-    /// Drawn only in other states: the desktop CLI row, and Linked environments behind its Labs flag.
-    const HIDDEN_HERE: &[&str] = &["Linked environments", "t3 command"];
+    /// Drawn only in other states: the desktop CLI row, the managed host's local environment, and
+    /// Linked environments behind its Labs flag.
+    const HIDDEN_HERE: &[&str] = &["Linked environments", "Local environment", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {
