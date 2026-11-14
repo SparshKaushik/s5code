@@ -205,7 +205,7 @@ struct SignalResult {
 
 /// `Schema.Option` on the wire: absent, `null`, `{_tag: "None"}`, `{_tag: "Some", value}`, or
 /// the bare value.
-fn option(v: &Value) -> Option<&Value> {
+pub(super) fn option(v: &Value) -> Option<&Value> {
     match v {
         Value::Null => None,
         Value::Object(map) => match map.get("_tag").and_then(Value::as_str) {
@@ -217,23 +217,23 @@ fn option(v: &Value) -> Option<&Value> {
     }
 }
 
-fn num(v: &Value) -> f64 {
+pub(super) fn num(v: &Value) -> f64 {
     v.as_f64().unwrap_or(0.0)
 }
 
-fn int(v: &Value) -> i64 {
+pub(super) fn int(v: &Value) -> i64 {
     v.as_f64().unwrap_or(0.0) as i64
 }
 
-fn string(v: &Value) -> String {
+pub(super) fn string(v: &Value) -> String {
     v.as_str().unwrap_or("").to_owned()
 }
 
-fn at(v: &Value) -> Option<i64> {
+pub(super) fn at(v: &Value) -> Option<i64> {
     v.as_str().and_then(crate::data::iso_ms)
 }
 
-fn list(v: &Value) -> impl Iterator<Item = &Value> {
+pub(super) fn list(v: &Value) -> impl Iterator<Item = &Value> {
     v.as_array().into_iter().flatten()
 }
 
@@ -359,12 +359,12 @@ fn decode_signal(v: &Value) -> SignalResult {
 // --- Formatting -----------------------------------------------------------------------------
 
 /// `Math.round`.
-fn js_round(v: f64) -> i64 {
+pub(super) fn js_round(v: f64) -> i64 {
     (v + 0.5).floor() as i64
 }
 
 /// `.replace(/\.0+$/, "")`.
-fn trim_zeros(s: String) -> String {
+pub(super) fn trim_zeros(s: String) -> String {
     let whole = match s.split_once('.') {
         Some((whole, fraction)) if !fraction.is_empty() && fraction.chars().all(|c| c == '0') => Some(whole.to_owned()),
         _ => None,
@@ -373,7 +373,7 @@ fn trim_zeros(s: String) -> String {
 }
 
 /// `Intl.NumberFormat` in en-US.
-fn format_count(n: i64) -> String {
+pub(super) fn format_count(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
@@ -393,7 +393,7 @@ fn format_duration(ms: f64) -> String {
     format!("{} s", trim_zeros(format!("{:.*}", digits, ms / 1_000.0)))
 }
 
-fn format_cpu_time(seconds: f64) -> String {
+pub(super) fn format_cpu_time(seconds: f64) -> String {
     let fixed = |v: f64| trim_zeros(format!("{:.*}", if v >= 10.0 { 1 } else { 2 }, v));
     if seconds < 60.0 {
         return format!("{}s", fixed(seconds));
@@ -406,7 +406,7 @@ fn format_cpu_time(seconds: f64) -> String {
 }
 
 /// `formatBytes`.
-fn format_bytes(value: f64) -> String {
+pub(super) fn format_bytes(value: f64) -> String {
     if value.round() < 1024.0 {
         return format!("{} B", value.round() as i64);
     }
@@ -420,12 +420,12 @@ fn format_bytes(value: f64) -> String {
     format!("{} {}", scaled(next), units[unit])
 }
 
-fn format_percent(v: f64) -> String {
+pub(super) fn format_percent(v: f64) -> String {
     format!("{v:.1}%")
 }
 
 /// `formatRelativeElapsed`: the value and its suffix.
-fn relative(at: i64, now: i64) -> (String, Option<&'static str>) {
+pub(super) fn relative(at: i64, now: i64) -> (String, Option<&'static str>) {
     let minutes = (now - at).max(0) / 60_000;
     match minutes {
         0 => ("just now".into(), None),
@@ -459,7 +459,7 @@ fn is_stale_signal_message(message: Option<&str>) -> bool {
 }
 
 /// `formatProcessName`: the executable's file name.
-fn format_process_name(command: &str) -> String {
+pub(super) fn format_process_name(command: &str) -> String {
     let Some(first) = command.split_whitespace().next() else { return command.to_owned() };
     let first = first.strip_prefix(['\'', '"']).unwrap_or(first);
     let normalized = first.strip_suffix(['\'', '"']).unwrap_or(first);
@@ -874,7 +874,7 @@ fn stat(label: &str, value: String, tip: Option<String>, tone: Tone, t: &T) -> E
 }
 
 /// `StatsGrid`: four blocks with rules between them.
-fn stats(blocks: Vec<El>, t: &T) -> El {
+pub(super) fn stats(blocks: Vec<El>, t: &T) -> El {
     let mut grid = row().w_full().items_stretch();
     for (i, block) in blocks.into_iter().enumerate() {
         if i > 0 {
@@ -885,7 +885,7 @@ fn stats(blocks: Vec<El>, t: &T) -> El {
     grid
 }
 
-fn alert_line(message: String, color: Color) -> El {
+pub(super) fn alert_line(message: String, color: Color) -> El {
     row()
         .w_full()
         .gap(8.0)
@@ -899,7 +899,7 @@ fn alerts(lines: Vec<El>) -> Option<El> {
     (!lines.is_empty()).then(|| col().w_full().px(20.0).py(12.0).gap(8.0).children(lines))
 }
 
-fn empty_rows(label: &str, t: &T) -> El {
+pub(super) fn empty_rows(label: &str, t: &T) -> El {
     text(label.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).px(20.0).py(16.0)
 }
 
@@ -929,7 +929,7 @@ fn refresh_button(pending: bool, label: &'static str, which: Which, t: &T) -> El
 }
 
 /// `InlineButton`: medium xs text, dimmed and unreachable when disabled.
-fn inline_button(label: &str, color: Color, enabled: bool, t: &T, f: impl Fn(&mut App) + 'static) -> El {
+pub(super) fn inline_button(label: &str, color: Color, enabled: bool, t: &T, f: impl Fn(&mut App) + 'static) -> El {
     let control = text(label.to_owned())
         .font(theme::XS_MEDIUM)
         .color(color)
@@ -995,22 +995,22 @@ fn trace_cell(ui: &Ui, now: i64, t: &T, trace_id: &str, key: String) -> El {
         .child(copy)
 }
 
-struct Column {
-    header: &'static str,
-    weight: f32,
-    end: bool,
+pub(super) struct Column {
+    pub(super) header: &'static str,
+    pub(super) weight: f32,
+    pub(super) end: bool,
     /// This column's horizontal padding when it differs from the table's (web `p-2`).
-    pad: Option<f32>,
+    pub(super) pad: Option<f32>,
 }
 
-const fn column(header: &'static str, weight: f32, end: bool) -> Column {
+pub(super) const fn column(header: &'static str, weight: f32, end: bool) -> Column {
     Column { header, weight, end, pad: None }
 }
 
 /// Web's `<table>`, at least `min_w` wide and scrolling sideways when the card is narrower.
 /// `fixed` is `table-fixed`: every column takes its percentage of the width, whatever it holds;
 /// otherwise columns start from their content and share what is left. `top` is `align-top`.
-fn table(t: &T, min_w: f32, pad: f32, top: bool, fixed: bool, columns: &[Column], rows: Vec<Vec<El>>) -> El {
+pub(super) fn table(t: &T, min_w: f32, pad: f32, top: bool, fixed: bool, columns: &[Column], rows: Vec<Vec<El>>) -> El {
     let cell = |c: &Column, content: El, py: f32| {
         let mut cell = row().grow(c.weight).min_w(0.0).px(c.pad.unwrap_or(pad)).py(py);
         if fixed {
@@ -1042,7 +1042,7 @@ fn table(t: &T, min_w: f32, pad: f32, top: bool, fixed: bool, columns: &[Column]
     col().w_full().scroll_x().child(body)
 }
 
-fn mono_cell(value: String, color: Color) -> El {
+pub(super) fn mono_cell(value: String, color: Color) -> El {
     text(value).font(theme::MONO_XS).color(color)
 }
 
@@ -1050,7 +1050,7 @@ fn name_cell(name: &str, t: &T) -> El {
     text(name.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground).wrap().selectable(true).min_w(0.0)
 }
 
-fn dot(color: Color) -> El {
+pub(super) fn dot(color: Color) -> El {
     el().size(6.0, 6.0).radius(3.0).fill(color)
 }
 
@@ -1070,6 +1070,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
     col()
         .w_full()
         .gap(40.0)
+        .child(super::resource_telemetry::view(s, t))
         .child(processes_section(s, ui, t))
         .child(history_section(ui, s.now_ms, t))
         .child(trace_section(s, ui, t))

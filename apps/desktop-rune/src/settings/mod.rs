@@ -35,6 +35,7 @@ mod source_control;
 mod storage;
 mod browser_profiles;
 mod diagnostics;
+mod resource_telemetry;
 mod licenses;
 mod secrets;
 mod tasks;
@@ -109,6 +110,7 @@ pub struct Ui {
     pub session: permissions::Session,
     pub secrets: secrets::Ui,
     pub diagnostics: diagnostics::Ui,
+    pub resource_telemetry: resource_telemetry::Ui,
     pub licenses: licenses::Ui,
     pub telemetry: telemetry::Ui,
 }
@@ -519,6 +521,7 @@ pub fn poll(s: &mut App) -> bool {
             ));
         }
     }
+    wanted.extend(resource_telemetry::wanted(s));
     for resource in add_provider::wanted(s) {
         if !wanted.contains(&resource) {
             wanted.push(resource);
@@ -541,7 +544,7 @@ pub fn poll(s: &mut App) -> bool {
     if matches!(&s.route, Route::Settings(p) if p == "secrets") && !secrets::enabled() && matches!(s.src, crate::data::Source::Live(_)) {
         s.navigate(Route::Settings("general".into()));
     }
-    let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && diagnostics::tick(s);
+    let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && (diagnostics::tick(s) | resource_telemetry::tick(s));
     let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
@@ -1006,6 +1009,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     projects::confirm_delete(s, t, &mut overlays);
     secrets::overlays(s, t, &mut overlays);
     diagnostics::overlays(s, t, &mut overlays);
+    resource_telemetry::overlays(s, t, &mut overlays);
     projects::confirm_remove(s, t, &mut overlays);
     project_icon::dialog(s, t, &mut overlays);
     if crate::chat::details::scripts::settings_editor_open(s) {
@@ -1159,6 +1163,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-diagnostics", |s| {
         scene(s, "diagnostics");
         diagnostics::fixture(s);
+        resource_telemetry::fixture(s);
     }),
     ("settings-open-source-licenses", |s| {
         scene(s, "open-source-licenses");
