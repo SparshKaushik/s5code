@@ -1,6 +1,8 @@
 //! The settings model picker (`ProviderModelPicker` without the composer's effort column): a
 //! bordered trigger (`SETTINGS_PICKER_TRIGGER_CLASSNAME`) and a popover with the provider rail and
-//! the selected provider's models. Rows: default, fallback and text generation model.
+//! the selected provider's models. Rows: default, fallback and text generation model, and the
+//! source control writer and review guide models, which a switch turns on (web
+//! `SourceControlWritingSettings`).
 
 use rune::{Align, Cursor, El, Side, TextEdit, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
@@ -25,7 +27,21 @@ pub struct Picker {
 }
 
 pub fn is_model_key(key: &str) -> bool {
-    matches!(key, "defaultModelSelection" | "fallbackModelSelection" | "textGenerationModelSelection")
+    matches!(key, "defaultModelSelection" | "fallbackModelSelection" | "textGenerationModelSelection") || dedicated(key)
+}
+
+const WRITER: &str = "sourceControlWriterModelSelection";
+const REVIEW_GUIDE: &str = "reviewGuideModelSelection";
+
+/// A model that is off (`null`) until its switch turns it on, and otherwise falls back.
+fn dedicated(key: &str) -> bool {
+    matches!(key, WRITER | REVIEW_GUIDE)
+}
+
+/// What a dedicated key uses while off or unusable: the writer falls back to the text generation
+/// model, the review guide to the writer (`resolveReviewGuideModelSelection`).
+fn fallback_key(key: &str) -> &'static str {
+    if key == REVIEW_GUIDE { WRITER } else { "textGenerationModelSelection" }
 }
 
 fn selectable(p: &Value) -> bool {
@@ -52,7 +68,7 @@ fn default_model(p: &Value) -> Option<String> {
 fn candidates<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
     providers(s)
         .iter()
-        .filter(|p| key != "textGenerationModelSelection" || p["supportsTextGeneration"] != false)
+        .filter(|p| !(key == "textGenerationModelSelection" || dedicated(key)) || p["supportsTextGeneration"] != false)
         .collect()
 }
 
@@ -83,6 +99,10 @@ pub fn selection(s: &App, key: &str) -> Option<(String, String)> {
     if key == "fallbackModelSelection" {
         return pair(&stored).or_else(|| selection(s, "defaultModelSelection"));
     }
+    if dedicated(key) {
+        let usable = stored["instanceId"].as_str().is_some_and(|id| entries.iter().any(|p| p["instanceId"] == id && selectable(p)));
+        return if usable { pair(&stored) } else { selection(s, fallback_key(key)) };
+    }
     if stored.is_null() {
         // `resolveProjectDefaultProviderModelSelection`: the first driver group wins first.
         let first = entries.first().map(|p| p["driver"].clone());
@@ -102,8 +122,64 @@ fn model_label(s: &App, instance: &str, model: &str) -> String {
     crate::chat::composer::model_name(s, instance, model)
 }
 
+/// Web's dedicated-model control: a muted line without a server, else the picker while on, then
+/// the switch. Turning it on starts from what it was falling back to.
+fn dedicated_control(s: &App, t: &T, key: &str) -> El {
+    let none = |copy: &str| text(copy.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground);
+    let (noun, aria) = if key == WRITER {
+        ("source control writer model", "Use a separate source control writer model")
+    } else {
+        ("review guide model", "Use a separate review guide model")
+    };
+    if s.state().config.is_none() {
+        return none(&format!("Connect an environment to choose its {noun}."));
+    }
+    let on = !super::value(s, key).is_null();
+    let start = selection(s, fallback_key(key));
+    let usable = can_enable(&candidates(s, key), start.as_ref().map(|(i, _)| i.as_str()));
+    let mut line = row().gap(8.0).center_y().justify_end();
+    if on && !usable && key == WRITER {
+        line = line.child(none("No text generation providers available."));
+    }
+    if on && usable {
+        line = line.child(trigger(s, t, key));
+    }
+    let owned = key.to_owned();
+    line.child(
+        crate::kit::Switch::new(on)
+            .label(aria)
+            .hide_label()
+            .disabled(!on && !usable)
+            .on_toggle(move |s: &mut App| {
+                let next = if on {
+                    Value::Null
+                } else {
+                    match selection(s, fallback_key(&owned)) {
+                        Some((instance, model)) => json!({"instanceId": instance, "model": model}),
+                        None => return,
+                    }
+                };
+                update(s, &owned, next);
+            })
+            .build(&crate::kit::theme(t))
+            .key(format!("setting-{key}")),
+    )
+}
+
+/// `canEnableDedicatedModel`: what the model falls back to comes from a usable provider.
+fn can_enable(entries: &[&Value], instance: Option<&str>) -> bool {
+    instance.is_some_and(|id| entries.iter().any(|p| p["instanceId"] == id && selectable(p)))
+}
+
 /// The row's control: the trigger, or the web's muted fallback copy.
 pub fn control(s: &App, t: &T, key: &str) -> El {
+    if dedicated(key) {
+        return dedicated_control(s, t, key);
+    }
+    trigger(s, t, key)
+}
+
+fn trigger(s: &App, t: &T, key: &str) -> El {
     let entries = candidates(s, key);
     let none = |copy: &str| text(copy.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground);
     if key == "textGenerationModelSelection" && !entries.iter().any(|p| selectable(p)) {
@@ -141,6 +217,8 @@ pub fn control(s: &App, t: &T, key: &str) -> El {
         .role("button")
         .label(match key {
             "fallbackModelSelection" => "Fallback model".to_owned(),
+            WRITER => "Source control writer model".to_owned(),
+            REVIEW_GUIDE => "Review guide model".to_owned(),
             _ => label.clone(),
         })
         .expanded(open)
@@ -498,5 +576,17 @@ mod tests {
     fn default_model_skips_custom_models() {
         let p = json!({"models":[{"slug":"c","isCustom":true,"isDefault":true},{"slug":"a"},{"slug":"b","isDefault":true}]});
         assert_eq!(default_model(&p).as_deref(), Some("b"));
+    }
+    #[test]
+    fn dedicated_models_fall_back_like_resolve_review_guide_model_selection() {
+        assert_eq!(fallback_key(REVIEW_GUIDE), WRITER);
+        assert_eq!(fallback_key(WRITER), "textGenerationModelSelection");
+        assert!(is_model_key(WRITER) && is_model_key(REVIEW_GUIDE));
+        let on = json!({"instanceId": "codex", "enabled": true, "availability": "available"});
+        let off = json!({"instanceId": "claude", "enabled": false});
+        let entries = [&on, &off];
+        assert!(can_enable(&entries, Some("codex")));
+        assert!(!can_enable(&entries, Some("claude")), "a disabled provider can't back a dedicated model");
+        assert!(!can_enable(&entries, None));
     }
 }
