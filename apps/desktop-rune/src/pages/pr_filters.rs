@@ -1,7 +1,7 @@
 //! The pull requests Filters menu's Author and Labels pickers (PullRequestListFilters): a search
 //! box over the loaded rows' authors and labels, widened by what the hosts find for the search.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rune::{Color, Cursor, El, col, el, icon, row, text, text_input};
@@ -11,6 +11,8 @@ use crate::App;
 use crate::data::s as field;
 use crate::icons as i;
 use crate::kit::{MenuEntry, MenuItem};
+use crate::shell::sidebar::folders::{self, Group};
+use crate::shell::sidebar::logic::Thread;
 use crate::theme::{self, AlphaMul, T, radius};
 
 /// The picker's search reaches the hosts this long after the last keystroke (OPTION_SEARCH_DEBOUNCE_MS).
@@ -230,10 +232,9 @@ pub struct ProjectChoice {
 
 /// pullRequestFilterProjects then PullRequestFiltersMenuInSidebarOrder: one project per repository
 /// (the chosen one where two share it), shared titles told apart by server name, then folder, then
-/// environment id, then project id, sorted by title, then in the sidebar's project order (its
-/// scope menu: open projects as the server lists them, archived ones after), and the projects
-/// whose listing failed last.
-pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, environment: &str, errors: &[Value]) -> Vec<ProjectChoice> {
+/// environment id, then project id, sorted by title, then in `order` (sortProjectsByGroupOrder:
+/// projects it leaves out after), and the projects whose listing failed last.
+pub fn projects(projects: &[Value], order: &[String], selected: Option<&str>, server: &str, environment: &str, errors: &[Value]) -> Vec<ProjectChoice> {
     let mut kept: Vec<&Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for p in projects.iter().filter(|p| p["isScratch"] != true) {
@@ -270,8 +271,7 @@ pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, enviro
         }
     }
     titled.sort_by(|a, b| by_name(&a.0, &b.0));
-    let sidebar: Vec<&str> = projects.iter().filter(|p| p["archivedAt"].is_null()).map(|p| field(p, "id")).collect();
-    titled.sort_by_key(|(_, p)| sidebar.iter().position(|id| *id == field(p, "id")).unwrap_or(sidebar.len()));
+    titled.sort_by_key(|(_, p)| order.iter().position(|id| id.as_str() == field(p, "id")).unwrap_or(order.len()));
     let mut out: Vec<ProjectChoice> = titled
         .into_iter()
         .map(|(title, p)| {
@@ -282,6 +282,21 @@ pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, enviro
         .collect();
     out.sort_by_key(|c| c.unavailable.is_some());
     out
+}
+
+/// useSidebarProjectGroups: the project groups in the sidebar's Project order, as member ids.
+pub fn sidebar_order(s: &App) -> Vec<String> {
+    let (groups, _) = folders::group_of(s);
+    let threads: Vec<Thread> = s.state().threads.iter().map(Thread::from_shell).collect();
+    let sort = crate::settings::value(s, "sidebarProjectSortOrder");
+    group_order(&groups, &s.state().projects, &threads, sort.as_str().unwrap_or("updated_at"))
+}
+
+/// sortSidebarV2ProjectGroups: every group by activity alone, pinned and archived ones included.
+fn group_order(groups: &[Group], projects: &[Value], threads: &[Thread], sort: &str) -> Vec<String> {
+    let flat: Vec<Group> = groups.iter().map(|g| Group { pinned: false, archived: false, ..g.clone() }).collect();
+    let ranked = folders::ordered(&folders::Plan { groups: &flat, projects, threads, active: &[], scope: &HashSet::new(), sort });
+    ranked.into_iter().flat_map(|n| flat[n].members.clone()).collect()
 }
 
 /// The Project submenu: "All projects", then each project under its favicon; one whose listing
@@ -448,7 +463,7 @@ fn search_box(t: &T, p: &Picker, key: &'static str, placeholder: &'static str, b
         .w_full()
         .h(26.0)
         .center_y()
-        .child(icon(if busy { &i::LOADER_CIRCLE } else { &i::SEARCH }, 16.0).color(t.c.muted_foreground.alpha_mul(0.55)).absolute(0.0, 5.0))
+        .child(super::pull_requests::busy_icon(busy, &i::SEARCH, 16.0).color(t.c.muted_foreground.alpha_mul(0.55)).absolute(0.0, 5.0))
         .child(
             text_input(&p.query, theme::TEXT_SM.lh(26.0))
                 .key(key)
@@ -628,15 +643,38 @@ mod tests {
             json!({"id": "s", "title": "Scratch", "isScratch": true}),
         ];
         let errors = [json!({"projectId": "c", "projectTitle": "api", "message": "gh is not authenticated."})];
-        let choices = projects(&list, None, "nucbox-1", "env-nucbox", &errors);
+        let order: Vec<String> = ["z", "d", "b", "a", "e"].map(String::from).to_vec();
+        let choices = projects(&list, &order, None, "nucbox-1", "env-nucbox", &errors);
         let shown: Vec<(&str, &str)> = choices.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
-        assert_eq!(shown, [("e", "Docs"), ("a", "web"), ("d", "api · nucbox-1 · /x/api"), ("z", "Archive"), ("c", "api · nucbox-1 · /w/api")]);
+        assert_eq!(shown, [("z", "Archive"), ("d", "api · nucbox-1 · /x/api"), ("a", "web"), ("e", "Docs"), ("c", "api · nucbox-1 · /w/api")]);
         assert_eq!(choices[4].unavailable.as_deref(), Some("gh is not authenticated."));
-        let chosen: Vec<String> = projects(&list, Some("b"), "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
-        assert_eq!(chosen, ["e", "b", "c", "d", "z"]);
+        let chosen: Vec<String> = projects(&list, &order, Some("b"), "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
+        assert_eq!(chosen, ["z", "d", "b", "e", "c"], "a project outside the order comes after it");
+        let by_title: Vec<String> = projects(&list, &[], None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
+        assert_eq!(by_title, ["c", "d", "z", "e", "a"]);
         let twins = [p("f", "t3code", None, "/work/main"), p("g", "t3code", None, "/work/main")];
-        let titles: Vec<String> = projects(&twins, None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.title).collect();
+        let titles: Vec<String> = projects(&twins, &[], None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.title).collect();
         assert_eq!(titles, ["t3code · nucbox-1 · /work/main · env-nucbox · f", "t3code · nucbox-1 · /work/main · env-nucbox · g"]);
+    }
+
+    #[test]
+    fn project_order_follows_the_sidebar_sort_with_pinned_and_archived_groups_in_place() {
+        let group = |key: &str, members: &[&str], pinned: bool, archived: bool| Group {
+            key: key.into(),
+            label: key.into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            representative: members[0].into(),
+            root: String::new(),
+            pinned,
+            archived,
+        };
+        let groups = [group("pinned", &["p1"], true, false), group("archived", &["p2", "p4"], false, true), group("quiet", &["p3"], false, false)];
+        let projects = [json!({"id": "p3", "createdAt": "2026-05-01T00:00:00Z", "updatedAt": "2026-02-01T00:00:00Z"})];
+        let thread = |project: &str, created: &str, message: &str| Thread::from_shell(&json!({"id": project, "projectId": project, "createdAt": created, "latestUserMessageAt": message}));
+        let threads = [thread("p1", "2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z"), thread("p2", "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z")];
+        assert_eq!(group_order(&groups, &projects, &threads, "updated_at"), ["p2", "p4", "p3", "p1"]);
+        assert_eq!(group_order(&groups, &projects, &threads, "created_at"), ["p3", "p2", "p4", "p1"]);
+        assert_eq!(group_order(&groups, &projects, &threads, "manual"), ["p1", "p2", "p4", "p3"]);
     }
 
     #[test]

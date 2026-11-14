@@ -5,7 +5,7 @@
 mod brand;
 mod chrome;
 pub mod favicon;
-mod folders;
+pub(crate) mod folders;
 pub mod logic;
 mod menu;
 mod row;

@@ -35,6 +35,57 @@ pub struct Scan {
     refreshing: bool,
     /// Bumped whenever this scan's answer changes.
     generation: u64,
+    /// When `summary` answered, for its staleness.
+    at: i64,
+    /// Other windows' answers, held while unseen (the usageSummary atoms' cache).
+    cached: Vec<Cached>,
+}
+
+/// Another window's answer and the scan settings it was asked with, answered at `at` and last on
+/// screen at `left`.
+struct Cached {
+    window: Value,
+    settings: Value,
+    summary: Value,
+    at: i64,
+    left: i64,
+}
+
+/// The usageSummary atom's `staleTimeMs`: an older cached answer shows and is asked again.
+const STALE_MS: i64 = 60_000;
+/// The query atoms' idle TTL: a window unseen this long is dropped.
+const IDLE_MS: i64 = 5 * 60_000;
+
+impl Scan {
+    /// Moves to `window` (Atom.swr on mount): the answer on screen is cached under its own window
+    /// and `window`'s cached answer shows at once. True when that answer is fresh enough to keep.
+    fn show(&mut self, window: &Value, settings: &Value, now: i64) -> bool {
+        if self.answered.as_ref() == Some(window) {
+            return false;
+        }
+        self.cached.retain(|c| now - c.left < IDLE_MS);
+        if let (Some(summary), Some(answered)) = (self.summary.take(), self.answered.take()) {
+            let settings = self.sent.as_ref().map_or(Value::Null, |(_, settings)| settings.clone());
+            self.cached.push(Cached { window: answered, settings, summary, at: self.at, left: now });
+        }
+        self.pending = None;
+        self.awaiting = false;
+        self.error = None;
+        self.generation += 1;
+        // The model filter is part of the query's input, so another filter's answer is another query.
+        let Some(at) = self.cached.iter().position(|c| c.window == *window && c.settings[3] == settings[3]) else {
+            return false;
+        };
+        let hit = self.cached.remove(at);
+        let fresh = hit.settings == *settings && now - hit.at < STALE_MS;
+        self.summary = Some(hit.summary);
+        self.answered = Some(hit.window);
+        self.at = hit.at;
+        if fresh {
+            self.refreshing = false;
+        }
+        fresh
+    }
 }
 
 pub struct Ui {
@@ -411,6 +462,7 @@ pub fn poll(s: &mut App) -> bool {
 /// still refreshing shows and is asked again with `awaitRefresh`, and a failed second ask keeps it.
 fn poll_scan(s: &mut App, key: &str) -> bool {
     let at = scan_at(s, key);
+    let now = s.now_ms;
     let mut changed = false;
     if let Some(id) = s.ui.pages.usage.scans[at].rates
         && env_net(s, key).is_none_or(|n| n.take_reply(id).is_some())
@@ -442,6 +494,7 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
                 }
                 scan.summary = Some(summary);
                 scan.answered = Some(window.clone());
+                scan.at = now;
                 scan.error = None;
             }
             Err(_) if awaited => scan.refreshing = false,
@@ -476,6 +529,10 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
         return changed;
     }
     let window = window_key(&want.0);
+    if ui(s).scans[at].show(&window, &want.1, now) {
+        ui(s).scans[at].sent = Some(want);
+        return true;
+    }
     match env_net(s, key) {
         Some(net) => {
             let id = net.request("server.getUsageSummary", want.0.clone());
@@ -645,6 +702,11 @@ fn environments(s: &App) -> Vec<EnvUsage<'_>> {
             EnvUsage { key, label, connected: true, pending, error, summary, needs_cursor }
         })
         .collect()
+}
+
+/// UsagePage's `environments.length === 0`: no environment has reported its config yet.
+fn no_environments(s: &App) -> bool {
+    crate::env::keys(s).iter().all(|k| config(s, k).is_none())
 }
 
 fn selected_usage(s: &App) -> Vec<EnvUsage<'_>> {
@@ -947,6 +1009,29 @@ pub(super) fn updating_scene(s: &mut App) {
     remerge(s);
 }
 
+/// The `usage-chart-tooltip-partial` scene: the provider loading scene's chart hovered on its
+/// last day with figures, where updating providers' values and the total read as partial.
+pub(super) fn tooltip_scene(s: &mut App) {
+    updating_scene(s);
+    let u = ui(s);
+    let Some(summary) = &u.summary else { return };
+    let m = merge(summary, &u.hidden, u.answered.as_ref(), None);
+    let Some(index) = m.periods.iter().rposition(|p| m.by_period.contains_key(p)) else { return };
+    let w = 640.0;
+    u.plot_w = w;
+    u.hover = Some((index, index as f32 / (m.periods.len().max(2) - 1) as f32 * w, 48.0));
+}
+
+/// The `usage-no-environments` scene: this machine is still connecting and has no config yet.
+pub(super) fn no_environments_scene(s: &mut App) {
+    if let crate::data::Source::Fixture(state) = &mut s.src {
+        state.config = None;
+        state.conn = s5_net::Conn::Connecting;
+    }
+    ui(s).menu = Some("environments");
+    remerge(s);
+}
+
 /// The `usage-offline` scene: only a saved environment that is not connected is selected.
 pub(super) fn offline_scene(s: &mut App) {
     s.ui.env.saved.push(crate::env::Saved { id: "lab".into(), label: "Lab server".into(), base: "https://lab.example".into(), bearer: "scene".into() });
@@ -1225,8 +1310,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let selected = selected_usage(s);
     let noun = if u.metric == "limits" { "limits" } else { "usage" };
     page = if selected.is_empty() {
-        let none = crate::env::keys(s).iter().all(|k| config(s, k).is_none());
-        page.child(muted_line(t, &if none { format!("Connect an environment to see {noun}.") } else { format!("Select an environment to see {noun}.") }))
+        page.child(muted_line(t, &if no_environments(s) { format!("Connect an environment to see {noun}.") } else { format!("Select an environment to see {noun}.") }))
     } else if u.metric == "limits" {
         page.child(super::usage_limits::view(s, cx, t, &mut overlays))
     } else if let Some(summary) = &u.summary {
@@ -1385,6 +1469,9 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         envs = envs.item(item);
     }
     let note = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+    if no_environments(s) {
+        envs = envs.row(col().max_w(280.0).px(8.0).py(8.0).child(note("No environments connected.".into())));
+    }
     let can_read = selected.iter().any(|e| e.connected);
     let (answered, still) = reporting(&selected);
     if show_status && answered > 0 && still > 0 {
@@ -1533,7 +1620,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
         );
     }
     let with_data = |kind: &str| m.providers.iter().any(|p| p.0 == kind && (p.1.tokens > 0.0 || p.1.cost > 0.0));
-    let active: Vec<&str> = PROVIDERS.iter().map(|p| p.0).filter(|k| with_data(*k) || partway.iter().any(|x| x == k)).collect();
+    let active = chart_providers(&m, &partway);
     let loading_kinds: Vec<&str> = active.iter().copied().filter(|k| every || partway.iter().any(|x| x == k)).collect();
     let cursor_at = ["codex", "claude"].iter().map(|k| active.iter().position(|p| p == k).map_or(0, |at| at + 1)).max().unwrap_or(0);
     let show_environment = selected.len() > 1;
@@ -1580,7 +1667,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
         (true, false) => "Hourly cost",
         (true, true) => "Hourly processed tokens",
     };
-    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w, false, &loading_kinds));
+    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, (u.hover, u.plot_w), false, &active, &loading_kinds));
     let top = row().w_full().gap(24.0).child(left).child(right);
 
     let metric = |label: &str, v: String| {
@@ -1659,7 +1746,8 @@ fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<E
         shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
     }
     shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None));
-    let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, u.model_hover, u.model_plot_w, true, &[])).child(shares);
+    let providers: Vec<&'static str> = PROVIDERS.iter().map(|p| p.0).filter(|k| *k == kind).collect();
+    let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, (u.model_hover, u.model_plot_w), true, &providers, &[])).child(shares);
     if let Some(parts) = speed_parts(t, &m) {
         body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))));
     }
@@ -1868,23 +1956,46 @@ fn hovered_column(x: f32, w: f32, n: usize) -> Option<usize> {
     (n > 0 && w > 0.0).then(|| ((x.clamp(0.0, w) / w * (n - 1) as f32).round() as usize).min(n - 1))
 }
 
-/// UsageChartTooltip: the hovered period, each provider's value, and the total, beside the
-/// pointer and flipped to stay inside the plot.
-fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32, f32), fmt: &dyn Fn(&Totals) -> f64, tokens_view: bool) -> El {
+/// UsagePage's `activeProviders`, the chart's series: providers with figures, and providers still
+/// updating before their first figures arrive.
+fn chart_providers(m: &Merged, partway: &[String]) -> Vec<&'static str> {
+    let with_data = |kind: &str| m.providers.iter().any(|p| p.0 == kind && (p.1.tokens > 0.0 || p.1.cost > 0.0));
+    PROVIDERS.iter().map(|p| p.0).filter(|k| with_data(*k) || partway.iter().any(|x| x == k)).collect()
+}
+
+/// buildChart's paths: largest total first, so it draws beneath the others.
+fn series(m: &Merged, providers: &[&'static str], value: &dyn Fn(&Totals) -> f64) -> Vec<&'static str> {
+    let total = |kind: &str| m.providers.iter().find(|p| p.0 == kind).map_or(0.0, |p| value(&p.1));
+    let mut out = providers.to_vec();
+    out.sort_by(|a, b| total(*b).total_cmp(&total(*a)));
+    out
+}
+
+/// UsageChartTooltip's figures for `period`: each chart provider's value and whether it still
+/// loads, the period's total, and whether that total is partial.
+fn tooltip_figures(m: &Merged, period: &str, providers: &[&'static str], loading: &[&str], value: &dyn Fn(&Totals) -> f64) -> (Vec<(&'static str, f64, bool)>, f64, bool) {
+    let values = m.by_period.get(period);
+    let rows = providers.iter().map(|&kind| (kind, values.and_then(|p| p.get(kind)).map(value).unwrap_or(0.0), loading.contains(&kind))).collect();
+    let total = values.map_or(0.0, |p| p.values().map(value).sum());
+    (rows, total, providers.iter().any(|kind| loading.contains(kind)))
+}
+
+/// UsageChartTooltip: the hovered period, each chart provider's value, and the total, beside the
+/// pointer and flipped to stay inside the plot. Figures still loading read muted.
+fn chart_tooltip(t: &T, m: &Merged, (index, x, y): (usize, f32, f32), plot: (f32, f32), tokens_view: bool, providers: &[&'static str], loading: &[&str]) -> El {
+    let value = |v: &Totals| if tokens_view { v.tokens } else { v.cost };
     let format = |v: f64| if tokens_view { tokens(v) } else { usd(v) };
     let period = m.periods.get(index).cloned().unwrap_or_default();
-    let values = m.by_period.get(&period);
+    let (rows, total, partial) = tooltip_figures(m, &period, providers, loading, &value);
     let muted = t.c.muted_foreground;
+    let figure = |still: bool| if still { muted } else { t.c.foreground };
     let num = theme::TEXT_XS.features("'tnum' 1");
-    let mut total = 0.0;
     let title = match iso_ms(&period).filter(|_| m.hourly) {
         Some(at) => m.clock.relative(at),
         None => period_label(&period, m.clock),
     };
     let mut body = col().child(text(title).font(theme::TEXT_XS).color(muted).mb(4.0));
-    for (kind, _, _) in &m.providers {
-        let v = values.and_then(|p| p.get(kind)).map(fmt).unwrap_or(0.0);
-        total += v;
+    for (kind, v, still) in rows {
         let (label, driver) = presentation(kind);
         body = body.child(
             row()
@@ -1892,7 +2003,7 @@ fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32
                 .center_y()
                 .child(row().gap(6.0).center_y().child(provider_icon(t, driver, 12.0)).child(text(label).font(theme::TEXT_XS).color(muted)))
                 .child(spacer())
-                .child(text(format(v)).font(num).color(t.c.foreground)),
+                .child(text(format(v)).font(num).color(figure(still))),
         );
     }
     body = body.child(
@@ -1904,10 +2015,10 @@ fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32
             .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border))
             .child(text("Total").font(theme::TEXT_XS).color(muted))
             .child(spacer())
-            .child(text(format(total)).font(num).color(t.c.foreground)),
+            .child(text(format(total)).font(num).color(figure(partial))),
     );
     // The tooltip isn't measured before it's placed, so flip on its estimated size.
-    let (w, h) = (176.0, 46.0 + 18.0 * m.providers.len() as f32);
+    let (w, h) = (176.0, 46.0 + 18.0 * providers.len() as f32);
     let gap = 12.0;
     let left = if x + gap + w <= plot.0 { x + gap } else { x - gap - w };
     let top = if y + gap + h <= plot.1 { y + gap } else { y - gap - h };
@@ -1926,9 +2037,10 @@ fn slot(u: &mut Ui, dialog: bool) -> (&mut Option<(usize, f32, f32)>, &mut f32) 
     if dialog { (&mut u.model_hover, &mut u.model_plot_w) } else { (&mut u.hover, &mut u.plot_w) }
 }
 
-/// UsageProviderChart; `loading` providers' series dim, and with nothing to plot yet the axis
-/// keeps unlabeled placeholder ticks (chartScale).
-fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32, dialog: bool, loading: &[&str]) -> El {
+/// UsageProviderChart: a series per chart provider, even one without figures yet; `loading`
+/// providers' series dim, and with nothing to plot yet the axis keeps unlabeled placeholder
+/// ticks (chartScale).
+fn chart(t: &T, m: &Merged, tokens_view: bool, (hover, plot_w): (Option<(usize, f32, f32)>, f32), dialog: bool, providers: &[&'static str], loading: &[&str]) -> El {
     let value = |x: &Totals| if tokens_view { x.tokens } else { x.cost };
     let peak = m.by_period.values().flat_map(|p| p.values()).map(value).fold(0.0, f64::max);
     let labeled = peak > 0.0 || loading.is_empty();
@@ -1947,10 +2059,8 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
         shape = shape.line([0.0, y], [VIEW_W, y], 1.0, LineCap::Butt, t.c.border);
     }
     let step = if m.periods.len() < 2 { 0.0 } else { VIEW_W / (m.periods.len() - 1) as f32 };
-    let mut series: Vec<(&str, f64)> = m.providers.iter().map(|p| (p.0, value(&p.1))).collect();
-    series.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut lines = Vec::new();
-    for (kind, _) in &series {
+    for kind in series(m, providers, &value) {
         let pts: Vec<[f32; 2]> = m
             .periods
             .iter()
@@ -1960,7 +2070,7 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
         if pts.len() < 2 {
             continue;
         }
-        let c = if loading.contains(kind) { color(t, kind).alpha_mul(0.4) } else { color(t, kind) };
+        let c = if loading.contains(&kind) { color(t, kind).alpha_mul(0.4) } else { color(t, kind) };
         let line = curve(&pts);
         let area = curve(&pts).line_to([VIEW_W, VIEW_H]).line_to([0.0, VIEW_H]).close();
         shape = shape.fill_path(&area, c.alpha_mul(0.12));
@@ -1997,8 +2107,8 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
                 *slot(ui(s), dialog).0 = None;
             }
         });
-    if let Some((index, x, y)) = hover {
-        plot = plot.child(chart_tooltip(t, m, index, (x, y), (plot_w, plot_h), &value, tokens_view));
+    if let Some(hover) = hover {
+        plot = plot.child(chart_tooltip(t, m, hover, (plot_w, plot_h), tokens_view, providers, loading));
     }
     let label = |n: usize| m.periods.get(n).map(|p| period_label(p, m.clock).to_uppercase()).unwrap_or_default();
     let x_labels = row()
@@ -2463,5 +2573,51 @@ mod tests {
         let m = merge(&merged, &[], None, None);
         assert_eq!((m.cost, m.sessions, m.periods.len()), (1.0, 3, 2));
         assert!(merged_summary(&[env("a", None)], &[], &window)["buckets"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    #[test]
+    fn a_window_switched_back_to_shows_its_cached_answer_and_asks_again_once_stale() {
+        let settings = json!([null, null, null, null]);
+        let (a, b) = (json!(["2026-10-08", "day"]), json!(["2026-11-05", "day"]));
+        let answer = |n: i64| Some(json!({"buckets": [n]}));
+        let mut scan = Scan { summary: answer(1), answered: Some(a.clone()), sent: Some((json!({}), settings.clone())), pending: Some((7, a.clone())), ..Scan::default() };
+        assert!(!scan.show(&b, &settings, 1_000));
+        assert_eq!((scan.summary.clone(), scan.pending.clone()), (None, None), "nothing held for b, and a's request is dropped");
+        scan.summary = answer(2);
+        scan.answered = Some(b.clone());
+        scan.at = 2_000;
+
+        assert!(scan.show(&a, &settings, 30_000), "a answered within the stale time, so it is not asked again");
+        assert_eq!((scan.summary.clone(), scan.answered.clone()), (answer(1), Some(a.clone())));
+        assert!(!scan.show(&b, &settings, 70_000), "b is shown at once but asked again");
+        assert_eq!(scan.summary, answer(2));
+
+        let filtered = json!([null, null, null, ["codex"]]);
+        assert!(!scan.show(&a, &filtered, 80_000));
+        assert_eq!(scan.summary, None, "another model filter is another query");
+        let repriced = json!([{"m": 1}, null, null, null]);
+        assert!(!scan.show(&b, &repriced, 80_000));
+        assert_eq!(scan.summary, answer(2), "changed prices keep the answer on screen while it is asked again");
+        assert!(!scan.show(&a, &settings, 70_000 + IDLE_MS));
+        assert_eq!(scan.summary, None, "a window unseen past the idle TTL is dropped");
+    }
+
+    #[test]
+    fn the_chart_draws_providers_with_figures_or_still_updating_and_marks_partial_figures() {
+        let bucket = |provider: &str, day: &str, cost: f64, tokens: i64| json!({"provider": provider, "day": day, "costUsd": cost, "totals": {"outputTokens": tokens}});
+        let summary = json!({"sinceDay": "2026-08-01", "untilDay": "2026-08-02", "buckets": [
+            bucket("codex", "2026-08-01", 2.0, 100), bucket("claude", "2026-08-01", 0.0, 0), bucket("opencode", "2026-08-02", 0.0, 40),
+        ]});
+        let m = merge(&summary, &[], None, None);
+        let active = chart_providers(&m, &["grok".to_string()]);
+        assert_eq!(active, ["codex", "grok", "opencode"], "Claude Code has buckets but no figures");
+        assert_eq!(series(&m, &active, &|x: &Totals| x.cost), ["codex", "grok", "opencode"]);
+        assert_eq!(series(&m, &active, &|x: &Totals| x.tokens), ["codex", "opencode", "grok"]);
+
+        let cost = |x: &Totals| x.cost;
+        let (rows, total, partial) = tooltip_figures(&m, "2026-08-01", &active, &["grok"], &cost);
+        assert_eq!(rows, [("codex", 2.0, false), ("grok", 0.0, true), ("opencode", 0.0, false)]);
+        assert_eq!((total, partial), (2.0, true));
+        assert!(!tooltip_figures(&m, "2026-08-02", &active, &[], &cost).2);
     }
 }

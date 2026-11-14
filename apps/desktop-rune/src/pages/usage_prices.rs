@@ -327,6 +327,32 @@ const MODEL: usize = 0;
 const ALIAS: usize = 1;
 const PRICE: usize = 2;
 
+/// One environment's session (`GET /api/auth/session`), read for its settings write grant.
+#[derive(Default)]
+struct Session {
+    data: Option<Value>,
+    failed: bool,
+    pending: Option<u64>,
+}
+
+/// priceTargetsAtom's `unavailable`: why the table cannot write to an environment. A session not
+/// read yet is still being checked, except in a recording, which has no session to read.
+fn unavailable_reason(connected: bool, loaded: bool, session: Option<&Session>, live: bool) -> Option<&'static str> {
+    if !connected {
+        return Some("Offline");
+    }
+    if !loaded {
+        return Some("Prices not loaded");
+    }
+    match session {
+        Some(Session { failed: true, .. }) => Some("Read-only access"),
+        Some(Session { data: Some(v), .. }) => (!super::pr_row::grants(v, "settings:write")).then_some("Read-only access"),
+        Some(Session { pending: Some(_), .. }) => Some("Checking permissions…"),
+        _ if live => Some("Checking permissions…"),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub open: bool,
@@ -340,6 +366,8 @@ pub struct Ui {
     pending: Vec<(String, u64)>,
     attempt: Option<Attempt>,
     menu: bool,
+    /// Each connected environment's session, read again every time the table opens.
+    sessions: HashMap<String, Session>,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -360,11 +388,10 @@ fn targets(s: &App) -> Vec<Target> {
             let prices = settings.map(|v| v["usagePriceOverrides"].as_object().cloned().unwrap_or_default());
             let mapped = config.is_some_and(|c| c["environment"]["capabilities"]["usageModelAliases"] == true);
             let aliases = settings.filter(|_| mapped).map(|v| v["usageModelAliases"].as_object().cloned().unwrap_or_default());
-            let unavailable = if crate::env::status(s, &key) != "Connected" {
-                Some("Offline".to_string())
-            } else {
-                settings.is_none().then(|| "Prices not loaded".to_string())
-            };
+            let connected = crate::env::status(s, &key) == "Connected";
+            let live = matches!(crate::env::source(s, &key), Some(crate::data::Source::Live(_)));
+            let session = s.ui.pages.usage.prices.sessions.get(&key);
+            let unavailable = unavailable_reason(connected, settings.is_some(), session, live).map(str::to_string);
             Target { label: crate::env::label(s, &key), key, prices, aliases, unavailable }
         })
         .collect()
@@ -580,10 +607,41 @@ fn settle(s: &mut App) {
     sync(s);
 }
 
+/// Reads each connected environment's session once per connection while the table is open.
+fn read_sessions(s: &mut App) -> bool {
+    let mut changed = false;
+    for key in crate::env::keys(s) {
+        if crate::env::status(s, &key) != "Connected" {
+            changed |= ui(s).sessions.remove(&key).is_some();
+            continue;
+        }
+        if let Some(id) = ui(s).sessions.get(&key).and_then(|x| x.pending) {
+            let Some(reply) = env_net(s, &key).and_then(|n| n.take_reply(id)) else { continue };
+            let session = ui(s).sessions.entry(key).or_default();
+            session.pending = None;
+            match reply {
+                Ok(v) => {
+                    session.data = Some(v);
+                    session.failed = false;
+                }
+                Err(_) => session.failed = true,
+            }
+            changed = true;
+        } else if !ui(s).sessions.contains_key(&key)
+            && let Some(net) = env_net(s, &key)
+        {
+            let id = net.http_request("GET", "/api/auth/session", json!({}));
+            ui(s).sessions.insert(key, Session { pending: Some(id), ..Session::default() });
+        }
+    }
+    changed
+}
+
 pub fn poll(s: &mut App) -> bool {
     if !ui(s).open {
         return false;
     }
+    let sessions = read_sessions(s);
     let mut landed = false;
     for (key, id) in ui(s).pending.clone() {
         let Some(reply) = env_net(s, &key).and_then(|n| n.take_reply(id)) else { continue };
@@ -603,7 +661,7 @@ pub fn poll(s: &mut App) -> bool {
     }
     let before = ui(s).cells.len();
     sync(s);
-    landed || ui(s).cells.len() != before
+    sessions || landed || ui(s).cells.len() != before
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent) -> bool {
@@ -629,6 +687,32 @@ pub(super) fn environments_scene(s: &mut App) {
         }
     }
     open(s, None);
+}
+
+/// The `usage-prices-checking` scene: "Apply to" is open while this machine's session is read.
+pub(super) fn checking_scene(s: &mut App) {
+    open(s, None);
+    let u = ui(s);
+    u.sessions.insert(crate::env::LOCAL.to_string(), Session { pending: Some(0), ..Session::default() });
+    u.menu = true;
+}
+
+/// The `usage-prices-read-only` scene: this machine's session lacks `settings:write`, so saving a
+/// new price fails there.
+pub(super) fn read_only_scene(s: &mut App) {
+    open(s, None);
+    let u = ui(s);
+    let session = json!({"authenticated": true, "permissions": ["orchestration:read", "diagnostics:read"]});
+    u.sessions.insert(crate::env::LOCAL.to_string(), Session { data: Some(session), ..Session::default() });
+    let id = add_row(u, "drift-9");
+    sync(s);
+    for (slot, value) in [(PRICE, "3"), (PRICE + 1, "15")] {
+        if let Some(cell) = ui(s).cells.get_mut(&(id.clone(), slot)) {
+            cell.edit.replace_text(value.to_string());
+            cell.last = value.to_string();
+        }
+    }
+    save(s);
 }
 
 // ---- view -------------------------------------------------------------------------------
@@ -666,7 +750,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
     let mut apply = Menu::new("usage-prices-apply")
         .trigger(apply_trigger(t, &selection, pending || has_changes))
         .placement(Placement::BottomStart)
-        .min_width(220.0)
+        // Web's popup grows to fit a reason beside the label; ours keeps the label readable.
+        .min_width(if all.iter().any(|t| t.unavailable.is_some()) { 300.0 } else { 220.0 })
         .open(u.menu)
         .on_close(|s: &mut App| ui(s).menu = false)
         .item(MenuItem::new("All environments").checked(u.selected.is_none()).on_select(|s: &mut App| {
@@ -862,10 +947,10 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                 }
             }
         }
-        let (glyph, label) = match (saved, removed) {
-            (None, _) => (&i::X, "Remove new model".to_string()),
-            (Some(m), true) => (&i::ROTATE_CCW, format!("Undo reset for {m}")),
-            (Some(m), false) => (&i::ROTATE_CCW, format!("Reset price for {m} to automatic")),
+        let (glyph, label, tip) = match (saved, removed) {
+            (None, _) => (&i::X, "Remove new model".to_string(), "Remove row"),
+            (Some(m), true) => (&i::ROTATE_CCW, format!("Undo reset for {m}"), "Undo reset"),
+            (Some(m), false) => (&i::ROTATE_CCW, format!("Reset price for {m} to automatic"), "Reset to automatic"),
         };
         let row_id = id.clone();
         let is_new = saved.is_none();
@@ -886,7 +971,8 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                         }
                         u.attempt = None;
                     })
-                    .build(t),
+                    .build(t)
+                    .help(tip),
             ),
         );
         table = table.child(line);
@@ -1021,5 +1107,25 @@ mod tests {
         let staged = drafts(&u, &both);
         assert_eq!((staged[0].values.clone(), staged[0].alias.clone()), ([Some(String::new()), None, None, None], None));
         assert_eq!(changes(&both[0], &staged).1["model:m"], "Input is required on Mac.");
+    }
+
+    #[test]
+    fn an_environment_reads_as_checking_until_its_session_grants_settings_write() {
+        let answered = |v: Value| Session { data: Some(v), ..Session::default() };
+        assert_eq!(unavailable_reason(false, true, None, true), Some("Offline"));
+        assert_eq!(unavailable_reason(true, false, None, true), Some("Prices not loaded"));
+        assert_eq!(unavailable_reason(true, true, None, true), Some("Checking permissions…"));
+        assert_eq!(unavailable_reason(true, true, Some(&Session { pending: Some(1), ..Session::default() }), false), Some("Checking permissions…"));
+        assert_eq!(unavailable_reason(true, true, None, false), None, "a recording has no session to read");
+        let read_only = answered(json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&read_only), true), Some("Read-only access"));
+        let writer = answered(json!({"authenticated": true, "permissions": ["settings:write"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&writer), true), None);
+        let legacy = answered(json!({"authenticated": true, "scopes": ["orchestration:read", "orchestration:operate"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&legacy), true), None, "an old server's operate scope grants settings writes");
+        let current = answered(json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}));
+        assert_eq!(unavailable_reason(true, true, Some(&current), true), Some("Read-only access"));
+        let failed = Session { failed: true, ..writer };
+        assert_eq!(unavailable_reason(true, true, Some(&failed), true), Some("Read-only access"));
     }
 }
