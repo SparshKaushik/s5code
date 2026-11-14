@@ -117,7 +117,17 @@ fn pick(s: &mut App, instance: String, slug: String) {
         d.effort = None;
     }
     d.model = Some((instance, slug));
+    super::fanout::clear(s);
     close(s);
+}
+
+/// Shift adds the model to the draft's models instead of replacing it (`additive`).
+fn choose(s: &mut App, instance: String, slug: String, additive: bool) {
+    if additive && super::fanout::enabled(s) {
+        super::fanout::toggle(s, &instance, &slug);
+    } else {
+        pick(s, instance, slug);
+    }
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -128,7 +138,7 @@ fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Up if !list.is_empty() => p.active = Some(p.active.map_or(list.len() - 1, |a| (a + list.len() - 1) % list.len())),
         Key::Enter => {
             if let Some((i, m, _)) = list.into_iter().nth(p.active.unwrap_or(0)) {
-                pick(s, i, m);
+                choose(s, i, m, e.mods.shift);
             }
         }
         Key::Command(c) if c.is_ascii_digit() && *c != '0' => {
@@ -148,6 +158,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         return Vec::new();
     }
     let current = selection(s);
+    let gathered = super::fanout::picks(s);
     let r = rail(s);
     let line = t.c.border.alpha_mul(0.7);
     let panel = t.c.muted.alpha_mul(0.4);
@@ -220,7 +231,10 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
     }
     for (n, (instance, slug, name)) in list.into_iter().enumerate() {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
-        let selected = current.as_ref().is_some_and(|(i, m)| *i == instance && *m == slug);
+        let selected = match gathered {
+            Some(models) => models.iter().any(|(i, m)| *i == instance && *m == slug),
+            None => current.as_ref().is_some_and(|(i, m)| *i == instance && *m == slug),
+        };
         let mut label = row().gap(8.0).center_y().shrink().min_w(0.0).child(text(name).font(theme::TEXT_SM.lh(19.25)).color(t.c.foreground).truncate().shrink());
         if selected {
             label = label.child(icon(&icons::CHECK, 14.0).color(t.c.muted_foreground));
@@ -254,7 +268,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             r = r.fill(t.c.accent);
         }
         let (i2, m2) = (instance.clone(), slug.clone());
-        models = models.child(r.on_press(move |s: &mut App| pick(s, i2.clone(), m2.clone())));
+        models = models.child(r.on_press_tx(move |s: &mut App, tx: &mut Tx| choose(s, i2.clone(), m2.clone(), tx.mods().shift)));
     }
     // A search spans every provider, so the rail steps aside (showSidebar).
     let middle = col()

@@ -6,6 +6,7 @@
 mod attachments;
 pub mod chips;
 mod context;
+pub mod fanout;
 mod menu;
 mod picker;
 pub mod provider_icons;
@@ -74,6 +75,7 @@ pub struct Ui {
     /// Drafts on disk: read once connected, then the last written copy and the next write check.
     stored: Option<String>,
     store_at: Option<std::time::Instant>,
+    fanout: fanout::State,
 }
 
 /// A dispatched command's draft key, and the draft it sent (`stored_draft`) to put back when it
@@ -449,7 +451,7 @@ fn send(s: &mut App, alternate: bool) {
         cancel_queued_edit(s);
         return;
     }
-    if crate::chat::details::run_on::holds_send(s) {
+    if crate::chat::details::run_on::holds_send(s) || fanout::send(s) {
         return;
     }
     let mode = mode_for(s, alternate);
@@ -720,6 +722,11 @@ pub fn poll(s: &mut App) -> bool {
         };
         let (request, outgoing) = composer.sends.remove(i);
         let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
+        changed = true;
+        let outcome = reply.as_ref().map(|_| ()).map_err(|e| crate::shell::palette::error_message(e, "Failed to send message."));
+        if fanout::settle(&mut composer.fanout, &outgoing.key, outcome) {
+            continue;
+        }
         match (reply, launch) {
             (Ok(v), Some(thread_id)) => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
             (Ok(_), None) => {}
@@ -728,8 +735,12 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     for (outgoing, error) in failed {
-        send_failed(s, outgoing, &error);
+        let message = crate::shell::palette::error_message(&error, "Failed to send message.");
+        if !fanout::settle(&mut s.ui.chat.composer.fanout, &outgoing.key, Err(message)) {
+            send_failed(s, outgoing, &error);
+        }
     }
+    changed |= fanout::finish(s);
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
     if let Some(id) = opened {
@@ -1139,7 +1150,8 @@ fn footer(s: &App, t: &T) -> El {
     let mut right = row().h(28.0).gap(8.0).center_y();
     if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
-        let name = model_name(s, &instance, &model);
+        let multiple = fanout::chip_label(s);
+        let name = multiple.as_ref().map_or_else(|| model_name(s, &instance, &model), |(shown, _)| shown.clone());
         // ComposerModelEffort: the level's name, or bars when Appearance's effort display says
         // so; named levels such as Max keep their name.
         let bars_setting = crate::settings::value(s, "effortDisplay") == "bars";
@@ -1151,22 +1163,24 @@ fn footer(s: &App, t: &T) -> El {
                 None => text(label).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0),
             })
         });
-        right = right.child(
-            row()
-                .key("composer-model-chip")
-                .h(28.0)
-                .px(9.0)
-                .gap(6.0)
-                .center_y()
-                .radius(theme::layout::CONTROL_RADIUS)
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(name.clone())
-                .child(provider_icon(t, &driver, 16.0))
-                .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
-                .children(effort)
-                .on_press(|s: &mut App| picker::toggle(s)),
-        );
+        let mut chip = row()
+            .key("composer-model-chip")
+            .h(28.0)
+            .px(9.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .label(name.clone())
+            .child(provider_icon(t, &driver, 16.0))
+            .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+            .children(effort.filter(|_| multiple.is_none()))
+            .on_press(|s: &mut App| picker::toggle(s));
+        if let Some((_, all)) = multiple {
+            chip = chip.help(all);
+        }
+        right = right.child(chip);
     }
     right = right.children(context::meter(s, t)).child(primary_action(s, t));
     row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)

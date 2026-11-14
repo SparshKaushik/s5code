@@ -577,6 +577,16 @@ pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
     Some(strategy)
 }
 
+/// The base each picked model's worktree starts from, and whether from origin; none outside a
+/// Git checkout (`multipleModelSendBlock`'s branch).
+pub fn draft_base(s: &App) -> Option<(String, bool)> {
+    let run = draft_run(s)?;
+    if !vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
+        return None;
+    }
+    Some((worktree_base(s, &run)?, run.from_origin))
+}
+
 fn set_env_mode(s: &mut App, worktree: bool) {
     s.ui.chat.details.menu = None;
     // A new worktree replaces the existing one the draft was in; the checkout keeps it.
@@ -968,7 +978,8 @@ fn card(s: &App, t: &T) -> Option<El> {
     let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
     let thread = composer::ctx(s).thread;
     let run = draft_run(s);
-    let new_worktree = run.as_ref().is_some_and(|r| r.worktree);
+    let fanout = composer::fanout::forces_worktree(s);
+    let new_worktree = fanout || run.as_ref().is_some_and(|r| r.worktree);
     let worktree = worktree_here(s).is_some();
     let mode = match (new_worktree, worktree, thread.is_some()) {
         (true, ..) => "New worktree",
@@ -989,7 +1000,7 @@ fn card(s: &App, t: &T) -> Option<El> {
         .label(format!("Run context: {env}, {mode}"))
         .child(icon(if run_on::auto_label(s).is_some() { &icons::SCALE } else { &icons::SERVER }, 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
-        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(workspace_path(s).unwrap_or_else(|| mode.to_string())));
+        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(if fanout { "Each model starts in its own worktree.".to_string() } else { workspace_path(s).unwrap_or_else(|| mode.to_string()) }));
     if workspace_path(s).is_some() {
         run_context = run_context.on_secondary_press(|s: &mut App, _: rune::PointerPress, _: &mut Tx| s.ui.chat.details.menu = Some(Menu::Path));
     }
@@ -1139,13 +1150,19 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
-    let worktree = draft_run(s).is_some_and(|r| r.worktree);
+    let fanout = composer::fanout::forces_worktree(s);
+    let worktree = fanout || draft_run(s).is_some_and(|r| r.worktree);
+    let checkout = if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" };
     let mut rows = vec![
         group_label(t, "Run on"),
         radio_row(t, &icons::SERVER, &env_label(s), run_on::auto_label(s).is_none(), run_on::keep_here),
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
-        radio_row(t, &icons::FOLDER, if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" }, !worktree, |s: &mut App| set_env_mode(s, false)),
+        if fanout {
+            menu_row(t, Some(icon(&icons::FOLDER, 16.0).color(t.c.muted_foreground)), checkout, None::<fn(&mut App)>, None).child(el().size(16.0, 16.0))
+        } else {
+            radio_row(t, &icons::FOLDER, checkout, !worktree, |s: &mut App| set_env_mode(s, false))
+        },
         radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
     ];
     if let Some(auto) = run_on::auto_row(s, t) {

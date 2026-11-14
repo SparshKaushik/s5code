@@ -1072,6 +1072,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.chat.details.menu = Some(crate::chat::details::Menu::RunContext);
     }),
     ("details-run-on", crate::chat::details::run_on::scene),
+    ("composer-multiple-models", crate::chat::composer::fanout::scene),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);
