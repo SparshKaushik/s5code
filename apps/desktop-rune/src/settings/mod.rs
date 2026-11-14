@@ -1,6 +1,7 @@
 mod about;
 mod access;
 pub(crate) use access::grants as session_grants;
+pub(crate) use connections::env_machine_icon;
 mod accent;
 mod acp_icons;
 mod add_provider;
