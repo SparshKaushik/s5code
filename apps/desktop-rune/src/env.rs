@@ -63,6 +63,8 @@ pub struct Ui {
     pub code: TextEdit,
     pairing: Option<Receiver<Result<Saved, String>>>,
     pub error: Option<String>,
+    /// The environment the last finished pairing added, for the setup wizard to select.
+    pub last_paired: Option<String>,
     /// Each parked environment's `shell_revision` when its rows were last copied in.
     merged: HashMap<String, u64>,
     /// Rows copied into `App::src`, and which environment owns each copied id.
@@ -553,10 +555,20 @@ pub(crate) fn add_ssh_route(s: &mut App, id: &str) {
 }
 
 pub(crate) fn add(s: &mut App) {
+    let (host, code) = (s.ui.env.host.text.clone(), s.ui.env.code.text.clone());
+    start_pairing(s, host, code);
+}
+
+/// Pairs from a pairing link alone, as the setup wizard's single field does.
+pub(crate) fn pair_link(s: &mut App, link: &str) {
+    start_pairing(s, link.trim().to_owned(), String::new());
+}
+
+fn start_pairing(s: &mut App, host: String, code: String) {
     if s.ui.env.pairing.is_some() {
         return;
     }
-    let (host, code) = (s.ui.env.host.text.clone(), s.ui.env.code.text.clone());
+    s.ui.env.last_paired = None;
     if let Err(e) = s5_net::resolve_pairing(&host, &code) {
         s.ui.env.error = Some(e);
         return;
@@ -606,6 +618,7 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     s.ui.env.parked.push((env.id.clone(), src));
     s.ui.env.saved.retain(|e| e.id != env.id);
     s.ui.env.off.retain(|k| *k != env.id);
+    s.ui.env.last_paired = Some(env.id.clone());
     s.ui.env.saved.push(env);
     s.ui.env.host.clear();
     s.ui.env.code.clear();
@@ -974,6 +987,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("wizard-connect-environments", |s| {
         scene_failing(s);
         s.ui.wizard.open = true;
+    }),
+    ("wizard-pairing-link", |s| {
+        scene_failing(s);
+        crate::wizard::scene_pairing(s);
     }),
 ];
 

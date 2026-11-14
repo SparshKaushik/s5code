@@ -5,6 +5,22 @@ use rune::TextEdit;
 use serde_json::{Value, json};
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("palette-projects-grouped", |s| {
+        open_thread(s);
+        if let data::Source::Fixture(state) = &mut s.src
+            && let Some(first) = state.projects.first_mut()
+        {
+            first["repositoryIdentity"] = json!({"canonicalKey": "github.com/acme/s5code", "name": "s5code"});
+            let mut copy = first.clone();
+            copy["id"] = json!("p-box-copy");
+            copy["workspaceRoot"] = json!("/srv/s5code");
+            copy[crate::env::TAG] = json!("box");
+            state.projects.push(copy);
+        }
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Build box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+        open(s);
+        push_page(s, "projects", "");
+    }),
     ("palette-actions-pr", |s| {
         open_thread(s);
         let thread = current(s);

@@ -536,10 +536,6 @@ pub fn tick(s: &mut App) -> bool {
     let mut changed = false;
     if s.ui.settings.resource_telemetry.env.as_deref() != Some(env.as_str()) {
         s.ui.settings.resource_telemetry = Ui { env: Some(env), ..Ui::default() };
-        // Idempotent; covers a switch to an environment the subscription diff has not reached.
-        if let Some(net) = s.src.net() {
-            net.watch_resource(SUBSCRIBE, json!({}));
-        }
         changed = true;
     }
     let latest = {
