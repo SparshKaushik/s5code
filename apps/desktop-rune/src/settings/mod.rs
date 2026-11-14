@@ -1737,19 +1737,10 @@ mod reveal_tests {
     }
 
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
-    const UNBUILT: &[&str] = &[
-        "Compact idle threads",
-        "Cursor account usage",
-        "Health check interval",
-        "Mobile app",
-        "Project defaults and overrides",
-        "Source control writer model",
-        "Thread details",
-        "Usage providers",
-    ];
-    /// Drawn only in other states: the desktop CLI row, the managed host's local environment, and
-    /// Linked environments behind its Labs flag.
-    const HIDDEN_HERE: &[&str] = &["Linked environments", "Local environment", "t3 command"];
+    const UNBUILT: &[&str] = &["Project defaults and overrides"];
+    /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
+    /// Linked environments behind its Labs flag, and Cursor usage on a macOS server.
+    const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {
