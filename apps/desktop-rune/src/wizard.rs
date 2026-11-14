@@ -921,6 +921,14 @@ pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
         .build(t, layer);
 }
 
+/// Headless scene: Add a computer open with its pairing help.
+pub(crate) fn scene_pairing(s: &mut App) {
+    let ui = &mut s.ui.wizard;
+    ui.open = true;
+    ui.pairing_open = true;
+    ui.pairing_help = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -830,6 +830,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene_failing(s);
         s.ui.wizard.open = true;
     }),
+    ("wizard-pairing-link", |s| {
+        scene_failing(s);
+        crate::wizard::scene_pairing(s);
+    }),
 ];
 
 #[cfg(test)]
