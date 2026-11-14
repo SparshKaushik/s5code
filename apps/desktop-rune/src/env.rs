@@ -541,15 +541,15 @@ pub(crate) fn add_route(s: &mut App, id: &str) {
 
 pub(crate) fn add(s: &mut App) {
     let (host, code) = (s.ui.env.host.text.clone(), s.ui.env.code.text.clone());
-    start(s, host, code);
+    start_pairing(s, host, code);
 }
 
 /// Pairs from a pairing link alone, as the setup wizard's single field does.
 pub(crate) fn pair_link(s: &mut App, link: &str) {
-    start(s, link.trim().to_owned(), String::new());
+    start_pairing(s, link.trim().to_owned(), String::new());
 }
 
-fn start(s: &mut App, host: String, code: String) {
+fn start_pairing(s: &mut App, host: String, code: String) {
     if s.ui.env.pairing.is_some() {
         return;
     }
