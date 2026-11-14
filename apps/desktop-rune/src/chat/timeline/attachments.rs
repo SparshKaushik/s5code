@@ -4,22 +4,25 @@ use crate::{
     icons,
     theme::{self, T},
 };
-use rune::{El, Pixels, col, el, icon, row, text};
+use super::media::{self, Kind, Loaded};
+use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Assets {
     pending: HashMap<String, u64>,
-    ready: HashMap<String, (String, Pixels)>,
-    failed: std::collections::HashSet<String>,
-    /// The image the lightbox shows, by attachment id.
+    pub(super) ready: HashMap<String, Loaded>,
+    pub(super) failed: std::collections::HashSet<String>,
+    /// The image the lightbox shows: an attachment id or a Markdown media key.
     pub open: Option<String>,
+    pub media: media::State,
 }
 
 pub fn poll(app: &mut App) -> bool {
+    let media_changed = media::poll(app);
     let crate::Route::Thread(thread) = app.frame_route() else {
-        return false;
+        return media_changed;
     };
     let attachments: Vec<Value> = app
         .state()
@@ -36,11 +39,12 @@ pub fn poll(app: &mut App) -> bool {
         })
         .flat_map(|v| super::rows::array(v, "attachments").iter().cloned())
         .collect();
+    let waker = app.ui.panel.waker.clone();
     let Some(net) = app.src.net() else {
-        return false;
+        return media_changed;
     };
     let assets = &mut app.ui.chat.timeline.assets;
-    let mut changed = false;
+    let mut changed = media_changed;
     for a in attachments {
         let id = s(&a, "id");
         if id.is_empty() || assets.ready.contains_key(id) || assets.failed.contains(id) {
@@ -59,30 +63,8 @@ pub fn poll(app: &mut App) -> bool {
             };
             let base = net.base_url().to_owned();
             let url = format!("{}{}", base.trim_end_matches('/'), s(&reply, "relativeUrl"));
-            let pixels = Pixels::new();
-            if s(&a, "mimeType").starts_with("image/") {
-                let (url, pixels) = (url.clone(), pixels.clone());
-                std::thread::spawn(move || {
-                    let Ok(response) = ureq::get(&url).call() else {
-                        return;
-                    };
-                    let mut bytes = Vec::new();
-                    use std::io::Read;
-                    if response
-                        .into_reader()
-                        .take(20 * 1024 * 1024)
-                        .read_to_end(&mut bytes)
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if let Ok(image) = image::load_from_memory(&bytes) {
-                        let image = image.thumbnail(720, 540).to_rgba8();
-                        pixels.set(image.width(), image.height(), image.into_raw());
-                    }
-                });
-            }
-            assets.ready.insert(id.to_owned(), (url, pixels));
+            let kind = media::attachment_kind(s(&a, "mimeType"), s(&a, "name"));
+            assets.ready.insert(id.to_owned(), Loaded::new(url, s(&a, "name").to_owned(), kind, waker.clone()));
         }
     }
     changed
@@ -124,14 +106,22 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
     let id = s(attachment, "id");
     let name = s(attachment, "name");
     let asset = app.ui.chat.timeline.assets.ready.get(id);
+    let kind = media::attachment_kind(s(attachment, "mimeType"), name);
+    if kind == Some(Kind::Video) {
+        // UserVideoAttachment: the video in the bubble, with Save video on right-click.
+        let failed = app.ui.chat.timeline.assets.failed.contains(id);
+        let source = media::Media { kind: Kind::Video, name: name.to_owned(), reference: None, open_file: None };
+        let tile = el().w(240.0).child(media::video(id, name, asset, failed, None, t));
+        return media::with_actions(tile, id, &source, false);
+    }
     let mut content = if s(attachment, "mimeType").starts_with("image/") {
         let mut frame = el()
             .size(240.0, 180.0)
             .radius(16.0)
             .clip_rounded(16.0)
             .fill(t.c.message_surface);
-        if let Some((_, pixels)) = asset {
-            frame = frame.pixels_fit(pixels, rune::SurfaceFit::Fit);
+        if let Some(loaded) = asset {
+            frame = frame.pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit);
         }
         frame
     } else {
@@ -157,8 +147,8 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
             })
             .child(icon(&icons::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
     };
-    if let Some((url, _)) = asset {
-        let url = url.clone();
+    if let Some(loaded) = asset {
+        let url = loaded.url.clone();
         let image = s(attachment, "mimeType").starts_with("image/");
         let id = id.to_owned();
         let shown = if image { name.to_owned() } else { file_label(attachment).0 };
@@ -191,11 +181,17 @@ pub fn on_key(app: &mut App, e: &rune::KeyEvent) -> bool {
     false
 }
 
-/// The open image over the chat (ImageLightbox): click outside, X or Escape closes it.
+/// The open image over the chat (ExpandedImageDialog): click outside, X or Escape closes it, and
+/// right-click offers the media actions.
 pub fn lightbox(app: &App) -> Option<El> {
     let id = app.ui.chat.timeline.assets.open.as_ref()?;
-    let (url, pixels) = app.ui.chat.timeline.assets.ready.get(id)?;
-    let url = url.clone();
+    let (source, loaded) = media::find(app, id)?;
+    let loaded = loaded?;
+    let url = loaded.url.clone();
+    let picture = el().w_full().h_full().pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit);
+    let mut menu = Vec::new();
+    // The lightbox is dark in both themes, and so is its menu.
+    media::menu(app, &crate::kit::theme(&theme::theme(true)), &mut menu);
     let button = |key: &str, glyph: &'static rune::Icon, label: &str| {
         el().key(key.to_owned())
             .size(32.0, 32.0)
@@ -209,8 +205,7 @@ pub fn lightbox(app: &App) -> Option<El> {
             .help(label.to_owned())
             .child(icon(glyph, 16.0).color(rune::Color::WHITE))
     };
-    Some(
-        el().key("image-lightbox")
+    let lightbox = el().key("image-lightbox")
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
@@ -223,7 +218,7 @@ pub fn lightbox(app: &App) -> Option<El> {
                     .role("dialog")
                     .label("Image preview")
                     .modal(true, close)
-                    .child(el().w_full().h_full().pixels_fit(pixels, rune::SurfaceFit::Fit))
+                    .child(media::with_actions(picture, id, &source, false))
                     .child(
                 row()
                     .pin(None, Some(0.0), Some(0.0), None)
@@ -233,8 +228,8 @@ pub fn lightbox(app: &App) -> Option<El> {
                     }))
                     .child(button("image-lightbox-close", &icons::X, "Close").on_press(close)),
                     ),
-            ),
-    )
+            );
+    Some(el().key("image-lightbox-layer").absolute(0.0, 0.0).w_full().h_full().child(lightbox).children(menu))
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use crate::{
 };
 use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
+use super::file_preview::{self as fp, Kind};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -66,6 +67,26 @@ pub struct Ui {
     image: Option<Image>,
     /// Decodes previews off the UI thread, as the sidebar's favicons do.
     images: Option<rune::ImageCache>,
+    /// The open file's rendered/source choice; `None` follows its kind (tables render).
+    rendered: Option<bool>,
+    /// Word wrap toggled away from the `wordWrap` setting.
+    wrap: Option<bool>,
+    copied: Option<Instant>,
+    byte_length: u64,
+    /// No text to show: a binary read, or a format Rune cannot draw.
+    binary: bool,
+    table: Option<fp::Table>,
+    notebook: Option<Result<fp::Notebook, String>>,
+    /// The open file's asset URL in flight and what it is for.
+    asset: Option<(u64, AssetUse)>,
+    /// Why the last Save file download failed, set off the UI thread.
+    save_failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+enum AssetUse {
+    External,
+    Browser,
+    Save(std::path::PathBuf),
 }
 
 type Download = std::sync::Arc<std::sync::Mutex<Option<Option<Vec<u8>>>>>;
@@ -154,6 +175,15 @@ impl Default for Ui {
             line: None,
             image: None,
             images: None,
+            rendered: None,
+            wrap: None,
+            copied: None,
+            byte_length: 0,
+            binary: false,
+            table: None,
+            notebook: None,
+            asset: None,
+            save_failed: Default::default(),
         }
     }
 }
@@ -302,27 +332,24 @@ fn read(app: &mut App, path: String) {
     let Some(cwd) = super::workspace(app) else {
         return;
     };
-    let image = is_image(&path).then(|| {
-        let absolute = format!("{}/{}", cwd.trim_end_matches('/'), path);
-        let resource = match super::context(app) {
-            Some((thread, _)) => json!({"_tag":"workspace-file","threadId":thread,"path":absolute}),
-            None => json!({"_tag":"draft-workspace-file","cwd":cwd,"path":absolute}),
-        };
-        Image {
-            request: app.src.net().map(|n| n.request("assets.createUrl", json!({"resource":resource}))),
-            url: None,
-            download: Download::default(),
-            decoded: None,
-            svg: false,
-            failed: false,
-        }
+    let kind = fp::kind(&path);
+    let image = is_image(&path).then(|| Image {
+        request: asset_request(app, &cwd, &path),
+        url: None,
+        download: Download::default(),
+        decoded: None,
+        svg: false,
+        failed: false,
     });
-    let request = if image.is_some() {
-        None
-    } else {
+    let request = if kind.reads_text() {
         app.src.net().map(|n| n.request("projects.readFile", json!({"cwd":cwd,"relativePath":path})))
+    } else {
+        None
     };
     let ui = &mut app.ui.panel.files;
+    ui.binary = image.is_none() && !kind.reads_text();
+    ui.rendered = None;
+    ui.asset = None;
     ui.image = image;
     ui.selected = path;
     ui.line = None;
@@ -332,6 +359,86 @@ fn read(app: &mut App, path: String) {
     ui.error = None;
     ui.save_error = None;
     show(ui, String::new(), false);
+}
+
+/// An `assets.createUrl` for a workspace file, which serves its bytes over HTTP.
+fn asset_request(app: &mut App, cwd: &str, path: &str) -> Option<u64> {
+    let absolute = format!("{}/{}", cwd.trim_end_matches('/'), path);
+    let resource = match super::context(app) {
+        Some((thread, _)) => json!({"_tag":"workspace-file","threadId":thread,"path":absolute}),
+        None => json!({"_tag":"draft-workspace-file","cwd":cwd,"path":absolute}),
+    };
+    app.src.net().map(|n| n.request("assets.createUrl", json!({"resource":resource})))
+}
+
+fn asset_url(src: &data::Source, reply: &Value) -> String {
+    format!("{}{}", src.net_ref().map(|n| n.base_url().trim_end_matches('/').to_owned()).unwrap_or_default(), data::s(reply, "relativeUrl"))
+}
+
+/// Fetches the open file's URL to open it elsewhere or save it.
+fn use_asset(app: &mut App, purpose: AssetUse) {
+    let (cwd, path) = (app.ui.panel.files.cwd.clone(), app.ui.panel.files.selected.clone());
+    if path.is_empty() {
+        return;
+    }
+    app.ui.panel.files.asset = asset_request(app, &cwd, &path).map(|id| (id, purpose));
+}
+
+/// "Save file": a copy of the file wherever the user picks, as web's download does.
+fn save_as(app: &mut App, tx: &mut Tx) {
+    let name = fp::file_name(&app.ui.panel.files.selected).to_owned();
+    let options = rune::FileDialogOptions { title: "Save file".into(), file_name: Some(name), ..Default::default() };
+    tx.save_file(options, |app: &mut App, picked: rune::FileDialogResult, _| {
+        if let Ok(Some(path)) = picked {
+            use_asset(app, AssetUse::Save(path.into()));
+        }
+    });
+}
+
+fn copy_contents(app: &mut App, tx: &mut Tx) {
+    tx.copy(app.ui.panel.files.editor.text.clone());
+    app.ui.panel.files.copied = Some(Instant::now());
+    tx.wake_after(COPIED_FOR);
+}
+
+const COPIED_FOR: Duration = Duration::from_secs(2);
+
+fn rendered_on(ui: &Ui) -> bool {
+    ui.rendered.unwrap_or(matches!(fp::kind(&ui.selected), Kind::Table(_)))
+}
+
+fn toggle_rendered(app: &mut App) {
+    flush(app);
+    let ui = &mut app.ui.panel.files;
+    ui.rendered = Some(!rendered_on(ui));
+    prepare(ui);
+}
+
+fn wrap_on(app: &App) -> bool {
+    app.ui.panel.files.wrap.unwrap_or_else(|| crate::settings::value(app, "wordWrap").as_bool() != Some(false))
+}
+
+/// `toLocaleString` for a byte count.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Parses the rendered views the open file's text feeds, once per read or toggle.
+fn prepare(ui: &mut Ui) {
+    let kind = fp::kind(&ui.selected);
+    ui.table = match kind {
+        Kind::Table(delimiter) => Some(fp::parse_delimited(&ui.editor.text, delimiter, 2000, 30, 2000)),
+        _ => None,
+    };
+    ui.notebook = (kind == Kind::Notebook).then(|| fp::notebook(&ui.editor.text));
 }
 
 /// Opens `path` (relative to the workspace) in the Files surface, opening its folders in the tree
@@ -376,6 +483,8 @@ fn close_file(app: &mut App) {
     ui.read_failure = None;
     ui.reading = None;
     ui.save_error = None;
+    ui.binary = false;
+    ui.asset = None;
     show(ui, String::new(), false);
 }
 
@@ -388,6 +497,7 @@ fn show(ui: &mut Ui, contents: String, truncated: bool) {
     ui.saved = contents;
     ui.due = None;
     measure(ui);
+    prepare(ui);
 }
 
 fn measure(ui: &mut Ui) {
@@ -501,6 +611,41 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     if app.ui.panel.files.searching.is_none() && app.ui.panel.files.search_due.is_some_and(|due| Instant::now() >= due) {
         search(app);
     }
+    if let Some(id) = app.ui.panel.files.asset.as_ref().map(|a| a.0)
+        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
+    {
+        let purpose = app.ui.panel.files.asset.take().map(|a| a.1);
+        match (reply, purpose) {
+            (Ok(v), Some(AssetUse::External)) => {
+                let _ = tx.open_url(&asset_url(&app.src, &v));
+            }
+            (Ok(v), Some(AssetUse::Browser)) => {
+                let url = asset_url(&app.src, &v);
+                super::open_preview(app, &url);
+            }
+            (Ok(v), Some(AssetUse::Save(path))) => {
+                let url = asset_url(&app.src, &v);
+                let (failed, wake) = (app.ui.panel.files.save_failed.clone(), app.ui.panel.waker.clone());
+                std::thread::spawn(move || {
+                    if let Err(e) = save_download(&url, &path) {
+                        *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                        if let Some(wake) = wake {
+                            wake();
+                        }
+                    }
+                });
+            }
+            (Err(e), Some(AssetUse::Save(_))) => crate::shell::palette::toast(app, "Could not save file", Some(&e.to_string())),
+            (Err(e), _) => crate::shell::palette::toast(app, "Could not open file", Some(&e.to_string())),
+            (Ok(_), None) => {}
+        }
+        changed = true;
+    }
+    let failed = app.ui.panel.files.save_failed.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(e) = failed {
+        crate::shell::palette::toast(app, "Could not save file", Some(&e));
+        changed = true;
+    }
     let ui = &mut app.ui.panel.files;
     if let Some(id) = ui.reading
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
@@ -508,6 +653,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         ui.reading = None;
         match reply {
             Ok(v) => {
+                ui.byte_length = v["byteLength"].as_u64().unwrap_or(0);
                 show(ui, data::s(&v, "contents").into(), v["truncated"] == true);
                 if ui.line.is_some() {
                     tx.instant();
@@ -518,6 +664,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     tx.wake_after(DEBOUNCE);
                 }
             }
+            Err(e) if failure(&e)["failure"] == "binary_file" => ui.binary = true,
             Err(e) => ui.read_failure = Some(read_failure(&e, &ui.cwd)),
         }
         changed = true;
@@ -529,7 +676,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         image.request = None;
         match reply {
             Ok(v) => {
-                let url = format!("{}{}", app.src.net().map(|n| n.base_url().trim_end_matches('/').to_owned()).unwrap_or_default(), data::s(&v, "relativeUrl"));
+                let url = asset_url(&app.src, &v);
                 image.url = Some(url.clone());
                 let (out, wake) = (image.download.clone(), app.ui.panel.waker.clone());
                 std::thread::spawn(move || {
@@ -639,6 +786,13 @@ fn download(url: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Streams a served file to `path`, as web's Save file downloads it.
+fn save_download(url: &str, path: &std::path::Path) -> Result<(), String> {
+    let mut reader = ureq::get(url).call().map_err(|e| e.to_string())?.into_reader();
+    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    std::io::copy(&mut reader, &mut file).map(drop).map_err(|e| e.to_string())
+}
+
 /// SVG text or gzipped SVGZ, which the image cache rasterizes at twice the drawing's own size.
 fn is_svg(bytes: &[u8]) -> bool {
     let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
@@ -689,7 +843,7 @@ fn image_view(image: &Image, t: &T) -> El {
     col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
 }
 
-fn editor(ui: &Ui, t: &T) -> El {
+fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
     let lang = ui.selected.rsplit('.').next();
     let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark)
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
@@ -718,6 +872,10 @@ fn editor(ui: &Ui, t: &T) -> El {
             .on_input_key(on_key)
     };
     let code = code.text_highlights(mark);
+    // Wrapped lines can't keep the gutter's numbers beside them, so wrapping drops it.
+    if wrap {
+        return scroll(code.wrap().w_full().px(12.).py(8.));
+    }
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(
         row()
             .py(8.)
@@ -749,15 +907,43 @@ pub(super) fn focus_field(app: &mut App, on: bool) {
     ui.editor.focused = on && !search && !ui.truncated;
 }
 
-fn header(ui: &Ui, t: &T) -> El {
+fn header(ui: &Ui, wrap: bool, t: &T) -> El {
     let button = |label: &str, glyph: &'static rune::Icon| kit::Button::new(label).icon(glyph).variant("ghost-muted").size("icon-xs");
     let reload = button("Refresh workspace files", &icons::REFRESH_CW).on_press(refresh).build(t).help("Refresh files");
     let header = row().h(40.).px(8.).gap(4.).center_y();
     if !ui.selected.is_empty() {
-        return header
+        let kind = fp::kind(&ui.selected);
+        let mut header = header
             .child(button("Back to files", &icons::ARROW_LEFT).on_press(close_file).build(t).help("Back to files"))
-            .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.))
-            .child(reload);
+            .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.));
+        let text_shown = ui.reading.is_none() && !ui.binary && ui.read_failure.is_none() && kind.reads_text();
+        let rendered = rendered_on(ui);
+        if text_shown && let Some(mode) = kind.rendered_mode() {
+            let label = fp::toggle_label(mode, rendered);
+            header = header.child(button(label, if rendered { &icons::CODE } else { &icons::EYE }).on_press(toggle_rendered).build(t).help(label));
+        }
+        if text_shown && kind != Kind::Notebook && !(rendered && kind.rendered_mode().is_some()) {
+            let label = if wrap { "Disable word wrap" } else { "Enable word wrap" };
+            header = header.child(
+                button(label, &icons::TEXT_WRAP)
+                    .on_press(move |s: &mut App| s.ui.panel.files.wrap = Some(!wrap))
+                    .build(t)
+                    .help(label),
+            );
+        }
+        if kind.opens_in_browser() {
+            let label = "Open file in preview browser";
+            header = header.child(button(label, &icons::GLOBE).on_press(|s: &mut App| use_asset(s, AssetUse::Browser)).build(t).help(label));
+        }
+        if text_shown {
+            let copied = ui.copied.is_some_and(|at| at.elapsed() < COPIED_FOR);
+            let (label, glyph) = if copied { ("Copied", &icons::CHECK) } else { ("Copy contents", &icons::COPY) };
+            header = header.child(button(label, glyph).build(t).on_press_tx(copy_contents).help(label));
+        }
+        let preparing = matches!(ui.asset, Some((_, AssetUse::Save(_))));
+        let label = if preparing { "Preparing file\u{2026}" } else { "Save file" };
+        header = header.child(button(label, &icons::DOWNLOAD).build(t).on_press_tx(save_as).help(label));
+        return header.child(reload);
     }
     let search = text_input(&ui.query, theme::TEXT_SM)
         .key("files-search")
@@ -886,7 +1072,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
 
 pub fn view(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.files;
-    let header = header(ui, t);
+    let wrap = wrap_on(app);
+    let header = header(ui, wrap, t);
     let content = if let Some(error) = &ui.error {
         scroll(
             row()
@@ -905,7 +1092,7 @@ pub fn view(app: &App, t: &T) -> El {
     } else if let Some(image) = &ui.image {
         image_view(image, t)
     } else if !ui.selected.is_empty() {
-        editor(ui, t)
+        file_body(app, ui, wrap, t)
     } else {
         tree(ui, t)
     };
@@ -931,7 +1118,34 @@ pub fn view(app: &App, t: &T) -> El {
         );
         surface = surface.child(el().h(1.).w_full().fill(t.c.warning.alpha_mul(0.2)));
     }
+    if ui.truncated && ui.image.is_none() && !ui.binary {
+        let notice = format!("Preview limited to the first 1 MB of a {} byte file.", grouped(ui.byte_length));
+        surface = surface
+            .child(row().w_full().px(12.).py(6.).fill(t.c.warning_surface).child(text(notice).font(theme::TEXT_2XS).color(t.c.warning_foreground).wrap().grow(1.)))
+            .child(el().h(1.).w_full().fill(t.c.warning.alpha_mul(0.2)));
+    }
     surface.child(content)
+}
+
+/// The open file: its rendered view, the editor, or "No preview" for what Rune can't draw.
+fn file_body(app: &App, ui: &Ui, wrap: bool, t: &T) -> El {
+    let kind = fp::kind(&ui.selected);
+    if ui.reading.is_some() {
+        return editor(ui, t, wrap);
+    }
+    let no_preview = |reason: Option<&str>| {
+        fp::no_preview(fp::file_name(&ui.selected), reason, t, |s: &mut App| use_asset(s, AssetUse::External), save_as)
+    };
+    if ui.binary {
+        return no_preview(None);
+    }
+    match (kind, &ui.table, &ui.notebook) {
+        (Kind::Notebook, _, Some(Ok(notebook))) => fp::notebook_view(app, &ui.selected, notebook, t),
+        (Kind::Notebook, _, Some(Err(e))) => no_preview(Some(e.as_str())),
+        (Kind::Markdown, ..) if rendered_on(ui) => fp::markdown(app, &ui.selected, &ui.editor.text, t),
+        (Kind::Table(_), Some(table), _) if rendered_on(ui) => fp::table(table, t),
+        _ => editor(ui, t, wrap),
+    }
 }
 
 fn scroll(content: El) -> El {
@@ -947,6 +1161,18 @@ fn scroll(content: El) -> El {
 pub fn fixture(app: &mut App) {
     let v: Value = serde_json::from_str(include_str!("../../fixtures/panel/files.json")).unwrap();
     app.ui.panel.files.dirs.insert(String::new(), v["entries"].as_array().unwrap().clone());
+}
+
+/// A file open in a preview mode, `rendered` or as source.
+pub fn preview_fixture(app: &mut App, path: &str, contents: &str, rendered: bool) {
+    fixture(app);
+    let ui = &mut app.ui.panel.files;
+    ui.selected = path.into();
+    ui.cwd = "/repo".into();
+    ui.binary = !fp::kind(path).reads_text();
+    ui.rendered = Some(rendered);
+    ui.byte_length = contents.len() as u64;
+    show(ui, contents.into(), false);
 }
 
 /// A recorded file open in the editor; `edit` types into it, `error` fails its save.
@@ -995,6 +1221,26 @@ mod tests {
         assert_eq!(line_range(text, 3), Some(14..14));
         assert_eq!(&text[line_range(text, 4).unwrap()], "last");
         assert_eq!(line_range(text, 5), None);
+    }
+
+    #[test]
+    fn previews_parse_on_read_and_follow_their_kind_defaults() {
+        let mut ui = Ui { selected: "data.csv".into(), ..Ui::default() };
+        show(&mut ui, "a,b\n1,2\n".into(), false);
+        assert!(rendered_on(&ui), "tables open rendered");
+        assert_eq!(ui.table.as_ref().map(|t| t.rows.len()), Some(2));
+        ui.editor.text.push_str("3,4\n");
+        ui.rendered = Some(false);
+        ui.rendered = Some(!rendered_on(&ui));
+        prepare(&mut ui);
+        assert_eq!(ui.table.as_ref().map(|t| t.rows.len()), Some(3), "toggling back renders the edited source");
+        ui.selected = "README.md".into();
+        ui.rendered = None;
+        assert!(!rendered_on(&ui), "markdown opens as source");
+        ui.selected = "nb.ipynb".into();
+        show(&mut ui, r#"{"nbformat":4,"cells":[]}"#.into(), false);
+        assert!(matches!(ui.notebook, Some(Ok(_))) && ui.table.is_none());
+        assert_eq!((grouped(999), grouped(1_048_576), grouped(12_345_678)), ("999".into(), "1,048,576".into(), "12,345,678".into()));
     }
 
     #[test]

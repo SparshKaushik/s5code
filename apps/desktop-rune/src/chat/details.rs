@@ -15,9 +15,14 @@ use crate::{App, Route};
 use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
+pub mod automations;
+pub mod child_work;
 mod git;
+pub mod html_render;
+pub mod items;
 pub mod pr;
 pub mod scripts;
+pub mod servers;
 
 #[derive(Default)]
 pub struct Ui {
@@ -72,6 +77,12 @@ pub struct Ui {
     session_pending: Option<u64>,
     /// Whether the card fits inline in the last laid-out chat area, for `threadPanel.toggle`.
     fits: std::cell::Cell<bool>,
+    /// The "Show in thread details" menu, where it opened.
+    pub items_menu: Option<items::At>,
+    pub servers: servers::State,
+    pub automations: automations::State,
+    pub child_work: child_work::State,
+    pub html_render: html_render::State,
 }
 
 const SESSION_STALE_MS: i64 = 5 * 60_000;
@@ -84,6 +95,47 @@ pub fn grants(s: &App, scope: &str) -> bool {
         Some(Err(())) => false,
         None => true,
     }
+}
+
+/// An item the card shows on a server thread (`!draftId && visible[id]`).
+fn shows(s: &App, id: &str) -> bool {
+    composer::ctx(s).thread.is_some() && items::visible(&s.client_settings.values, id)
+}
+
+/// The first object in a reply tagged `tag`, such as a typed RPC error inside its Effect cause.
+fn tagged<'a>(v: &'a Value, tag: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(map) if map.get("_tag").and_then(Value::as_str) == Some(tag) => Some(v),
+        Value::Object(map) => map.values().find_map(|v| tagged(v, tag)),
+        Value::Array(rows) => rows.iter().find_map(|v| tagged(v, tag)),
+        _ => None,
+    }
+}
+
+/// Scenes: the Replay showcase thread, whose card shows inline; its id.
+fn scene_thread(s: &mut App) -> Option<String> {
+    crate::scene_clock(s);
+    let id = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_string())?;
+    s.navigate(crate::Route::Thread(id.clone()));
+    Some(id)
+}
+
+/// ThreadDetailsSection: a titled list under a hairline when a section with content is above it.
+fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
+    let heading = row()
+        .w_full()
+        .min_h(32.0)
+        .mb(4.0)
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
+        .child(text(title.to_string()).font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground).truncate().grow(1.0).shrink().min_w(0.0))
+        .children(actions);
+    let mut out = col().w_full().px(8.0).pt(8.0).pb(10.0).label(title.to_string());
+    if divided {
+        out = out.child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)));
+    }
+    out.child(heading).child(body)
 }
 
 fn poll_session(s: &mut App) -> bool {
@@ -316,6 +368,8 @@ pub fn watch(s: &mut App) {
         net.watch_vcs(&cwd);
     }
     scripts::load_file(s, false);
+    servers::watch(s);
+    automations::watch(s);
 }
 
 /// A card row: icon, label, then trailing content. `split` leaves room for a 32-point chevron.
@@ -846,7 +900,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
     poll_branch(s) || changed
 }
 
@@ -1057,57 +1111,94 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         "Choose editor",
         Menu::Editor,
     );
-    let script = scripts::view(s, t);
-    let general = col().w_full().padding(8.0).pb(10.0).child(run_context).child(editor).child(script);
-
-    let mut body = col().w_full().child(general);
+    let on = |id: &str| items::visible(&s.client_settings.values, id);
+    let general: Vec<El> = [(on("environment"), Some(run_context)), (on("openIn"), Some(editor)), (on("scripts"), None)]
+        .into_iter()
+        .filter(|(shown, _)| *shown)
+        .map(|(_, item)| item.unwrap_or_else(|| scripts::view(s, t)))
+        .collect();
+    let mut divided = !general.is_empty();
+    let mut body = col().w_full();
+    if divided {
+        body = body.child(col().w_full().padding(8.0).pb(10.0).children(general));
+    }
 
     // A failed status stream still shows the section, with Commit disabled and +0 -0.
     let failed = (vcs(s).is_none() && git::status_error(s).is_some()).then(|| json!({"isRepo": true}));
     if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true) {
-        let current = data::s(v, "refName").to_string();
-        // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
-        let branch = match run.as_ref().filter(|r| r.worktree) {
-            Some(r) => match worktree_base(s, r) {
-                Some(base) if r.from_origin => format!("From {base} (remote)"),
-                Some(base) => format!("From {base}"),
-                None => "Select ref".into(),
-            },
-            None if current.is_empty() => "Select ref".into(),
-            None => current,
-        };
-        let mut section = col()
-            .w_full()
-            .px(8.0)
-            .pt(9.0)
-            .pb(10.0)
-            .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)))
-            .child(
+        let mut rows: Vec<El> = vec![];
+        if on("branch") {
+            let current = data::s(v, "refName").to_string();
+            // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
+            let branch = match run.as_ref().filter(|r| r.worktree) {
+                Some(r) => match worktree_base(s, r) {
+                    Some(base) if r.from_origin => format!("From {base} (remote)"),
+                    Some(base) => format!("From {base}"),
+                    None => "Select ref".into(),
+                },
+                None if current.is_empty() => "Select ref".into(),
+                None => current,
+            };
+            rows.push(
                 branch_row(t, &branch, fg, muted)
                     .help(with_shortcut(s, &branch, "composer.branch"))
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
-        if let Some(prs) = pr::rows(s, t) {
-            section = section.child(prs);
+            rows.extend(pr::rows(s, t));
         }
         // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
-        let Some(git) = git::view(s, t, v, draft) else { return Some(frame(t, body.child(section), cap)) };
-        section = section.child(git);
-        let (add, del) = git::changes_totals(v);
-        let stat = theme::mono(theme::XS_MEDIUM);
-        let changes = action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
-            .w_full()
-            .child(
-                row()
-                    .gap(6.0)
-                    .child(text(format!("+{}", thousands(add))).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
-                    .child(text(format!("-{}", thousands(del))).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
-            );
-        section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
-        body = body.child(section);
+        if let Some(git) = git::view(s, t, v, draft).filter(|_| on("gitActions") || on("changes")) {
+            if on("gitActions") {
+                rows.push(git);
+            }
+            if on("changes") {
+                let (add, del) = git::changes_totals(v);
+                let stat = theme::mono(theme::XS_MEDIUM);
+                let changes = action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
+                    .w_full()
+                    .child(
+                        row()
+                            .gap(6.0)
+                            .child(text(format!("+{}", thousands(add))).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
+                            .child(text(format!("-{}", thousands(del))).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
+                    );
+                rows.push(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
+            }
+        }
+        if !rows.is_empty() {
+            let mut section = col().w_full().px(8.0).pt(9.0).pb(10.0);
+            if divided {
+                section = section.child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)));
+            }
+            body = body.child(section.children(rows));
+            divided = true;
+        }
     }
-    Some(frame(t, body, cap))
+    if let Some(id) = thread.map(|row| data::s(row, "id")) {
+        if on("servers")
+            && let Some(panel) = servers::view(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
+        if on("automations")
+            && let Some(panel) = automations::view(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
+    }
+    // Shown only when no section has content, so an emptied card can be refilled.
+    if !divided {
+        let choose = action(t, items::CHOOSE_KEY, icon(&icons::SLIDERS_HORIZONTAL, 16.0).color(muted), "Choose what to show", fg)
+            .h(24.0)
+            .w_full()
+            .on_press(|s: &mut App| items::open(s, items::At::Choose));
+        body = body.child(col().w_full().padding(8.0).child(choose));
+    }
+    let card = frame(t, body, cap).on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| items::open(s, items::At::Point(at.x, at.y)));
+    Some(card)
 }
 
 /// The open card menu, anchored under its trigger. Attach after the card so it draws above.
@@ -1344,6 +1435,8 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     scripts::overlays(s, t, &mut out);
     pr::overlays(s, t, &mut out);
     restore_dialog(s, t, &mut out);
+    items::overlay(s, t, &mut out);
+    child_work::overlay(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {
         let copy = crate::kit::MenuItem::new("Copy branch name").icon(&icons::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             s.ui.chat.details.branch_copy = None;
@@ -1387,9 +1480,11 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         toggle(s, fits);
         return true;
     }
-    let menu = if crate::panel::shortcut(s, e, "composer.branch") && vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
+    // The menus anchor to their rows, so a hidden row's shortcut falls through.
+    let shown = |id: &str| items::visible(&s.client_settings.values, id);
+    let menu = if crate::panel::shortcut(s, e, "composer.branch") && shown("branch") && vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
         Menu::Branch
-    } else if crate::panel::shortcut(s, e, "composer.workspace") && draft_run(s).is_some() {
+    } else if crate::panel::shortcut(s, e, "composer.workspace") && shown("environment") && draft_run(s).is_some() {
         Menu::RunContext
     } else if crate::panel::shortcut(s, e, "composer.host") && draft_run(s).is_some() && !hosts(s).is_empty() {
         Menu::RunContext

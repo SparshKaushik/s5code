@@ -863,15 +863,19 @@ mod tests {
     #[test]
     fn a_links_provider_and_model_pick_the_drafts_model() {
         let mut s = App::new();
+        // A link without a repository drafts in Scratch, which this fixture lacks, so name one it has.
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.projects[0]["repositoryIdentity"] = serde_json::json!({"canonicalKey": "github.com/acme/app"});
+        }
         let model = |s: &App| s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(s, s.frame_route())).and_then(|d| d.model.clone());
         let toast = |s: &App| crate::shell::palette::toast_title(s).map(str::to_owned);
-        assert!(open(&mut s, "s5code://new?prompt=hi&provider=OpenCode&model=opencode%2Fbig-pickle"));
+        assert!(open(&mut s, "s5code://new?prompt=hi&repo=acme/app&provider=OpenCode&model=opencode%2Fbig-pickle"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/big-pickle".into())), "FAILED: the named model is picked");
         assert_eq!(toast(&s), None, "FAILED: an exact match needs no note");
-        assert!(open(&mut s, "s5code://new?prompt=again&provider=opencode&model=nope"));
+        assert!(open(&mut s, "s5code://new?prompt=again&repo=acme/app&provider=opencode&model=nope"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: an unknown model falls back to the instance's first");
         assert_eq!(toast(&s).as_deref(), Some("Prompt added from a link"));
-        assert!(open(&mut s, "s5code://new?prompt=more&provider=claude&model=claude-opus-5-5"));
+        assert!(open(&mut s, "s5code://new?prompt=more&repo=acme/app&provider=claude&model=claude-opus-5-5"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: a provider not ready here leaves the model alone");
     }
 
