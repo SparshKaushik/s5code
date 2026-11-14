@@ -322,6 +322,11 @@ pub fn known(app: &App, thread: &str) -> Vec<(String, String, bool)> {
     out
 }
 
+/// Seeds the server's terminal list for headless scenes.
+pub fn known_fixture(app: &mut App, thread: &str, running: &[&str]) {
+    app.ui.panel.terminal.known = running.iter().map(|id| json!({"threadId": thread, "terminalId": id, "label": "", "hasRunningSubprocess": true})).collect();
+}
+
 /// How many of the thread's terminals run a process (`useThreadRunningTerminalIds`).
 pub fn running(app: &App, thread: &str) -> usize {
     known(app, thread).iter().filter(|(.., running)| *running).count()

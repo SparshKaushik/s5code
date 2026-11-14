@@ -270,7 +270,15 @@ fn action_verb(action: &str) -> &'static str {
     }
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if matches!(s.route, Route::PullRequests) && crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
+        let u = &s.ui.pages.detail;
+        let Some(d) = u.detail.as_ref().or(u.entry.as_ref()).filter(|d| !d["number"].is_null()) else { return false };
+        let short = if field(d, "url").contains("/-/merge_requests/") { "MR" } else { "PR" };
+        tx.copy(&format!("#{}", d["number"]));
+        crate::shell::palette::toast(s, &format!("{short} number copied"), None);
+        return true;
+    }
     if !matches!(s.route, Route::PullRequests) || !matches!(e.key, rune::Key::Escape) {
         return false;
     }
@@ -289,16 +297,16 @@ fn has(list: &Value, item: &str) -> bool {
     list.as_array().is_some_and(|a| a.iter().any(|v| v == item))
 }
 
-fn can(d: &Value, action: &str) -> bool {
+pub(crate) fn can(d: &Value, action: &str) -> bool {
     has(&d["capabilities"]["actions"], action) && has(&d["viewerPermissions"]["actions"], action)
 }
 
-fn allowed_methods(d: &Value) -> Vec<String> {
+pub(crate) fn allowed_methods(d: &Value) -> Vec<String> {
     let caps = &d["mergeCapabilities"];
     d["capabilities"]["mergeMethods"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| caps[*m].as_bool().unwrap_or(false)).map(str::to_string).collect()
 }
 
-fn merge_method(d: &Value, picked: Option<String>) -> String {
+pub(crate) fn merge_method(d: &Value, picked: Option<String>) -> String {
     let allowed = allowed_methods(d);
     picked.filter(|m| allowed.contains(m)).or_else(|| allowed.first().cloned()).unwrap_or_else(|| "merge".into())
 }
@@ -328,7 +336,7 @@ fn checks_state(checks: &[Value]) -> Option<&'static str> {
 }
 
 /// summarizePullRequestChecks, without the workflow-approval split.
-fn checks_summary(checks: &[Value]) -> String {
+pub(crate) fn checks_summary(checks: &[Value]) -> String {
     let n = checks.len();
     let count = |f: &dyn Fn(&str) -> bool| checks.iter().filter(|c| f(field(c, "status"))).count();
     let failed = count(&|st| st == "failure" || st == "cancelled");
@@ -383,7 +391,7 @@ pub fn primary(d: &Value) -> Option<Primary> {
     can(d, "merge").then_some(Primary::Merge)
 }
 
-fn bounded(v: &str) -> String {
+pub(crate) fn bounded(v: &str) -> String {
     let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
     if v.chars().count() <= 1000 { v } else { format!("{}...", v.chars().take(997).collect::<String>()) }
 }
@@ -403,7 +411,7 @@ pub fn handoff_task(d: &Value, explain: bool) -> (String, Value) {
     }
 }
 
-fn resolve_text(d: &Value) -> String {
+pub(crate) fn resolve_text(d: &Value) -> String {
     let base = bounded(field(d, "baseBranch"));
     [
         format!("PR #{} ({}) conflicts with its base branch `{base}`. Its branch `{}` is the checkout prepared for this thread.", d["number"], bounded(field(d, "url")), bounded(field(d, "headBranch"))),
@@ -675,11 +683,11 @@ fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
             let _ = tx.open_url(&open_url);
             ui(s).menu = false;
         }))
-        .item(MenuItem::new("Copy link").icon(&i::LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        .item(MenuItem::new("Copy link").icon(&i::LINK).shortcut(crate::shell::palette::shortcut_label(s, "thread.copyReference")).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             tx.copy(&copy_url);
             ui(s).menu = false;
         }))
-        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).shortcut(crate::shell::palette::shortcut_label(s, "pullRequest.copyNumber")).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             tx.copy(&number);
             ui(s).menu = false;
         }));
