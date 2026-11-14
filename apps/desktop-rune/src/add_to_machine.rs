@@ -844,7 +844,7 @@ mod tests {
         if let Some(crate::data::Source::Fixture(st)) = env::source_mut(&mut s, "box") {
             st.projects.push(json!({"id": "p2", "repositoryIdentity": {"canonicalKey": "GitHub.com/acme/app"}}));
         }
-        s.ui.env.owners.insert("p2".into(), "box".into());
+        env::adopt(&mut s, "p2", "box");
         if let crate::data::Source::Fixture(st) = &mut s.src {
             st.projects.push(json!({"id": "p2", "repositoryIdentity": {"canonicalKey": "GitHub.com/acme/app"}}));
         }
