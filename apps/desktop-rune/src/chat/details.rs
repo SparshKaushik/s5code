@@ -11,7 +11,7 @@ use crate::chat::composer;
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
-use crate::App;
+use crate::{App, Route};
 use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
@@ -107,6 +107,8 @@ pub struct DraftRun {
     pub worktree: bool,
     pub base: Option<String>,
     pub from_origin: bool,
+    /// An existing worktree the draft reuses: `(path, branch)`.
+    pub existing: Option<(String, Option<String>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -424,6 +426,13 @@ pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
     let run = draft_run(s)?;
     let key = composer::draft_key(s, s.frame_route());
     s.ui.chat.details.drafts.remove(&key);
+    if let Some((path, branch)) = run.existing {
+        let mut strategy = json!({"type": "existing_worktree", "worktreePath": path});
+        if let Some(branch) = branch {
+            strategy["branch"] = json!(branch);
+        }
+        return Some(strategy);
+    }
     if !run.worktree {
         return None;
     }
@@ -437,10 +446,71 @@ pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
 fn set_env_mode(s: &mut App, worktree: bool) {
     s.ui.chat.details.menu = None;
     let run = draft_run_mut(s);
+    run.existing = None;
     if run.worktree != worktree {
         run.worktree = worktree;
         run.base = None;
     }
+}
+
+/// resolvePreviousWorktreeSeed: the project's most recently updated unarchived thread with a
+/// worktree other than the one the draft already uses, as `(path, branch)`.
+fn previous_worktree(s: &App) -> Option<(String, Option<String>)> {
+    let current = draft_run(s)?.existing.map(|(path, _)| path);
+    let project = data::s(composer::ctx(s).project?, "id");
+    s.state()
+        .threads
+        .iter()
+        .filter(|t| data::s(t, "projectId") == project && t["archivedAt"].is_null())
+        .filter(|t| !data::s(t, "worktreePath").is_empty() && current.as_deref() != Some(data::s(t, "worktreePath")))
+        .max_by(|a, b| data::s(a, "updatedAt").cmp(data::s(b, "updatedAt")))
+        .map(|t| (data::s(t, "worktreePath").to_string(), Some(data::s(t, "branch").to_string()).filter(|b| !b.is_empty())))
+}
+
+fn use_previous_worktree(s: &mut App) -> bool {
+    let Some(seed) = previous_worktree(s) else { return false };
+    s.ui.chat.details.menu = None;
+    let run = draft_run_mut(s);
+    *run = DraftRun { existing: Some(seed), ..DraftRun::default() };
+    let route = s.frame_route().clone();
+    composer::focus(s, &route);
+    true
+}
+
+/// The draft's project and one copy per other environment in its repository group; empty when
+/// it lives on one environment only.
+fn hosts(s: &App) -> Vec<String> {
+    let Some(project) = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return Vec::new() };
+    let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+    let Some(&g) = by_project.get(&project) else { return Vec::new() };
+    let rows = &s.state().projects;
+    let env_of = |id: &str| rows.iter().find(|p| data::s(p, "id") == id).filter(|p| p["archivedAt"].is_null()).map(|p| crate::env::of(s, p));
+    let mut seen = vec![env_of(&project).unwrap_or_default()];
+    let mut hosts = vec![project.clone()];
+    for member in &groups[g].members {
+        if let Some(env) = env_of(member).filter(|e| !seen.contains(e)) {
+            seen.push(env);
+            hosts.push(member.clone());
+        }
+    }
+    if hosts.len() > 1 { hosts } else { Vec::new() }
+}
+
+/// Moves the new-thread draft (prompt and run context) to `project`'s copy on another
+/// environment, as RunContextSelector's "Run on" does.
+fn move_draft(s: &mut App, project: &str) {
+    s.ui.chat.details.menu = None;
+    let (from, to) = (composer::draft_key(s, s.frame_route()), composer::home_key(project));
+    if from == to {
+        return;
+    }
+    if let Some(d) = s.ui.chat.composer.drafts.remove(&from) {
+        s.ui.chat.composer.drafts.insert(to.clone(), d);
+    }
+    if let Some(run) = s.ui.chat.details.drafts.remove(&from) {
+        s.ui.chat.details.drafts.insert(to, DraftRun { existing: None, ..run });
+    }
+    s.navigate(Route::Home { project_id: Some(project.to_string()) });
 }
 
 fn pick_item(s: &mut App, item: Item) {
@@ -794,7 +864,7 @@ fn card(s: &App, t: &T) -> Option<El> {
     let thread = composer::ctx(s).thread;
     let run = draft_run(s);
     let new_worktree = run.as_ref().is_some_and(|r| r.worktree);
-    let worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty());
+    let worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty()) || run.as_ref().is_some_and(|r| r.existing.is_some());
     let mode = if new_worktree { "New worktree" } else if worktree { "Worktree" } else if thread.is_some() { "Local checkout" } else { "Current checkout" };
     // A draft can still choose where it runs, so its row is the env mode picker.
     let draft = thread.is_none();
@@ -931,15 +1001,38 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
-    let worktree = draft_run(s).is_some_and(|r| r.worktree);
-    vec![
-        group_label(t, "Run on"),
-        radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
+    let run = draft_run(s).unwrap_or_default();
+    let mut rows = vec![group_label(t, "Run on")];
+    let hosts = hosts(s);
+    if hosts.is_empty() {
+        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
+    }
+    let current = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).unwrap_or_default();
+    for project in hosts {
+        let label = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| crate::env::location(s, p)).unwrap_or_default();
+        let checked = project == current;
+        rows.push(radio_row(t, &icons::SERVER, &label, checked, move |s: &mut App| move_draft(s, &project)));
+    }
+    let (workspace, folder) = if run.existing.is_some() { ("Current worktree", &icons::FOLDER_GIT) } else { ("Current checkout", &icons::FOLDER) };
+    rows.extend([
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
-        radio_row(t, &icons::FOLDER, "Current checkout", !worktree, |s: &mut App| set_env_mode(s, false)),
-        radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
-    ]
+        radio_row(t, folder, workspace, !run.worktree, |s: &mut App| {
+            if draft_run(s).is_some_and(|r| r.existing.is_some()) {
+                s.ui.chat.details.menu = None;
+            } else {
+                set_env_mode(s, false);
+            }
+        }),
+        radio_row(t, &icons::FOLDER_GIT_2, "New worktree", run.worktree, |s: &mut App| set_env_mode(s, true)),
+    ]);
+    if let Some((_, branch)) = previous_worktree(s) {
+        let label = branch.map_or_else(|| "Previous worktree".to_string(), |b| format!("Previous worktree ({b})"));
+        rows.push(radio_row(t, &icons::GIT_FORK, &label, false, |s: &mut App| {
+            use_previous_worktree(s);
+        }));
+    }
+    rows
 }
 
 /// BranchPicker: a ref search, a capped list with badges, and "Create new ref" for a new name.
@@ -1094,6 +1187,10 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         Menu::Branch
     } else if crate::panel::shortcut(s, e, "composer.workspace") && draft_run(s).is_some() {
         Menu::RunContext
+    } else if crate::panel::shortcut(s, e, "composer.host") && draft_run(s).is_some() && !hosts(s).is_empty() {
+        Menu::RunContext
+    } else if crate::panel::shortcut(s, e, "composer.previousWorktree") && draft_run(s).is_some() {
+        return use_previous_worktree(s);
     } else {
         return false;
     };
@@ -1207,9 +1304,70 @@ mod tests {
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
         assert_eq!(take_draft_workspace(&mut s), None, "the checkout by default");
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true, existing: None };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
+    }
+
+    fn chord(c: char) -> rune::KeyEvent {
+        let mut e = rune::KeyEvent::from(rune::Key::Command(c));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        e
+    }
+
+    #[test]
+    fn the_previous_worktree_chord_reuses_the_newest_unarchived_one() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] =
+                json!([{"command": "composer.previousWorktree", "shortcut": {"key": "l", "modKey": true, "shiftKey": true}}]);
+            let thread = |id: &str, path: &str, branch: &str, updated: &str, archived: bool| {
+                json!({"id": id, "projectId": project, "title": id, "worktreePath": path, "branch": branch, "updatedAt": updated,
+                    "archivedAt": if archived { json!("2026-11-10T00:00:00.000Z") } else { json!(null) }})
+            };
+            state.threads.retain(|t| data::s(t, "projectId") != project);
+            state.threads.extend([
+                thread("wt-old", "/wt/old", "feat/old", "2026-11-01T00:00:00.000Z", false),
+                thread("wt-new", "/wt/new", "feat/new", "2026-11-05T00:00:00.000Z", false),
+                thread("wt-archived", "/wt/archived", "feat/gone", "2026-11-09T00:00:00.000Z", true),
+                thread("local", "", "main", "2026-11-12T00:00:00.000Z", false),
+            ]);
+        }
+        s.navigate(Route::Home { project_id: Some(project) });
+        assert!(super::shortcut(&mut s, &chord('l')), "FAILED: the chord takes the previous worktree");
+        assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "existing_worktree", "worktreePath": "/wt/new", "branch": "feat/new"})));
+        assert!(super::shortcut(&mut s, &chord('l')));
+        assert_eq!(super::previous_worktree(&s), Some(("/wt/old".into(), Some("feat/old".into()))), "FAILED: the one in use is skipped");
+        super::set_env_mode(&mut s, true);
+        assert_eq!(draft_run(&s).unwrap().existing, None, "FAILED: picking a mode drops the reused worktree");
+        s.navigate(Route::Thread("wt-old".into()));
+        assert!(!super::shortcut(&mut s, &chord('l')), "FAILED: a started thread keeps its workspace");
+    }
+
+    #[test]
+    fn the_host_chord_lists_one_copy_per_environment_and_moves_the_draft() {
+        let mut s = App::new();
+        let identity = json!({"canonicalKey": "github.com/acme/app", "name": "app", "rootPath": "/src/app"});
+        let project = |id: &str| json!({"id": id, "title": "app", "workspaceRoot": "/src/app", "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] =
+                json!([{"command": "composer.host", "shortcut": {"key": "h", "modKey": true, "shiftKey": true}}]);
+            let mut remote = project("remote-app");
+            remote[crate::env::TAG] = json!("box");
+            state.projects.extend([project("local-app"), project("local-app-2"), remote]);
+        }
+        s.navigate(Route::Home { project_id: Some("local-app".into()) });
+        assert_eq!(super::hosts(&s), vec!["local-app".to_string(), "remote-app".to_string()], "FAILED: one row per environment");
+        s.ui.chat.composer.drafts.entry(crate::chat::composer::home_key("local-app")).or_default().edit.replace_text("carry me");
+        assert!(super::shortcut(&mut s, &chord('h')), "FAILED: the chord opens Run on");
+        assert_eq!(s.ui.chat.details.menu, Some(super::Menu::RunContext));
+        super::move_draft(&mut s, "remote-app");
+        assert_eq!(s.route, Route::Home { project_id: Some("remote-app".into()) });
+        assert_eq!(s.ui.chat.composer.drafts[&crate::chat::composer::home_key("remote-app")].edit.text, "carry me", "FAILED: the prompt moves along");
+        assert!(!s.ui.chat.composer.drafts.contains_key(&crate::chat::composer::home_key("local-app")));
     }
 
     #[test]
@@ -1217,7 +1375,7 @@ mod tests {
         let mut s = App::new();
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true, existing: None };
         git::sync_branch(&mut s, &json!({"branch": {"status": "skipped_not_requested"}}));
         assert_eq!(draft_run(&s).unwrap().base.as_deref(), Some("main"));
         git::sync_branch(&mut s, &json!({"branch": {"status": "created", "name": "feature/fix"}}));
