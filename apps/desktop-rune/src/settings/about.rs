@@ -311,7 +311,7 @@ fn track_row(s: &App, t: &T, policy: Option<&Value>, managed: bool) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(4.0)
-                .child(text("Update track").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text("Update track").key(super::title_key("Update track")).font(theme::SM_MEDIUM).color(t.c.foreground))
                 .child(description),
         )
         .child(control)
