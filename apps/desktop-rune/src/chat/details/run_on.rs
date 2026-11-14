@@ -301,7 +301,8 @@ mod tests {
         let text = |s: &App| s.ui.chat.composer.drafts.get(&composer::draft_key(s, &s.route)).map(|d| d.edit.text.clone());
         assert!(!offers_auto(&s) && auto_label(&s).is_none(), "off until load balancing is on");
 
-        s.client_settings.values.insert("loadBalancingEnabled".into(), json!(true));
+        // Settings > Connections > Load balancing writes these keys (settings::machines).
+        crate::settings::update(&mut s, "loadBalancingEnabled", json!(true));
         assert!(automatic(&s) && needs_balancing(&s), "a fresh draft is the balancer's");
         assert_eq!(candidates(&s), [env::LOCAL.to_string(), "box".to_string()]);
         assert!(holds_send(&mut s), "send waits for the pick");
@@ -325,7 +326,7 @@ mod tests {
         assert!(needs_balancing(&s));
 
         // "Manual only" drops a machine; a failed check says the balancer has nowhere to go.
-        s.client_settings.values.insert("loadBalancingWeights".into(), json!({"box": 0}));
+        crate::settings::update(&mut s, "loadBalancingWeights", json!({"box": 0}));
         assert_eq!(candidates(&s), [env::LOCAL.to_string()]);
         s.ui.chat.details.run_on.resources.insert(env::LOCAL.into(), (data::now_ms(), None));
         assert_eq!(auto_label(&s), Some("Auto balance unavailable"));
