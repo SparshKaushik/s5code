@@ -305,15 +305,15 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
                 .min_w(0.0)
                 .gap(4.0)
                 .child(text(saved.label.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
-                .child(
-                    text({
-                        let status = env::status(s, &saved.id);
-                        env::ssh::detail(s, &saved.id, &status).unwrap_or_else(|| format!("{} · {status}", saved.base))
-                    })
+                .child({
+                    // SavedEnvironmentRows: a short status, red while failing, the full text on hover.
+                    let (status, failing) = env::row_status(s, &saved.id);
+                    text(env::ssh::detail(s, &saved.id, &status).unwrap_or_else(|| format!("{} · {status}", saved.base)))
                         .font(theme::TEXT_XS)
-                        .color(t.c.muted_foreground)
-                        .truncate(),
-                ),
+                        .color(if failing { t.c.destructive_foreground } else { t.c.muted_foreground })
+                        .truncate()
+                        .help(env::status(s, &saved.id))
+                }),
         )
         .children(env::ssh::row_action(s, t, &saved.id))
         .child(

@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
-use rune::{El, TextEdit, col, icon, row, text};
+use rune::{El, TextEdit, col, row, text};
 use serde_json::{Value, json};
 
 use crate::data::Source;
 use crate::theme::{self, T};
-use crate::{App, Route, icons, kit};
+use crate::{App, Route, kit};
 
 pub mod ssh;
 
@@ -173,6 +173,37 @@ pub fn status(s: &App, key: &str) -> String {
         s5_net::Conn::Closed(reason) if rejected(reason) => format!("Connection failed. Reason: {reason}. Pair this environment again."),
         s5_net::Conn::Closed(reason) if reason.is_empty() => "Reconnecting...".into(),
         s5_net::Conn::Closed(reason) => format!("Failed to connect. Reconnecting... Reason: {reason}"),
+    }
+}
+
+/// The setup wizard's one-word state (`presentSavedCloudEnvironmentConnection`'s `buttonLabel`).
+pub fn short_status(s: &App, key: &str) -> &'static str {
+    let Some(src) = source(s, key) else { return "Not connected" };
+    let st = src.state();
+    match &st.conn {
+        s5_net::Conn::Open if st.shell_ready => "Connected",
+        s5_net::Conn::Open | s5_net::Conn::Connecting => "Connecting…",
+        s5_net::Conn::Closed(reason) if rejected(reason) => "Connection failed",
+        s5_net::Conn::Closed(_) => "Reconnecting…",
+    }
+}
+
+/// The base URL a saved environment was paired at.
+pub fn base_url(s: &App, key: &str) -> Option<String> {
+    s.ui.env.saved.iter().find(|e| e.id == key).map(|e| e.base.clone())
+}
+
+/// The settings row's shorter status (SavedEnvironmentRows' `statusPresentation`), and whether it
+/// reads as an error; the full [`status`] is its tooltip.
+pub fn row_status(s: &App, key: &str) -> (String, bool) {
+    let Some(src) = source(s, key) else { return ("Not connected".into(), false) };
+    let st = src.state();
+    match &st.conn {
+        s5_net::Conn::Open if st.shell_ready => ("Connected".into(), false),
+        s5_net::Conn::Open | s5_net::Conn::Connecting => ("Connecting".into(), false),
+        s5_net::Conn::Closed(reason) if rejected(reason) => (format!("Connection failed: {reason}. Pair this environment again."), true),
+        s5_net::Conn::Closed(reason) if reason.is_empty() => ("Reconnecting".into(), true),
+        s5_net::Conn::Closed(reason) => (format!("Reconnecting: {reason}"), true),
     }
 }
 
@@ -441,49 +472,6 @@ pub fn poll(s: &mut App) -> bool {
     true
 }
 
-/// Settings > Connections > Environments: this machine, each saved environment, and the pairing form.
-pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
-    let mut rows = Vec::new();
-    for key in keys(s) {
-        let mut detail = status(s, &key);
-        if key == LOCAL {
-            detail = format!("This machine · {detail}");
-        } else if let Some(env) = s.ui.env.saved.iter().find(|e| e.id == key) {
-            detail = ssh::detail(s, &key, &detail).unwrap_or_else(|| format!("{} · {detail}", env.base));
-        }
-        let mut actions = row().gap(8.0).center_y();
-        if key != LOCAL {
-            actions = actions.children(ssh::row_action(s, t, &key));
-            let target = key.clone();
-            actions = actions.child(
-                kit::icon_button(&icons::TRASH_2, "Remove environment").variant("ghost").size("icon-xs").on_press(move |s: &mut App| remove(s, &target)).build(t),
-            );
-        }
-        rows.push(
-            row()
-                .key(format!("env-{key}"))
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .center_y()
-                .child(icon(if key == LOCAL { &icons::LAPTOP } else { &icons::SERVER }, 16.0).color(t.c.muted_foreground))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .shrink()
-                        .min_w(0.0)
-                        .gap(2.0)
-                        .child(text(label(s, &key)).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
-                        .child(text(detail).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().max_lines(2)),
-                )
-                .child(actions),
-        );
-    }
-    rows.push(pairing_form(s, t));
-    rows.push(ssh::form(s, t));
-    rows
-}
-
 /// The web's remote pairing fields: a host (or a whole pairing URL) and a pairing code.
 pub fn pairing_form(s: &App, t: &T) -> El {
     let pairing = s.ui.env.pairing.is_some();
@@ -520,6 +508,28 @@ pub fn pairing_form(s: &App, t: &T) -> El {
     form
 }
 
+/// Two saved environments that cannot connect: one refused, one whose credential was rejected.
+fn scene_failing(s: &mut App) {
+    crate::scene_clock(s);
+    for (id, label, reason) in [("box", "Build box", "Connection refused (os error 111)"), ("lab", "Lab", "HTTP error: 401 Unauthorized")] {
+        s.ui.env.saved.push(Saved { id: id.into(), label: label.into(), base: format!("https://{id}.example.com"), bearer: String::new() });
+        let mut state = crate::data::empty_state();
+        state.conn = s5_net::Conn::Closed(reason.into());
+        park(s, id, Source::Fixture(state));
+    }
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("environments-failing", |s| {
+        scene_failing(s);
+        s.route = Route::Settings("connections".into());
+    }),
+    ("wizard-connect-environments", |s| {
+        scene_failing(s);
+        s.ui.wizard.open = true;
+    }),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +560,17 @@ mod tests {
             s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
             assert_eq!(status(&s, "a"), expected);
         }
+        let mut row = |s: &mut App, conn: s5_net::Conn| {
+            remote.conn = conn;
+            s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
+            row_status(s, "a")
+        };
+        assert_eq!(row(&mut s, s5_net::Conn::Connecting), ("Connecting".into(), false));
+        assert_eq!(short_status(&s, "a"), "Connecting…");
+        assert_eq!(row(&mut s, s5_net::Conn::Closed("refused".into())), ("Reconnecting: refused".into(), true));
+        assert_eq!(short_status(&s, "a"), "Reconnecting…");
+        assert_eq!(row(&mut s, s5_net::Conn::Closed("HTTP error: 401 Unauthorized".into())).0, "Connection failed: HTTP error: 401 Unauthorized. Pair this environment again.");
+        assert_eq!(short_status(&s, "a"), "Connection failed");
         assert_eq!(status(&s, "gone"), "Not connected");
     }
 
@@ -575,6 +596,11 @@ mod tests {
         assert_eq!(ids(&s), ["t-here", "t-there"]);
         assert_eq!((owner(&s, "t-there"), owner(&s, "p-there"), owner(&s, "t-here")), ("a".into(), "a".into(), LOCAL.into()));
         assert_eq!(remote_label(&s, &s.state().projects[1]), Some("Box a".into()));
+        // The scope menu's server-icon tooltip (ProjectEnvironmentBadge).
+        let members = |ids: &[&str]| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        assert_eq!(badge(&s, &members(&["p-here", "p-there"])).as_deref(), Some("Also on Box a"));
+        assert_eq!(badge(&s, &members(&["p-there"])).as_deref(), Some("On Box a"));
+        assert_eq!(badge(&s, &members(&["p-here"])), None);
         assert!(!drain(&mut s), "nothing moved, so nothing is copied again");
 
         s.navigate(Route::Thread("t-there".into()));
