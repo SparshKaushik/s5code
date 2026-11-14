@@ -7,6 +7,7 @@ mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
+pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;

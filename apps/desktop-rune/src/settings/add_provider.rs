@@ -1186,7 +1186,7 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     } else if ready && !chatgpt.auth_sent {
         chatgpt.auth_sent = true;
-        request(s, "provider.auth.start", json!({"instanceId": id, "methodId": "chatgpt"}));
+        request(s, "provider.auth.start", json!({"instanceId": id, "methodId": "chatgpt", "callbackMode": "client"}));
         changed = true;
     }
     changed

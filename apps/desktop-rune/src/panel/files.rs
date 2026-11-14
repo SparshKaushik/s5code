@@ -510,6 +510,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             Ok(v) => {
                 show(ui, data::s(&v, "contents").into(), v["truncated"] == true);
                 if ui.line.is_some() {
+                    tx.instant();
                     tx.scroll_center("file-line");
                 }
                 if ui.editor.text != ui.saved {

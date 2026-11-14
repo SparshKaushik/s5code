@@ -65,6 +65,10 @@ fn wizard(source: &'static Source, from: Option<String>) -> Import {
 fn run_import(s: &mut App, scale: f32) {
     let Some(w) = s.ui.settings.profiles.import.as_ref() else { return };
     let (source, from) = (w.source, w.from.clone());
+    if let Some(denied) = crate::desktop::policy::current().denies_cookie_import() {
+        crate::shell::palette::toast(s, "Could not import cookies", Some(&denied));
+        return;
+    }
     let step = match crate::panel::preview::import(s, scale, source, from) {
         Some(job) => Step::Running(job),
         None => Step::Blocked("sessionUnavailable"),
