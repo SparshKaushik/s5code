@@ -153,6 +153,29 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
+    // ChatHeader's parent crumb: a subagent's parent, in this environment only.
+    if let Route::Thread(id) = s.frame_route()
+        && let Some(parent) = crate::chat::timeline::parent_link(s, id).filter(|p| p.subagent)
+    {
+        let target = parent.id.clone();
+        crumbs = crumbs
+            .child(
+                row()
+                    .key("topbar-parent")
+                    .center_y()
+                    .shrink()
+                    .min_w(0.0)
+                    .max_w(200.0)
+                    .cursor(rune::Cursor::Pointer)
+                    .focusable(true)
+                    .role("button")
+                    .label(format!("Open parent thread: {}", parent.title))
+                    .help(parent.title.clone())
+                    .on_press(move |s: &mut App| s.navigate(Route::Thread(target.clone())))
+                    .child(text(parent.title).font(CRUMB).color(t.c.muted_foreground).truncate().shrink()),
+            )
+            .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
+    }
     let title_el = match &s.ui.chat.topbar.rename {
         Some(edit) => text_input(edit, CRUMB)
             .key("topbar-rename")

@@ -179,6 +179,62 @@ pub(super) fn workspace_root(app: &App) -> Option<String> {
 /// The T3 wordmark (shell brand) centred in a square box, as web's square-sized T3Wordmark draws.
 static T3_MARK: rune::Icon = rune::Icon { name: "t3-mark", view: 94.3941, body: "<path d=\"M 17.92 74.717 V 29.277 H 0 V 18.717 H 48.8 V 29.277 H 30.88 V 74.717 H 17.92 Z M 71.194 75.677 C 67.301 75.677 63.434 75.17 59.594 74.157 C 55.754 73.09 52.501 71.597 49.834 69.677 L 54.874 59.757 C 57.008 61.304 59.488 62.53 62.314 63.437 C 65.141 64.344 67.994 64.797 70.874 64.797 C 74.128 64.797 76.688 64.157 78.554 62.877 C 80.421 61.597 81.354 59.837 81.354 57.597 C 81.354 55.464 80.528 53.784 78.874 52.557 C 77.221 51.33 74.554 50.717 70.874 50.717 H 64.954 V 42.157 L 80.554 24.477 L 81.994 29.117 H 52.634 V 18.717 H 91.834 V 27.117 L 76.314 44.797 L 69.754 41.037 H 73.514 C 80.394 41.037 85.594 42.584 89.114 45.677 C 92.634 48.77 94.394 52.744 94.394 57.597 C 94.394 60.744 93.568 63.704 91.914 66.477 C 90.261 69.197 87.728 71.41 84.314 73.117 C 80.901 74.824 76.528 75.677 71.194 75.677 Z\" fill=\"currentColor\"/>" };
 
+/// ChatView's `parentThreadLink`: where a side chat or subagent came from, or the thread a linked
+/// environment's agent delegated this one from.
+#[derive(Debug, PartialEq)]
+pub struct ParentLink {
+    pub id: String,
+    pub title: String,
+    pub side_chat: bool,
+    pub subagent: bool,
+    /// The delegating environment's label, for a delegated thread.
+    pub environment: Option<String>,
+    /// Whether this client can open it (a delegating environment it isn't connected to can't).
+    pub open: bool,
+}
+
+pub fn parent_link(app: &App, thread_id: &str) -> Option<ParentLink> {
+    let state = app.state();
+    let thread = state.threads.iter().find(|t| s(t, "id") == thread_id)?;
+    let lineage = &thread["lineage"];
+    let row = |id: &str| state.threads.iter().find(|t| s(t, "id") == id);
+    let parent = s(lineage, "parentThreadId");
+    let side_chat = lineage["sideChat"] == true;
+    if !parent.is_empty() && (side_chat || s(lineage, "relationshipToParent") == "subagent") {
+        let title = row(parent).map_or("Parent thread", |p| s(p, "title")).to_owned();
+        return Some(ParentLink { id: parent.to_owned(), title, side_chat, subagent: !side_chat, environment: None, open: true });
+    }
+    let from = &thread["delegatedFrom"];
+    let id = s(from, "threadId");
+    if id.is_empty() {
+        return None;
+    }
+    let found = row(id);
+    let title = found.map_or_else(|| s(from, "title"), |p| s(p, "title")).to_owned();
+    let environment = found.map(|p| crate::env::location(app, p)).unwrap_or_else(|| s(&thread["linkOrigin"], "label").to_owned());
+    Some(ParentLink { id: id.to_owned(), title, side_chat: false, subagent: false, environment: Some(environment), open: found.is_some() })
+}
+
+/// The list header's "Subagent of" / "Context from" divider with its "Open parent thread" action.
+fn parent_divider(app: &App, thread_id: &str, t: &T) -> Option<El> {
+    let link = parent_link(app, thread_id)?;
+    let detail = match &link.environment {
+        Some(env) if !env.is_empty() => format!("{} on {env}", link.title),
+        _ => link.title.clone(),
+    };
+    let open = link.open.then(|| {
+        let id = link.id.clone();
+        text("Open parent thread")
+            .font(theme::XS_MEDIUM)
+            .color(t.c.foreground.alpha_mul(0.8))
+            .cursor(rune::Cursor::Pointer)
+            .role("button")
+            .on_press(move |app: &mut App| app.navigate(crate::Route::Thread(id.clone())))
+    });
+    let (glyph, label) = if link.side_chat { (&icons::MESSAGES_SQUARE, "Context from") } else { (&icons::BOT, "Subagent of") };
+    Some(col().key("timeline-row-parent").w_full().pt(4.0).child(divider(t, glyph, label.into(), t.c.muted_foreground, Some(detail), open)))
+}
+
 /// TimelineSystemDivider: a rule either side of an icon, a label and an optional action, with
 /// any detail wrapping under it.
 fn divider(t: &T, glyph: &'static rune::Icon, label: String, color: rune::Color, detail: Option<String>, action: Option<El>) -> El {
@@ -665,6 +721,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     if let Some(control) = history::view(app, thread_id, t) {
         stack = stack.child(col().key("timeline-row-history").w_full().child(control));
     }
+    stack = stack.children(parent_divider(app, thread_id, t));
     for (index, r) in rows.into_iter().enumerate() {
         let marks = marks.next().flatten();
         let steer = if let Row::User(item) = &r { work::steer(item) } else { None };
@@ -909,6 +966,31 @@ pub fn composer_requests(app: &App, t: &T) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::collapses;
+
+    #[test]
+    fn the_parent_link_names_side_chats_subagents_and_delegations() {
+        use super::{ParentLink, parent_link};
+        use serde_json::json;
+        let mut app = crate::App::new();
+        if let crate::data::Source::Fixture(state) = &mut app.src {
+            state.threads.extend([
+                json!({"id": "p", "title": "Parent work", "lineage": {}}),
+                json!({"id": "side", "title": "Side", "lineage": {"parentThreadId": "p", "sideChat": true}}),
+                json!({"id": "sub", "title": "Sub", "lineage": {"parentThreadId": "p", "relationshipToParent": "subagent"}}),
+                json!({"id": "orphan", "title": "Orphan", "lineage": {"parentThreadId": "gone", "relationshipToParent": "subagent"}}),
+                json!({"id": "fork", "title": "Fork", "lineage": {"parentThreadId": "p", "relationshipToParent": "fork"}}),
+                json!({"id": "delegated", "title": "D", "lineage": {}, "delegatedFrom": {"threadId": "far", "title": "Far plan"}, "linkOrigin": {"label": "Studio"}}),
+            ]);
+        }
+        let link = |id: &str| parent_link(&app, id);
+        assert_eq!(link("side"), Some(ParentLink { id: "p".into(), title: "Parent work".into(), side_chat: true, subagent: false, environment: None, open: true }));
+        assert_eq!(link("sub").map(|l| (l.subagent, l.title)), Some((true, "Parent work".into())));
+        assert_eq!(link("orphan").map(|l| l.title), Some("Parent thread".into()), "FAILED: an unseen parent reads Parent thread");
+        assert_eq!(link("fork"), None, "FAILED: a fork is no child");
+        assert_eq!(link("p"), None);
+        let far = link("delegated").expect("FAILED: a delegated thread links its origin");
+        assert_eq!((far.title.as_str(), far.environment.as_deref(), far.open), ("Far plan", Some("Studio"), false), "FAILED: an unconnected origin can't be opened");
+    }
 
     #[test]
     fn long_user_messages_fold() {
