@@ -17,6 +17,9 @@ const REPOSITORY_HOSTS: [&str; 3] = ["github.com", "git.cafe", "staging.git.cafe
 pub struct NewThread {
     prompt: String,
     repository: Option<(String, String)>,
+    /// The provider driver the link asks for, lowercased, and its model.
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Default)]
@@ -131,8 +134,33 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
             Some(repo) => Some(repository(&repo).ok_or("This link names a repository T3 Code cannot read.")?),
             None => None,
         };
-        Ok(NewThread { prompt, repository })
+        let provider = param("provider").map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty());
+        let model = param("model").map(|m| m.trim().to_owned()).filter(|m| !m.is_empty() && provider.is_some());
+        Ok(NewThread { prompt, repository, provider, model })
     })())
+}
+
+/// `resolvePromptLinkModelSelection`: the first ready (else warning) enabled instance of the
+/// provider and the model it names, by slug, name or alias, else the instance's default.
+/// `exact` is false when that default stands in; None when no usable instance exists.
+fn link_model(s: &App, provider: &str, model: Option<&str>) -> Option<((String, String), bool)> {
+    let driver = if provider == "claude" { "claudeagent" } else { provider };
+    let usable: Vec<&serde_json::Value> = crate::chat::composer::providers(s)
+        .iter()
+        .filter(|p| data::s(p, "driver").to_lowercase() == driver && p["enabled"] == true && data::s(p, "availability") != "unavailable")
+        .collect();
+    let instance = usable.iter().find(|p| data::s(p, "status") == "ready").or_else(|| usable.iter().find(|p| data::s(p, "status") == "warning"))?;
+    let models = instance["models"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let requested = model.and_then(|m| {
+        let lower = m.to_lowercase();
+        models
+            .iter()
+            .find(|o| data::s(o, "slug") == m)
+            .or_else(|| models.iter().find(|o| data::s(o, "name").to_lowercase() == lower))
+            .or_else(|| models.iter().find(|o| o["aliases"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str().is_some_and(|v| v.to_lowercase() == lower)))))
+    });
+    let picked = requested.or_else(|| models.iter().find(|o| o["isDefault"] == true)).or_else(|| models.first())?;
+    Some(((data::s(instance, "instanceId").to_owned(), data::s(picked, "slug").to_owned()), model.is_none() || requested.is_some()))
 }
 
 /// Opens a prompt link from anywhere (a second launch, the OS's URL handler), on the UI thread:
@@ -283,6 +311,23 @@ pub fn poll(s: &mut App) -> bool {
             };
             s.navigate(Route::Home { project_id });
             crate::chat::composer::append_to_draft(s, &link.prompt);
+            if let Some(provider) = &link.provider {
+                let resolved = link_model(s, provider, link.model.as_deref());
+                if let Some((selection, _)) = &resolved {
+                    let key = crate::chat::composer::draft_key(s, s.frame_route());
+                    let draft = s.ui.chat.composer.drafts.entry(key).or_default();
+                    draft.model = Some(selection.clone());
+                    draft.effort = None;
+                }
+                let note = match resolved {
+                    None => Some(format!("The link asked for {provider}, which is not set up here, so your default model is used.")),
+                    Some((_, false)) => Some(format!("The link asked for {}, which {provider} does not offer here, so its default model is used.", link.model.as_deref().unwrap_or_default())),
+                    Some(_) => None,
+                };
+                if let Some(note) = note {
+                    crate::shell::palette::toast(s, "Prompt added from a link", Some(&format!("Read it before you send. {note}")));
+                }
+            }
         }
     }
     true
@@ -293,10 +338,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_links_provider_and_model_pick_the_drafts_model() {
+        let mut s = App::new();
+        let model = |s: &App| s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(s, s.frame_route())).and_then(|d| d.model.clone());
+        let toast = |s: &App| crate::shell::palette::toast_title(s).map(str::to_owned);
+        assert!(open(&mut s, "s5code://new?prompt=hi&provider=OpenCode&model=opencode%2Fbig-pickle"));
+        assert_eq!(model(&s), Some(("opencode".into(), "opencode/big-pickle".into())), "FAILED: the named model is picked");
+        assert_eq!(toast(&s), None, "FAILED: an exact match needs no note");
+        assert!(open(&mut s, "s5code://new?prompt=again&provider=opencode&model=nope"));
+        assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: an unknown model falls back to the instance's first");
+        assert_eq!(toast(&s).as_deref(), Some("Prompt added from a link"));
+        assert!(open(&mut s, "s5code://new?prompt=more&provider=claude&model=claude-opus-5-5"));
+        assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: a provider not ready here leaves the model alone");
+    }
+
+    #[test]
     fn prompt_links_parse_like_the_web() {
         let ok = |url: &str| parse(url).expect("a prompt link").expect("valid");
         let link = ok("t3code://new?prompt=Fix%20the%20tests&repo=pingdotgg/t3code");
-        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())) });
+        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())), provider: None, model: None });
         assert_eq!(ok("https://app.s5code.touchtech.club/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
         assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
@@ -327,7 +387,10 @@ mod tests {
         let repo = ("acme".to_string(), "app".to_string());
         let link = new_thread_link("  Fix the tests & ship  ", Some(&repo), Some("claudeAgent"), Some("claude-haiku-5-5")).unwrap();
         assert_eq!(link, "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests+%26+ship&repo=acme%2Fapp&provider=claudeAgent&model=claude-haiku-5-5");
-        assert_eq!(parse(&link).unwrap().unwrap(), NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo) });
+        assert_eq!(
+            parse(&link).unwrap().unwrap(),
+            NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo), provider: Some("claudeagent".into()), model: Some("claude-haiku-5-5".into()) }
+        );
         assert_eq!(new_thread_link("hi", None, None, Some("ignored")).unwrap(), "https://app.s5code.touchtech.club/new?prompt=hi");
         assert_eq!(new_thread_link("   ", None, None, None), None);
         assert_eq!(new_thread_link(&"x".repeat(8_001), None, None, None), None);
