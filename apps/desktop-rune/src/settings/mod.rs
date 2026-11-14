@@ -25,7 +25,7 @@ pub(crate) mod project_icon;
 mod projects;
 mod providers;
 mod scope;
-mod search;
+pub mod search;
 mod snooze;
 mod source_control;
 mod storage;

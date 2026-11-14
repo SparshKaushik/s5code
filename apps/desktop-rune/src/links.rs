@@ -8,7 +8,8 @@ use crate::{App, Route, data};
 
 /// `PROMPT_LINK_MAX_PROMPT_LENGTH`.
 const MAX_PROMPT: usize = 8_000;
-const HOSTED_APP: &str = "https://app.t3.codes";
+/// `DEFAULT_HOSTED_APP_URL` (connectAuth.ts).
+const HOSTED_APP: &str = "https://app.s5code.touchtech.club";
 /// `PROMPT_LINK_REPOSITORY_HOSTS`: git.cafe mirrors GitHub under the same path.
 const REPOSITORY_HOSTS: [&str; 3] = ["github.com", "git.cafe", "staging.git.cafe"];
 
@@ -183,6 +184,37 @@ fn project_for(s: &App, (owner, name): &(String, String)) -> Option<String> {
         .map(|p| data::s(p, "id").to_owned())
 }
 
+/// `buildNewThreadLink` through `promptLinkFor`: the hosted app's `/new` link for a draft's prompt,
+/// or `None` for an empty prompt or one past `PROMPT_LINK_MAX_PROMPT_LENGTH`.
+pub fn new_thread_link(prompt: &str, repository: Option<&(String, String)>, provider: Option<&str>, model: Option<&str>) -> Option<String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT {
+        return None;
+    }
+    let mut url = s5_net::url::Url::parse(HOSTED_APP).ok()?.join("/new").ok()?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("prompt", prompt);
+        if let Some((owner, name)) = repository {
+            q.append_pair("repo", &format!("{owner}/{name}"));
+        }
+        if let Some(provider) = provider.filter(|p| !p.is_empty()) {
+            q.append_pair("provider", provider);
+            if let Some(model) = model.filter(|m| !m.is_empty()) {
+                q.append_pair("model", model);
+            }
+        }
+    }
+    Some(url.to_string())
+}
+
+/// `promptLinkRepositoryOf`: a GitHub project's `owner/name`, by its grouping key.
+pub fn repository_of(project: &serde_json::Value) -> Option<(String, String)> {
+    let identity = &project["repositoryIdentity"];
+    let key = identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str())?;
+    repository(key.strip_prefix("github.com/")?)
+}
+
 /// Lands a waiting link once the shell has loaded projects.
 /// Web's `pairFromLink`: any page can open a pairing link, so the person confirms the backend
 /// before its one-time token is spent.
@@ -265,7 +297,7 @@ mod tests {
         let ok = |url: &str| parse(url).expect("a prompt link").expect("valid");
         let link = ok("t3code://new?prompt=Fix%20the%20tests&repo=pingdotgg/t3code");
         assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())) });
-        assert_eq!(ok("https://app.t3.codes/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
+        assert_eq!(ok("https://app.s5code.touchtech.club/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
         assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
         assert_eq!(ok("s5code-dev://new?prompt=hi").prompt, "hi");
@@ -278,6 +310,7 @@ mod tests {
         assert_eq!(err("t3code://new?prompt=x&repo=not%20a%20repo"), "This link names a repository T3 Code cannot read.");
         assert!(err(&format!("t3code://new?prompt={}", "x".repeat(8_001))).contains("longer than 8,000"));
         assert!(parse("https://example.com/new?prompt=x").is_none());
+        assert!(parse("https://app.t3.codes/new?prompt=x").is_none(), "upstream's hosted app is not this fork's");
         assert!(parse("t3code://pair?pairingUrl=x").is_none());
         // `readPairingAppLink`.
         assert_eq!(pairing_link("s5code://pair?pairingUrl=https%3A%2F%2Fbox.example%2Fpair%23token%3Dabc").as_deref(), Some("https://box.example/pair#token=abc"));
@@ -287,5 +320,21 @@ mod tests {
         assert_eq!(pairing_link("https://pair?pairingUrl=https://box"), None);
         assert!(is_app_link("s5code://pair?pairingUrl=https://box") && is_app_link("s5code://new?prompt=hi") && !is_app_link("s5code://other"));
         assert!(parse("--check-server").is_none());
+    }
+
+    #[test]
+    fn built_links_carry_the_prompt_repo_and_model_and_parse_back() {
+        let repo = ("acme".to_string(), "app".to_string());
+        let link = new_thread_link("  Fix the tests & ship  ", Some(&repo), Some("claudeAgent"), Some("claude-haiku-5-5")).unwrap();
+        assert_eq!(link, "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests+%26+ship&repo=acme%2Fapp&provider=claudeAgent&model=claude-haiku-5-5");
+        assert_eq!(parse(&link).unwrap().unwrap(), NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo) });
+        assert_eq!(new_thread_link("hi", None, None, Some("ignored")).unwrap(), "https://app.s5code.touchtech.club/new?prompt=hi");
+        assert_eq!(new_thread_link("   ", None, None, None), None);
+        assert_eq!(new_thread_link(&"x".repeat(8_001), None, None, None), None);
+        let project = |identity: serde_json::Value| serde_json::json!({ "repositoryIdentity": identity });
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "github.com/acme/app"}))), Some(("acme".into(), "app".into())));
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "github.com/fork/app", "origin": {"canonicalKey": "github.com/acme/app"}}))), Some(("acme".into(), "app".into())));
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "gitlab.com/acme/app"}))), None);
+        assert_eq!(repository_of(&serde_json::json!({})), None);
     }
 }

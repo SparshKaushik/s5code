@@ -174,11 +174,19 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
         })
         .on_key({
             let id = th.id.clone();
-            move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+            move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
+                let plain = !(e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd);
                 match e.key {
                     rune::Key::Enter => super::open_thread(s, &id),
                     rune::Key::Text(ref k) if k == " " => super::open_thread(s, &id),
                     rune::Key::Function(2) => super::start_rename(s, &id),
+                    // `sidebarTree`: Left moves to the row's folder or shelf; a row has no children.
+                    rune::Key::Left if plain => {
+                        if let Some(parent) = super::tree_parent(&Model::build(s), &id) {
+                            super::focus_row(s, parent, tx);
+                        }
+                    }
+                    rune::Key::Right if plain => {}
                     _ => return false,
                 }
                 true
@@ -207,6 +215,7 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
                         ui.drag = Some(Dragging { key: id.clone(), section, dy: d.dy, context, at, scroll });
                         ui.hover = None;
                         // Auto-scroll: near an edge, each move reveals the next item past the target.
+                        let over = ui.drag_over.borrow().clone().or_else(|| over.clone());
                         if edge != 0 && !context
                             && let Some(over) = &over
                         {
@@ -801,6 +810,8 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
         _ => 0,
     });
     let over = drag.and_then(|d| drag_over(cx, &items, d));
+    // The drag handler reads it from here, so a row built before the drag moved still follows.
+    *ui.drag_over.borrow_mut() = over.clone();
     let target = drag.zip(over.as_deref()).and_then(|(d, o)| logic::drop_target(&items, &d.key, o));
     let center = drag.and_then(|d| cx.layout(&format!("sb-li-{}", d.key)).map(|r| r[1] + r[3] / 2.0 + d.dy));
     let target = sticky(target, ui.drag_target.borrow().clone(), center, cx.layout(&marker_key(Marker::PinnedDivider)).map(|r| (r[1], r[1] + r[3])));
@@ -975,10 +986,25 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                 .focus_ring(2.0, -2.0, t.sb.ring)
                 .child(icon(&i::CHEVRON_DOWN, 12.0).color(t.sb.muted_foreground))
                 .child(text(label).font(theme::TEXT_XS).color(t.sb.muted_foreground))
-                .on_press(|s: &mut App| s.ui.shell.sidebar.settled_pages += 1),
+                .on_press(|s: &mut App| s.ui.shell.sidebar.settled_pages += 1)
+                .on_key(|s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
+                    let plain = !(e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd);
+                    if plain && e.key == rune::Key::Left {
+                        super::focus_row(s, super::Shelf::Settled.key(), tx);
+                        return true;
+                    }
+                    false
+                }),
         );
     }
-    el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(content)
+    // rune has no focus setter: a `focus_return` marker unmounting while focus is in this list
+    // hands focus to its target. It shows for one layout, which clears the request.
+    if let Some(target) = &ui.focus_to {
+        content = content.child(el().key("sb-focus-move").absolute(0.0, 0.0).size(0.0, 0.0).focus_return(target.clone()).on_layout(|s: &mut App, _| s.ui.shell.sidebar.focus_to = None));
+    }
+    // A column, so the list keeps its content height: a row would stretch it to the viewport,
+    // leaving nothing to scroll.
+    col().key("sb-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content)
 }
 
 #[cfg(test)]
