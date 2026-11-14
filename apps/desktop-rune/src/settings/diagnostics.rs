@@ -999,17 +999,23 @@ struct Column {
     header: &'static str,
     weight: f32,
     end: bool,
+    /// This column's horizontal padding when it differs from the table's (web `p-2`).
+    pad: Option<f32>,
 }
 
 const fn column(header: &'static str, weight: f32, end: bool) -> Column {
-    Column { header, weight, end }
+    Column { header, weight, end, pad: None }
 }
 
-/// Web's fixed-layout `<table>`: proportional columns, at least `min_w` wide, scrolling
-/// sideways when the card is narrower. `top` aligns cells to the top (`align-top`).
-fn table(t: &T, min_w: f32, pad: f32, top: bool, columns: &[Column], rows: Vec<Vec<El>>) -> El {
+/// Web's `<table>`, at least `min_w` wide and scrolling sideways when the card is narrower.
+/// `fixed` is `table-fixed`: every column takes its percentage of the width, whatever it holds;
+/// otherwise columns start from their content and share what is left. `top` is `align-top`.
+fn table(t: &T, min_w: f32, pad: f32, top: bool, fixed: bool, columns: &[Column], rows: Vec<Vec<El>>) -> El {
     let cell = |c: &Column, content: El, py: f32| {
-        let mut cell = row().grow(c.weight).min_w(0.0).px(pad).py(py);
+        let mut cell = row().grow(c.weight).min_w(0.0).px(c.pad.unwrap_or(pad)).py(py);
+        if fixed {
+            cell = cell.w(0.0);
+        }
         cell = if top { cell.items_start() } else { cell.center_y() };
         if c.end {
             cell = cell.justify_end();
@@ -1117,11 +1123,10 @@ const PROCESS_COLUMNS: [Column; 7] = [
     column("Name", 24.0, false),
     column("CPU", 8.0, true),
     column("Memory", 10.0, true),
-    // Web's 6% Kill column has `p-2`; these cells pad 12, so it borrows from Command.
-    column("Command", 31.0, false),
+    column("Command", 33.0, false),
     column("PID", 8.0, true),
     column("Type", 11.0, false),
-    column("Kill", 8.0, true),
+    Column { header: "Kill", weight: 6.0, end: true, pad: Some(8.0) },
 ];
 
 /// `ProcessDiagnosticsTable`.
@@ -1189,7 +1194,7 @@ fn process_table(s: &App, ui: &Ui, t: &T) -> El {
         })
         .collect();
     let empty = rows.is_empty();
-    let table = table(t, 1040.0, 12.0, false, &PROCESS_COLUMNS, rows);
+    let table = table(t, 1040.0, 12.0, false, true, &PROCESS_COLUMNS, rows);
     if !empty {
         return table;
     }
@@ -1339,7 +1344,7 @@ fn history_table(ui: &Ui, t: &T) -> El {
         })
         .collect();
     let empty = rows.is_empty();
-    let table = table(t, 980.0, 12.0, false, &HISTORY_COLUMNS, rows);
+    let table = table(t, 980.0, 12.0, false, true, &HISTORY_COLUMNS, rows);
     if !empty {
         return table;
     }
@@ -1469,7 +1474,7 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
                 ]
             })
             .collect();
-        table(t, 640.0, 16.0, true, &LATEST_COLUMNS, rows)
+        table(t, 640.0, 16.0, true, false, &LATEST_COLUMNS, rows)
     });
     let common = data.filter(|d| !d.common_failures.is_empty()).map(|d| {
         let rows = d
@@ -1484,7 +1489,7 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
                 ]
             })
             .collect();
-        table(t, 760.0, 16.0, true, &COMMON_COLUMNS, rows)
+        table(t, 760.0, 16.0, true, false, &COMMON_COLUMNS, rows)
     });
     let slowest = data.filter(|d| !d.slowest.is_empty()).map(|d| {
         let rows = d
@@ -1499,7 +1504,7 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
                 ]
             })
             .collect();
-        table(t, 900.0, 16.0, true, &SLOWEST_COLUMNS, rows)
+        table(t, 900.0, 16.0, true, true, &SLOWEST_COLUMNS, rows)
     });
     let logs = data.filter(|d| !d.logs.is_empty()).map(|d| {
         let rows = d
@@ -1521,7 +1526,7 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
                 ]
             })
             .collect();
-        table(t, 920.0, 16.0, true, &LOG_COLUMNS, rows)
+        table(t, 920.0, 16.0, true, true, &LOG_COLUMNS, rows)
     });
     let top = data.filter(|d| !d.top_spans.is_empty()).map(|d| {
         let rows = d
@@ -1537,7 +1542,7 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
                 ]
             })
             .collect();
-        table(t, 760.0, 16.0, true, &TOP_COLUMNS, rows)
+        table(t, 760.0, 16.0, true, true, &TOP_COLUMNS, rows)
     });
     vec![
         section("Latest Failures", latest, "Loading failures...", "No failed spans found."),
