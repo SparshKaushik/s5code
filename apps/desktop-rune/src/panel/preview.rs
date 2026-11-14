@@ -1557,6 +1557,7 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
     let container = (ui.pip_area[2], ui.pip_area[3]);
     let mut area = el()
         .key("browser-pip-area")
+        .transition(rune::Transition::none())
         .pin(Some(0.), Some(theme::layout::TOPBAR_H), Some(right), Some(0.))
         .on_layout(|s: &mut App, r| s.ui.panel.browser.pip_area = r);
     // The chat area's size arrives with the first layout.
@@ -1625,7 +1626,7 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
         })
         .children(handles)
         .child(pill);
-    area = area.child(frame);
+    area = area.child(crate::kit::motion::popup(frame));
     out.push(area);
 }
 

@@ -159,6 +159,8 @@ fn reveal(app: &App, tx: &mut Tx) {
     let targets = targets(app);
     let active = app.ui.chat.timeline.find.active;
     if let Some(row) = targets.get(active) {
+        // Content lands at once (kit::motion); a match jumps into view instead of a 320 ms glide.
+        tx.instant();
         tx.scroll_center(format!("{row}/find-{active}"));
     }
 }
