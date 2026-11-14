@@ -544,17 +544,13 @@ pub fn request_discovery(s: &mut App) {
     s.ui.shell.palette.add.discovery_pending = net(s).map(|net| net.request("server.discoverSourceControl", json!({})));
 }
 /// Where "Add project" starts (`resolveAddProjectEntry`): the environment list when several are
-/// connected, else the sources of the one that is.
+/// connected, the sources of the one that is, else the way to connect one.
 pub fn open(s: &mut App) {
     s.ui.shell.palette.add.clone = None;
     let ready: Vec<String> = crate::env::keys(s).into_iter().filter(|k| crate::env::connected(s, k)).collect();
     match ready.as_slice() {
-        [_, _, ..] => push_page(s, "add-environment", ""),
         [only] => open_in(s, only),
-        [] => {
-            let key = s.ui.env.active.clone();
-            open_in(s, &key);
-        }
+        _ => push_page(s, "add-environment", ""),
     }
 }
 /// The source list for adding a project to the environment `key`.
@@ -572,7 +568,14 @@ pub fn open_in(s: &mut App, key: &str) {
 }
 /// The environments "Add project" can target, as the web's `buildEnvironmentItem`.
 pub fn environment_items(s: &App) -> Vec<Item> {
-    crate::env::keys(s)
+    let keys = crate::env::keys(s);
+    if !keys.iter().any(|k| crate::env::connected(s, k)) {
+        let mut v = item("Connect an environment", "Environments", &crate::icons::SETTINGS, "", Action::Navigate(crate::Route::Settings("connections".into())));
+        v.description = Some("No connected environment can add a project".into());
+        v.fields = keywords(&["connect", "environment", "connection", "settings"]);
+        return vec![v];
+    }
+    keys
         .into_iter()
         .map(|key| {
             let local = key == crate::env::LOCAL;
@@ -981,6 +984,15 @@ mod tests {
         assert_eq!(s.ui.shell.palette.page, "add-project", "one connected environment skips the list");
         assert_eq!(new_projects_root(&s).as_deref(), Some("/home/me/new"));
         assert!(environment_items(&s)[1].disabled, "a disconnected environment is listed but cannot be picked");
+
+        let mut closed = ready("/home/me/new");
+        closed.conn = s5_net::Conn::Closed("gone".into());
+        s.src = crate::data::Source::Fixture(closed);
+        crate::shell::palette::open_add_project(&mut s);
+        let rows = environment_items(&s);
+        assert_eq!(s.ui.shell.palette.page, "add-environment");
+        assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Connect an environment"]);
+        assert!(matches!(&rows[0].action, Action::Navigate(crate::Route::Settings(p)) if p == "connections"));
     }
     #[test]
     fn browse_paths_follow_client_runtime() {

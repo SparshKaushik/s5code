@@ -19,6 +19,8 @@ pub fn items() -> &'static [Item] {
             // Pages this client has, on this platform.
             .filter(|v| super::has_page(v["to"].as_str().unwrap_or_default()))
             .filter(|v| v["macOnly"] != true || cfg!(target_os = "macos"))
+            // Connections sections this client doesn't draw.
+            .filter(|v| !matches!(v["id"].as_str(), Some("load-balancing" | "pull-request-routing")))
             .map(|v| Item {
                 title: v["title"].as_str().unwrap_or("").to_owned(),
                 to: v["to"].as_str().unwrap_or("").to_owned(),
@@ -102,5 +104,6 @@ mod tests {
         assert!(search("contrast").iter().any(|i| i.to == "appearance"));
         assert!(super::items().iter().all(|i| super::super::has_page(&i.to)));
         assert!(search("open source licenses").iter().any(|i| i.to == "about"));
+        assert!(search("load balancing").is_empty(), "no result for a section this client doesn't draw");
     }
 }
