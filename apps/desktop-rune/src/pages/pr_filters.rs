@@ -236,6 +236,20 @@ pub struct ProjectChoice {
     pub unavailable: Option<String>,
 }
 
+/// resolveProjectScope: the Project filter's id, dropped once the projects are known and none is
+/// it; kept while an environment reconnects, until its projects arrive.
+pub fn project_scope<'a>(project: Option<&'a str>, projects: &[Value], known: bool) -> Option<&'a str> {
+    project.filter(|id| !known || projects.iter().any(|p| field(p, "id") == *id))
+}
+
+/// environmentMachineIcon(resolveEnvironmentMachineKind(serverConfig)): an environment's mark in
+/// the Server filter.
+pub fn server_icon(s: &App, env: &str) -> &'static rune::Icon {
+    use crate::settings::connections::{machine_icon, machine_kind};
+    let config = crate::env::source(s, env).and_then(|src| src.state().config.as_ref());
+    machine_icon(machine_kind(config.and_then(|c| c["settings"]["environmentIcon"].as_str()), config.and_then(|c| c["environment"]["platform"]["machine"].as_str())))
+}
+
 /// Whether `c` is the Project filter's project (on the Server filter's environment, if any).
 pub fn chosen(f: &Filters, c: &ProjectChoice) -> bool {
     f.project.as_deref() == Some(c.id.as_str()) && f.environment.as_deref().is_none_or(|env| env == c.environment)
@@ -751,5 +765,14 @@ mod tests {
         let typing = hosted(&p, "labels", None, Some("github.com"));
         assert!(typing.pending && typing.labels.is_empty());
         assert_eq!(input("authors", Some("p1"), None, "octo"), json!({"kind": "authors", "projectId": "p1", "query": "octo"}));
+    }
+
+    #[test]
+    fn the_project_scope_waits_for_the_projects_before_dropping_an_unknown_id() {
+        let projects = [json!({"id": "p1"})];
+        assert_eq!(project_scope(Some("p1"), &projects, true), Some("p1"));
+        assert_eq!(project_scope(Some("gone"), &projects, true), None);
+        assert_eq!(project_scope(Some("gone"), &[], false), Some("gone"), "kept while an environment reconnects");
+        assert_eq!(project_scope(None, &projects, true), None);
     }
 }

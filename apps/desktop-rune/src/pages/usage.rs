@@ -418,6 +418,12 @@ fn env_net<'a>(s: &'a mut App, key: &str) -> Option<&'a mut s5_net::Net> {
     crate::env::source_mut(s, key).and_then(|src| src.net())
 }
 
+/// The reply to `id`, which `key` was sent: `env::drain` hands a parked environment's replies to
+/// `App::src`, so its own client no longer holds them.
+fn take(s: &mut App, key: &str, id: u64) -> Option<Result<Value, Value>> {
+    super::pull_requests::take(s, key, id)
+}
+
 fn config<'a>(s: &'a App, key: &str) -> Option<&'a Value> {
     crate::env::source(s, key).and_then(|src| src.state().config.as_ref())
 }
@@ -454,10 +460,10 @@ pub fn poll(s: &mut App) -> bool {
         changed |= poll_scan(s, &key);
     }
     for (key, id) in std::mem::take(&mut ui(s).cursor_enabling) {
-        match env_net(s, &key).map(|n| n.take_reply(id)) {
-            Some(None) => ui(s).cursor_enabling.push((key, id)),
+        match take(s, &key, id) {
+            None if env_net(s, &key).is_some() => ui(s).cursor_enabling.push((key, id)),
             reply => {
-                if matches!(reply, Some(Some(Ok(_)))) {
+                if matches!(reply, Some(Ok(_))) {
                     refresh_usage(s, false);
                     super::usage_limits::refresh(s, false);
                 }
@@ -475,7 +481,7 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
     let now = s.now_ms;
     let mut changed = false;
     if let Some(id) = s.ui.pages.usage.scans[at].rates
-        && env_net(s, key).is_none_or(|n| n.take_reply(id).is_some())
+        && (take(s, key, id).is_some() || env_net(s, key).is_none())
     {
         let scan = &mut ui(s).scans[at];
         scan.rates = None;
@@ -483,7 +489,7 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
         changed = true;
     }
     if let Some((id, window)) = s.ui.pages.usage.scans[at].pending.clone()
-        && let Some(reply) = env_net(s, key).and_then(|n| n.take_reply(id))
+        && let Some(reply) = take(s, key, id)
     {
         changed = true;
         let scan = &mut ui(s).scans[at];
@@ -2412,6 +2418,20 @@ mod tests {
 
     fn ui_in(zone: Zone, window_days: i64) -> Ui {
         Ui { zone_name: "Asia/Kolkata".into(), zone, window_days, ..Ui::default() }
+    }
+
+    #[test]
+    fn a_parked_environment_s_answer_lands_after_the_drain_hands_it_on() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::offline());
+        crate::env::park(&mut s, "lab", crate::data::Source::Live(s5_net::Net::offline()));
+        let id = env_net(&mut s, "lab").map(|n| n.request("server.getUsageSummary", json!({}))).unwrap();
+        let at = scan_at(&mut s, "lab");
+        ui(&mut s).scans[at].pending = Some((id, json!("window")));
+        crate::env::drain(&mut s);
+        assert!(poll_scan(&mut s, "lab"));
+        let scan = &s.ui.pages.usage.scans[at];
+        assert_eq!((scan.pending.is_none(), scan.error.as_deref()), (true, Some("This environment could not report usage.")));
     }
 
     #[test]

@@ -169,8 +169,25 @@ fn open_clicked(s: &mut App) -> bool {
     let Some(id) = CLICKED.lock().map(|mut c| c.pop()).ok().flatten() else { return false };
     CLICKED.lock().map(|mut c| c.clear()).ok();
     WINDOW.with(|w| w.get().map(|h| h.open()));
-    crate::shell::sidebar::open_thread(s, &id);
+    match id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
+        Some(url) => crate::pages::pr_guide::open_guide(s, url),
+        None => crate::shell::sidebar::open_thread(s, &id),
+    }
     true
+}
+
+/// The notification sound for something other than a thread (a review guide run settling).
+pub fn sound(s: &mut App, kind: Kind) {
+    if has_sound(mode(s)) {
+        play_sound(s, kind);
+    }
+}
+
+/// A desktop notification for something other than a thread; a click hands `id` back here.
+pub fn desktop(s: &App, title: &str, body: &str, id: &str) {
+    if has_desktop(mode(s)) {
+        os::notify(title, body, id, s.ui.panel.waker.clone());
+    }
 }
 
 pub fn poll(s: &mut App, tx: &mut Tx) -> bool {

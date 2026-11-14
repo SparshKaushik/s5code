@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use rune::{Color, Cursor, El, col, el, icon, row, spacer, text};
+use rune::{Color, Cursor, El, Tx, col, el, icon, row, spacer, text};
 use serde_json::{Value, json};
 
 use super::avatars::{Avatars, avatar};
@@ -40,6 +40,9 @@ pub struct Item<'a> {
     pub thread: Option<&'a Value>,
     /// Replies the host did not send.
     pub more: usize,
+    /// The host holds replies this thread lacks (`hasMoreReplies`), and the first comment's link.
+    pub has_more: bool,
+    pub url: Option<String>,
 }
 
 impl Item<'_> {
@@ -76,9 +79,11 @@ pub fn items(a: &Value) -> Vec<Item<'_>> {
             continue;
         }
         let more = th["commentCount"].as_u64().map_or(0, |n| (n as usize).saturating_sub(ordered.len()));
+        let has_more = more > 0 || th.get("nextCommentsCursor").is_some_and(|c| !c.is_null());
+        let url = ordered.iter().find_map(|c| c.get("url").and_then(Value::as_str)).map(str::to_string);
         let root = ordered.remove(0);
         claimed.extend(std::iter::once(&root).chain(&ordered).map(|c| field(c, "id").to_string()));
-        threads.push(Item { id: field(th, "id"), at: ts(&root, "createdAt"), root, replies: ordered, thread: Some(th), more });
+        threads.push(Item { id: field(th, "id"), at: ts(&root, "createdAt"), root, replies: ordered, thread: Some(th), more, has_more, url });
     }
     threads.sort_by_key(|i| i.at.unwrap_or(0));
     let mut threads = threads.into_iter().peekable();
@@ -91,7 +96,7 @@ pub fn items(a: &Value) -> Vec<Item<'_>> {
         while let Some(next) = threads.next_if(|i| i.at.unwrap_or(0) < at.unwrap_or(0)) {
             out.push(next);
         }
-        out.push(Item { id: field(c, "id"), at, root: Cow::Borrowed(c), replies: Vec::new(), thread: None, more: 0 });
+        out.push(Item { id: field(c, "id"), at, root: Cow::Borrowed(c), replies: Vec::new(), thread: None, more: 0, has_more: false, url: None });
     }
     out.extend(threads);
     out
@@ -492,6 +497,193 @@ pub fn commit_row(s: &App, t: &T, e: &Event<'_>) -> El {
     out.on_press(move |s: &mut App| pr_detail::open_commit(s, oid.clone()))
 }
 
+/// PullRequestTimelineRow: one event, or a run of plain comments that collapse together.
+pub enum Row<'e, 'a> {
+    Event(&'e Event<'a>),
+    Comments(Vec<&'e Event<'a>>),
+}
+
+/// groupPullRequestTimelineConversations: consecutive comments and reviews that are neither a
+/// review thread nor a verdict share one row.
+pub fn rows<'e, 'a>(events: &'e [Event<'a>]) -> Vec<Row<'e, 'a>> {
+    let mut out: Vec<Row<'e, 'a>> = Vec::new();
+    for e in events {
+        let plain = e.item.as_ref().is_some_and(|item| item.thread.is_none() && outcome(field(&item.root, "reviewState")).is_none());
+        if !plain {
+            out.push(Row::Event(e));
+        } else if let Some(Row::Comments(run)) = out.last_mut() {
+            run.push(e);
+        } else {
+            out.push(Row::Comments(vec![e]));
+        }
+    }
+    out
+}
+
+/// A comment card as the Summary tab draws it, with a thread's replies under it.
+pub type Card = fn(&App, &T, &Value, &[Cow<Value>]) -> El;
+
+/// PullRequestTimelineTab's rows for `events`, in their order.
+pub fn timeline_rows(s: &App, t: &T, events: &[Event<'_>], term: &str, card: Card) -> Vec<El> {
+    rows(events)
+        .into_iter()
+        .map(|r| match r {
+            Row::Comments(run) => comment_group(s, t, &run, card),
+            Row::Event(e) => match (&e.item, e.kind) {
+                (Some(item), _) if item.thread.is_some() => thread_row(s, t, e, item, card),
+                (Some(item), _) => beside(marker(actor_mark(s, t, &e.actor)), card(s, t, &item.root, &item.replies)).key(format!("pr-conversation-{}", item.id)),
+                (None, "commit") => commit_row(s, t, e),
+                _ => lifecycle_row(s, t, e, term),
+            },
+        })
+        .collect()
+}
+
+/// ActorTimelineMarker's avatar, or the comment glyph without an actor.
+fn actor_mark(s: &App, t: &T, actor: &Value) -> El {
+    if actor.is_object() { avatar(&s.ui.pages.avatars, actor, 28.0, t) } else { icon(&i::MESSAGE_SQUARE, 14.0).color(t.c.muted_foreground) }
+}
+
+/// A timeline marker beside its row's content, both from the top.
+fn beside(mark: El, content: El) -> El {
+    row().w_full().gap(16.0).items_start().child(mark).child(col().grow(1.0).shrink().min_w(0.0).child(content))
+}
+
+fn toggle_open(s: &mut App, key: &str) {
+    let open = &mut s.ui.pages.detail.open_comments;
+    if !open.remove(key) {
+        open.insert(key.to_string());
+    }
+}
+
+fn chevron(t: &T, open: bool) -> El {
+    icon(&i::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).rotate(if open { 180f32.to_radians() } else { 0.0 })
+}
+
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", crate::chat::details::thousands(n as u64), if n == 1 { one } else { many })
+}
+
+/// ConversationGroup: a run of comments behind one "N comments" row, closed until opened.
+fn comment_group(s: &App, t: &T, run: &[&Event<'_>], card: Card) -> El {
+    let Some(first) = run.first() else { return el() };
+    let key = format!("comments:{}", first.item.as_ref().map_or("empty", |i| i.id));
+    let open = s.ui.pages.detail.open_comments.contains(&key);
+    let mut actors: Vec<&Value> = Vec::new();
+    for e in run {
+        if e.actor["login"].as_str().is_some_and(|login| !actors.iter().any(|a| a["login"] == login)) {
+            actors.push(&e.actor);
+        }
+    }
+    let mark = actor_mark(s, t, actors.first().copied().unwrap_or(&Value::Null)).opacity(if open { 1.0 } else { 0.45 });
+    let comments = counted(run.len(), "comment", "comments");
+    let when = first.at.map_or_else(String::new, |at| relative(at, s.now_ms));
+    let toggle = key.clone();
+    let trigger = row()
+        .key(format!("pr-timeline-{key}"))
+        .w_full()
+        .py(8.0)
+        .gap(12.0)
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .label(comments.clone())
+        .opacity(if open { 1.0 } else { 0.55 })
+        .child(
+            col()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .child(text(comments).font(theme::weight(theme::TEXT_XS, theme::SEMIBOLD)).color(if open { t.c.foreground } else { t.c.muted_foreground }))
+                .child(text(format!("{} · {when}", counted(actors.len(), "author", "authors"))).font(theme::TEXT_3XS).color(t.c.muted_foreground).truncate()),
+        )
+        .child(chevron(t, open))
+        .on_press(move |s: &mut App| toggle_open(s, &toggle));
+    let mut content = col().w_full().child(trigger);
+    if open {
+        content = content.child(col().w_full().mt(4.0).gap(4.0).children(run.iter().filter_map(|e| e.item.as_ref()).map(|item| card(s, t, &item.root, &item.replies))));
+    }
+    beside(marker(mark).mt(7.0), content).key(key)
+}
+
+/// ReviewThreadEvent: the thread's file and state over its comments, open unless resolved or
+/// dismissed, then the replies the host held back.
+fn thread_row(s: &App, t: &T, e: &Event<'_>, item: &Item<'_>, card: Card) -> El {
+    let th = item.thread.unwrap_or(&Value::Null);
+    let resolved = th["isResolved"] == true;
+    let dismissed = outcome(field(&item.root, "reviewState")) == Some("dismissed");
+    // A thread's resolution or dismissal starts its disclosure over, in the new state.
+    let key = format!("thread:{}:{resolved}:{dismissed}", item.id);
+    let expanded = (!resolved && !dismissed) != s.ui.pages.detail.open_comments.contains(&key);
+    let (muted, small) = (t.c.muted_foreground, theme::TEXT_2XS);
+    let place = match th["line"].as_u64() {
+        Some(line) => format!("{}:{line}", field(th, "path")),
+        None => field(th, "path").to_string(),
+    };
+    let toggle = key.clone();
+    let mut head = row()
+        .key(format!("pr-timeline-{key}"))
+        .w_full()
+        .px(8.0)
+        .py(8.0)
+        .gap(8.0)
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .label(place.clone())
+        .child(icon(&i::FILE_CODE_CORNER, 12.0).color(muted))
+        .child(text(place).font(theme::mono(small)).color(muted).truncate().shrink().min_w(0.0));
+    if resolved {
+        let ink = t.c.success_foreground;
+        head = head.child(row().gap(4.0).center_y().child(icon(&i::CIRCLE_CHECK, 12.0).color(ink)).child(text("Resolved").font(theme::weight(small, theme::MEDIUM)).color(ink)));
+    }
+    for (on, label) in [(dismissed, "Review dismissed"), (th["isOutdated"] == true, "Outdated")] {
+        if on {
+            head = head.child(text(label).font(theme::weight(small, theme::MEDIUM)).color(muted));
+        }
+    }
+    if !expanded {
+        let replies = item.replies.len() + item.more;
+        let mut summary = format!("· {}", e.actor["login"].as_str().unwrap_or("ghost"));
+        if replies > 0 {
+            summary = format!("{summary} · {}", counted(replies, "reply", "replies"));
+        }
+        head = head.child(text(summary).font(small).color(muted));
+    }
+    head = head.child(spacer()).child(chevron(t, expanded)).on_press(move |s: &mut App| toggle_open(s, &toggle));
+    let mut content = col().w_full().child(head);
+    if expanded {
+        content = content.child(card(s, t, &item.root, &item.replies));
+    }
+    let mark = actor_mark(s, t, &e.actor).opacity(if expanded { 1.0 } else { 0.45 });
+    beside(marker(mark), content.children(more_replies(t, item))).key(format!("pr-conversation-{}", item.id))
+}
+
+/// PullRequestMoreReplies' text: how many replies the host held back, when it says.
+pub fn more_replies_label(more: usize, has_more: bool) -> Option<String> {
+    has_more.then(|| if more > 0 { format!("{} more", counted(more, "reply", "replies")) } else { "More replies".into() })
+}
+
+/// PullRequestMoreReplies: the replies the host held back, and where to read them.
+pub fn more_replies(t: &T, item: &Item<'_>) -> Option<El> {
+    let label = more_replies_label(item.more, item.has_more)?;
+    let mut out = row().px(8.0).py(4.0).gap(8.0).center_y().child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    if let Some(url) = item.url.clone() {
+        out = out.child(
+            text("View on host")
+                .font(theme::TEXT_XS)
+                .color(t.c.muted_foreground)
+                .key(format!("pr-more-replies-{}", item.id))
+                .cursor(Cursor::Pointer)
+                .role("link")
+                .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                    let _ = tx.open_url(&url);
+                }),
+        );
+    }
+    Some(out)
+}
+
 // ---- commit scope -----------------------------------------------------------------------
 
 /// The scoped commit, while the pull request still has it: after a force-push it reads as
@@ -669,6 +861,61 @@ mod tests {
         assert_eq!(timeline(&closed, &a)[0].title, "Pull request closed");
         closed["closedAt"] = Value::Null;
         assert_eq!(timeline(&closed, &a).len(), 3);
+    }
+
+    #[test]
+    fn timeline_comments_group_until_a_commit_verdict_or_thread_and_threads_count_held_back_replies() {
+        let d = json!({"createdAt": "2026-07-01T00:00:00Z", "author": {"login": "a"}, "mergedAt": "2026-07-06T00:00:00Z"});
+        let a = json!({
+            "commits": [{"oid": "1baf7bdcafe", "messageHeadline": "fix", "committedDate": "2026-07-02T00:00:00Z", "authors": []}],
+            "comments": [
+                comment("new-1", "b", "2026-07-05T00:00:00Z", json!({})),
+                comment("approval", "c", "2026-07-04T12:00:00Z", json!({"kind": "review", "reviewState": "APPROVED"})),
+                comment("new-2", "b", "2026-07-04T00:00:00Z", json!({})),
+                comment("remark", "c", "2026-07-03T00:00:00Z", json!({"kind": "review", "reviewState": "COMMENTED"})),
+                comment("old-1", "b", "2026-07-01T12:00:00Z", json!({})),
+                comment("old-2", "b", "2026-07-01T06:00:00Z", json!({})),
+            ],
+            "reviewThreads": [
+                {"id": "t1", "path": "a.rs", "isResolved": false, "commentCount": 3, "comments": [
+                    {"id": "tc1", "author": {"login": "b"}, "body": "x", "createdAt": "2026-07-03T12:00:00Z", "url": "https://host.test/1#tc1"},
+                ]},
+                {"id": "t2", "path": "b.rs", "isResolved": false, "nextCommentsCursor": "c2", "comments": [
+                    {"id": "tc2", "author": {"login": "b"}, "body": "y", "createdAt": "2026-07-01T00:30:00Z", "url": null},
+                ]},
+            ],
+        });
+        let events = timeline(&d, &a);
+        let name = |e: &Event| e.item.as_ref().map(|i| i.id.to_string()).or_else(|| e.commit.map(|c| field(c, "oid").to_string())).unwrap_or_else(|| e.kind.to_string());
+        let got: Vec<Vec<String>> = rows(&events)
+            .iter()
+            .map(|r| match r {
+                Row::Event(e) => vec!["event".to_string(), name(e)],
+                Row::Comments(run) => std::iter::once("comments".to_string()).chain(run.iter().map(|e| name(e))).collect(),
+            })
+            .collect();
+        let row = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            [
+                row(&["event", "merged"]),
+                row(&["comments", "new-1"]),
+                row(&["event", "approval"]),
+                row(&["comments", "new-2"]),
+                row(&["event", "t1"]),
+                row(&["comments", "remark"]),
+                row(&["event", "1baf7bdcafe"]),
+                row(&["comments", "old-1", "old-2"]),
+                row(&["event", "t2"]),
+                row(&["event", "opened"]),
+            ]
+        );
+        let thread = |id: &str| events.iter().filter_map(|e| e.item.as_ref()).find(|i| i.id == id).map(|i| (more_replies_label(i.more, i.has_more), i.url.clone()));
+        assert_eq!(thread("t1"), Some((Some("2 more replies".to_string()), Some("https://host.test/1#tc1".to_string()))));
+        assert_eq!(thread("t2"), Some((Some("More replies".to_string()), None)), "a cursor alone means the host holds more");
+        assert_eq!(more_replies_label(1, true).as_deref(), Some("1 more reply"));
+        assert_eq!(more_replies_label(1234, true).as_deref(), Some("1,234 more replies"));
+        assert_eq!(more_replies_label(0, false), None);
     }
 
     #[test]

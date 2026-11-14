@@ -21,6 +21,11 @@ const SIBLING_MIN: f32 = 360.0;
 const WIDTH_KEY: &str = "pullRequestPanelWidth";
 /// SortableTabList's PointerSensor activation distance.
 const DRAG_DISTANCE: f32 = 6.0;
+const TAB_GAP: f32 = 4.0;
+/// closedViewStore keeps the 20 newest closed views.
+const CLOSED_CAP: usize = 20;
+/// The tab strip's horizontal scroll viewport.
+pub(super) const STRIP: &str = "pr-tab-scroll";
 
 #[derive(Default)]
 pub struct Tabs {
@@ -32,6 +37,8 @@ pub struct Tabs {
     drag: Option<(usize, f32)>,
     /// The width while the handle is dragged; it is saved when the drag ends.
     resizing: Option<f32>,
+    /// Closed tabs' entries for `view.reopenClosed`, newest first.
+    closed: Vec<Value>,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -80,11 +87,46 @@ fn activate(u: &mut Ui, url: &str) {
     }
 }
 
+/// closedViewStore.remember for the tabs a close removed: the shown tab goes last, so it
+/// reopens first, and a tab closed again replaces its older entry.
+fn remember(u: &mut Ui, removed: Vec<Value>) {
+    let active = u.selected.clone().or_else(|| u.hidden.clone());
+    let (shown, rest): (Vec<Value>, Vec<Value>) = removed.into_iter().partition(|e| active.as_deref() == Some(field(e, "url")));
+    for e in rest.into_iter().chain(shown) {
+        let url = field(&e, "url").to_string();
+        u.tabs.closed.retain(|c| field(c, "url") != url);
+        u.tabs.closed.insert(0, e);
+    }
+    u.tabs.closed.truncate(CLOSED_CAP);
+}
+
+/// ReopenClosedViewShortcut (planNextReopen, openPullRequest): the newest closed tab that isn't
+/// already showing opens at the end of the strip and shows; the key of its tab, to reveal.
+pub(super) fn reopen(u: &mut Ui) -> Option<String> {
+    while !u.tabs.closed.is_empty() {
+        let e = u.tabs.closed.remove(0);
+        let url = field(&e, "url").to_string();
+        let open = index(u, &url).is_some();
+        if open && u.selected.is_some() {
+            continue;
+        }
+        let key = tab_key(&e);
+        if !open {
+            u.tabs.open.push(e);
+        }
+        u.selected = Some(url);
+        u.hidden = None;
+        return Some(key);
+    }
+    None
+}
+
 /// closeSurface: closing the shown tab shows the one that takes its place, else the one before;
 /// closing the last empties the panel.
 pub(super) fn close(u: &mut Ui, url: &str) {
     let Some(at) = index(u, url) else { return };
-    u.tabs.open.remove(at);
+    let removed = u.tabs.open.remove(at);
+    remember(u, vec![removed]);
     let next = u.tabs.open.get(at.min(u.tabs.open.len().saturating_sub(1))).map(|e| field(e, "url").to_string());
     if u.selected.as_deref() == Some(url) {
         u.selected = next;
@@ -96,15 +138,17 @@ pub(super) fn close(u: &mut Ui, url: &str) {
 /// closeOtherSurfaces: the kept tab shows.
 fn close_others(u: &mut Ui, url: &str) {
     let Some(at) = index(u, url) else { return };
-    let kept = u.tabs.open.swap_remove(at);
-    u.tabs.open = vec![kept];
+    let kept = u.tabs.open.remove(at);
+    let removed = std::mem::replace(&mut u.tabs.open, vec![kept]);
+    remember(u, removed);
     activate(u, url);
 }
 
 /// closeSurfacesToRight: the shown tab stays unless it was closed, when this one shows.
 fn close_right(u: &mut Ui, url: &str) {
     let Some(at) = index(u, url) else { return };
-    u.tabs.open.truncate(at + 1);
+    let removed = u.tabs.open.split_off(at + 1);
+    remember(u, removed);
     if u.selected.as_deref().is_some_and(|a| index(u, a).is_none()) {
         u.selected = Some(url.to_string());
     }
@@ -115,7 +159,8 @@ fn close_right(u: &mut Ui, url: &str) {
 
 /// closeAllSurfaces.
 fn close_all(u: &mut Ui) {
-    u.tabs.open.clear();
+    let removed = std::mem::take(&mut u.tabs.open);
+    remember(u, removed);
     u.selected = None;
     u.hidden = None;
 }
@@ -127,6 +172,20 @@ fn move_tab(u: &mut Ui, from: usize, to: usize) {
     }
     let tab = u.tabs.open.remove(from);
     u.tabs.open.insert(to, tab);
+}
+
+/// Each tab's x along the strip and its width, from the widths alone so scrolling the strip
+/// doesn't re-run the view.
+fn spans(widths: &[f32]) -> Vec<(f32, f32)> {
+    let mut x = 0.0;
+    widths
+        .iter()
+        .map(|&w| {
+            let at = x;
+            x += w + TAB_GAP;
+            (at, w)
+        })
+        .collect()
 }
 
 /// closestCenter: the tab whose centre lies nearest the dragged tab's, from each tab's x and width.
@@ -205,13 +264,21 @@ fn fresh<'a>(s: &'a App, stored: &'a Value) -> &'a Value {
     detail.or_else(|| listed(s, url)).unwrap_or(stored)
 }
 
-fn tab_key(e: &Value) -> String {
+pub(super) fn tab_key(e: &Value) -> String {
     format!("pr-tab-{}", super::pull_requests::key(e))
 }
 
 /// SortableTabList: a press shows the tab; past the activation distance the tab follows the
 /// pointer and drops where its centre lands.
 fn drag_tab(s: &mut App, d: &mut rune::Drag, tx: &mut Tx, n: usize, url: &str, spans: &[(f32, f32)]) {
+    // handleTabAuxClick: a middle click released over the tab closes it.
+    if tx.button() == rune::PointerButton::Middle {
+        let over = (0.0..=d.w).contains(&d.x) && (0.0..=d.h).contains(&d.y);
+        if d.phase == Phase::Up && !d.cancelled() && over {
+            close(ui(s), url);
+        }
+        return;
+    }
     let dx = crate::desktop::from_window(d.dx, 0.0).0;
     let tabs = &mut ui(s).tabs;
     match d.phase {
@@ -275,6 +342,7 @@ fn tab(s: &App, t: &T, n: usize, stored: &Value, spans: &[(f32, f32)]) -> El {
         .label(title.clone())
         .help(title.clone())
         .focusable(true)
+        .pointer_buttons([rune::PointerButton::Middle])
         .on_drag(move |s: &mut App, d: &mut rune::Drag, tx: &mut Tx| drag_tab(s, d, tx, n, &drag_url, &spans))
         .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
             let press = matches!(e.key, rune::Key::Enter) || matches!(e.key, rune::Key::Text(ref k) if k == " ");
@@ -318,14 +386,17 @@ fn tab_menu(s: &App, t: &T, url: &str, x: f32, y: f32, overlays: &mut Vec<El>) {
         .overlay(&kit::theme(t), overlays);
 }
 
-/// The tab strip, then the maximize and panel toggles (PullRequestsPage's openPanelControls).
+/// The tab strip, scrolling sideways once the tabs overflow (RightPanelTabs' ScrollArea), then
+/// the maximize and panel toggles (PullRequestsPage's openPanelControls).
 fn strip(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let shown = shown(s);
-    let spans: Vec<(f32, f32)> = shown.iter().map(|e| cx.layout_with(tab_key(e).as_str(), |r| (r[0], r[2])).unwrap_or_default()).collect();
-    let mut tabs = row().grow(1.0).shrink().min_w(0.0).gap(4.0).center_y().role("tablist");
+    let widths: Vec<f32> = shown.iter().map(|e| cx.layout_with(tab_key(e).as_str(), |r| r[2]).unwrap_or_default()).collect();
+    let spans = spans(&widths);
+    let mut list = row().h_full().gap(TAB_GAP).center_y().role("tablist");
     for (n, e) in shown.iter().enumerate() {
-        tabs = tabs.child(tab(s, t, n, e, &spans));
+        list = list.child(tab(s, t, n, e, &spans));
     }
+    let tabs = row().key(STRIP).grow(1.0).min_w(0.0).h_full().scroll_x().scroll_edge_fade(24.0).child(list);
     row()
         .key("pr-panel-tabs")
         .w_full()
@@ -460,6 +531,7 @@ mod tests {
     #[test]
     fn a_dragged_tab_drops_where_its_centre_is_nearest() {
         let spans = [(0.0, 40.0), (44.0, 40.0), (88.0, 60.0)];
+        assert_eq!(super::spans(&[40.0, 40.0, 60.0]), spans, "positions follow from the widths and the gap");
         assert_eq!(drop_index(&spans, 0, 5.0), Some(0));
         assert_eq!(drop_index(&spans, 0, 50.0), Some(1));
         assert_eq!(drop_index(&spans, 0, 80.0), Some(2));
@@ -471,6 +543,37 @@ mod tests {
         assert_eq!(numbers(&u), [2, 3, 1]);
         move_tab(&mut u, 2, 0);
         assert_eq!((numbers(&u), u.selected.clone()), (vec![1, 2, 3], Some(url(1))), "moving never changes the shown tab");
+    }
+
+    #[test]
+    fn reopening_brings_back_the_newest_closed_tab_and_skips_ones_already_showing() {
+        let reopened = |u: &mut Ui| reopen(u).and(u.selected.clone());
+        let mut u = opened(&[1, 2, 3, 4], 2);
+        close_all(&mut u);
+        assert_eq!(reopened(&mut u), Some(url(2)), "the shown tab is remembered last, so it reopens first");
+        assert_eq!(reopened(&mut u), Some(url(4)));
+        assert_eq!(numbers(&u), [2, 4], "reopened tabs join the end of the strip");
+        close(&mut u, &url(4));
+        assert_eq!(reopened(&mut u), Some(url(4)), "a tab closed again moves to the front");
+        u.tabs.open.push(pr(3));
+        assert_eq!(reopened(&mut u), Some(url(1)), "a tab already showing is dropped");
+        assert_eq!((reopen(&mut u), numbers(&u)), (None, vec![2, 4, 3, 1]));
+
+        let mut u = opened(&[1, 2, 3], 1);
+        close_right(&mut u, &url(1));
+        assert_eq!(reopened(&mut u), Some(url(3)), "of tabs closed together the rightmost reopens first");
+
+        let mut u = opened(&[1, 2], 2);
+        close(&mut u, &url(2));
+        u.tabs.open.push(pr(2));
+        u.hidden = u.selected.take();
+        assert_eq!(reopened(&mut u), Some(url(2)), "behind a hidden panel an open tab shows again");
+        assert_eq!((numbers(&u), u.hidden.clone()), (vec![1, 2], None));
+
+        let mut u = opened(&(1..=25).collect::<Vec<u64>>(), 1);
+        close_all(&mut u);
+        assert_eq!(u.tabs.closed.len(), CLOSED_CAP);
+        assert_eq!(reopened(&mut u), Some(url(1)));
     }
 
     #[test]

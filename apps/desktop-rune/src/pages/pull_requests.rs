@@ -742,8 +742,9 @@ pub(super) fn targets(s: &App) -> Vec<Target> {
     let envs: Vec<String> = capable(s).into_iter().filter(|env| f.environment.as_ref().is_none_or(|e| e == env)).collect();
     let projects = env_projects(s, &envs);
     let known = envs.iter().all(|env| crate::env::source(s, env).is_some_and(|src| src.state().shell_ready));
-    let envs = query_environments(envs, &projects, f.project.as_deref(), known);
-    if !known || f.project.is_some() {
+    let project = super::pr_filters::project_scope(f.project.as_deref(), &projects, known);
+    let envs = query_environments(envs, &projects, project, known);
+    if !known || project.is_some() {
         return envs.into_iter().map(|env| (env, None)).collect();
     }
     let mut assignment = assign(&projects, &envs);
@@ -909,8 +910,8 @@ fn reread(u: &mut Ui) {
 }
 
 /// Watches each environment's `pullRequests.subscribeRefreshes` while the page shows; a new
-/// revision means a turn finished somewhere, so the list and the open detail read again (the
-/// queries' refreshTrigger).
+/// revision means a turn finished there, so what that environment listed and the open detail it
+/// owns read again (each query's own refreshTrigger, keyed by its environmentId).
 fn watch_refreshes(s: &mut App, on: bool) -> bool {
     let envs: Vec<String> = if on { targets(s).into_iter().map(|t| t.0).collect() } else { Vec::new() };
     for gone in std::mem::take(&mut ui(s).watching).into_iter().filter(|env| !envs.contains(env)) {
@@ -918,21 +919,36 @@ fn watch_refreshes(s: &mut App, on: bool) -> bool {
             net.unwatch_resource(REFRESHES, json!({}));
         }
     }
-    ui(s).turns.retain(|env, _| envs.contains(env));
-    let mut moved = false;
+    let mut revisions = Vec::new();
     for env in &envs {
         let Some(net) = crate::env::net_of(s, env) else { continue };
         net.watch_resource(REFRESHES, json!({}));
-        let revision = net.resource(REFRESHES, json!({})).and_then(Value::as_u64);
-        moved |= turned(ui(s).turns.entry(env.clone()).or_default(), revision);
+        revisions.push((env.clone(), net.resource(REFRESHES, json!({})).and_then(Value::as_u64)));
     }
-    ui(s).watching = envs;
-    if !moved {
+    let u = ui(s);
+    u.turns.retain(|env, _| envs.contains(env));
+    let moved = moved_since(&mut u.turns, revisions);
+    u.watching = envs;
+    if moved.is_empty() {
         return false;
     }
-    after_turn(ui(s));
-    super::pr_detail::refresh(s);
+    let active = s.ui.env.active.clone();
+    after_turn(ui(s), &moved, &active);
+    if s.ui.pages.detail.entry.as_ref().is_some_and(|e| moved.iter().any(|env| env.as_str() == origin(e, &active))) {
+        super::pr_detail::refresh(s);
+    }
     true
+}
+
+/// The environments whose refresh revision moved since it was last seen.
+fn moved_since(turns: &mut HashMap<String, Option<u64>>, revisions: Vec<(String, Option<u64>)>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (env, revision) in revisions {
+        if turned(turns.entry(env.clone()).or_default(), revision) {
+            out.push(env);
+        }
+    }
+    out
 }
 
 fn turned(seen: &mut Option<u64>, now: Option<u64>) -> bool {
@@ -950,10 +966,25 @@ fn largest_read(entries: &[Value]) -> u64 {
     counts.into_values().max().unwrap_or(0)
 }
 
-/// A turn rereads what the page shows, and re-measures sizes.
-fn after_turn(u: &mut Ui) {
-    u.stats_asked.clear();
-    reread_loaded(u);
+/// A turn on `moved` asks those environments again for what they listed (the others' answers
+/// stay) and re-measures their rows. Once "Load more" continued the list, one environment's first
+/// page cannot replace its share, so the whole loaded list reads again.
+fn after_turn(u: &mut Ui, moved: &[String], active: &str) {
+    if u.appending {
+        u.stats_asked.clear();
+        reread_loaded(u);
+        return;
+    }
+    let rows = u.result.as_ref().and_then(|r| r["entries"].as_array()).into_iter().flatten();
+    for e in rows.filter(|e| moved.iter().any(|env| env.as_str() == origin(e, active))) {
+        u.stats_asked.remove(&key(e));
+    }
+    u.sent.retain(|t| !moved.contains(&t.0));
+    u.pending.retain(|(env, _)| !moved.contains(env));
+    for read in [&mut u.baseline, &mut u.facets].into_iter().chain(u.partitions.iter_mut()) {
+        read.sent.retain(|t| !moved.contains(&t.0));
+        read.pending.retain(|(env, _)| !moved.contains(env));
+    }
 }
 
 /// refreshList(true): every read asks again, the first page grown to hold what "Load more" had
@@ -1325,6 +1356,15 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         if !repeat {
             super::pr_tabs::close(u, &url);
         }
+        return true;
+    }
+    // ReopenClosedViewShortcut: the newest closed tab reopens; with none left the key goes on to
+    // the thread panel's closed views.
+    if crate::panel::shortcut(s, e, "view.reopenClosed")
+        && !tx.key_repeat()
+        && let Some(tab) = super::pr_tabs::reopen(ui(s))
+    {
+        tx.scroll_into_view_in(super::pr_tabs::STRIP, tab);
         return true;
     }
     if crate::panel::shortcut(s, e, "rightPanel.toggle") {
@@ -1737,7 +1777,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     }
     let header = top_bar(s, t, overlays);
     let marker = el().key(CONDENSE_MARKER).w_full().h(1.0);
-    let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(col().w_full().child(toolbar(s, t, overlays)).child(marker));
+    let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(col().w_full().child(toolbar(s, t, toolbar_inline(cx), overlays)).child(marker));
     match (&u.result, &u.error) {
         (None, None) => content = content.child(ghost(t, 7, Some("Loading pull requests…".into()))),
         (None, Some(error)) => content = content.child(unavailable(t, error, !u.pending.is_empty())),
@@ -1988,10 +2028,18 @@ fn top_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .children(panel)
 }
 
-fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
+/// The list column is at least `@lg` (32rem) wide, so the search shares the toolbar's line.
+fn toolbar_inline(cx: &mut rune::Cx<App>) -> bool {
+    cx.layout_with("pr-list", |r| r[2] >= 512.0).unwrap_or(true)
+}
+
+/// The search, then Sort, Filters, the host menu and Refresh, wrapping as they run out of room;
+/// in a narrow column the search takes a line of its own (PullRequestsColumn's flex-wrap row).
+fn toolbar(s: &App, t: &T, inline: bool, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.pull_requests;
     let k = kit::theme(t);
-    let search = search_field(u, t, "pr-search", !(u.condensed && search_expanded(u))).grow(1.0).min_w(240.0);
+    let search = search_field(u, t, "pr-search", !(u.condensed && search_expanded(u)));
+    let search = if inline { search.grow(1.0).min_w(0.0) } else { search.w_full() };
     let open = |name| u.menu == Some(name);
 
     let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle_menu("sort")).build(t)).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close_menu);
@@ -2022,7 +2070,8 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     row()
         .key("pr-toolbar")
         .w_full()
-        .gap(8.0)
+        .flex_wrap()
+        .gaps(8.0, 8.0)
         .center_y()
         .child(search)
         .child(sort.build(&k, overlays))
@@ -2092,7 +2141,7 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let environments = capable(s);
     if environments.len() > 1 {
         let value = f.environment.as_deref().map_or_else(|| "All servers".to_string(), |env| crate::env::label(s, env));
-        let glyph = if f.environment.is_some() { &i::SERVER } else { &i::LAYERS };
+        let glyph = f.environment.as_deref().map_or(&i::LAYERS, |env| super::pr_filters::server_icon(s, env));
         out.extend([MenuEntry::Separator, sub_item(MenuItem::new("Server").icon(glyph), value, "server", server_entries(s, &environments))]);
     }
 
@@ -2121,7 +2170,7 @@ fn server_entries(s: &App, environments: &[String]) -> Vec<MenuEntry> {
     ];
     for env in environments {
         let pick = env.clone();
-        out.push(MenuEntry::item(MenuItem::new(crate::env::label(s, env)).icon(&i::SERVER).radio(chosen == Some(env.as_str())).on_select(move |s: &mut App| pick_server(ui(s), Some(pick.clone())))));
+        out.push(MenuEntry::item(MenuItem::new(crate::env::label(s, env)).icon(super::pr_filters::server_icon(s, env)).radio(chosen == Some(env.as_str())).on_select(move |s: &mut App| pick_server(ui(s), Some(pick.clone())))));
     }
     out
 }
@@ -2308,12 +2357,12 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
         .child({
             // Only the number carries the link menu (PullRequestRow's onContextMenu).
             let menu_url = url.clone();
-            text(format!("#{}", e["number"])).font(mono).color(t.c.muted_foreground).shrink().on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
+            text(format!("#{}", e["number"])).font(mono).color(t.c.muted_foreground).on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
                 ui(s).context = Some((menu_url.clone(), at.x, at.y));
             })
         })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
-    let mut signals = row().gap(4.0).center_y().shrink().children(super::pr_row::checks(s, t, e, overlays));
+    let mut signals = row().gap(4.0).center_y().children(super::pr_row::checks(s, t, e, overlays));
     let review = match field(e, "reviewDecision") {
         "approved" => Some((&i::USER_CHECK, success(t), "Approved")),
         "changes-requested" => Some((&i::USER_ROUND_X, if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) }, "Changes requested")),
@@ -2331,7 +2380,6 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
             .h(20.0)
             .gap(4.0)
             .center_y()
-            .shrink()
             .child(text(format!("+{}", grouped(add))).font(stat).color(t.c.diff_addition_foreground))
             .child(text(format!("-{}", grouped(del))).font(stat).color(t.c.diff_deletion_foreground));
         line1 = line1.child(super::pr_row::breakdown(s, t, e, counts, overlays));
@@ -2358,6 +2406,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
                 .gap(4.0)
                 .center_y()
                 .shrink()
+                .min_w(14.0)
                 .max_w(160.0)
                 .help(author_tip)
                 .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
@@ -2388,7 +2437,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
     if let Some(at) = ts(e, "updatedAt") {
         line2 = line2.child(spacer()).child(text(relative(at, s.now_ms)).font(meta.features("'tnum' 1")).color(t.c.muted_foreground));
     }
-    let select = url.clone();
+    let (select, tab) = (url.clone(), super::pr_tabs::tab_key(e));
     let body = row()
         .grow(1.0)
         .shrink()
@@ -2401,7 +2450,10 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
         .gap(8.0)
         .child(mark.mt(2.0).self_start())
         .child(col().grow(1.0).shrink().min_w(0.0).child(line1).child(line2))
-        .on_press(move |s: &mut App| ui(s).selected = Some(select.clone()));
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            ui(s).selected = Some(select.clone());
+            tx.scroll_into_view_in(super::pr_tabs::STRIP, tab.clone());
+        });
     row()
         .key(format!("pr-{url}"))
         .w_full()
@@ -2799,17 +2851,47 @@ mod tests {
 
         let mut u = Ui::default();
         u.result = Some(json!({"entries": rows(150, "github.com", "github", "acme/app")}));
+        u.appending = true;
         u.requested = Some(json!({}));
         u.baseline.asked = Some(json!({}));
         u.stats_asked.insert("k".into());
-        after_turn(&mut u);
+        after_turn(&mut u, &[String::new()], "");
         assert_eq!(u.limit, Some(2 * PAGE));
         assert!(u.requested.is_none() && u.baseline.asked.is_none() && u.stats_asked.is_empty());
 
         u.limit = None;
         u.result = Some(json!({"entries": rows(1, "github.com", "github", "acme/app")}));
-        after_turn(&mut u);
+        after_turn(&mut u, &[String::new()], "");
         assert_eq!(u.limit, None);
+    }
+
+    #[test]
+    fn a_finished_turn_asks_again_only_the_environment_it_finished_on() {
+        let mut seen = HashMap::new();
+        let revisions = |studio: u64| vec![(String::new(), Some(4)), ("studio".to_string(), Some(studio))];
+        assert_eq!(moved_since(&mut seen, revisions(7)), [String::new(), "studio".to_string()], "the first revisions seen");
+        assert_eq!(moved_since(&mut seen, revisions(8)), ["studio".to_string()]);
+        assert!(moved_since(&mut seen, revisions(8)).is_empty());
+
+        let mut u = Ui::default();
+        let mut theirs = entry(json!({"number": 1}));
+        theirs[TAG] = json!("studio");
+        let ours = entry(json!({"number": 2}));
+        let both: Vec<Target> = vec![(String::new(), None), ("studio".into(), None)];
+        u.result = Some(json!({"entries": [theirs.clone(), ours.clone()]}));
+        u.requested = Some(json!({}));
+        u.sent = both.clone();
+        u.pending = vec![("studio".into(), 3)];
+        u.baseline.sent = both.clone();
+        u.partitions[0].pending = vec![("studio".into(), 4), (String::new(), 5)];
+        u.facets.sent = both;
+        u.stats_asked = HashSet::from([key(&theirs), key(&ours)]);
+        after_turn(&mut u, &["studio".to_string()], "");
+        let here: Vec<Target> = vec![(String::new(), None)];
+        assert_eq!((&u.sent, &u.baseline.sent, &u.facets.sent), (&here, &here, &here));
+        assert_eq!((u.pending.len(), u.partitions[0].pending.clone()), (0, vec![(String::new(), 5)]));
+        assert_eq!(u.stats_asked, HashSet::from([key(&ours)]), "this machine's rows keep their sizes");
+        assert!(u.requested.is_some() && u.limit.is_none(), "the other environments' answers stay");
     }
 
     #[test]
@@ -3034,7 +3116,9 @@ mod tests {
 
         pick_server(ui(&mut s), None);
         ui(&mut s).filters.project = Some("docs".into());
-        assert_eq!(targets(&s), [studio], "only the environment holding the project");
+        assert_eq!(targets(&s), [studio.clone()], "only the environment holding the project");
+        ui(&mut s).filters.project = Some("deleted".into());
+        assert_eq!(targets(&s), [studio, (String::new(), Some(vec!["api".to_string()]))], "a project no environment holds leaves the scope");
         assert_eq!(assign(&env_projects(&s, &capable(&s)), &capable(&s))["studio"], ["web-copy", "docs"]);
     }
 

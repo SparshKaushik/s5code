@@ -24,6 +24,17 @@ pub fn project_merge_method<'a>(settings: &'a Value, project_id: &str) -> Option
     settings["projectSettingsOverrides"][project_id]["pullRequestMergeMethod"].as_str().or_else(|| settings["pullRequestMergeMethod"].as_str())
 }
 
+/// What a pull request's own pick falls back to: the project's default, then the last one used.
+pub fn merge_defaults<'a>(s: &'a App, project_id: &str) -> (Option<&'a str>, Option<&'a str>) {
+    let project = project_merge_method(crate::settings::server_settings(s), project_id);
+    (project, s.client_settings.values.get(LAST_MERGE_METHOD).and_then(Value::as_str))
+}
+
+/// pullRequestActionNeedsHostRefresh: approving workflows changes checks the host has cached.
+pub fn needs_host_refresh(action: &str) -> bool {
+    action == "approve-workflows"
+}
+
 /// `Auto-merge (squash and merge)`, or plain "Auto-merge" when the method is unknown.
 pub fn auto_merge_label(method: Option<&str>) -> String {
     method.map_or_else(|| "Auto-merge".into(), |m| format!("Auto-merge ({})", method_label(m).to_lowercase()))
@@ -321,6 +332,7 @@ mod tests {
         assert_eq!(success_title("revert", "pull request").as_deref(), Some("Revert pull request opened"));
         assert_eq!(success_title("delete-branch", "pull request").as_deref(), Some("Branch deleted"));
         assert_eq!(success_title("merge", "pull request"), None);
+        assert!(ALL.iter().all(|a| needs_host_refresh(a) == (*a == "approve-workflows")), "only approving workflows rereads the host");
 
         let missing = json!({"cause": {"_tag": "Fail", "error": {"_tag": "PullRequestOperationError", "operation": "detail", "detail": "Not found", "reason": "not-found"}}});
         assert!(not_found(&missing));

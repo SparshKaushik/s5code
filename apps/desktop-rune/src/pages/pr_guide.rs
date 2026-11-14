@@ -4,8 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, icon, row, spacer, text};
+use rune::{Color, Cursor, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, icon, row, spacer, text, text_input};
 use rune_kit::diff::{FileDiff, LineKind};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 use serde_json::{Value, json};
@@ -13,14 +14,20 @@ use serde_json::{Value, json};
 use super::pr_detail::reference;
 use crate::data::s as field;
 use crate::icons as i;
-use crate::kit;
+use crate::kit::{self, MenuItem};
+use crate::notify::Kind;
+use crate::panel::diff::comments::{self, ReviewLine};
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, Route};
 
 /// The Guide tab's id in `pr_detail::Ui::tab`; it shows second (`tab_order`).
 pub const TAB: usize = 3;
+/// A desktop notification's id for a pull request's guide (its URL follows), not a thread.
+pub const NOTIFICATION: &str = "pull-request-guide:";
 const RUN_POLL_MS: i64 = 5_000;
 const UNSEEN_RUN_MS: i64 = 60_000;
+/// The reviewGuide query's `staleTimeMs`: a cached answer older than this is read again on reopening.
+const STALE_MS: i64 = 60_000;
 /// Diff lines drawn for a file outside the stop's excerpts before the rest points at Code.
 const FILE_LINES: usize = 400;
 const FAILURE_HINT: &str = "Check the review guide model in Settings → Source control.";
@@ -46,6 +53,33 @@ pub struct Ui {
     pub details_open: bool,
     /// The stop's other files opened to their diff.
     pub open_files: HashSet<String>,
+    /// The reviewGuide query cache: each pull request's answer by run key and when it came, shown
+    /// at once when the pull request opens again.
+    cache: HashMap<String, (Value, i64)>,
+    /// The open pull request's guide was read, or its cached answer is fresh enough.
+    checked: bool,
+    /// The line comment being written on one of the stop's excerpts.
+    draft: Option<LineDraft>,
+    comment: TextEdit,
+}
+
+/// GuideExcerpt's draft: the excerpt it is on, and the rows of the file's diff it covers, the
+/// row pressed first and the one it extends to.
+struct LineDraft {
+    excerpt: usize,
+    path: String,
+    from: usize,
+    to: usize,
+}
+
+/// Where a settled run is announced (PullRequestGuideRunCoordinator's onGuide).
+#[derive(Debug, PartialEq)]
+enum Notice {
+    /// The guide is on screen in the focused window.
+    Quiet,
+    Toast,
+    /// The window is in the background.
+    Desktop,
 }
 
 #[derive(Default)]
@@ -89,12 +123,25 @@ fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.guide
 }
 
-/// Another pull request starts its guide over, keeping the watched runs and every guide's progress.
+/// Another pull request starts its guide over from its cached answer, keeping the watched runs,
+/// the cache and every guide's progress.
 fn sync(s: &mut App) {
     let key = s.ui.pages.detail.entry.as_ref().map(|e| run_key(s, e)).unwrap_or_default();
+    let now = crate::data::now_ms();
     let u = ui(s);
     if u.open != key {
-        *u = Ui { open: key, watches: std::mem::take(&mut u.watches), progress: std::mem::take(&mut u.progress), ..Ui::default() };
+        let cache = std::mem::take(&mut u.cache);
+        let (data, checked) = reopened(&cache, &key, now);
+        *u = Ui { open: key, data, checked, cache, watches: std::mem::take(&mut u.watches), progress: std::mem::take(&mut u.progress), ..Ui::default() };
+    }
+}
+
+/// A pull request opening again: its cached guide, and whether that answer is fresh enough to
+/// skip reading it again.
+fn reopened(cache: &HashMap<String, (Value, i64)>, key: &str, now: i64) -> (Option<Value>, bool) {
+    match cache.get(key) {
+        Some((data, at)) => (Some(data.clone()), now - at < STALE_MS),
+        None => (None, false),
     }
 }
 
@@ -320,14 +367,14 @@ fn file_rows(f: &FileDiff) -> Vec<DiffRow<'_>> {
     f.hunks.iter().enumerate().flat_map(|(h, hunk)| hunk.lines.iter().map(move |l| DiffRow { kind: l.kind, old: l.old, new: l.new, text: &l.text, hunk: h })).collect()
 }
 
-/// excerptRows: the rows numbered `start..=end` on one side, widened over the lines a change
-/// replaced (new side) or replaced them with (old side).
-fn excerpt_rows<'a>(rows: &[DiffRow<'a>], old_side: bool, start: u32, end: u32) -> Vec<DiffRow<'a>> {
+/// excerptRows: the first and last of the rows numbered `start..=end` on one side, widened over
+/// the lines a change replaced (new side) or replaced them with (old side).
+fn excerpt_span<'a>(rows: &[DiffRow<'a>], old_side: bool, start: u32, end: u32) -> Option<(usize, usize)> {
     let within = |r: &DiffRow<'a>| {
         let line = if old_side { r.old } else { r.new };
         line.is_some_and(|n| n >= start && n <= end)
     };
-    let Some(mut first) = rows.iter().position(|r| within(r)) else { return Vec::new() };
+    let mut first = rows.iter().position(|r| within(r))?;
     let mut last = rows.iter().rposition(|r| within(r)).unwrap_or(first);
     if !old_side && rows[first].kind == LineKind::Added {
         while first > 0 && rows[first - 1].kind == LineKind::Removed && rows[first - 1].hunk == rows[first].hunk {
@@ -339,7 +386,7 @@ fn excerpt_rows<'a>(rows: &[DiffRow<'a>], old_side: bool, start: u32, end: u32) 
             last += 1;
         }
     }
-    rows[first..=last].to_vec()
+    Some((first, last))
 }
 
 fn bounded(v: &str) -> String {
@@ -448,6 +495,7 @@ fn take_open(s: &mut App, now: i64) -> bool {
 fn answered(s: &mut App, key: &str, entry: &Value, data: Value, now: i64) {
     let open = s.ui.pages.detail.entry.as_ref().is_some_and(|e| run_key(s, e) == key);
     let g = ui(s);
+    g.cache.insert(key.to_string(), (data.clone(), now));
     match g.watches.iter().position(|w| w.key == key) {
         Some(n) => match settle(&mut g.watches[n], &data, now) {
             Settle::Wait => {}
@@ -502,10 +550,11 @@ fn poll_watches(s: &mut App, now: i64) -> bool {
 
 fn want_guide(s: &mut App) -> bool {
     let g = &s.ui.pages.guide;
-    if g.data.is_some() || g.error.is_some() || g.pending.is_some() {
+    if g.checked || g.error.is_some() || g.pending.is_some() {
         return false;
     }
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
+    ui(s).checked = true;
     match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
             let id = net.request("pullRequests.reviewGuide", reference(&entry));
@@ -594,24 +643,41 @@ fn shown_key(s: &App) -> Option<String> {
     u.entry.as_ref().filter(|_| on).map(|e| run_key(s, e))
 }
 
-/// The coordinator's announcement: a toast that opens the guide, unless it is on screen or the
-/// window is in the background.
+/// `looking && isGuideShown` stays quiet, `looking` toasts, and a window in the background gets a
+/// desktop notification.
+fn notice(background: bool, on_screen: bool) -> Notice {
+    match (background, on_screen) {
+        (true, _) => Notice::Desktop,
+        (false, true) => Notice::Quiet,
+        (false, false) => Notice::Toast,
+    }
+}
+
+/// The coordinator's announcement: the notification sound, then a toast that opens the guide, or
+/// a desktop notification that does when the window is in the background.
 fn announce(s: &mut App, w: Watch, outcome: Settle) {
-    if s.ui.notify.background || shown_key(s).as_deref() == Some(w.key.as_str()) {
+    let on_screen = shown_key(s).as_deref() == Some(w.key.as_str());
+    let notice = notice(s.ui.notify.background, on_screen);
+    if notice == Notice::Quiet {
         return;
     }
     let body = w.title.clone().unwrap_or_else(|| format!("{} #{}", field(&w.entry, "repository"), w.entry["number"]));
-    let (title, description) = match outcome {
-        Settle::Failed(detail) => ("Review guide failed", format!("{body}: {detail}")),
-        _ => ("Review guide ready", body),
+    let (title, description, kind) = match outcome {
+        Settle::Failed(detail) => ("Review guide failed", format!("{body}: {detail}"), Kind::Input),
+        _ => ("Review guide ready", body.clone(), Kind::Completion),
     };
+    crate::notify::sound(s, kind);
     let url = field(&w.entry, "url").to_string();
+    if notice == Notice::Desktop {
+        crate::notify::desktop(s, title, &body, &format!("{NOTIFICATION}{url}"));
+        return;
+    }
     let open: crate::shell::palette::ToastAction = ("Open guide".into(), true, Rc::new(move |s: &mut App, _: &mut Tx| open_guide(s, &url)));
     crate::shell::palette::toast_with(s, title, Some(&description), vec![open]);
 }
 
-/// "Open guide": the pull request's detail on its Guide tab.
-fn open_guide(s: &mut App, url: &str) {
+/// "Open guide", from a toast or a desktop notification: the pull request's detail on its Guide tab.
+pub fn open_guide(s: &mut App, url: &str) {
     crate::shell::sidebar::go(s, Route::PullRequests);
     s.ui.pages.pull_requests.selected = Some(url.to_string());
     s.ui.pages.detail.tab = TAB;
@@ -643,6 +709,8 @@ fn go_to(s: &mut App, next: usize, tx: &mut Tx) {
     advance(p, at, next);
     u.rail_open = false;
     u.open_files.clear();
+    u.draft = None;
+    u.comment = TextEdit::default();
     tx.scroll_into_view("pr-guide-top".to_string());
 }
 
@@ -660,6 +728,224 @@ fn ask(s: &mut App, index: usize, question: String) {
     let (_, chip) = super::pr_detail::handoff_task(&d, false);
     super::pr_detail::handoff(s, bounded(&question), Some(chip));
     crate::chat::composer::add_context(s, stop_context(&d, &stop, index));
+}
+
+/// onFinishReview's condition: the host takes a verdict this viewer may give.
+fn can_finish(s: &App) -> bool {
+    s.ui.pages.detail.detail.as_ref().is_some_and(|d| !super::pr_edit::verdicts(d).is_empty())
+}
+
+/// GuideTour's onFinish: the last stop counts as read and the review composer opens on the Summary.
+fn finish(s: &mut App, tx: &mut Tx) {
+    if let Some((key, count)) = current(s) {
+        let p = ui(s).progress.entry(key).or_default();
+        let at = p.position.min(count.saturating_sub(1));
+        p.seen.insert(at);
+    }
+    let u = &mut s.ui.pages.detail;
+    u.tab = 0;
+    u.edit.composer.review = true;
+    u.edit.composer.open = true;
+    u.edit.composer.summary.focused = true;
+    tx.scroll_into_view("pr-composer-trigger".to_string());
+}
+
+/// PullRequestActionsMenu's guide item label.
+fn menu_label(running: bool, written: bool) -> &'static str {
+    match (running, written) {
+        (true, _) => "Writing guide...",
+        (false, false) => "Write guide",
+        (false, true) => "Rewrite guide",
+    }
+}
+
+/// PullRequestActionsMenu's guide item, where guides are on and the viewer may write one.
+pub fn menu_item(s: &App) -> Option<MenuItem> {
+    let entry = s.ui.pages.detail.entry.as_ref()?;
+    if !available(s) || !can_write(s, entry) {
+        return None;
+    }
+    let g = &s.ui.pages.guide;
+    let v = shown(g.data.as_ref(), g.writing.is_some());
+    Some(MenuItem::new(menu_label(v.running, v.guide.is_some())).icon(&i::SPARKLES).disabled(v.running).on_select(write_from_menu))
+}
+
+/// The detail's writeGuide: a first guide also opens the Guide tab to show it being written.
+fn write_from_menu(s: &mut App) {
+    s.ui.pages.detail.menu = false;
+    let written = s.ui.pages.guide.data.as_ref().is_some_and(|d| d["guide"].is_object());
+    write(s);
+    if !written {
+        s.ui.pages.detail.tab = TAB;
+    }
+}
+
+// ---- line comments on excerpts ----------------------------------------------------------
+
+/// ExcerptCommenting's canComment: the host takes line comments from this viewer.
+fn can_comment_lines(d: &Value) -> bool {
+    d["capabilities"]["review"]["inlineComment"] == true && d["viewerPermissions"]["comment"] != false
+}
+
+fn ranged(s: &App) -> bool {
+    s.ui.pages.detail.detail.as_ref().is_some_and(|d| d["capabilities"]["review"]["rangeComment"] == true)
+}
+
+/// resolveDiffReviewAnchor over a file's rows: the row the comment anchors to and, for a host
+/// with ranged comments, its first row while the range stays in one hunk.
+fn anchor(rows: &[DiffRow], from: usize, to: usize, ranged: bool) -> (usize, Option<usize>) {
+    if !ranged || from == to {
+        return (to, None);
+    }
+    let (first, last) = (from.min(to), from.max(to));
+    match (rows.get(first), rows.get(last)) {
+        (Some(a), Some(b)) if a.hunk == b.hunk => (last, Some(first)),
+        _ => (to, None),
+    }
+}
+
+/// resolveDiffReviewPosition for a row of the unified excerpt, where context reads on the new side.
+fn row_position(r: &DiffRow) -> Option<Value> {
+    Some(match r.kind {
+        LineKind::Added => {
+            let new = r.new?;
+            json!({"kind": "added", "newLine": new})
+        }
+        LineKind::Removed => {
+            let old = r.old?;
+            json!({"kind": "deleted", "oldLine": old})
+        }
+        LineKind::Context => {
+            let (old, new) = (r.old?, r.new?);
+            json!({"kind": "context", "oldLine": old, "newLine": new, "side": "right"})
+        }
+    })
+}
+
+/// getReviewPositionAnchor: whether a pending comment's position shows under `r`.
+fn on_row(p: &Value, r: &DiffRow) -> bool {
+    let line = |k: &str| p[k].as_u64().map(|n| n as u32);
+    let old = || r.kind != LineKind::Added && r.old.is_some() && r.old == line("oldLine");
+    let new = || r.kind != LineKind::Removed && r.new.is_some() && r.new == line("newLine");
+    match p["kind"].as_str() {
+        Some("added") => new(),
+        Some("deleted") => old(),
+        Some(_) if p["side"] == "left" => old(),
+        Some(_) => new(),
+        None => false,
+    }
+}
+
+/// The draft as a `PullRequestReviewCommentDraft`, with the local id the pending list keys it by.
+fn line_comment(files: &[FileDiff], d: &LineDraft, body: &str, ranged: bool, id: String) -> Option<Value> {
+    let file = files.iter().find(|f| f.path() == d.path.as_str())?;
+    let rows = file_rows(file);
+    let (at, first) = anchor(&rows, d.from, d.to, ranged);
+    let position = row_position(rows.get(at)?)?;
+    let mut c = json!({"id": id, "path": d.path, "position": position, "body": body});
+    if let Some(old) = file.old_path.as_ref().filter(|o| **o != d.path) {
+        c["oldPath"] = json!(old);
+    }
+    if let Some(first) = first {
+        c["startPosition"] = row_position(rows.get(first)?)?;
+    }
+    Some(c)
+}
+
+/// buildDiffReviewComment for the draft's lines, the chip an "Ask agent" hands over.
+fn lines_record(files: &[FileDiff], d: &LineDraft) -> Option<Value> {
+    let file = files.iter().find(|f| f.path() == d.path.as_str())?;
+    let rows = file_rows(file);
+    let lines: Vec<ReviewLine> = rows.iter().map(|r| ReviewLine { kind: r.kind, old: r.old, new: r.new, text: r.text }).collect();
+    let (first, last) = (d.from.min(d.to), d.from.max(d.to));
+    let number = |n: usize| rows.get(n).and_then(|r| r.new.or(r.old)).unwrap_or(0);
+    let id = format!("pull-request-guide:{}:{}:{}", d.path, number(first), number(last));
+    let section = format!("pull-request-guide:{}", d.path);
+    Some(comments::record((section.as_str(), "Review guide"), &d.path, &lines, first, last, "", &id))
+}
+
+/// A press on a line's numbers starts a comment there; with shift, it stretches the open one.
+fn press_line(s: &mut App, excerpt: usize, path: String, at: usize, extend: bool) {
+    let u = ui(s);
+    if let Some(d) = &mut u.draft {
+        if extend && d.excerpt == excerpt && d.path == path {
+            d.to = at;
+        }
+        return;
+    }
+    u.draft = Some(LineDraft { excerpt, path, from: at, to: at });
+    u.comment = TextEdit::new("");
+    u.comment.focused = true;
+}
+
+fn cancel_line(s: &mut App) {
+    let u = ui(s);
+    u.draft = None;
+    u.comment = TextEdit::default();
+}
+
+/// "Add to review": the comment joins the Code tab's pending ones, sent with the review.
+fn add_line_comment(s: &mut App) {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    let ranged = ranged(s);
+    let u = ui(s);
+    let body = u.comment.text.trim().to_string();
+    if body.is_empty() {
+        return;
+    }
+    let Some(d) = u.draft.take() else { return };
+    u.comment = TextEdit::default();
+    let id = format!("pending-review-comment-guide-{}", SEQ.fetch_add(1, Ordering::Relaxed) + 1);
+    let comment = line_comment(&u.diff.files, &d, &body, ranged, id);
+    if let Some(comment) = comment {
+        super::pr_code::add_pending(s, &entry, comment);
+    }
+}
+
+/// "Ask agent": a new thread holding the request, the pull request and the lines.
+fn ask_lines(s: &mut App) {
+    let request = ui(s).comment.text.trim().to_string();
+    let Some(d) = s.ui.pages.detail.detail.clone() else { return };
+    if request.is_empty() {
+        return;
+    }
+    let Some(draft) = ui(s).draft.take() else { return };
+    ui(s).comment = TextEdit::default();
+    let Some(record) = lines_record(&ui(s).diff.files, &draft) else { return };
+    let chip = crate::chat::composer::chips::pull_request(&d, true, &[]);
+    super::pr_detail::handoff(s, bounded(&request), Some(chip));
+    crate::chat::composer::add_context(s, record);
+}
+
+/// The draft's submit: "Add to review" where the viewer may comment, else "Ask agent".
+fn submit_line(s: &mut App) {
+    if s.ui.pages.detail.detail.as_ref().is_some_and(can_comment_lines) {
+        add_line_comment(s);
+    } else {
+        ask_lines(s);
+    }
+}
+
+fn discard_line(s: &mut App, id: &str) {
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    super::pr_code::remove_pending(s, &entry, id);
+}
+
+fn line_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    match e.key {
+        Key::Escape => {
+            cancel_line(s);
+            tx.blur();
+            true
+        }
+        Key::Enter if e.mods.cmd || e.mods.ctrl => {
+            submit_line(s);
+            tx.blur();
+            true
+        }
+        _ => false,
+    }
 }
 
 /// GuideTour's j and k while the guide shows and no field has focus.
@@ -920,7 +1206,7 @@ fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, see
     let (notes, by_excerpt) = letter_notes(stop);
     let excerpts = list(stop, "excerpts");
     for (n, excerpt) in excerpts.iter().enumerate() {
-        out = out.child(excerpt_view(s, t, excerpt, by_excerpt.get(n).map(Vec::as_slice).unwrap_or(&[])));
+        out = out.child(excerpt_view(s, t, n, excerpt, by_excerpt.get(n).map(Vec::as_slice).unwrap_or(&[])));
     }
     if !notes.is_empty() {
         out = out.child(notes_view(t, &notes));
@@ -935,12 +1221,15 @@ fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, see
     if let Some(next) = stops.get(position + 1) {
         let label = format!("Next: {}", field(next, "title"));
         footer = footer.child(kit::Button::new(label).icon(&i::ARROW_RIGHT).build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| step(s, 1, tx)));
+    } else if can_finish(s) {
+        footer = footer.child(kit::Button::new("Finish review").icon(&i::MESSAGE_SQUARE).build(t).on_press_tx(finish));
     }
     out.child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(footer)
 }
 
-/// GuideExcerpt: the excerpt's lines from the change, its notes' markers under the lines.
-fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, String)>)]) -> El {
+/// GuideExcerpt: the excerpt's lines from the change, its notes' markers, pending line comments
+/// and the comment being written under the lines.
+fn excerpt_view(s: &App, t: &T, index: usize, excerpt: &Value, markers: &[(u64, Vec<(String, String)>)]) -> El {
     let d = &s.ui.pages.guide.diff;
     let path = field(excerpt, "path").to_string();
     let old = field(excerpt, "side") == "old";
@@ -951,9 +1240,9 @@ fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, S
     }
     let file = d.files.iter().find(|f| f.path() == path.as_str());
     let all = file.map(file_rows).unwrap_or_default();
-    let rows = excerpt_rows(&all, old, start, end);
+    let span = excerpt_span(&all, old, start, end);
     let note = |m: String| col().w_full().radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).px(12.0).py(8.0).child(text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
-    if rows.is_empty() {
+    let Some((first, last)) = span else {
         if d.error.is_none() && !d.done {
             return out.child(note(format!("Loading {path}...")));
         }
@@ -970,7 +1259,7 @@ fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, S
                 .child(text(format!("{path} lines {start}-{end} are not in the loaded diff.")).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.0).shrink().min_w(0.0))
                 .child(kit::Button::new("Open in Code").size("xs").variant("outline").on_press(move |s: &mut App| open_file(s, open.clone())).build(t)),
         );
-    }
+    };
     let open = path.clone();
     let header = row()
         .w_full()
@@ -981,14 +1270,22 @@ fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, S
         .fill(t.c.muted.alpha_mul(0.25))
         .child(text(path.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).truncate().shrink().min_w(0.0))
         .child(spacer())
-        .child(text(format!("{}showing {} of {} diff lines", if old { "removed code, " } else { "" }, rows.len(), all.len())).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground))
+        .child(text(format!("{}showing {} of {} diff lines", if old { "removed code, " } else { "" }, last - first + 1, all.len())).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground))
         .child(kit::Button::new(format!("Open {path} in Code")).size("icon-xs").variant("ghost-muted").icon(&i::ARROW_UP_RIGHT).on_press(move |s: &mut App| open_file(s, open.clone())).build(t));
+    let detail = s.ui.pages.detail.detail.as_ref();
+    let can = detail.is_some_and(can_comment_lines);
+    let pending: &[Value] = s.ui.pages.detail.entry.as_ref().map_or(&[][..], |e| &super::pr_code::pending(s, e)[..]);
+    let draft = s.ui.pages.guide.draft.as_ref().filter(|d| d.excerpt == index && d.path == path);
+    let draft_at = draft.map(|d| anchor(&all, d.from, d.to, ranged(s)).0);
+    let selected = draft.map(|d| (d.from.min(d.to), d.from.max(d.to)));
     let mut lines = col().w_full();
-    for (n, r) in rows.iter().enumerate() {
-        if n > 0 && rows[n - 1].hunk != r.hunk {
+    for n in first..=last {
+        let r = &all[n];
+        if n > first && all[n - 1].hunk != r.hunk {
             lines = lines.child(el().h(8.0).w_full().fill(t.c.muted.alpha_mul(0.4)));
         }
-        lines = lines.child(line_view(t, r));
+        let picked = selected.is_some_and(|(a, b)| n >= a && n <= b);
+        lines = lines.child(line_view(t, r, picked, detail.is_some().then(|| (index, path.clone(), n))));
         let at = if old { r.old } else { r.new };
         if let Some((_, titles)) = at.and_then(|at| markers.iter().find(|(line, _)| *line == u64::from(at))) {
             let mut strip = row().w_full().px(12.0).py(4.0).gap(12.0).flex_wrap();
@@ -997,11 +1294,19 @@ fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, S
             }
             lines = lines.child(strip);
         }
+        for p in pending.iter().filter(|p| field(p, "path") == path && on_row(&p["position"], r)) {
+            lines = lines.child(pending_card(t, p));
+        }
+        if draft_at == Some(n) {
+            lines = lines.child(draft_view(s, t, &path, r, can));
+        }
     }
     out.child(col().w_full().radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).clip_rounded(radius::LG).child(header).child(lines))
 }
 
-fn line_view(t: &T, r: &DiffRow) -> El {
+/// A diff line; on an excerpt (`comment`: the excerpt, its path and the row) its numbers start a
+/// line comment, and the lines a draft covers show picked.
+fn line_view(t: &T, r: &DiffRow, picked: bool, comment: Option<(usize, String, usize)>) -> El {
     let mono = theme::mono(theme::TEXT_XS).lh(20.0);
     let num = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
     let (bg, mark, ink) = match r.kind {
@@ -1010,14 +1315,81 @@ fn line_view(t: &T, r: &DiffRow) -> El {
         LineKind::Context => (Color::TRANSPARENT, " ", t.c.muted_foreground),
     };
     let number = |n: Option<u32>| row().w(40.0).shrink().justify_end().pr(8.0).child(text(n.map(|n| n.to_string()).unwrap_or_default()).font(num).color(t.c.muted_foreground.alpha_mul(0.7)));
+    let mut gutter = row().child(number(r.old)).child(number(r.new));
+    if let Some((excerpt, path, at)) = comment {
+        let line = r.new.or(r.old).unwrap_or(0);
+        gutter = gutter
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .label(format!("Comment on line {line}"))
+            .hover(t.c.accent.alpha_mul(0.5))
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| press_line(s, excerpt, path.clone(), at, tx.mods().shift));
+    }
     row()
         .w_full()
         .min_h(20.0)
-        .fill(bg)
-        .child(number(r.old))
-        .child(number(r.new))
+        .fill(if picked { t.c.primary.alpha_mul(0.12) } else { bg })
+        .child(gutter)
         .child(row().w(16.0).shrink().child(text(mark).font(mono).color(ink)))
         .child(text(r.text.replace('\t', "    ")).font(mono).color(t.c.foreground).wrap().grow(1.0).shrink().min_w(0.0).pr(8.0))
+}
+
+/// PendingReviewCommentCard.
+fn pending_card(t: &T, p: &Value) -> El {
+    let id = field(p, "id").to_string();
+    let head = row()
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(icon(&i::MESSAGE_SQUARE, 14.0).color(t.c.muted_foreground))
+        .child(text("Pending. Sent when you submit the review").font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.0).min_w(0.0).truncate())
+        .child(kit::Button::new("Discard this comment").icon(&i::TRASH_2).variant("ghost").size("icon-xs").on_press(move |s: &mut App| discard_line(s, &id)).build(t).help("Discard this comment"));
+    col().key(format!("pr-guide-pending-{}", field(p, "id"))).w_full().px(12.0).py(6.0).child(
+        col()
+            .w_full()
+            .gap(8.0)
+            .padding(12.0)
+            .radius(radius::XL)
+            .border(1.0, t.c.border.alpha_mul(0.7))
+            .fill(t.c.background)
+            .child(head)
+            .child(text(field(p, "body").to_string()).font(theme::TEXT_SM).color(t.c.foreground).wrap()),
+    )
+}
+
+/// DiffCommentAnnotation's draft: "Add to review" with "Ask agent" beside it where the viewer may
+/// comment, else "Ask agent" alone.
+fn draft_view(s: &App, t: &T, path: &str, r: &DiffRow, can: bool) -> El {
+    let edit = &s.ui.pages.guide.comment;
+    let empty = edit.text.trim().is_empty();
+    let line = r.new.or(r.old).unwrap_or(0);
+    let input = text_input(edit, theme::TEXT_SM)
+        .key("pr-guide-comment-input")
+        .role("textbox")
+        .label(format!("Comment on lines {path}:{line}"))
+        .placeholder(if can { "Add a comment…" } else { "Ask the agent about these lines…" }, t.c.contrast_placeholder)
+        .w_full()
+        .min_h(44.0)
+        .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut ui(s).comment)
+        .on_input_key(line_key);
+    let mut footer = row()
+        .w_full()
+        .gap(4.0)
+        .items_center()
+        .child(text("⌘/Ctrl Enter to send").font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)).grow(1.0).min_w(0.0).truncate())
+        .child(kit::Button::new("Cancel").variant("ghost-muted").size("xs").on_press(cancel_line).build(t));
+    if can {
+        footer = footer.child(kit::Button::new("Ask agent").variant("outline").size("xs").disabled(empty).on_press(ask_lines).build(t));
+    }
+    footer = footer.child(kit::Button::new(if can { "Add to review" } else { "Ask agent" }).size("xs").disabled(empty).on_press(submit_line).build(t));
+    col()
+        .key("pr-guide-comment-draft")
+        .w_full()
+        .px(12.0)
+        .py(6.0)
+        .child(col().w_full().gap(6.0).padding(8.0).radius(8.0).border(1.0, t.c.border).fill(t.c.background).child(input).child(footer))
 }
 
 /// GuideNotes.
@@ -1108,7 +1480,7 @@ fn file_lines(t: &T, f: &FileDiff, path: &str) -> El {
         if n > 0 && rows[n - 1].hunk != r.hunk {
             out = out.child(el().h(8.0).w_full().fill(t.c.muted.alpha_mul(0.4)));
         }
-        out = out.child(line_view(t, r));
+        out = out.child(line_view(t, r, false, None));
     }
     if rows.len() > FILE_LINES {
         let open = path.to_string();
@@ -1156,7 +1528,8 @@ fn questions(t: &T, items: &[Value], position: usize) -> El {
 }
 
 /// The detail on its Guide tab with review guides on: the recorded guide, or none yet, or a first
-/// run on its way (`state`).
+/// run on its way (`state`); the last stop with "Finish review", an excerpt's line comments, or
+/// the actions menu offering a rewrite.
 pub fn scene(s: &mut App, state: &str) {
     if let crate::data::Source::Fixture(st) = &mut s.src {
         st.config.get_or_insert_with(|| json!({}))["settings"]["reviewGuidesEnabled"] = json!(true);
@@ -1165,11 +1538,45 @@ pub fn scene(s: &mut App, state: &str) {
     sync(s);
     let recorded = super::fixture("pull-request-guide.json").unwrap_or(Value::Null);
     let head = recorded["currentHeadSha"].clone();
-    ui(s).data = Some(match state {
+    let g = ui(s);
+    g.checked = true;
+    g.data = Some(match state {
         "empty" => json!({"guide": null, "run": null, "currentHeadSha": head}),
         "generating" => json!({"guide": null, "run": {"_tag": "Running", "headSha": head, "startedAt": "2026-11-14T09:00:00.000Z"}, "currentHeadSha": head}),
         _ => recorded,
     });
+    match state {
+        "finish" => {
+            super::pr_edit::scene_caps(&mut s.ui.pages.detail);
+            if let Some((key, count)) = current(s) {
+                let p = ui(s).progress.entry(key).or_default();
+                p.position = count.saturating_sub(1);
+                p.seen = (0..p.position).collect();
+            }
+        }
+        "comment" => {
+            if let Some(d) = &mut s.ui.pages.detail.detail {
+                d["capabilities"]["review"]["inlineComment"] = json!(true);
+                d["capabilities"]["review"]["rangeComment"] = json!(true);
+            }
+            want_diff(s);
+            let usage = "apps/desktop-rune/src/pages/usage.rs";
+            let row = |s: &App, line: u32| s.ui.pages.guide.diff.files.iter().find(|f| f.path() == usage).and_then(|f| file_rows(f).iter().position(|r| r.kind == LineKind::Added && r.new == Some(line)));
+            if let (Some(wall), Some(label)) = (row(&*s, 210), row(&*s, 211)) {
+                press_line(s, 0, usage.into(), wall, false);
+                ui(s).comment = TextEdit::new("Name this `wall_start` so it reads apart from `start`.");
+                add_line_comment(s);
+                press_line(s, 0, usage.into(), label, false);
+                ui(s).comment = TextEdit::new("Does hour_label follow the 12-hour setting here?");
+            }
+        }
+        "menu" => {
+            let u = &mut s.ui.pages.detail;
+            u.tab = 0;
+            u.menu = true;
+        }
+        _ => {}
+    }
     want_diff(s);
 }
 
@@ -1279,12 +1686,12 @@ index 9c1e2f0..a41d7b2 100644
     fn excerpts_widen_over_the_lines_their_change_replaced() {
         let files = rune_kit::diff::parse(PATCH);
         let rows = file_rows(&files[0]);
-        let lines = |rows: Vec<DiffRow>| rows.iter().map(|r| (r.old, r.new)).collect::<Vec<_>>();
+        let lines = |span: Option<(usize, usize)>| span.map_or(vec![], |(a, b)| rows[a..=b].iter().map(|r| (r.old, r.new)).collect::<Vec<_>>());
         let replaced = vec![(Some(210), None), (None, Some(210)), (None, Some(211))];
-        assert_eq!(lines(excerpt_rows(&rows, false, 210, 211)), replaced, "added lines take the deletions before them");
-        assert_eq!(lines(excerpt_rows(&rows, true, 210, 210)), replaced, "removed lines take the additions after them");
-        assert_eq!(lines(excerpt_rows(&rows, false, 212, 213)), vec![(Some(211), Some(212)), (Some(212), Some(213))]);
-        assert!(excerpt_rows(&rows, false, 400, 410).is_empty());
+        assert_eq!(lines(excerpt_span(&rows, false, 210, 211)), replaced, "added lines take the deletions before them");
+        assert_eq!(lines(excerpt_span(&rows, true, 210, 210)), replaced, "removed lines take the additions after them");
+        assert_eq!(lines(excerpt_span(&rows, false, 212, 213)), vec![(Some(211), Some(212)), (Some(212), Some(213))]);
+        assert_eq!(excerpt_span(&rows, false, 400, 410), None);
     }
 
     #[test]
@@ -1338,5 +1745,64 @@ index 9c1e2f0..a41d7b2 100644
              - usage.rs lines 210-211\n\
              - usage.rs lines 210-210 (removed; numbered as in the base branch)"
         );
+    }
+
+    #[test]
+    fn a_reopened_pull_request_shows_its_cached_guide_and_reads_it_again_once_stale() {
+        let guide = result(Some(("a", "t1")), Value::Null, Some("a"));
+        let cache = HashMap::from([("env:p:github.com:o/r#1".to_string(), (guide.clone(), 1_000))]);
+        assert_eq!(reopened(&cache, "env:p:github.com:o/r#1", 1_000 + STALE_MS - 1), (Some(guide.clone()), true), "a fresh answer is not read again");
+        assert_eq!(reopened(&cache, "env:p:github.com:o/r#1", 1_000 + STALE_MS), (Some(guide), false), "a stale one shows while it is read again");
+        assert_eq!(reopened(&cache, "other-env:p:github.com:o/r#1", 1_000), (None, false), "the cache is per environment and pull request");
+    }
+
+    #[test]
+    fn a_settled_run_is_quiet_on_screen_toasts_in_focus_and_reaches_the_desktop_otherwise() {
+        assert_eq!(notice(false, true), Notice::Quiet);
+        assert_eq!(notice(false, false), Notice::Toast);
+        assert_eq!(notice(true, true), Notice::Desktop, "a guide on screen in a background window still notifies");
+        assert_eq!(notice(true, false), Notice::Desktop);
+    }
+
+    #[test]
+    fn the_menu_writes_a_first_guide_and_rewrites_a_written_one() {
+        assert_eq!(menu_label(false, false), "Write guide");
+        assert_eq!(menu_label(false, true), "Rewrite guide");
+        assert_eq!((menu_label(true, false), menu_label(true, true)), ("Writing guide...", "Writing guide..."));
+    }
+
+    #[test]
+    fn excerpt_line_comments_anchor_where_the_host_takes_them() {
+        let files = rune_kit::diff::parse(PATCH);
+        let rows = file_rows(&files[0]);
+        // 2: -210, 3: +210, 4: +211, 5: 211/212 context.
+        assert_eq!(anchor(&rows, 3, 3, true), (3, None));
+        assert_eq!(anchor(&rows, 4, 2, true), (4, Some(2)), "a range anchors on its last line in diff order");
+        assert_eq!(anchor(&rows, 4, 2, false), (2, None), "without ranged comments the line pressed last takes it");
+        assert_eq!(row_position(&rows[2]), Some(json!({"kind": "deleted", "oldLine": 210})));
+        assert_eq!(row_position(&rows[5]), Some(json!({"kind": "context", "oldLine": 211, "newLine": 212, "side": "right"})));
+
+        let draft = LineDraft { excerpt: 0, path: "usage.rs".into(), from: 2, to: 4 };
+        assert_eq!(
+            line_comment(&files, &draft, "Rename.", true, "c1".into()),
+            Some(json!({"id": "c1", "path": "usage.rs", "position": {"kind": "added", "newLine": 211}, "startPosition": {"kind": "deleted", "oldLine": 210}, "body": "Rename."}))
+        );
+        let missing = LineDraft { path: "gone.rs".into(), ..draft };
+        assert_eq!(line_comment(&files, &missing, "x", true, "c2".into()), None);
+
+        let added = json!({"kind": "added", "newLine": 211});
+        assert!(on_row(&added, &rows[4]) && !on_row(&added, &rows[3]));
+        assert!(on_row(&json!({"kind": "deleted", "oldLine": 210}), &rows[2]));
+        assert!(on_row(&json!({"kind": "context", "oldLine": 211, "newLine": 212, "side": "left"}), &rows[5]));
+        assert!(!on_row(&json!({"kind": "deleted", "oldLine": 210}), &rows[3]), "an added line never holds a deletion");
+    }
+
+    #[test]
+    fn asking_about_excerpt_lines_hands_the_agent_those_lines() {
+        let files = rune_kit::diff::parse(PATCH);
+        let record = lines_record(&files, &LineDraft { excerpt: 0, path: "usage.rs".into(), from: 4, to: 2 }).expect("the file is in the diff");
+        assert_eq!(record["contextId"], crate::chat::composer::chips::context_id("review-comment", "pull-request-guide:usage.rs:210:211"));
+        assert_eq!((record["sectionId"].as_str(), record["sectionTitle"].as_str(), record["filePath"].as_str()), (Some("pull-request-guide:usage.rs"), Some("Review guide"), Some("usage.rs")));
+        assert_eq!((record["rangeLabel"].as_str(), record["text"].as_str()), (Some("210 to 211"), Some("")));
     }
 }

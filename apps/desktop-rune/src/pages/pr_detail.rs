@@ -32,10 +32,14 @@ pub struct Ui {
     pub error: Option<String>,
     pub activity_error: Option<String>,
     pub diff_error: Option<String>,
+    /// The diff error's "Technical details" disclosure is open.
+    pub diff_details: bool,
     pending_detail: Option<u64>,
     pending_activity: Option<u64>,
     pending_diff: Option<u64>,
     pub(super) pending_action: Option<(u64, String)>,
+    /// `pullRequests.invalidate` for this pull request, before it reads again (refreshFromHost).
+    pending_invalidate: Option<u64>,
     /// Title, description and comment drafts, the composer, and reactions sent.
     pub edit: super::pr_edit::Edit,
     pub tab: usize,
@@ -59,6 +63,9 @@ pub struct Ui {
     pub confirm: Option<&'static str>,
     /// The actions menu's item waiting on its second press.
     pub menu_confirm: Option<&'static str>,
+    /// When `confirm` and `menu_confirm` were armed, in ms.
+    confirm_at: i64,
+    menu_confirm_at: i64,
     /// The merge method picked for this pull request, or the one its auto-merge was armed with.
     pub merge_method: Option<String>,
     pub delete_confirm: bool,
@@ -99,7 +106,8 @@ fn selected_entry(s: &App) -> Option<Value> {
 
 pub fn poll(s: &mut App) -> bool {
     let on = matches!(s.frame_route(), Route::PullRequests);
-    let mut changed = live_refresh(s, on);
+    let mut changed = release_confirms(ui(s), crate::data::now_ms());
+    changed |= live_refresh(s, on);
     if !on {
         return changed;
     }
@@ -160,15 +168,23 @@ pub fn poll(s: &mut App) -> bool {
                     u.files = Some(rune_kit::diff::parse(d["patch"].as_str().unwrap_or("")));
                     u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
                     s.ui.pages.code.fresh = true;
+                    s.ui.pages.code.next = d["nextCursor"].as_str().map(str::to_owned);
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),
             }
             changed = true;
         }
+        // Read again whether or not the host's cache dropped, as refreshFromHost does.
+        let invalidated = u.pending_invalidate.and_then(|id| net.take_reply(id)).is_some();
         let mut acted = None;
         if let Some(reply) = u.pending_action.as_ref().and_then(|(id, _)| net.take_reply(*id)) {
             let (_, action) = u.pending_action.take().unwrap_or_default();
             acted = Some((action, reply));
+            changed = true;
+        }
+        if invalidated {
+            ui(s).pending_invalidate = None;
+            reload(s);
             changed = true;
         }
         if let Some((action, reply)) = acted {
@@ -298,13 +314,59 @@ pub(super) fn run(s: &mut App, action: &'static str) {
     }
 }
 
+/// useInlineActionConfirm's release timer.
+const CONFIRM_MS: i64 = 3_000;
+
+/// An armed confirm lets go 3 s after it was armed.
+fn lapsed(armed_at: i64, now: i64) -> bool {
+    now - armed_at >= CONFIRM_MS
+}
+
+/// Lets go of the confirms whose time ran out; true when one did.
+fn release_confirms(u: &mut Ui, now: i64) -> bool {
+    let header = u.confirm.is_some() && lapsed(u.confirm_at, now);
+    let menu = u.menu_confirm.is_some() && lapsed(u.menu_confirm_at, now);
+    if header {
+        u.confirm = None;
+    }
+    if menu {
+        u.menu_confirm = None;
+    }
+    header || menu
+}
+
 /// useInlineActionConfirm for the header's buttons: the first press arms, the second runs.
-fn arm_or_run(s: &mut App, action: &'static str) {
-    if ui(s).confirm == Some(action) {
+fn arm_or_run(s: &mut App, action: &'static str, tx: &mut Tx) {
+    let now = crate::data::now_ms();
+    let u = ui(s);
+    if u.confirm == Some(action) && !lapsed(u.confirm_at, now) {
         run(s, action);
     } else {
-        ui(s).confirm = Some(action);
+        u.confirm = Some(action);
+        u.confirm_at = now;
+        tx.wake_after(std::time::Duration::from_millis(CONFIRM_MS as u64));
     }
+}
+
+/// The menu's twin of [`arm_or_run`]; the first select keeps the menu open.
+fn arm_or_run_item(s: &mut App, action: &'static str, tx: &mut Tx) {
+    let now = crate::data::now_ms();
+    let u = ui(s);
+    if u.menu_confirm == Some(action) && !lapsed(u.menu_confirm_at, now) {
+        run(s, action);
+    } else {
+        u.menu_confirm = Some(action);
+        u.menu_confirm_at = now;
+        tx.wake_after(std::time::Duration::from_millis(CONFIRM_MS as u64));
+    }
+}
+
+/// An armed header button holds the pointer: a press outside it lets go, as Escape does.
+fn release_outside(button: El, armed: bool) -> El {
+    if !armed {
+        return button;
+    }
+    button.modal(true, |s: &mut App| ui(s).confirm = None)
 }
 
 /// finishAction: a failure toasts the host's words or the action's hint; a success toasts what
@@ -323,8 +385,27 @@ fn finished(s: &mut App, action: &str, reply: Result<Value, Value>) {
                 crate::shell::palette::toast(s, &title, None);
             }
             s.ui.pages.pull_requests.requested = None;
-            reload(s);
+            if super::pr_actions::needs_host_refresh(action) {
+                refresh_from_host(s);
+            } else {
+                reload(s);
+            }
         }
+    }
+}
+
+/// refreshFromHost: the host's cached answers for this pull request go, then it reads again.
+fn refresh_from_host(s: &mut App) {
+    let Some(entry) = ui(s).entry.clone() else { return };
+    if ui(s).pending_invalidate.is_some() {
+        return;
+    }
+    match super::pull_requests::net_for(s, &entry) {
+        Some(net) => {
+            let id = net.request("pullRequests.invalidate", json!({"reference": reference(&entry)}));
+            ui(s).pending_invalidate = Some(id);
+        }
+        None => reload(s),
     }
 }
 
@@ -374,8 +455,7 @@ pub(crate) fn allowed_methods(d: &Value) -> Vec<String> {
 
 /// selectedMergeMethod: this pull request's pick, the project's default, then the last one used.
 pub(crate) fn merge_method(s: &App, d: &Value) -> String {
-    let project = super::pr_actions::project_merge_method(crate::settings::server_settings(s), field(d, "projectId"));
-    let last = s.client_settings.values.get(super::pr_actions::LAST_MERGE_METHOD).and_then(Value::as_str);
+    let (project, last) = super::pr_actions::merge_defaults(s, field(d, "projectId"));
     super::pr_actions::resolve_merge_method(d, s.ui.pages.detail.merge_method.as_deref(), project, last)
 }
 
@@ -597,7 +677,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let d = u.detail.as_ref().unwrap_or(entry);
     panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d)).child(rule(t));
     if u.tab == 2 {
-        return panel.child(code(s, t, overlays));
+        return panel.child(code(s, t, overlays)).children(super::pr_edit::composer(s, t, d, overlays));
     }
     let content = match u.tab {
         1 => timeline(s, t),
@@ -605,7 +685,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         _ => summary(s, t, d, overlays),
     };
     let key = format!("pr-detail-scroll-{}", u.tab);
-    panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t))
+    super::pr_edit::reaction_picker(s, t, overlays);
+    panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays))
 }
 
 /// Crumbs, the primary action and the actions menu; the panel's tab strip holds its toggles.
@@ -690,7 +771,8 @@ fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr
         let button = kit::Button::new(label.clone()).variant("default").size("xs").icon(glyph).disabled(pending.is_some());
         match gate.blocked {
             Some(reason) => button.build(t).opacity(0.64).help(reason),
-            None => button.on_press(move |s: &mut App| arm_or_run(s, action)).build(t).help(label),
+            None if pending.is_some() => button.build(t).help(label),
+            None => release_outside(button.build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| arm_or_run(s, action, tx)).help(label), armed),
         }
     };
     let mut out = Vec::new();
@@ -741,13 +823,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
     // useInlineActionConfirm for menu items: the first select arms and keeps the menu open.
     let confirming = |action: &'static str, idle: String, confirm: &str, glyph: &'static rune::Icon| {
         let label = if u.menu_confirm == Some(action) { confirm.to_string() } else { idle };
-        MenuItem::new(label).icon(glyph).disabled(busy).on_select(move |s: &mut App| {
-            if ui(s).menu_confirm == Some(action) {
-                run(s, action);
-            } else {
-                ui(s).menu_confirm = Some(action);
-            }
-        })
+        MenuItem::new(label).icon(glyph).disabled(busy).on_select_tx(move |s: &mut App, tx: &mut Tx| arm_or_run_item(s, action, tx))
     };
     let trigger = kit::Button::new("").variant("ghost-muted").size("icon-xs").icon(&i::ELLIPSIS).on_press(|s: &mut App| ui(s).menu = !ui(s).menu).build(t).label(format!("More {term} actions")).help(format!("More {term} actions"));
     let ask = handoff_task(d, false);
@@ -758,15 +834,18 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
         .min_width(220.0)
         .open(u.menu)
         .on_close(close_menu)
-        .item(MenuItem::new("Refresh").icon(&i::REFRESH_CW).on_select(|s: &mut App| {
+        .entries(super::pr_meta::link_entries(s))
+        .item(MenuItem::new("Refresh").icon(&i::REFRESH_CW).disabled(u.pending_invalidate.is_some()).on_select(|s: &mut App| {
             ui(s).menu = false;
-            reload(s);
+            refresh_from_host(s);
         }))
         .row(super::pr_meta::ask_row(t, d, move |s: &mut App| handoff(s, ask.0.clone(), Some(ask.1.clone()))))
         .row(super::pr_meta::explain_row(t, d, move |s: &mut App| handoff(s, explain.0.clone(), Some(explain.1.clone()))))
-        .item(super::pr_meta::fix_findings_item())
-        .separator();
-    menu = super::pr_meta::maintainer_entries(s, t, d, menu);
+        .item(super::pr_meta::fix_findings_item());
+    if let Some(item) = super::pr_guide::menu_item(s) {
+        menu = menu.item(item);
+    }
+    menu = super::pr_meta::maintainer_entries(s, t, d, menu.separator());
     if open {
         let draft = d["isDraft"] == true;
         if shows.draft_toggle {
@@ -979,8 +1058,11 @@ fn tab_bar(s: &App, t: &T, d: &Value) -> El {
                 (_, Some("approve-workflows")) => "Confirm approve?",
                 _ => "Approve workflows to run",
             };
-            let approve = kit::Button::new(label).variant("warning-outline").size("xs").icon(&i::PLAY).disabled(pending.is_some()).on_press(|s: &mut App| arm_or_run(s, "approve-workflows"));
-            bar = bar.child(approve.build(t).help(label));
+            let approve = kit::Button::new(label).variant("warning-outline").size("xs").icon(&i::PLAY).disabled(pending.is_some()).build(t).help(label);
+            bar = bar.child(match pending {
+                Some(_) => approve,
+                None => release_outside(approve.on_press_tx(|s: &mut App, tx: &mut Tx| arm_or_run(s, "approve-workflows", tx)), u.confirm == Some("approve-workflows")),
+            });
         }
         0 => {
             let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -1154,7 +1236,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let kept: Vec<&conv::Item> = items.iter().filter(|i| conv::keep(i, filter)).collect();
     let hidden = conv::comment_count(&items) - conv::comment_count(kept.iter().copied());
     let actions = row().gap(4.0).center_y().shrink().child(conv::filter_menu(s, t, filter, hidden, overlays)).child(order_toggle(s, t));
-    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(actions), || comments(s, t, &items, &kept, hidden))).children(super::pr_edit::composer(s, t, d, overlays))
+    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(actions), || comments(s, t, &items, &kept, hidden)))
 }
 
 /// The Comments section: filtered, paged from the newest, and ordered by the toggle.
@@ -1163,7 +1245,7 @@ fn comments(s: &App, t: &T, items: &[conv::Item], kept: &[&conv::Item], hidden: 
     let muted = |m: String| text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let Some(a) = &u.activity else {
         return match &u.activity_error {
-            Some(e) => muted(e.clone()),
+            Some(e) => activity_unavailable(s, t, e, true, refresh_detail),
             None => muted("Loading comments…".into()),
         };
     };
@@ -1397,15 +1479,7 @@ fn timeline(s: &App, t: &T) -> El {
     if u.oldest_first {
         events.reverse();
     }
-    let mut out = col().w_full().px(16.0).pt(12.0).pb(48.0).gap(10.0);
-    for e in &events {
-        out = out.child(match (&e.item, e.kind) {
-            (Some(item), _) => conversation(s, t, item),
-            (None, "commit") => conv::commit_row(s, t, e),
-            _ => conv::lifecycle_row(s, t, e, term),
-        });
-    }
-    out
+    col().w_full().px(16.0).pt(12.0).pb(48.0).gap(10.0).children(conv::timeline_rows(s, t, &events, term, comment_card))
 }
 
 /// openCommit: the Code tab, scoped to the change one commit made.
@@ -1422,6 +1496,7 @@ pub(super) fn scope_commit(s: &mut App, oid: Option<String>) {
         u.commit = oid;
         u.files = None;
         u.diff_error = None;
+        u.diff_details = false;
         u.diff_truncated = false;
         u.pending_diff = None;
         u.expanded.clear();
@@ -1509,17 +1584,27 @@ fn activity_state(s: &App, t: &T) -> El {
     let Some(error) = &u.activity_error else {
         return col().w_full().padding(16.0).child(text("Loading activity…").font(theme::TEXT_XS).color(t.c.muted_foreground));
     };
+    activity_unavailable(s, t, error, false, retry_activity)
+}
+
+/// PullRequestActivityUnavailableState; `compact` is the Summary's Comments section.
+fn activity_unavailable(s: &App, t: &T, error: &str, compact: bool, retry: fn(&mut App)) -> El {
+    let u = &s.ui.pages.detail;
     let term = u.detail.as_ref().or(u.entry.as_ref()).map_or("pull request", super::pr_row::term);
-    col()
-        .w_full()
-        .min_h(192.0)
-        .px(16.0)
-        .py(40.0)
-        .gap(8.0)
-        .center()
-        .child(text(format!("Could not load {term} activity")).font(theme::SM_MEDIUM).color(t.c.foreground))
-        .child(text(error.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(448.0))
-        .child(kit::Button::new("Retry").variant("outline").size("sm").icon(&i::REFRESH_CW).on_press(retry_activity).build(t))
+    let out = col().w_full().gap(8.0).center();
+    let out = if compact { out.py(12.0) } else { out.min_h(192.0).px(16.0).py(40.0) };
+    out.child(text(format!("Could not load {term} activity")).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(error.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(448.0))
+        .child(kit::Button::new("Retry").variant("outline").size("sm").icon(&i::REFRESH_CW).on_press(retry).build(t))
+}
+
+/// refreshDetail: the pull request and its activity read again.
+fn refresh_detail(s: &mut App) {
+    let Some(entry) = ui(s).entry.clone() else { return };
+    if super::pull_requests::net_for(s, &entry).is_some() {
+        ui(s).activity_error = None;
+    }
+    load(s);
 }
 
 /// activityQuery.refresh.
@@ -1544,6 +1629,7 @@ fn diff_unavailable(s: &App, t: &T, error: &str) -> El {
         let u = ui(s);
         u.diff_error = None;
         u.files = None;
+        u.diff_details = false;
     });
     let open = kit::Button::new(format!("Open on {provider}")).variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
         let _ = tx.open_url(&url);
@@ -1559,6 +1645,33 @@ fn diff_unavailable(s: &App, t: &T, error: &str) -> El {
         .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground))
         .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center).max_w(384.0))
         .child(row().gap(8.0).child(retry.build(t)).child(open))
+        .child(diff_details(t, error, u.diff_details))
+}
+
+/// The diff error's `<details>`: the environment's own words behind "Technical details".
+fn diff_details(t: &T, error: &str, open: bool) -> El {
+    let toggle = row()
+        .key("pr-diff-details")
+        .gap(4.0)
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .label("Technical details")
+        .child(icon(&i::CHEVRON_RIGHT, 12.0).color(t.c.muted_foreground).rotate(if open { 90f32.to_radians() } else { 0.0 }))
+        .child(text("Technical details").font(theme::TEXT_XS).color(t.c.muted_foreground))
+        .on_press(|s: &mut App| ui(s).diff_details = !ui(s).diff_details);
+    let mut out = col().w_full().max_w(512.0).gap(12.0).child(row().w_full().center().child(toggle));
+    if open {
+        let body = col()
+            .key("pr-diff-details-body")
+            .w_full()
+            .max_h(160.0)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .padding(12.0)
+            .child(text(error.to_string()).font(theme::MONO_XS).color(t.c.muted_foreground).wrap().selectable(true));
+        out = out.child(col().w_full().radius(radius::LG).border(1.0, t.c.border).fill(t.c.muted.alpha_mul(0.4)).clip_rounded(radius::LG).child(kit::scroll_area("pr-diff-details-scroll", body, t)));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1642,6 +1755,19 @@ mod tests {
         let mut no_squash = armed.clone();
         no_squash["mergeCapabilities"]["squash"] = json!(false);
         assert_eq!(merge_method(&s, &no_squash), "rebase", "a pick the host no longer allows falls through");
+    }
+
+    #[test]
+    fn an_armed_confirm_lets_go_after_three_seconds() {
+        assert!(!lapsed(1_000, 3_999));
+        assert!(lapsed(1_000, 4_000));
+        let mut u = Ui { confirm: Some("merge"), confirm_at: 1_000, menu_confirm: Some("close"), menu_confirm_at: 2_500, ..Ui::default() };
+        assert!(!release_confirms(&mut u, 3_999));
+        assert!(release_confirms(&mut u, 4_000));
+        assert_eq!((u.confirm, u.menu_confirm), (None, Some("close")), "each confirm keeps its own clock");
+        assert!(release_confirms(&mut u, 5_500));
+        assert_eq!(u.menu_confirm, None);
+        assert!(!release_confirms(&mut u, 9_000), "nothing armed, nothing changes");
     }
 
     #[test]
