@@ -38,6 +38,13 @@ pub struct Ui {
     pub open: bool,
     step: Step,
     pairing_open: bool,
+    /// The pairing link field, whether this wizard started the pairing in flight (so its
+    /// result and error are the wizard's), and the "Need a pairing link?" help.
+    link: rune::TextEdit,
+    paired_here: bool,
+    /// Show the pairing error under the field: the wizard's last pairing failed.
+    pairing_failed: bool,
+    pairing_help: bool,
     scan: Option<u64>,
     /// The environment scanned, so the import lands there whatever is focused by then.
     scan_env: String,
@@ -66,6 +73,8 @@ enum Stage {
     Create(u64, String, String),
     History(u64, String),
 }
+
+const IMPORT_PERMISSION_MESSAGE: &str = "This connection cannot import projects or thread history.";
 
 fn completed(s: &App) -> bool {
     s.client_settings.values.get("onboardingCompletedAt").is_some_and(|v| !v.is_null())
@@ -141,6 +150,19 @@ pub fn poll(s: &mut App) -> bool {
     }
     if !s.ui.wizard.open {
         return changed;
+    }
+    // `onPaired`: the new computer is the one set up, and the form folds away.
+    if s.ui.wizard.paired_here && !crate::env::pairing(s) {
+        s.ui.wizard.paired_here = false;
+        match s.ui.env.last_paired.take() {
+            Some(id) => {
+                crate::env::switch(s, &id);
+                s.ui.wizard.pairing_open = false;
+                s.ui.wizard.link.clear();
+            }
+            None => s.ui.wizard.pairing_failed = true,
+        }
+        changed = true;
     }
     if let Some(id) = s.ui.wizard.scan
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
@@ -256,6 +278,11 @@ fn poll_import(s: &mut App) -> bool {
 
 fn finish(s: &mut App, project: Option<String>) {
     complete(s);
+    // Web keeps the wizard open on this failure; here an unreadable settings file would trap
+    // the person in it, so it closes and says the choice wasn't saved.
+    if s.client_settings.error.is_some() {
+        crate::shell::palette::toast_error(s, "Could not finish setup", Some("Your settings could not be saved. Try again."));
+    }
     s.ui.wizard.open = false;
     s.ui.wizard.import = None;
     if project.is_some() {
@@ -569,12 +596,17 @@ fn connect(s: &App, t: &T) -> El {
             .child(icon(&icons::LINK, 16.).color(t.c.muted_foreground))
             .child(text("Add a computer").font(theme::SM_MEDIUM).color(t.c.foreground).grow(1.))
             .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 16.).color(t.c.muted_foreground))
-            .on_press(|s: &mut App| s.ui.wizard.pairing_open = !s.ui.wizard.pairing_open),
+            .on_press(|s: &mut App| {
+                if !crate::env::pairing(s) {
+                    s.ui.wizard.pairing_open = !s.ui.wizard.pairing_open;
+                }
+            }),
     );
     if open {
-        pairing = pairing.child(crate::env::pairing_form(s, t));
+        pairing = pairing.child(pairing_form(s, t));
     }
-    let ready = crate::env::status(s, &s.ui.env.active) == "Connected";
+    let pairing_now = crate::env::pairing(s);
+    let ready = crate::env::status(s, &s.ui.env.active) == "Connected" && !pairing_now;
     body.child(rune::el().h(8.)).child(pairing).child(rune::el().h(16.)).child(
         row()
             .w_full()
@@ -596,6 +628,135 @@ fn connect(s: &App, t: &T) -> El {
             )
             .child(continue_button(t, "Continue", !ready, |s: &mut App| go(s, Step::Agents))),
     )
+}
+
+fn submit_link(s: &mut App) {
+    let link = s.ui.wizard.link.text.clone();
+    if link.trim().is_empty() || crate::env::pairing(s) {
+        return;
+    }
+    s.ui.wizard.pairing_failed = false;
+    s.ui.wizard.paired_here = true;
+    crate::env::pair_link(s, &link);
+    if !crate::env::pairing(s) {
+        // The link didn't parse; its error shows under the field.
+        s.ui.wizard.paired_here = false;
+        s.ui.wizard.pairing_failed = true;
+    }
+}
+
+/// Web's onboarding `PairingForm`: one pairing link, Pair, and how to get a link.
+fn pairing_form(s: &App, t: &T) -> El {
+    let ui = &s.ui.wizard;
+    let pairing = crate::env::pairing(s);
+    let error = s.ui.env.error.as_deref().filter(|_| ui.pairing_failed && !pairing);
+    let mut form = col()
+        .key("wizard-pairing")
+        .w_full()
+        .px(12.)
+        .pb(12.)
+        .gap(12.)
+        .child(
+            col().w_full().gap(8.).child(text("Pairing link").font(theme::TEXT_SM).color(t.c.muted_foreground)).child(
+                kit::Input::new(&ui.link)
+                    .size("lg")
+                    .placeholder("https://your-server:5230/pair#token=…")
+                    .invalid(error.is_some())
+                    .disabled(pairing)
+                    .on_edit(|s: &mut App| &mut s.ui.wizard.link)
+                    .on_submit(|s: &mut App, _| submit_link(s))
+                    .build(t)
+                    .single_line(),
+            ),
+        );
+    if let Some(error) = error {
+        form = form.child(
+            row()
+                .w_full()
+                .px(12.)
+                .py(10.)
+                .radius(8.)
+                .border(1., t.c.destructive.alpha_mul(0.32))
+                .fill(t.c.destructive.alpha_mul(0.04))
+                .child(text(error.to_owned()).font(theme::TEXT_SM).color(t.c.destructive_foreground).wrap().grow(1.).shrink().min_w(0.)),
+        );
+    }
+    let help = ui.pairing_help;
+    form = form.child(
+        row()
+            .w_full()
+            .gap(12.)
+            .center_y()
+            .child(
+                row()
+                    .gap(4.)
+                    .center_y()
+                    .role("button")
+                    .label("Need a pairing link?")
+                    .cursor(rune::Cursor::Pointer)
+                    .child(icon(if help { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 14.).color(t.c.muted_foreground))
+                    .child(text("Need a pairing link?").font(theme::TEXT_SM).color(t.c.muted_foreground))
+                    .on_press(|s: &mut App| s.ui.wizard.pairing_help = !s.ui.wizard.pairing_help),
+            )
+            .child(rune::el().grow(1.))
+            .child(kit::Button::new(if pairing { "Pairing..." } else { "Pair" }).disabled(pairing || ui.link.text.trim().is_empty()).on_press(submit_link).build(t)),
+    );
+    if help {
+        let code = |c: &str| text(c.to_owned()).font(theme::mono(theme::TEXT_SM)).color(t.c.muted_foreground);
+        form = form
+            .child(
+                row()
+                    .w_full()
+                    .flex_wrap()
+                    .child(text("On the computer with your code, start T3 Code or run ").font(theme::TEXT_SM).color(t.c.muted_foreground))
+                    .child(code("npx t3 serve"))
+                    .child(text(", then run:").font(theme::TEXT_SM).color(t.c.muted_foreground)),
+            )
+            .child(command_block("npx t3 pair", t))
+            .child(
+                row()
+                    .w_full()
+                    .flex_wrap()
+                    .child(text("On a tailnet, run ").font(theme::TEXT_XS).color(t.c.muted_foreground))
+                    .child(text("npx t3 pair --tailscale").font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground))
+                    .child(text(" instead.").font(theme::TEXT_XS).color(t.c.muted_foreground)),
+            );
+    }
+    form
+}
+
+/// Web `CommandBlock`: the command after a muted `$`, with a copy button.
+fn command_block(command: &'static str, t: &T) -> El {
+    row()
+        .w_full()
+        .px(12.)
+        .py(10.)
+        .gap(12.)
+        .center_y()
+        .radius(8.)
+        .border(1., t.c.border)
+        .fill(t.c.muted.alpha_mul(0.5))
+        .child(
+            row()
+                .grow(1.)
+                .shrink()
+                .min_w(0.)
+                .child(text("$ ").font(theme::mono(theme::TEXT_SM)).color(t.c.muted_foreground))
+                .child(text(command).font(theme::mono(theme::TEXT_SM)).color(t.c.foreground).truncate()),
+        )
+        .child(
+            row()
+                .size(24., 24.)
+                .center()
+                .radius(6.)
+                .hover(t.c.accent)
+                .role("button")
+                .label("Copy command")
+                .help("Copy command")
+                .cursor(rune::Cursor::Pointer)
+                .child(icon(&icons::COPY, 14.).color(t.c.muted_foreground))
+                .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(command.to_owned())),
+        )
 }
 
 fn agents(s: &App, t: &T) -> El {
@@ -707,7 +868,12 @@ fn projects(s: &App, t: &T) -> El {
     list = list.child(import_list(candidates, ui, t));
     body = body.child(kit::scroll_area("wizard-import-list", list.scroll(rune::ScrollSpec { stick_bottom: false }), t).max_h(320.));
     let label = if importing { "Importing…".into() } else { format!("Import {chosen} {}", if chosen == 1 { "project" } else { "projects" }) };
-    body.child(rune::el().h(8.)).child(row().w_full().gap(8.).child(rune::el().grow(1.)).child(skip).child(continue_button(t, &label, importing || chosen == 0, start_import)))
+    // Web's `canImport`: every selected computer grants operate (denied until its session answers).
+    let can_import = chosen == 0 || crate::settings::permissions::can_on(s, &ui.scan_env, "orchestration:operate");
+    if !can_import {
+        body = body.child(text(IMPORT_PERMISSION_MESSAGE).font(theme::TEXT_SM).color(t.c.destructive).wrap());
+    }
+    body.child(rune::el().h(8.)).child(row().w_full().gap(8.).child(rune::el().grow(1.)).child(skip).child(continue_button(t, &label, !can_import || importing || chosen == 0, start_import)))
 }
 
 pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
@@ -824,5 +990,27 @@ mod tests {
         s.client_settings.values.insert("onboardingCompletedAt".into(), Value::Null);
         poll(&mut s);
         assert!(!s.ui.wizard.open && completed(&s), "a used workspace skips the wizard and records it");
+    }
+
+    #[test]
+    fn a_pairing_from_the_wizard_sets_up_the_new_computer() {
+        let mut s = App::new();
+        s.ui.wizard.open = true;
+        s.ui.wizard.decided = true;
+        s.ui.wizard.pairing_open = true;
+        s.ui.wizard.link = rune::TextEdit::new("https://box.example/pair#token=t");
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example".into(), bearer: "t".into() });
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(crate::data::empty_state()));
+
+        s.ui.wizard.paired_here = true;
+        poll(&mut s);
+        assert!(s.ui.wizard.pairing_failed, "a pairing that added nothing shows its error");
+        assert!(s.ui.wizard.pairing_open);
+
+        s.ui.wizard.paired_here = true;
+        s.ui.env.last_paired = Some("box".into());
+        poll(&mut s);
+        assert_eq!(s.ui.env.active, "box");
+        assert!(!s.ui.wizard.pairing_open && s.ui.wizard.link.text.is_empty());
     }
 }
