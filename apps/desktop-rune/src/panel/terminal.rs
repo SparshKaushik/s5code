@@ -57,6 +57,8 @@ pub struct Session {
     exit_noted: bool,
     /// When the PTY hears the settled grid (`notifyResize` in the web's ghostty surface).
     notify_at: Option<Instant>,
+    /// A frame was asked for to lay the viewport out once `notify_at` passed.
+    kicked: bool,
     /// A foreground process holds the shell (`hasRunningSubprocess`).
     pub running: bool,
     attached: bool,
@@ -87,6 +89,7 @@ impl Session {
             ended: false,
             exit_noted: false,
             notify_at: None,
+            kicked: false,
             running: false,
             attached: false,
             queued: None,
@@ -109,18 +112,22 @@ impl Session {
         }
     }
 
-    /// A new viewport size. The grid reflows only once it settles, with the PTY: a size that
-    /// comes straight back (a thread shown again, a panel re-laying out) never reflows the screen,
-    /// since a round trip through a narrower grid can leave the cursor off the prompt.
-    fn fit_to(&mut self, cols: usize, rows: usize) {
+    /// The viewport's size at a layout. A size settles only when a layout after the settle time
+    /// still has it: then the grid reflows and the PTY hears it (the returned size). A frame at
+    /// a passing size (a thread shown again lays its drawer out from fallbacks first) must not
+    /// reach the shell even when the next frame is slow, or readline redraws its prompt for a
+    /// width the screen no longer has and the cursor lands columns past it.
+    fn fit_to(&mut self, cols: usize, rows: usize, now: Instant) -> Option<(usize, usize)> {
         if self.fit == Some((cols, rows)) {
-            return;
+            return self.settle(now);
         }
         self.fit = Some((cols, rows));
+        self.kicked = false;
         // Recorded sessions keep the grid they were captured at.
         if self.payload.is_some() {
-            self.notify_at = Some(Instant::now() + RESIZE_SETTLE);
+            self.notify_at = Some(now + RESIZE_SETTLE);
         }
+        None
     }
 
     /// Once the size settles the grid reflows to it, and the PTY hears it unless it has it.
@@ -136,6 +143,7 @@ impl Session {
 
     /// The PTY hears the fit once it settles, unless it already has it.
     fn schedule_notify(&mut self) {
+        self.kicked = false;
         self.notify_at = (self.fit.is_some() && self.fit != self.grid).then(|| Instant::now() + RESIZE_SETTLE);
     }
 
@@ -429,7 +437,12 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
     };
-    session.fit_to(cols, rows);
+    if let Some((cols, rows)) = session.fit_to(cols, rows, Instant::now())
+        && let Some(net) = app.src.net()
+    {
+        let request = net.request("terminal.resize", json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}));
+        app.ui.panel.terminal.pending.push((request, thread.to_string(), id.to_string()));
+    }
 }
 
 pub fn palette(t: &T) -> Palette {
@@ -504,7 +517,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     });
     let mut writes = vec![];
     let mut ended = vec![];
-    let mut notify = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
         let payload = app.ui.panel.terminal.sessions[index].payload.clone();
         let events = match (payload, app.src.net()) {
@@ -551,26 +563,15 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             session.cursor_blinks = blinks;
             changed = true;
         }
+        // The settle itself waits for a layout (`fit_to`); this only brings that frame.
         if let Some(at) = session.notify_at {
             let now = Instant::now();
             if now < at {
                 tx.wake_after(at - now);
-            } else {
-                let size = session.vt.size();
-                if let Some((cols, rows)) = session.settle(now) {
-                    notify.push((session.thread.clone(), session.id.clone(), cols, rows));
-                }
-                changed |= session.vt.size() != size;
+            } else if !session.kicked {
+                session.kicked = true;
+                changed = true;
             }
-        }
-    }
-    for (thread, id, cols, rows) in notify {
-        if let Some(net) = app.src.net() {
-            let request = net.request(
-                "terminal.resize",
-                json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}),
-            );
-            app.ui.panel.terminal.pending.push((request, thread, id));
         }
     }
     for (thread, id, data) in writes {
@@ -1514,7 +1515,7 @@ mod tests {
         );
         assert_eq!(session.vt.size(), (100, 30));
         assert_eq!((session.title().as_str(), session.running), ("vim", true), "activity renames the tab");
-        // A wider view waits for the PTY's grid; a narrower one reflows at once (`applyGrid`).
+        // A wider view waits for the PTY's grid; a narrower one reflows to it (`applyGrid`).
         session.fit = Some((120, 40));
         session.apply_grid();
         assert_eq!(session.vt.size(), (100, 30));
@@ -1543,55 +1544,31 @@ mod tests {
     const PROMPT_SCREEN: &str = "root@modal:~/projects/demo# echo first-key-ok\r\nfirst-key-ok\r\nroot@modal:~/projects/demo# ";
 
     #[test]
-    fn a_viewport_laid_out_again_leaves_the_screen_alone() {
+    fn a_passing_viewport_size_never_reaches_the_shell() {
         let mut session = Session::new("t", "term-1");
         session.payload = Some(json!({"threadId":"t","terminalId":"term-1","cwd":"/p"}));
         apply(&mut session, &json!({"type":"snapshot","snapshot":{"history":PROMPT_SCREEN,"cols":80,"rows":24,"sequence":1}}));
-        session.fit_to(80, 24);
-        assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), None, "the PTY already has this size");
+        let t0 = Instant::now();
+        let later = |ms: u64| t0 + Duration::from_millis(ms);
+        assert_eq!(session.fit_to(80, 24, t0), None);
+        assert_eq!(session.fit_to(80, 24, later(200)), None, "the PTY already has this size");
         let before = session.vt.cursor_point();
         assert_eq!(before, (28, 2));
-        // Showing the thread again lays the viewport out at another size for a frame.
-        for cols in [2, 20, 27, 28, 40] {
-            session.fit_to(cols, 24);
-            session.fit_to(80, 24);
-            assert_eq!((session.vt.size(), session.vt.cursor_point()), ((80, 24), before), "a {cols}-column frame");
-            assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), None, "nothing for the PTY to hear");
-            assert_eq!(session.vt.cursor_point(), before);
+        // Showing the thread again lays its drawer out at a fallback size for one frame, and on a
+        // slow machine the next frame comes after the settle time.
+        for cols in [2, 20, 27, 40, 120] {
+            assert_eq!(session.fit_to(cols, 24, later(1000)), None);
+            assert_eq!(session.fit_to(80, 24, later(1400)), None, "a {cols}-column frame");
+            assert_eq!(session.fit_to(80, 24, later(1800)), None, "the shell never hears it");
+            assert_eq!((session.vt.size(), session.vt.cursor_point()), ((80, 24), before));
         }
-        // A size that holds reflows the grid and reaches the PTY together.
-        session.fit_to(60, 20);
+        // A size that holds past the settle time reflows the grid and reaches the PTY together.
+        assert_eq!(session.fit_to(60, 20, later(2000)), None);
+        assert_eq!(session.fit_to(60, 20, later(2100)), None, "not settled yet");
         assert_eq!(session.vt.size(), (80, 24));
-        assert_eq!(session.settle(Instant::now()), None, "not settled yet");
-        assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), Some((60, 20)));
+        assert_eq!(session.fit_to(60, 20, later(2200)), Some((60, 20)));
         assert_eq!(session.vt.size(), (60, 20));
-    }
-
-    #[test]
-    fn zz_diagnose_round_trip_reflow() {
-        let mut moved = vec![];
-        for cols in [2usize, 5, 10, 13, 14, 15, 20, 27, 28, 29, 30, 40, 45, 46, 60, 79] {
-            let mut vt = Vt::new(80, 24);
-            vt.feed(PROMPT_SCREEN);
-            let before = vt.cursor_point();
-            vt.resize(cols, 24);
-            let mid = vt.cursor_point();
-            vt.resize(80, 24);
-            if vt.cursor_point() != before {
-                moved.push((cols, mid, vt.cursor_point()));
-            }
-        }
-        for rows in [1usize, 2, 3] {
-            let mut vt = Vt::new(80, 24);
-            vt.feed(PROMPT_SCREEN);
-            let before = vt.cursor_point();
-            vt.resize(80, rows);
-            vt.resize(80, 24);
-            if vt.cursor_point() != before {
-                moved.push((1000 + rows, before, vt.cursor_point()));
-            }
-        }
-        panic!("error: DIAG round trips that moved the cursor from (28, 2): {moved:?}");
+        assert_eq!(session.fit_to(60, 20, later(2400)), None, "once");
     }
 
     #[test]
