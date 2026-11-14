@@ -12,6 +12,7 @@ pub struct Dialog {
     open: bool,
     width: f32,
     outside: bool,
+    button_only: bool,
     scroll_all: bool,
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
@@ -26,6 +27,7 @@ impl Dialog {
             open: false,
             width: 512.,
             outside: true,
+            button_only: false,
             scroll_all: false,
             close: None,
             button: None,
@@ -57,11 +59,23 @@ impl Dialog {
         self.outside = false;
         self
     }
+    /// Web's `onOpenChange` that cancels every reason but `close-press`: the X closes, while
+    /// Escape and outside presses do nothing. Call before `on_close`.
+    pub fn button_only(mut self) -> Self {
+        self.outside = false;
+        self.button_only = true;
+        self
+    }
     pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S) + Clone + 'static) -> Self {
         let button = f.clone();
         self.button = Some(Box::new(move |e| e.on_press(button)));
         let outside = self.outside;
-        self.close = Some(Box::new(move |e| e.modal(outside, f)));
+        let close: Box<dyn FnOnce(El) -> El> = if self.button_only {
+            Box::new(|e: El| e.modal(false, |_: &mut S| {}))
+        } else {
+            Box::new(move |e: El| e.modal(outside, f))
+        };
+        self.close = Some(close);
         self
     }
     pub fn build(self, t: &T, layer: &mut Vec<El>) {
@@ -73,7 +87,7 @@ impl Dialog {
         };
         // Web `DialogPopup`'s close button: `size="icon" variant="ghost"` at `absolute end-2 top-2`;
         // alert dialogs (`AlertDialogPopup`) have none.
-        let dismiss = (self.outside).then(|| {
+        let dismiss = (self.outside || self.button_only).then(|| {
             let dismiss = Button::new("Close").size("icon").variant("ghost").icon(&crate::icons::X).build(t);
             match self.button {
                 Some(f) => f(dismiss),

@@ -4,6 +4,7 @@
 //! Each surface module owns its slice of UI state (`App::ui.*`) and its headless scenes, which
 //! render recorded server state from `fixtures/` for pixel comparison against the web app.
 
+mod add_to_machine;
 mod chat;
 mod data;
 mod desktop;
@@ -62,6 +63,7 @@ impl Route {
 /// Per-surface UI state; each module owns its struct.
 #[derive(Default)]
 pub struct Ui {
+    pub add_to_machine: add_to_machine::Ui,
     pub shell: shell::Ui,
     pub chat: chat::Ui,
     pub panel: panel::Ui,
@@ -191,6 +193,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);
+    changed |= add_to_machine::poll(s);
     changed |= settings::codex_callback::poll(s);
     changed |= wizard::poll(s);
     changed |= search::poll(s);
@@ -238,7 +241,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 

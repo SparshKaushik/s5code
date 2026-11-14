@@ -304,14 +304,11 @@ impl Ui {
 fn launch_context(app: &App) -> Option<(String, String, Option<String>, Option<String>)> {
     let thread = current_thread(app)?;
     let cwd = super::workspace(app)?;
-    let worktree = app
-        .state()
-        .threads
-        .iter()
-        .find(|v| v["id"] == thread.as_str())
-        .and_then(|v| v["worktreePath"].as_str())
-        .filter(|v| !v.is_empty())
-        .map(String::from);
+    let worktree = match app.state().threads.iter().find(|v| v["id"] == thread.as_str()) {
+        Some(v) => v["worktreePath"].as_str().filter(|v| !v.is_empty()).map(String::from),
+        // A draft runs in the worktree it picked ("New thread on {branch}", "Previous worktree").
+        None => crate::chat::details::draft_worktree(app).map(|(path, _)| path),
+    };
     Some((thread, cwd, worktree, project_root(app)))
 }
 
@@ -356,10 +353,14 @@ fn current_or_draft(app: &mut App) -> Option<String> {
         return None;
     }
     let project = crate::data::s(crate::chat::home::draft_project(app)?, "id").to_string();
-    let thread = format!("thread:project:{project}:{}", s5_net::uuid());
-    let key = crate::chat::composer::draft_key(app, &app.route);
-    app.ui.panel.drawer.drafts.insert(key, thread.clone());
-    Some(thread)
+    Some(draft_thread(app, &project))
+}
+
+/// The thread id the project's draft will be created with, made on first need, so its
+/// terminals and a pull request worktree prepared for it carry into the thread.
+pub fn draft_thread(app: &mut App, project: &str) -> String {
+    let key = crate::chat::composer::home_key(project);
+    app.ui.panel.drawer.drafts.entry(key).or_insert_with(|| format!("thread:project:{project}:{}", s5_net::uuid())).clone()
 }
 
 /// The id a draft's terminals run under becomes the new thread's, once.
@@ -1207,6 +1208,22 @@ mod tests {
         let mut empty = Groups::default();
         assert!(reconcile_ids(&mut empty, &s(&["term-5"])));
         assert_eq!(empty.active, "term-5");
+    }
+
+    #[test]
+    fn a_draft_terminal_runs_in_the_drafts_worktree_and_carries_into_its_thread() {
+        let mut app = App::new();
+        let p = app.state().projects.iter().next().cloned().unwrap();
+        let (project, root) = (crate::data::s(&p, "id").to_string(), crate::data::s(&p, "workspaceRoot").to_string());
+        app.navigate(Route::Home { project_id: Some(project.clone()) });
+        assert_eq!(current_thread(&app), None, "no id until a terminal needs one");
+        let thread = current_or_draft(&mut app).unwrap();
+        assert!(thread.starts_with(&format!("thread:project:{project}:")), "{thread}");
+        assert_eq!(launch_context(&app), Some((thread.clone(), root.clone(), None, Some(root.clone()))));
+        app.ui.chat.home.workspace = Some((project.clone(), json!({"type": "existing_worktree", "worktreePath": "/w/b", "branch": "feat/b"})));
+        assert_eq!(launch_context(&app), Some((thread.clone(), "/w/b".into(), Some("/w/b".into()), Some(root))), "the picked worktree");
+        assert_eq!(take_draft_thread(&mut app, &project), Some(thread), "the thread is created with the terminals' id");
+        assert_eq!(current_thread(&app), None);
     }
 
     #[test]
