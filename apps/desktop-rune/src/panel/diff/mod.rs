@@ -1,10 +1,10 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
-mod comments;
+pub(crate) mod comments;
 pub(crate) mod file_menu;
 mod find;
-mod state;
-mod view;
+pub(crate) mod state;
+pub(crate) mod view;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -905,12 +905,12 @@ fn compact(n: usize) -> String {
 
 /// One row of the file tree: a folder (with chains of single folders joined) or a file.
 #[derive(Debug, PartialEq)]
-struct TreeRow {
-    depth: u32,
-    label: String,
+pub(crate) struct TreeRow {
+    pub(crate) depth: u32,
+    pub(crate) label: String,
     /// The folder's full path, for folding it.
-    dir: Option<String>,
-    file: Option<usize>,
+    pub(crate) dir: Option<String>,
+    pub(crate) file: Option<usize>,
 }
 
 #[derive(Default)]
@@ -920,7 +920,7 @@ struct Node {
     file: Option<usize>,
 }
 
-fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
+pub(crate) fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
     let mut root = Node::default();
     for (i, path) in paths.iter().enumerate() {
         let mut node = &mut root;
@@ -962,7 +962,7 @@ fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
     out
 }
 
-fn all_dirs(paths: &[&str]) -> HashSet<String> {
+pub(crate) fn all_dirs(paths: &[&str]) -> HashSet<String> {
     tree_rows(paths, &HashSet::new()).into_iter().filter_map(|r| r.dir).collect()
 }
 
@@ -1067,7 +1067,7 @@ fn clock_at(wall: i64, hour12: bool) -> String {
 }
 
 /// A header toggle: ghost `sm` button that shows pressed with the accent fill.
-fn toggle(t: &T, key: &str, label: &str, glyph: &'static Icon, on: bool, act: impl Fn(&mut App) + 'static) -> El {
+pub(crate) fn toggle(t: &T, key: &str, label: &str, glyph: &'static Icon, on: bool, act: impl Fn(&mut App) + 'static) -> El {
     let fg = t.c.contrast_foreground;
     row()
         .key(key)
@@ -1093,9 +1093,23 @@ fn icon_button(t: &T, key: &str, label: &str, glyph: &'static Icon, act: impl Fn
 
 /// The stacked / split segmented control.
 fn layout_group(app: &App, t: &T) -> El {
-    let mode = app.ui.panel.diff.state.mode();
+    layout_toggle(t, "panel-diff", ("Stacked diff", "Split diff"), app.ui.panel.diff.state.mode(), pick_layout)
+}
+
+fn pick_layout(s: &mut App, m: DiffMode) {
+    s.ui.panel.diff.state.set_mode(m);
+    save_layout(s, m);
+}
+
+/// The client's `diffLayout`, shared by this panel and a pull request's Code tab.
+pub(crate) fn save_layout(app: &mut App, m: DiffMode) {
+    save_setting(app, "diffLayout", json!(if m == DiffMode::Split { "split" } else { "stacked" }));
+}
+
+/// A stacked / split segmented control over `mode`, keyed `{key}-layout`, `-stacked` and `-split`.
+pub(crate) fn layout_toggle(t: &T, key: &str, (stacked, split): (&str, &str), mode: DiffMode, pick: fn(&mut App, DiffMode)) -> El {
     let pressed = if t.dark { t.c.input.alpha_mul(0.72) } else { t.c.background };
-    let item = |key: &str, label: &str, glyph: &'static Icon, m: DiffMode| {
+    let item = |key: String, label: &str, glyph: &'static Icon, m: DiffMode| {
         let on = mode == m;
         row()
             .key(key)
@@ -1112,19 +1126,16 @@ fn layout_group(app: &App, t: &T) -> El {
             .help(label.to_owned())
             .checked(on)
             .child(icon(glyph, 14.0).color(if on { t.c.foreground } else { t.c.muted_foreground }))
-            .on_press(move |s: &mut App| {
-                s.ui.panel.diff.state.set_mode(m);
-                save_setting(s, "diffLayout", json!(if m == DiffMode::Split { "split" } else { "stacked" }));
-            })
+            .on_press(move |s: &mut App| pick(s, m))
     };
     row()
-        .key("panel-diff-layout")
+        .key(format!("{key}-layout"))
         .padding(2.0)
         .gap(2.0)
         .radius(8.0)
         .fill(t.c.input.alpha_mul(0.4))
-        .child(item("panel-diff-stacked", "Stacked diff", &icons::ROWS_3, DiffMode::Unified))
-        .child(item("panel-diff-split", "Split diff", &icons::COLUMNS_2, DiffMode::Split))
+        .child(item(format!("{key}-stacked"), stacked, &icons::ROWS_3, DiffMode::Unified))
+        .child(item(format!("{key}-split"), split, &icons::COLUMNS_2, DiffMode::Split))
 }
 
 /// One base-ref row per branch (`buildBaseRefChoices`): a local branch paired with its remote

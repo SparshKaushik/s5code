@@ -1,7 +1,7 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
 pub mod browser;
 mod closed;
-mod diff;
+pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
 mod files;

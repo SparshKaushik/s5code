@@ -305,7 +305,7 @@ fn can_write(s: &App) -> bool {
 }
 
 /// `can_write` for the environment that listed `e`: the destination's own grant.
-fn can_write_on(s: &App, e: &Value) -> bool {
+pub(super) fn can_write_on(s: &App, e: &Value) -> bool {
     let Some(env) = e[crate::env::TAG].as_str().filter(|env| *env != s.ui.env.active) else { return can_write(s) };
     match s.ui.pages.pull_requests.row.sessions.get(env).map(|r| (&r.data, &r.error)) {
         Some((_, Some(_))) => false,

@@ -72,7 +72,10 @@ pub struct Ui {
     pub picker: super::pr_filters::Picker,
     pub menu: Option<&'static str>,
     pub submenu: Option<&'static str>,
+    /// The shown tab's pull request, by URL.
     pub selected: Option<String>,
+    /// The panel's tabs and width.
+    pub tabs: super::pr_tabs::Tabs,
     /// The pull request the panel toggle hid, which it reopens.
     pub(super) hidden: Option<String>,
     /// The detail fills the page (RightPanelMaximizeControl); only while it is open.
@@ -773,6 +776,7 @@ pub fn poll(s: &mut App) -> bool {
         return changed;
     }
     settle_panel(ui(s));
+    changed |= super::pr_tabs::sync(s);
     let u = ui(s);
     if std::mem::take(&mut u.pasted) {
         submit(u);
@@ -1273,18 +1277,15 @@ fn settle_sweep(u: &mut Ui) -> bool {
     !first && super::pr_row::cancel_sweep(&mut u.row)
 }
 
-/// Escape ends a sweep, closes a menu or the open pull request, and otherwise leaves the page
+/// Escape ends a sweep or closes a menu, and otherwise leaves the page with its tabs kept
 /// (registerPullRequestsEscapeCommand) unless a shell overlay is open.
 fn escape(s: &mut App) -> bool {
     let u = ui(s);
     if super::pr_row::cancel_sweep(&mut u.row) {
         return true;
     }
-    if u.context.take().is_some() || u.menu.take().is_some() {
+    if u.context.take().is_some() || u.menu.take().is_some() || u.tabs.menu.take().is_some() {
         u.submenu = None;
-        return true;
-    }
-    if u.selected.take().is_some() {
         return true;
     }
     let shell = &s.ui.shell;
@@ -1316,10 +1317,15 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         u.query.focus = u.query.text.len();
         return true;
     }
+    // closeActiveSurfaceFromShortcut: the shown tab closes.
     if crate::panel::shortcut(s, e, "rightPanel.close") {
         let repeat = tx.key_repeat();
         let u = ui(s);
-        return if repeat { u.selected.is_some() } else { u.selected.take().is_some() };
+        let Some(url) = u.selected.clone() else { return false };
+        if !repeat {
+            super::pr_tabs::close(u, &url);
+        }
+        return true;
     }
     if crate::panel::shortcut(s, e, "rightPanel.toggle") {
         let repeat = tx.key_repeat();
@@ -1715,7 +1721,6 @@ pub(super) fn panel_control(s: &App, t: &T) -> El {
 // ---- view -------------------------------------------------------------------------------
 
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
-    let _ = cx;
     let u = &s.ui.pages.pull_requests;
     if let Some((url, x, y)) = &u.context
         && let Some(e) = u.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| field(e, "url") == url))
@@ -1728,7 +1733,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
         tx.live_only();
     });
     if u.selected.is_some() && u.maximized {
-        return main.child(super::pr_detail::view(s, t, overlays));
+        return main.child(super::pr_tabs::panel(s, cx, t, overlays));
     }
     let header = top_bar(s, t, overlays);
     let marker = el().key(CONDENSE_MARKER).w_full().h(1.0);
@@ -1776,7 +1781,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     if u.selected.is_none() {
         return main;
     }
-    main.child(el().w(1.0).h_full().shrink().fill(t.c.border)).child(super::pr_detail::view(s, t, overlays))
+    main.child(super::pr_tabs::panel(s, cx, t, overlays))
 }
 
 /// `Button` with the outline look the toolbar and states use throughout.
@@ -2217,7 +2222,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color { r: a.r * k + b.r * (1.0 - k), g: a.g * k + b.g * (1.0 - k), b: a.b * k + b.b * (1.0 - k), a: a.a * k + b.a * (1.0 - k) }
 }
 
-fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
+pub(super) fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
     let dark = t.dark;
     if open(e) && e["isDraft"].as_bool().unwrap_or(false) {
         return (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 });
@@ -2735,14 +2740,16 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_open_pull_request_then_leaves_the_page() {
+    fn escape_leaves_the_page_with_its_pull_requests_still_open() {
         let mut s = App::new();
         s.route = Route::PullRequests;
         s.ui.pages.main_route = Some(Route::Thread("t1".into()));
         s.ui.pages.pull_requests.selected = Some("https://github.com/acme/app/pull/7".into());
-        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "the open pull request closes first");
+        s.ui.pages.pull_requests.tabs.menu = Some(("https://github.com/acme/app/pull/7".into(), 0.0, 0.0));
+        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "an open tab menu closes first");
         assert!(escape(&mut s));
         assert!(matches!(&s.route, Route::Thread(id) if id == "t1"), "then Escape leaves for the page it was opened over");
+        assert_eq!(s.ui.pages.pull_requests.selected.as_deref(), Some("https://github.com/acme/app/pull/7"));
     }
 
     #[test]

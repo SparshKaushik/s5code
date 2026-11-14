@@ -36,7 +36,9 @@ pub struct Ui {
     pending_detail: Option<u64>,
     pending_activity: Option<u64>,
     pending_diff: Option<u64>,
-    pending_action: Option<(u64, String)>,
+    pub(super) pending_action: Option<(u64, String)>,
+    /// Title, description and comment drafts, the composer, and reactions sent.
+    pub edit: super::pr_edit::Edit,
     pub tab: usize,
     pub checks_open: bool,
     pub description_closed: bool,
@@ -174,6 +176,7 @@ pub fn poll(s: &mut App) -> bool {
     if detail_loaded {
         super::pr_actions::want_stack(s);
     }
+    changed |= super::pr_edit::poll(s);
     let u = ui(s);
     if u.tab == 2 && u.entry.is_some() && u.files.is_none() && u.pending_diff.is_none() && u.diff_error.is_none() {
         load_diff(s);
@@ -268,7 +271,7 @@ fn load_diff(s: &mut App) {
 }
 
 /// perform: one action at a time, merges carrying the resolved method.
-fn run(s: &mut App, action: &'static str) {
+pub(super) fn run(s: &mut App, action: &'static str) {
     let Some(entry) = ui(s).entry.clone() else { return };
     if ui(s).pending_action.is_some() {
         return;
@@ -565,7 +568,7 @@ fn md_style(t: &T) -> MarkdownStyle {
         .code_block_padding(12.0, 10.0)
 }
 
-fn markdown(t: &T, src: &str) -> El {
+pub(super) fn markdown(t: &T, src: &str) -> El {
     Markdown::new(src)
         .selectable(true)
         .on_link_tx(|_: &mut App, url, tx| {
@@ -576,7 +579,7 @@ fn markdown(t: &T, src: &str) -> El {
 
 pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
-    let mut panel = col().key("pr-detail").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background);
+    let mut panel = col().key("pr-detail").grow(1.0).shrink().w_full().min_w(0.0).min_h(0.0).fill(t.c.background);
     let Some(entry) = &u.entry else { return panel };
     let shown = u.detail.as_ref().unwrap_or(entry);
     panel = panel.child(top(s, t, shown, u.detail.is_some(), overlays));
@@ -601,7 +604,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t))
 }
 
-/// Crumbs, the primary action, the actions menu, then the maximize and panel toggles.
+/// Crumbs, the primary action and the actions menu; the panel's tab strip holds its toggles.
 fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
     let open_url = field(d, "url").to_string();
     let menu_url = open_url.clone();
@@ -644,7 +647,6 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
             delete_branch_dialog(t, d, overlays);
         }
     }
-    actions = actions.child(super::pull_requests::maximize_control(s, t)).child(super::pull_requests::panel_control(s, t));
     row().key("pr-detail-top").w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
 }
 
@@ -916,7 +918,7 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
         .px(16.0)
         .pt(4.0)
         .pb(16.0)
-        .child(text(field(d, "title").to_string()).font(theme::weight(theme::TEXT_LG.lh(26.0), theme::SEMIBOLD)).color(t.c.foreground).w_full().wrap())
+        .child(super::pr_edit::title(s, t, d))
         .child(meta)
         .child(branches)
 }
@@ -1096,7 +1098,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let mut out = col().w_full().pb(48.0).child(meta).child(rule(t));
     let body = field(d, "body").trim().to_string();
     out = out.child(section(t, "description", "Description".into(), !u.description_closed, |s| ui(s).description_closed = !ui(s).description_closed, None, || {
-        markdown(t, if body.is_empty() { "_No description provided._" } else { &body })
+        super::pr_edit::description(s, t, d, markdown(t, if body.is_empty() { "_No description provided._" } else { &body }))
     }));
     let checks = d["checks"].as_array().cloned().unwrap_or_default();
     out = out.child(rule(t)).child(section(t, "checks", "Checks".into(), u.checks_open, |s| ui(s).checks_open = !ui(s).checks_open, None, || {
@@ -1137,7 +1139,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let kept: Vec<&conv::Item> = items.iter().filter(|i| conv::keep(i, filter)).collect();
     let hidden = conv::comment_count(&items) - conv::comment_count(kept.iter().copied());
     let actions = row().gap(4.0).center_y().shrink().child(conv::filter_menu(s, t, filter, hidden, overlays)).child(order_toggle(s, t));
-    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(actions), || comments(s, t, &items, &kept, hidden)))
+    out.child(rule(t)).child(section(t, "comments", title, !u.comments_closed, |s| ui(s).comments_closed = !ui(s).comments_closed, Some(actions), || comments(s, t, &items, &kept, hidden))).children(super::pr_edit::composer(s, t, d, overlays))
 }
 
 /// The Comments section: filtered, paged from the newest, and ordered by the toggle.
@@ -1218,7 +1220,7 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
     if let Some(at) = ts(c, "createdAt") {
         head = head.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
     }
-    head = head.child(spacer());
+    head = head.child(spacer()).children(super::pr_edit::reaction_bar(s, t, c));
     let replies = item.replies.len() + item.more;
     if replies > 0 {
         head = head.child(text(format!("{replies} {}", if replies == 1 { "reply" } else { "replies" })).font(theme::TEXT_XS).color(muted));
@@ -1257,13 +1259,13 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
         }
         return card;
     }
-    if let Some(body) = body {
-        card = card.child(col().w_full().mt(8.0).child(markdown(t, &body)));
+    if let Some(body) = super::pr_edit::comment_body(s, t, c, body.map(|b| markdown(t, &b))) {
+        card = card.child(col().w_full().mt(8.0).child(body));
     }
     if !item.replies.is_empty() {
         let mut thread = col().w_full().gap(12.0);
         for r in &item.replies {
-            thread = thread.child(markdown(t, field(r, "body").trim()));
+            thread = thread.children(super::pr_edit::comment_body(s, t, r, Some(markdown(t, field(r, "body").trim()))));
         }
         card = card.child(row().w_full().mt(12.0).ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0)));
     }
@@ -1323,7 +1325,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>]) -> El {
         if let Some(path) = path {
             h = h.child(text(path).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0));
         }
-        h = h.child(spacer());
+        h = h.child(spacer()).children(super::pr_edit::reaction_bar(s, t, c));
         if let Some(at) = ts(c, "createdAt") {
             h = h.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
         }
@@ -1352,13 +1354,13 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>]) -> El {
         .border(1.0, t.c.border.alpha_mul(0.6))
         .clip_rounded(radius::LG)
         .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(c, path)));
-    if let Some(body) = conv::visible_body(field(c, "body")) {
-        card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(markdown(t, &body)));
+    if let Some(body) = super::pr_edit::comment_body(s, t, c, conv::visible_body(field(c, "body")).map(|b| markdown(t, &b))) {
+        card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(body));
     }
     if !replies.is_empty() {
         let mut thread = col().w_full().gap(12.0);
         for r in replies {
-            thread = thread.child(col().w_full().gap(6.0).child(head_line(&**r, None)).child(markdown(t, field(r, "body").trim())));
+            thread = thread.child(col().w_full().gap(6.0).child(head_line(&**r, None)).children(super::pr_edit::comment_body(s, t, r, Some(markdown(t, field(r, "body").trim())))));
         }
         card = card.child(row().w_full().px(12.0).pb(12.0).child(row().w_full().ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))));
     }

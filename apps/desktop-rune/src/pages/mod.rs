@@ -3,10 +3,13 @@
 
 pub mod avatars;
 pub mod pr_actions;
+pub mod pr_code;
 pub mod pr_conversation;
 pub mod pr_detail;
+pub mod pr_edit;
 pub mod pr_filters;
 pub mod pr_row;
+pub mod pr_tabs;
 pub mod pull_requests;
 pub mod usage;
 pub mod usage_limits;
@@ -23,6 +26,8 @@ use crate::{App, Appearance, Route};
 pub struct Ui {
     pub pull_requests: pull_requests::Ui,
     pub detail: pr_detail::Ui,
+    /// The Code tab's diff, kept across pull requests like web's mounted tab.
+    pub code: pr_code::Ui,
     pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
@@ -457,9 +462,73 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |_| {});
         light(s);
     }),
+    ("pull-requests-detail-edit-title", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.edit.title = Some(pr_edit::Draft::new("feat(desktop-rune): port the pull requests, usage and limits pages").edit);
+        })
+    }),
+    ("pull-requests-detail-edit-description", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            let body = u.detail.as_ref().map(|d| crate::data::s(d, "body").to_string()).unwrap_or_default();
+            u.edit.body = Some(pr_edit::Draft::new(&format!("{body}\n\n- [ ] Check the limits beside each provider.")));
+        })
+    }),
+    ("pull-requests-detail-edit-comment", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            let draft = pr_edit::Draft::new("Fixed in the latest push: hours now follow the local zone, and the labels say which.");
+            u.edit.comment = Some(pr_edit::CommentDraft { id: "c2".into(), kind: "issue-comment".into(), draft });
+        })
+    }),
+    ("pull-requests-detail-comment-form", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            u.comments_closed = true;
+            u.edit.composer.comment = rune::TextEdit::new("Superseded by #2490, which carries these pages forward.");
+        })
+    }),
+    ("pull-requests-detail-review-composer", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            u.comments_closed = true;
+            let c = &mut u.edit.composer;
+            c.review = true;
+            c.verdict = Some("request-changes");
+            c.verdict_menu = true;
+            c.summary = rune::TextEdit::new("The hourly labels still read in UTC on the limits card.");
+        })
+    }),
+    ("pull-requests-detail-reactions", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) else { return };
+            for c in list.iter_mut() {
+                c["reactions"] = match c["id"].as_str() {
+                    Some("c1") => json!([{"content": "thumbs-up", "count": 3, "actors": ["theo", "juliusmarminge"], "viewerHasReacted": true}, {"content": "rocket", "count": 1, "actors": ["theo"], "viewerHasReacted": false}]),
+                    Some("c2") => json!([{"content": "heart", "count": 1, "actors": ["juliusmarminge"], "viewerHasReacted": false}]),
+                    _ => continue,
+                };
+            }
+            u.edit.picker = Some("c2".into());
+        })
+    }),
     ("pull-requests-maximized", |s| {
         open_detail(s, 0, |_| {});
         s.ui.pages.pull_requests.maximized = true;
+    }),
+    ("pull-requests-tabs", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 3, None);
+    }),
+    ("pull-requests-panel-resized", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 1, Some(420.0));
     }),
     ("pull-requests-panel-narrow-search", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-panel-hidden", |s| {

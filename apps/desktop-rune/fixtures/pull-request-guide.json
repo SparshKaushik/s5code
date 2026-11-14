@@ -1,0 +1,85 @@
+{
+  "guide": {
+    "headSha": "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b",
+    "generatedAt": "2026-11-14T08:52:10.000Z",
+    "modelSelection": { "instanceId": "codex", "model": "gpt-5.4" },
+    "stops": [
+      {
+        "title": "Hour labels follow the chosen zone",
+        "summary": "The usage chart labelled hourly periods with the UTC hour. It now converts the period start to wall time in the selected zone and formats it with `hour_label`, so a 12-hour preference reads `3 PM` instead of `15:00`.",
+        "attention": {
+          "kind": "contract",
+          "note": "`hour_label` is shared with the tooltip. Check that both still agree on midnight, which the old code printed as `00:00`."
+        },
+        "excerpts": [
+          {
+            "path": "apps/desktop-rune/src/pages/usage.rs",
+            "side": "new",
+            "start": 210,
+            "end": 211,
+            "caption": "The period start becomes wall time before it is labelled."
+          }
+        ],
+        "files": [{ "path": "apps/desktop-rune/src/pages/usage.rs" }],
+        "notes": [
+          {
+            "path": "apps/desktop-rune/src/pages/usage.rs",
+            "line": 210,
+            "title": "Zone conversion",
+            "body": "`m.zone` is the zone picked in the header, not the machine's."
+          },
+          {
+            "path": "apps/desktop-rune/src/pages/usage.rs",
+            "line": 211,
+            "title": "12-hour clocks",
+            "body": "`m.hour12` comes from the client settings."
+          }
+        ],
+        "questions": [
+          "Does the tooltip use the same zone as the axis?",
+          "What happens to a period that starts on a daylight saving change?"
+        ]
+      },
+      {
+        "title": "Register the pages module",
+        "summary": "A new `pages` module holds the sidebar footer's utility pages. It only declares the two pages and imports what their key handlers need.",
+        "attention": null,
+        "excerpts": [
+          {
+            "path": "apps/desktop-rune/src/pages/mod.rs",
+            "side": "new",
+            "start": 1,
+            "end": 6,
+            "caption": ""
+          }
+        ],
+        "files": [],
+        "notes": [
+          {
+            "path": "apps/desktop-rune/src/pages/mod.rs",
+            "line": 3,
+            "title": "Pull requests page",
+            "body": ""
+          }
+        ],
+        "questions": []
+      },
+      {
+        "title": "Route the page",
+        "summary": "`Route::PullRequests` replaces the main column, the way `Route::Usage` opens over it.",
+        "attention": null,
+        "excerpts": [],
+        "files": [
+          {
+            "path": "apps/desktop-rune/src/main.rs",
+            "note": "One new route variant"
+          }
+        ],
+        "notes": [],
+        "questions": ["Should the route remember the selected pull request?"]
+      }
+    ]
+  },
+  "run": null,
+  "currentHeadSha": "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b"
+}
