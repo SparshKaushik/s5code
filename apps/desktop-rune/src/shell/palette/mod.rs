@@ -1075,8 +1075,21 @@ fn token_score(source: &str, token: &str, typos: bool, mid_word: bool) -> f32 {
         .unwrap_or(0.)
 }
 
+/// The web leaves a page opened with a query (the Local folder path) once its field is emptied.
+fn leave_emptied_page(s: &mut App) -> bool {
+    let ui = &s.ui.shell.palette;
+    if ui.page != "add-browse" || !ui.query.text.is_empty() {
+        return false;
+    }
+    pop_page(s);
+    true
+}
+
 /// Request only queries that can search message content; replies are applied after Net drains.
 pub fn search_changed(s: &mut App, tx: &mut Tx) {
+    if leave_emptied_page(s) {
+        return;
+    }
     let query = normalize_query(&s.ui.shell.palette.query.text);
     s.ui.shell.palette.picked = false;
     add_project::sync_browse(s);
@@ -2130,6 +2143,18 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn emptying_the_folder_path_leaves_the_browse_page_like_the_web() {
+        let mut s = App::new();
+        push_page(&mut s, "add-project", "");
+        push_page(&mut s, "add-browse", "~/");
+        assert!(!leave_emptied_page(&mut s), "a path in the field stays");
+        set_query(&mut s, "");
+        assert!(leave_emptied_page(&mut s));
+        assert_eq!(s.ui.shell.palette.page, "add-project");
+        assert!(!leave_emptied_page(&mut s), "only the browse page leaves on an empty field");
+    }
+
     #[test]
     fn submenu_suggestions_name_the_submenu_unless_the_query_only_names_it() {
         assert_eq!(suggestion_prefix("New thread in...", "demo").as_deref(), Some("New thread in "));

@@ -25,6 +25,7 @@ alacritty_terminal = { version = "0.26", default-features = false }
 regex-automata = "0.4"
 # Already in the tree through rustls; PBKDF2 and SHA-256 for browser cookie import.
 ring = "0.17"
+qrcodegen = "1.8"
 
 [profile.dev.package."*"]
 debug = false

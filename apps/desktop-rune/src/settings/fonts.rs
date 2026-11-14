@@ -45,9 +45,13 @@ fn size(values: &Map<String, Value>, key: &str, (min, max, default): (f64, f64, 
     px.round().clamp(min, max) as f32
 }
 
+/// The size that zooms the whole window (`desktop::frame`): a change lands in one commit
+/// (`tx.instant()`), as View › Zoom does, instead of springing every element to its new layout.
+pub const ZOOM_KEY: &str = "fontSizeInterface";
+
 /// Web's root font size over its 16px default: the factor rem-sized UI draws at.
 pub fn interface_scale(values: &Map<String, Value>) -> f32 {
-    size(values, "fontSizeInterface", (12.0, 20.0, 16.0)) / 16.0
+    size(values, ZOOM_KEY, (12.0, 20.0, 16.0)) / 16.0
 }
 
 /// `--font-size-code` in layout points: px in web, so the interface scale doesn't grow it.

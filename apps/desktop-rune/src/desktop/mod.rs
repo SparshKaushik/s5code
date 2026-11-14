@@ -6,10 +6,13 @@
 //! only the accelerators matter: `on_key` runs them last, after every surface had the key.
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(unix)]
 pub mod cli;
 pub mod exposure;
+pub mod policy;
+#[cfg(unix)]
+pub mod telemetry;
 pub mod locale;
 pub mod recovery;
 #[cfg(unix)]
@@ -181,6 +184,7 @@ pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
                 macos::fix_menus(SETTINGS_TITLE, UPDATES_TITLE, QUIT_TITLE);
             }
             macos::autosave_frame(window);
+            macos::install_open_documents();
         });
     app
 }

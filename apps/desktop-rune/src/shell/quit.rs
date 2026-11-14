@@ -158,11 +158,12 @@ pub fn overlay(s: &App, t: &T) -> Option<El> {
     Some(
         col()
             .key("quit-hold")
+            .transition(rune::Transition::none())
             .role("status")
             .inert()
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
             .child(el().grow(22.0))
-            .child(row().w_full().justify_center().child(pill))
+            .child(row().w_full().justify_center().child(crate::kit::motion::popup(pill)))
             .child(el().grow(78.0)),
     )
 }

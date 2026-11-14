@@ -200,6 +200,10 @@ pub fn open_tool_diff(app: &mut App, thread: String, item: String) {
     diff::open_tool_call(app, thread, item);
     activate(app, Surface::Diff);
 }
+/// The open panel shows a browser tab, as web's `threadShowingBrowser`.
+pub fn showing_browser(app: &App) -> bool {
+    app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_)))
+}
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
     let tab = preview::open(app);
