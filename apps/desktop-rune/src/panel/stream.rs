@@ -89,6 +89,11 @@ impl Stream {
         self.state.lock().unwrap().clone()
     }
 
+    /// The server this stream comes from.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
     }

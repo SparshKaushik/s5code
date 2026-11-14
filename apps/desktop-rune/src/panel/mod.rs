@@ -217,6 +217,13 @@ pub fn open_preview(app: &mut App, url: &str) {
     activate(app, Surface::Browser(tab));
     preview::navigate(app, tab, url);
 }
+/// Web's "Open in browser" for an HTML or PDF file, absolute or workspace-relative.
+pub fn open_file_in_preview(app: &mut App, path: &str) {
+    preview::open_file(app, path);
+}
+pub fn previewable_file(path: &str) -> bool {
+    preview::previewable_file(path)
+}
 /// `workspace.focusNext`'s panel (order 4) and terminal (order 5) areas.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Region {

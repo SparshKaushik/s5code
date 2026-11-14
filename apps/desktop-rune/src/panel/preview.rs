@@ -160,6 +160,8 @@ pub struct Ui {
     deferred: Vec<(String, Value)>,
     /// `preview.adjust` and `preview.resize` for streamed tabs: request id, environment, tab.
     adjusting: Vec<(u64, String, TabId)>,
+    /// Workspace files on their way to a tab: the `assets.createUrl` request and the file.
+    assets: Vec<(u64, String)>,
     /// A display-scale change waiting for a recording to end before Chrome relaunches.
     rescale: Option<f32>,
     /// The server process the tabs' sessions belong to.
@@ -611,6 +613,80 @@ fn rewrite_loopback(url: &str, environment: &str) -> Result<String, String> {
     Ok(page.to_string())
 }
 
+/// Web's `isBrowserPreviewFile`: HTML and PDF files open in the browser.
+pub fn previewable_file(path: &str) -> bool {
+    let path = path.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    [".html", ".htm", ".pdf"].iter().any(|ext| path.ends_with(ext))
+}
+
+/// Web's `openFileInPreview`: the server serves the file at a signed address that opens in a new
+/// tab. `path` is absolute or relative to the thread's workspace.
+pub fn open_file(app: &mut App, path: &str) {
+    let Some((thread, cwd)) = super::context(app) else {
+        crate::shell::palette::toast(app, "Unable to open file in browser", Some("Open a thread first."));
+        return;
+    };
+    let (absolute, inside) = asset_path(path, &cwd);
+    let resource = json!({ "resource": { "_tag": if inside { "workspace-file" } else { "media-file" }, "threadId": thread, "path": absolute } });
+    match app.src.net().map(|n| n.request("assets.createUrl", resource)) {
+        Some(id) => app.ui.panel.browser.assets.push((id, path.to_owned())),
+        None => crate::shell::palette::toast(app, "Unable to open file in browser", Some("The environment is not connected.")),
+    }
+}
+
+/// The file's absolute path, and whether it lies inside the workspace (`workspace-file`).
+fn asset_path(path: &str, cwd: &str) -> (String, bool) {
+    let root = cwd.trim_end_matches('/');
+    if path.starts_with('/') {
+        let inside = path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'));
+        return (path.to_owned(), inside);
+    }
+    let mut rest = path;
+    while let Some(r) = rest.strip_prefix("./") {
+        rest = r;
+    }
+    (format!("{root}/{rest}"), !rest.starts_with("../"))
+}
+
+fn take_assets(app: &mut App) -> bool {
+    let mut changed = false;
+    for (id, path) in std::mem::take(&mut app.ui.panel.browser.assets) {
+        let Some(net) = app.src.net() else { continue };
+        let Some(reply) = net.take_reply(id) else {
+            app.ui.panel.browser.assets.push((id, path));
+            continue;
+        };
+        let base = net.base_url().trim_end_matches('/').to_owned();
+        changed = true;
+        match reply {
+            Ok(v) => super::open_preview(app, &format!("{base}{}", data::s(&v, "relativeUrl"))),
+            Err(e) => {
+                let message = crate::shell::palette::error_message(&e, &path);
+                crate::shell::palette::toast(app, "Unable to open file in browser", Some(&message));
+            }
+        }
+    }
+    changed
+}
+
+/// Web's `previewPdfAssetUrl`: a workspace PDF the server's browser can't draw, fetched from
+/// this client's own connection to that server when the page's address is its loopback.
+fn pdf_asset_url(url: &str, base: &str) -> Option<String> {
+    let page = s5_net::url::Url::parse(url).ok()?;
+    let base = s5_net::url::Url::parse(base).ok()?;
+    if !matches!(page.scheme(), "http" | "https") || !page.path().starts_with("/api/assets/") || !page.path().to_ascii_lowercase().ends_with(".pdf") {
+        return None;
+    }
+    let loopback = matches!(page.host_str(), Some("localhost" | "0.0.0.0" | "[::1]")) || page.host_str().is_some_and(|h| h.starts_with("127."));
+    if page.origin() != base.origin() && !loopback {
+        return Some(page.to_string());
+    }
+    let mut own = base.join(page.path()).ok()?;
+    own.set_query(page.query());
+    own.set_fragment(page.fragment());
+    Some(own.to_string())
+}
+
 /// A streamed page's box in the page area and its scale from CSS pixels, as a device size's.
 fn stream_box(ui: &Ui, tab: TabId) -> (f32, f32, f32) {
     let (w, h) = (ui.area.0.max(1.), ui.area.1.max(1.));
@@ -811,6 +887,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let synced = sync_sessions(app);
     let synced = sync_streams(app) || synced;
     let synced = stream_events(app, tx) || synced;
+    let synced = take_assets(app) || synced;
     let wait = cursor_wake(app);
     if let Some(wait) = wait {
         tx.wake_after(wait + Duration::from_millis(16));
@@ -2409,11 +2486,29 @@ fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
     if let Some((need, command)) = state.host_setup {
         return Some(host_setup(t, need, command));
     }
+    let nav = &ui.tabs.get(&tab)?.snapshot["navStatus"];
+    if let Some(pdf) = nav["url"].as_str().filter(|_| nav["_tag"] == "Success").and_then(|url| pdf_asset_url(url, stream.base())) {
+        return Some(stream_pdf(t, pdf));
+    }
     if !state.painted {
         return Some(col().grow(1.).min_h(0.).w_full().center().child(text("Connecting to the server's browser…").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
     let (w, h, scale) = stream_box(ui, tab);
     Some(col().grow(1.).min_h(0.).w_full().center().child(page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale))))
+}
+
+/// Web embeds a workspace PDF in its own browser; this window has no PDF engine of its own, so
+/// the PDF opens in the system's viewer.
+fn stream_pdf(t: &T, url: String) -> El {
+    let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default().to_owned();
+    let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
+    let open = kit::Button::new("Open PDF").variant("outline").size("sm").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+        if let Err(e) = tx.open_url(&url) {
+            crate::shell::palette::toast(s, "Unable to open the PDF", Some(&e.to_string()));
+        }
+    });
+    let notice = col().max_w(360.).gap(10.).padding(16.).center().child(icon(&icons::FILE, 24.).color(t.c.muted_foreground)).child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground).wrap()).child(text("This PDF opens in your system's viewer.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()).child(open);
+    col().key("browser-stream-pdf").grow(1.).min_h(0.).w_full().center().child(notice)
 }
 
 /// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
@@ -3345,6 +3440,22 @@ mod tests {
         // While the server still probes the script's URL, its own address opens.
         let probing = json!({ "servers": response["servers"], "configuredUrlProbing": true });
         assert_eq!(previewable(&probing, &["http://localhost:8080/admin".into()])[0].0, "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn workspace_html_and_pdf_open_in_the_browser() {
+        assert!(previewable_file("docs/Index.HTML") && previewable_file("a.htm?x=1") && previewable_file("/tmp/report.pdf#page=2"));
+        assert!(!previewable_file("notes.md") && !previewable_file("page.html/notes"));
+        assert_eq!(asset_path("./site/index.html", "/repo/"), ("/repo/site/index.html".into(), true));
+        assert_eq!(asset_path("/repo/out.pdf", "/repo"), ("/repo/out.pdf".into(), true));
+        assert_eq!(asset_path("/repository/out.pdf", "/repo"), ("/repository/out.pdf".into(), false));
+        assert_eq!(asset_path("../other/page.html", "/repo"), ("/repo/../other/page.html".into(), false));
+        // The server's own loopback address is fetched through this client's connection to it.
+        let base = "https://box.tail1.ts.net:3773";
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/api/assets/t/Report.pdf?sig=1", base).as_deref(), Some("https://box.tail1.ts.net:3773/api/assets/t/Report.pdf?sig=1"));
+        assert_eq!(pdf_asset_url("https://cdn.example.com/api/assets/t/a.pdf", base).as_deref(), Some("https://cdn.example.com/api/assets/t/a.pdf"));
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/api/assets/t/page.html", base), None);
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/docs/a.pdf", base), None);
     }
 
     #[test]

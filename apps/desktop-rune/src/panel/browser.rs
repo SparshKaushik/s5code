@@ -945,6 +945,18 @@ impl Worker {
                 let audible = p["payload"] == "1";
                 self.update(tab, |s| s.audible = audible);
             }
+            "Fetch.requestPaused" => {
+                let session = v["sessionId"].as_str().unwrap_or_default().to_string();
+                let url = p["request"]["url"].as_str().unwrap_or_default();
+                let ok = p["responseStatusCode"].as_u64().is_some_and(|c| (200..300).contains(&c));
+                if ok && main(&p["frameId"]) && pdf_response(&p["responseHeaders"]) {
+                    let body = base64::engine::general_purpose::STANDARD.encode(pdf_viewer(url));
+                    let headers = json!([{ "name": "Content-Type", "value": "text/html; charset=utf-8" }, { "name": "Cache-Control", "value": "no-store" }]);
+                    self.send(Some(&session), "Fetch.fulfillRequest", json!({ "requestId": p["requestId"], "responseCode": 200, "responseHeaders": headers, "body": body }), None);
+                } else {
+                    self.send(Some(&session), "Fetch.continueRequest", json!({ "requestId": p["requestId"] }), None);
+                }
+            }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.frameStartedLoading" if main(&p["frameId"]) => self.update(tab, |s| s.loading = true),
             "Page.frameStoppedLoading" | "Page.loadEventFired" if method == "Page.loadEventFired" || main(&p["frameId"]) => {
@@ -1021,6 +1033,8 @@ impl Worker {
                 self.send(Some(&session), "Runtime.enable", json!({}), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
+                // Chrome's headless shell has no PDF viewer, so a PDF page arrives as pdf.js.
+                self.send(Some(&session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
                 self.metrics(tab);
                 let scheme = self.tabs.get(&tab).map_or("", |t| t.scheme);
                 if !scheme.is_empty() {
@@ -1419,6 +1433,58 @@ const FAVICON_JS: &str = r#"(() => {
 
 /// Reports whether the top page's media is playing sound and mutes it on `__s5Mute`, as a
 /// headless Chrome has neither a tab audio indicator nor a mute switch.
+/// Whether a paused response is a PDF, by its `Content-Type`.
+fn pdf_response(headers: &Value) -> bool {
+    headers.as_array().into_iter().flatten().any(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("content-type")) && h["value"].as_str().is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("application/pdf")))
+}
+
+/// The page a PDF shows as, at the PDF's own address: pdf.js draws each page, fetching the
+/// bytes from that address again (same origin, so cookies and signed links still work).
+fn pdf_viewer(url: &str) -> String {
+    let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+    let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
+    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    PDF_VIEWER.replace("{title}", &escape(&name))
+}
+
+const PDF_VIEWER: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
+<style>
+html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
+#pages{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
+canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
+#status{padding:16px;text-align:center}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head><body><div id="status">Loading PDF…</div><div id="pages"></div>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  const lib = window.pdfjsLib;
+  if (!lib) { status.textContent = "The PDF viewer could not load. Check the connection and reload."; return; }
+  lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  try {
+    const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
+    status.remove();
+    const pages = document.getElementById("pages");
+    const ratio = window.devicePixelRatio || 1;
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const css = Math.min(1.5, (innerWidth - 16) / page.getViewport({ scale: 1 }).width);
+      const viewport = page.getViewport({ scale: css * ratio });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.style.width = Math.floor(viewport.width / ratio) + "px";
+      pages.append(canvas);
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    }
+  } catch (error) {
+    status.textContent = "Unable to show this PDF: " + (error && error.message ? error.message : error);
+  }
+})();
+</script></body></html>"#;
+
 const AUDIO_JS: &str = r#"(() => {
   if (window !== top || window.__s5Mute) return;
   const mine = new WeakSet();
@@ -1672,6 +1738,17 @@ mod tests {
         let element = json!({ "rect": { "x": 10., "y": -5., "width": 120., "height": 30. }, "doc": { "x": 10., "y": 395. } });
         assert_eq!(clip(&element), Some(json!({ "x": 10., "y": 395., "width": 120., "height": 30., "scale": 1 })));
         assert_eq!(clip(&json!({ "rect": { "width": 0., "height": 10. }, "doc": { "x": 0., "y": 0. } })), None);
+    }
+
+    #[test]
+    fn a_pdf_page_shows_in_the_viewer_at_its_own_address() {
+        let pdf = json!([{ "name": "content-type", "value": "Application/PDF" }]);
+        assert!(pdf_response(&pdf));
+        assert!(!pdf_response(&json!([{ "name": "Content-Type", "value": "text/html" }])));
+        assert!(!pdf_response(&Value::Null));
+        let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
+        assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
+        assert!(page.contains("getDocument({ url: location.href"));
     }
 
     #[test]

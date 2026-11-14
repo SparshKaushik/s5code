@@ -757,6 +757,10 @@ fn header(ui: &Ui, t: &T) -> El {
         return header
             .child(button("Back to files", &icons::ARROW_LEFT).on_press(close_file).build(t).help("Back to files"))
             .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.))
+            .children(super::preview::previewable_file(&ui.selected).then(|| {
+                let path = ui.selected.clone();
+                button("Open file in preview browser", &icons::GLOBE).on_press(move |s: &mut App| super::preview::open_file(s, &path)).build(t).help("Open file in preview browser")
+            }))
             .child(reload);
     }
     let search = text_input(&ui.query, theme::TEXT_SM)
