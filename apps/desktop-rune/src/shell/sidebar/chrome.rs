@@ -629,7 +629,9 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
         r = if on { r.fill(t.sb.sidebar_row_active) } else { r.hover(t.sb.sidebar_row_hover) };
         list = list.child(r);
     }
-    el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(list)
+    // A column, so the list keeps its content height: a row would stretch it to the viewport,
+    // leaving nothing to scroll.
+    col().key("sb-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list)
 }
 
 #[cfg(test)]

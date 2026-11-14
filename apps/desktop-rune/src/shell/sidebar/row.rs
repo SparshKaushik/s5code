@@ -997,7 +997,9 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     if let Some(target) = &ui.focus_to {
         content = content.child(el().key("sb-focus-move").absolute(0.0, 0.0).size(0.0, 0.0).focus_return(target.clone()).on_layout(|s: &mut App, _| s.ui.shell.sidebar.focus_to = None));
     }
-    el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(content)
+    // A column, so the list keeps its content height: a row would stretch it to the viewport,
+    // leaving nothing to scroll.
+    col().key("sb-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content)
 }
 
 #[cfg(test)]

@@ -1371,6 +1371,8 @@ mod tests {
             rt.frame(1. / 60.);
         }
         let viewport = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-scroll")).expect("the list").rect;
+        let list = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-list")).expect("the rows").rect;
+        assert!(list[3] > viewport[3] + 100., "FAILED: the list keeps its content height, taller than the viewport: {list:?} in {viewport:?}");
         let rows = |rt: &rune::Runtime<App>| rt.elements().into_iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("sb-row-"))).collect::<Vec<_>>();
         let visible: Vec<_> = rows(&rt)
             .into_iter()
@@ -1415,11 +1417,11 @@ mod tests {
             }
         }
         let after = state(&rt);
-        let (from, to) = (anchor.rect[1], anchor_y(&rt));
+        let scrolled = rows(&rt).iter().map(|e| e.scrolled[1]).fold(0., f32::max);
         assert_eq!(rt.state.ui.shell.sidebar.drag_edge.get(), 1, "FAILED: the pointer sits at the bottom edge: {after}");
         rt.pointer_up(x, edge);
         rt.frame(1. / 60.);
-        assert!(to < from - 0.5, "FAILED: holding a dragged row at the bottom edge scrolls the list ({from} -> {to}): {after}");
+        assert!(scrolled > 0., "FAILED: holding a dragged row at the bottom edge scrolls the list: {after}");
     }
 
     #[test]
