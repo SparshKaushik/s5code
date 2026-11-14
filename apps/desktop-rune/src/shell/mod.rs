@@ -27,6 +27,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.shell.palette.open = true;
         s.ui.shell.palette.query.focused = true;
     }),
+    ("home-local-off", |s| {
+        crate::scene_clock(s);
+        let mut state = crate::data::empty_state();
+        state.conn = s5_net::Conn::Closed(crate::host::LOCAL_OFF.into());
+        state.shell_ready = true;
+        s.src = crate::data::Source::Fixture(state);
+        s.ui.desktop.local_off = true;
+        s.navigate(crate::Route::Home { project_id: None });
+    }),
 ];
 
 fn open_titled(s: &mut App, title: &str) {
@@ -78,6 +87,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(palette::overlay(s, cx, t));
     overlays.extend(crate::search::overlay(s, t));
     overlays.extend(crate::notify::overlays(s, t));
+    crate::links::overlays(s, t, &mut overlays);
     crate::wizard::overlays(s, t, &mut overlays);
     overlays.extend(quit::overlay(s, t));
     rune_kit::root(body, overlays)

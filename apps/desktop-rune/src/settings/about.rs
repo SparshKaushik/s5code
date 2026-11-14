@@ -21,33 +21,34 @@ pub fn view(s: &App, t: &T) -> El {
         .as_ref()
         .and_then(|c| c["environment"]["capabilities"]["serverSelfUpdate"].as_str())
         .is_some_and(|capability| capability != "unsupported");
+    // Web's About version row: Electron's app update, which Rune builds have no feed for.
+    let mut app = vec![about_row(
+        t,
+        &format!("Version {}", env!("CARGO_PKG_VERSION")),
+        crate::desktop::NO_UPDATE_FEED,
+        c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
+    )];
+    // Web keeps this under Connections (`ServerUpdateAction`); here it names the server apart.
     let mut controls = row().gap(8.0).child(
-        c::button("Check for updates", t)
+        c::button("Check Server Release", t)
             .on_press(|s: &mut App| request(s, "server.getNpmRelease", json!({"spec":"latest"}))),
     );
     if let Some(target) = target.filter(|target| *target != version) {
         let target = target.to_owned();
         controls = controls.child(
-            c::button("Update server", t)
+            c::button("Update", t)
                 .disabled(!can_update)
                 .on_press(move |s: &mut App| s.ui.settings.update_version = Some(target.clone())),
         );
     }
-    let mut app = vec![about_row(
-        t,
-        &format!("S5 Code {}", env!("CARGO_PKG_VERSION")),
-        &match target {
-            Some(v) if v != version => format!("Native client · Server {version} · Latest release: {v}"),
-            _ => format!("Native client · Server {version}"),
-        },
-        controls,
-    )];
-    // Electron's Check for Updates, which Rune has in a menu only on macOS.
     app.push(about_row(
         t,
-        "App updates",
-        crate::desktop::NO_UPDATE_FEED,
-        c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
+        "Server",
+        &match target {
+            Some(v) if v != version => format!("Version {version} · Latest release: {v}"),
+            _ => format!("Version {version}"),
+        },
+        controls,
     ));
     // Web's `CliCommandSettingsRow`, desktop only.
     #[cfg(unix)]

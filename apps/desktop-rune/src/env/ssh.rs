@@ -102,6 +102,8 @@ struct Job {
     interactive: bool,
     version: Option<String>,
     preferred: Option<u16>,
+    /// The saved environment's bearer, checked before it is reused.
+    bearer: Option<String>,
 }
 
 impl Job {
@@ -115,7 +117,8 @@ impl Job {
 
 enum Done {
     Added(Target, Saved),
-    Reconnected { id: String, base: String },
+    /// `bearer` is a fresh one when the saved session no longer worked.
+    Reconnected { id: String, base: String, bearer: Option<String> },
 }
 
 struct Finished {
@@ -206,6 +209,7 @@ static EXITED: AtomicBool = AtomicBool::new(false);
 /// Lands finished SSH jobs and re-ensures tunnels that exited.
 pub(super) fn poll(s: &mut App) -> bool {
     let mut changed = EXITED.swap(false, Ordering::Relaxed) && revive(s);
+    changed |= repair(s);
     if s.ui.env.ssh.jobs.is_empty() {
         return changed;
     }
@@ -240,11 +244,31 @@ pub(super) fn forget(s: &mut App, id: &str) {
     });
 }
 
-/// Closes every tunnel; remote servers keep running so the next launch reconnects quickly.
+/// How long quitting waits for remote servers to stop.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Electron's tunnel finalizers on quit: close each forward, then stop the server this app
+/// launched there, with the password it last used or in batch mode.
 pub fn shutdown() {
-    for (_, mut tunnel) in lock(&TUNNELS).drain(..) {
+    let tunnels: Vec<(String, Tunnel)> = lock(&TUNNELS).drain(..).collect();
+    let (tx, rx) = channel();
+    let count = tunnels.len();
+    for (key, mut tunnel) in tunnels {
         let _ = tunnel.child.kill();
         let _ = tunnel.child.wait();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let secret = secret_for(&key);
+            let script = stop_script(&tunnel.target.state_key());
+            let _ = run_ssh(&tunnel.target, secret.as_deref(), &[], &["sh", "-s"], Some(script.as_str()), SHUTDOWN_GRACE);
+            let _ = tx.send(());
+        });
+    }
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    for _ in 0..count {
+        if rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).is_err() {
+            return;
+        }
     }
 }
 
@@ -282,7 +306,7 @@ fn add(s: &mut App) {
         Err(error) => s.ui.env.ssh.error = Some(error),
         Ok(target) => {
             s.ui.env.ssh.error = None;
-            let job = Job { kind: Kind::Add, target, secret: None, prompts: 0, interactive: true, version: version(s), preferred: None };
+            let job = Job { kind: Kind::Add, target, secret: None, prompts: 0, interactive: true, version: version(s), preferred: None, bearer: None };
             spawn(s, job);
         }
     }
@@ -290,9 +314,11 @@ fn add(s: &mut App) {
 
 fn reconnect(s: &mut App, id: &str, interactive: bool) {
     let Some(target) = s.ui.env.ssh.targets.iter().find(|(k, _)| k == id).map(|(_, t)| t.clone()) else { return };
-    let preferred = s.ui.env.saved.iter().find(|e| e.id == id).and_then(|e| port_of(&e.base));
+    let saved = s.ui.env.saved.iter().find(|e| e.id == id);
+    let preferred = saved.and_then(|e| port_of(&e.base));
+    let bearer = saved.map(|e| e.bearer.clone()).filter(|b| !b.is_empty());
     s.ui.env.ssh.notes.remove(id);
-    let job = Job { kind: Kind::Reconnect(id.to_owned()), target, secret: None, prompts: 0, interactive, version: version(s), preferred };
+    let job = Job { kind: Kind::Reconnect(id.to_owned()), target, secret: None, prompts: 0, interactive, version: version(s), preferred, bearer };
     spawn(s, job);
 }
 
@@ -317,6 +343,26 @@ fn revive(s: &mut App) -> bool {
         .iter()
         .filter(|(id, t)| dead.contains(&t.key()) && ui.revived.get(id).is_none_or(|at| now.duration_since(*at) > Duration::from_secs(60)))
         .map(|(id, _)| id.clone())
+        .collect();
+    for id in &ids {
+        s.ui.env.ssh.revived.insert(id.clone(), now);
+        reconnect(s, id, false);
+    }
+    !ids.is_empty()
+}
+
+/// A saved SSH environment whose server refuses its bearer (the session expired or was revoked)
+/// reconnects, which re-pairs through the tunnel; at most once a minute each, like `revive`.
+fn repair(s: &mut App) -> bool {
+    let now = Instant::now();
+    let ui = &s.ui.env.ssh;
+    let ids: Vec<String> = ui
+        .targets
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| !busy(ui, id) && ui.revived.get(*id).is_none_or(|at| now.duration_since(*at) > Duration::from_secs(60)))
+        .filter(|id| super::source(s, id).is_some_and(|src| matches!(&src.state().conn, s5_net::Conn::Closed(reason) if super::rejected(reason))))
+        .cloned()
         .collect();
     for id in &ids {
         s.ui.env.ssh.revived.insert(id.clone(), now);
@@ -354,9 +400,9 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
                 s.ui.env.ssh.error = s.ui.env.error.take();
             }
         }
-        Ok(Done::Reconnected { id, base }) => {
+        Ok(Done::Reconnected { id, base, bearer }) => {
             s.ui.env.ssh.notes.remove(&id);
-            rebase(s, &id, base);
+            rebase(s, &id, base, bearer);
         }
         Err(error) if job.interactive && job.prompts < 2 && is_auth_failure(&error) && !is_agent_signing_failure(&error) => {
             s.ui.env.ssh.password = TextEdit::new(String::new()).secure();
@@ -366,13 +412,17 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
     }
 }
 
-/// A tunnel that came back on another local port moves the saved environment with it.
-fn rebase(s: &mut App, id: &str, base: String) {
+/// A tunnel that came back on another local port, or a session paired again, moves the saved
+/// environment with it.
+fn rebase(s: &mut App, id: &str, base: String, bearer: Option<String>) {
     let Some(env) = s.ui.env.saved.iter_mut().find(|e| e.id == id) else { return };
-    if env.base == base {
+    if env.base == base && bearer.is_none() {
         return;
     }
     env.base = base;
+    if let Some(bearer) = bearer {
+        env.bearer = bearer;
+    }
     let env = env.clone();
     let src = super::connect(s, &env);
     if let Some(slot) = super::source_mut(s, id) {
@@ -1323,6 +1373,8 @@ fn askpass() -> Result<PathBuf, String> {
 /// `baseSshArgs` plus `buildSshChildEnvironment`: batch mode until there is a password to give.
 fn ssh(target: &Target, secret: Option<&str>) -> Result<Command, String> {
     let mut command = Command::new("ssh");
+    // The login shell's agent socket and PATH, which an app opened from Finder lacks.
+    command.envs(crate::desktop::shell_path::server_env().0.iter().map(|(k, v)| (k, v)));
     command.args(["-o", if secret.is_some() { "BatchMode=no" } else { "BatchMode=yes" }, "-o", "ConnectTimeout=10"]);
     if let Some(port) = target.port {
         command.arg("-p").arg(port.to_string());
@@ -1388,6 +1440,7 @@ fn run_ssh(target: &Target, secret: Option<&str>, pre_host: &[&str], remote: &[&
 struct Tunnel {
     child: Child,
     local: u16,
+    target: Target,
 }
 
 static TUNNELS: Mutex<Vec<(String, Tunnel)>> = Mutex::new(Vec::new());
@@ -1517,12 +1570,12 @@ fn ensure(job: &Job, waker: Option<Waker>) -> Result<Ensured, String> {
                 let local = local_port(job.preferred)?;
                 let child = start_tunnel(&target, secret.as_deref(), local, remote, waker)?;
                 close(&key);
-                lock(&TUNNELS).push((key.clone(), Tunnel { child, local }));
+                lock(&TUNNELS).push((key.clone(), Tunnel { child, local, target: target.clone() }));
                 local
             }
         };
         let credential = match job.kind {
-            Kind::Add => Some(parse_credential(&run_ssh(&target, secret.as_deref(), &[], &["sh", "-s"], Some(pairing_script(&target.state_key(), &runner).as_str()), LAUNCH_TIMEOUT)?)?),
+            Kind::Add => Some(issue_credential(&target, secret.as_deref(), &runner)?),
             Kind::Reconnect(_) => None,
         };
         Ok(Ensured { target: target.clone(), base: base_url(local), credential })
@@ -1532,6 +1585,61 @@ fn ensure(job: &Job, waker: Option<Waker>) -> Result<Ensured, String> {
             remember_secret(&key, None);
         }
     })
+}
+
+/// `auth pairing create` on the SSH host, through the runner.
+fn issue_credential(target: &Target, secret: Option<&str>, runner: &str) -> Result<String, String> {
+    parse_credential(&run_ssh(target, secret, &[], &["sh", "-s"], Some(pairing_script(&target.state_key(), runner).as_str()), LAUNCH_TIMEOUT)?)
+}
+
+/// contracts' `AuthStandardClientScopes`.
+const STANDARD_SCOPES: &[&str] = &[
+    "orchestration:read",
+    "orchestration:operate",
+    "settings:write",
+    "providers:manage",
+    "environment:maintain",
+    "preview:operate",
+    "diagnostics:read",
+    "terminal:read",
+    "terminal:operate",
+    "source-control:write",
+    "filesystem:read",
+    "filesystem:write",
+    "relay:read",
+    "access:read",
+    "access:write",
+    "relay:write",
+];
+
+/// Web's `prepareDesktopSshEnvironment`: a saved bearer stays while its session is authenticated
+/// and holds every standard scope. Stored grants never widen, so one missing a newer scope re-pairs.
+fn session_usable(session: &Value) -> bool {
+    let granted = session["permissions"].as_array().or_else(|| session["scopes"].as_array());
+    session["authenticated"] == true && granted.is_some_and(|granted| STANDARD_SCOPES.iter().all(|scope| granted.iter().any(|g| g == scope)))
+}
+
+/// `GET /api/auth/session`; a refused bearer is a session that no longer exists.
+fn fetch_session(base: &str, bearer: &str) -> Result<Value, String> {
+    let agent = ureq::AgentBuilder::new().timeout(COMMAND_TIMEOUT).build();
+    match agent.get(&format!("{base}/api/auth/session")).set("authorization", &format!("Bearer {bearer}")).call() {
+        Ok(response) => response.into_json().map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(401 | 403, _)) => Ok(serde_json::json!({ "authenticated": false })),
+        Err(e) => Err(format!("Could not check the SSH environment's session: {e}")),
+    }
+}
+
+/// A fresh bearer when the saved one no longer works, through a new pairing code.
+fn renew_bearer(job: &Job, target: &Target, base: &str) -> Result<Option<String>, String> {
+    if let Some(bearer) = &job.bearer
+        && session_usable(&fetch_session(base, bearer)?)
+    {
+        return Ok(None);
+    }
+    let version = job.version.clone().or_else(bundled_version).ok_or("S5 Code could not tell which t3 release to run on the SSH host.")?;
+    let runner = runner_script(&version, &release_base_url())?;
+    let credential = issue_credential(target, secret_for(&target.key()).as_deref(), &runner)?;
+    s5_net::exchange_bootstrap(base, &credential).map(Some).map_err(|e| format!("The pairing code was refused: {e}"))
 }
 
 fn run(job: &Job, waker: Option<Waker>) -> Result<Done, String> {
@@ -1546,7 +1654,7 @@ fn run(job: &Job, waker: Option<Waker>) -> Result<Done, String> {
             Ok(Done::Added(target, Saved { id, label, base, bearer }))
         }
         Kind::Reconnect(saved) if *saved != id => Err(format!("That host reaches {label}, a different machine. Add it as its own environment instead.")),
-        Kind::Reconnect(saved) => Ok(Done::Reconnected { id: saved.clone(), base }),
+        Kind::Reconnect(saved) => Ok(Done::Reconnected { id: saved.clone(), bearer: renew_bearer(job, &target, &base)?, base }),
     }
 }
 
@@ -1706,6 +1814,18 @@ mod tests {
 
     fn target(alias: &str, hostname: &str, username: Option<&str>, port: Option<u16>) -> Target {
         Target { alias: alias.into(), hostname: hostname.into(), username: username.map(Into::into), port }
+    }
+
+    #[test]
+    fn a_saved_session_is_reused_only_while_it_holds_every_standard_scope() {
+        let all: Vec<&str> = STANDARD_SCOPES.to_vec();
+        assert!(session_usable(&json!({"authenticated": true, "permissions": all})));
+        assert!(session_usable(&json!({"authenticated": true, "scopes": all})), "older servers answer scopes");
+        assert!(!session_usable(&json!({"authenticated": false, "permissions": all})), "expired");
+        assert!(!session_usable(&json!({"authenticated": true, "permissions": &all[..all.len() - 1]})), "a newer scope is missing");
+        assert!(!session_usable(&json!({"authenticated": true})));
+        // `permissions ?? scopes`: a narrower permissions list wins over a full scopes one.
+        assert!(!session_usable(&json!({"authenticated": true, "permissions": ["orchestration:read"], "scopes": all})));
     }
 
     #[test]

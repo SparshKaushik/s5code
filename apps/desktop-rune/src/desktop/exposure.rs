@@ -52,6 +52,8 @@ pub struct State {
     viewed: Cell<bool>,
     expanded: bool,
     default_key: Option<String>,
+    /// A headless scene shows the rows without a bundled server.
+    scene: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -311,6 +313,15 @@ fn view(s: &App) -> View {
     View { network: if ui.network { rest } else { vec![] }, tailscale_https: https.into_iter().next() }
 }
 
+/// Shares this machine on 192.168.1.20:3773 with no bundled server, for headless scenes.
+pub fn scene(s: &mut App) {
+    s.ui.desktop.server = Some(("http://127.0.0.1:3773".into(), String::new()));
+    let ui = &mut s.ui.desktop.exposure;
+    ui.scene = true;
+    ui.network = true;
+    ui.host = Some(Ipv4Addr::new(192, 168, 1, 20));
+}
+
 /// Where pairing links point: web's `defaultDesktopAdvertisedEndpoint`. None while this window
 /// doesn't run the bundled server.
 pub fn pairing_endpoint(s: &App) -> Option<Endpoint> {
@@ -344,8 +355,9 @@ fn muted(value: impl Into<String>, t: &T) -> El {
     text(value.into()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()
 }
 
+/// Web `SettingsRow`: `px-4 py-3`, `gap-8` between the copy and the control.
 fn setting_row(key: &str, copy: El, control: Option<El>) -> El {
-    let mut r = row().key(key.to_owned()).w_full().padding(16.0).gap(12.0).center_y().child(copy);
+    let mut r = row().key(key.to_owned()).w_full().px(16.0).py(12.0).gap(32.0).center_y().child(copy);
     if let Some(control) = control {
         r = r.child(control);
     }
@@ -369,10 +381,10 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
 /// Web `renderNetworkAccessRow`, while this window runs the bundled server. Another server's
 /// exposure is set where it starts.
 pub fn network_row(s: &App, t: &T) -> Option<El> {
-    if !crate::host::managed() {
+    let ui = &s.ui.desktop.exposure;
+    if !crate::host::managed() && !ui.scene {
         return None;
     }
-    let ui = &s.ui.desktop.exposure;
     ui.viewed.set(true);
     let on = ui.network;
     let v = view(s);

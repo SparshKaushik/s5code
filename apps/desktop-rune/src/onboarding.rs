@@ -111,14 +111,21 @@ pub fn shows_hero(s: &App) -> bool {
 }
 
 pub fn hero(s: &App, t: &T) -> El {
-    let scratch = crate::shell::palette::actions::scratch_available(s);
-    let mut buttons = row().pt(24.0).gap(8.0).justify_center().child(
+    let off = s.ui.desktop.local_off && s.ui.env.active == crate::env::LOCAL;
+    let scratch = !off && crate::shell::palette::actions::scratch_available(s);
+    let mut buttons = row().pt(24.0).gap(8.0).justify_center().child(if off {
+        // `HostedEmptyState` with the local environment off.
+        kit::Button::new("Open Environments")
+            .size("sm")
+            .on_press(|s: &mut App| s.navigate(Route::Settings("connections".into())))
+            .build(t)
+    } else {
         kit::Button::new("Add project")
             .size("sm")
             .icon(&icons::PLUS)
             .on_press(|s: &mut App| crate::shell::palette::open_add_project(s))
-            .build(t),
-    );
+            .build(t)
+    });
     if scratch {
         buttons = buttons.child(
             kit::Button::new("Start without a project")
@@ -129,7 +136,11 @@ pub fn hero(s: &App, t: &T) -> El {
                 .build(t),
         );
     }
-    let description = if scratch { "Add a project, or start without one." } else { "Add a project to start your first thread." };
+    let (title, description) = match (off, scratch) {
+        (true, _) => ("This computer is off", "Turn it back on, or connect a different computer."),
+        (false, true) => ("What should we work on?", "Add a project, or start without one."),
+        (false, false) => ("What should we work on?", "Add a project to start your first thread."),
+    };
     // Empty size="hero": the title is text-3xl at desktop widths, the description text-sm, mt-1.
     let header = col()
         .w_full()
@@ -137,7 +148,7 @@ pub fn hero(s: &App, t: &T) -> El {
         .px(32.0)
         .py(48.0)
         .items_center()
-        .child(text("What should we work on?").font(theme::weight(theme::TEXT_3XL, theme::SEMIBOLD)).color(t.c.foreground))
+        .child(text(title).font(theme::weight(theme::TEXT_3XL, theme::SEMIBOLD)).color(t.c.foreground))
         .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).mt(4.0))
         .child(buttons);
     col()

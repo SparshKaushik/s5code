@@ -14,6 +14,10 @@ pub mod locale;
 pub mod recovery;
 #[cfg(unix)]
 pub mod shell_path;
+#[cfg(unix)]
+pub mod activation;
+#[cfg(unix)]
+pub mod signals;
 pub mod single;
 #[cfg(target_os = "linux")]
 mod url_handler;
@@ -59,6 +63,10 @@ pub struct Ui {
     pub exposure: exposure::State,
     /// Why the bundled server keeps failing before it ever started, for the recovery screen.
     pub startup_failure: Option<crate::host::StartupFailure>,
+    /// `localEnvironmentEnabled` is off, so this machine runs no server.
+    pub local_off: bool,
+    #[cfg(unix)]
+    pub activation: activation::State,
     #[cfg(unix)]
     pub cli: cli::State,
     zoom_level: f32,
@@ -303,6 +311,10 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= exposure::poll(s);
+    #[cfg(unix)]
+    {
+        changed |= activation::poll(s);
+    }
     let ui = &mut s.ui.desktop;
     #[cfg(target_os = "macos")]
     if ui.appearance != Some(s.appearance) && !rune::is_headless() {

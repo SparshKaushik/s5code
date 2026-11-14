@@ -26,7 +26,7 @@ fn read_handoff(r: impl BufRead) -> (String, Vec<String>) {
 
 /// This launch's prompt links, for the app that already runs.
 fn argv_links() -> Vec<String> {
-    std::env::args().skip(1).filter(|a| crate::links::parse(a).is_some()).collect()
+    std::env::args().skip(1).filter(|a| crate::links::is_app_link(a)).collect()
 }
 
 fn deliver(app: &rune::AppHandle<crate::App>, r: impl BufRead) {

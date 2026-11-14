@@ -1047,6 +1047,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-worktrees", |s| scene(s, "worktrees")),
     ("settings-connections", |s| scene(s, "connections")),
     ("settings-access", |s| scene(s, "access")),
+    ("settings-access-desktop", |s| {
+        scene(s, "access");
+        crate::desktop::exposure::scene(s);
+    }),
     ("settings-secrets", |s| scene(s, "secrets")),
     ("settings-maintenance", |s| scene(s, "maintenance")),
     ("settings-labs", |s| scene(s, "labs")),
