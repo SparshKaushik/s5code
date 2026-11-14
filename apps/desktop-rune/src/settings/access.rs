@@ -893,11 +893,14 @@ fn machine_menu(s: &App, t: &T, layers: &mut Vec<El>) {
         state.menu = false;
         state.icon_menu = false;
     };
-    let entries = KINDS
+    let lock = super::connections::icon_lock(s.state().config.is_some(), super::permissions::can(s, "settings:write"));
+    let mut entries: Vec<MenuEntry> = lock
         .into_iter()
-        .map(|(kind, label)| {
+        .flat_map(|lock| [MenuEntry::item(MenuItem::new(lock).disabled(true)), MenuEntry::Separator])
+        .collect();
+    entries.extend(KINDS.into_iter().map(|(kind, label)| {
             let detected = detected.to_owned();
-            let mut item = MenuItem::new(label).icon(machine_icon(kind)).radio(kind == resolved);
+            let mut item = MenuItem::new(label).icon(machine_icon(kind)).radio(kind == resolved).disabled(lock.is_some());
             if kind == detected {
                 item = item.trailing(
                     text(if known { "detected" } else { "default" }).font(theme::TEXT_XS).color(t.c.muted_foreground),
@@ -907,8 +910,7 @@ fn machine_menu(s: &App, t: &T, layers: &mut Vec<El>) {
                 update(s, "environmentIcon", icon_setting(kind, &detected));
                 close(s);
             }))
-        })
-        .collect();
+        }));
     Menu::new("access-machine-menu")
         .anchor("access-machine-more")
         .width(200.0)

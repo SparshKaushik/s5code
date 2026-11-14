@@ -132,6 +132,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 for section in super::storage::maintenance(s, cx, t) {
                     page = page.child(section);
                 }
+                if !super::storage::project_scope(s) {
+                    page = page.child(super::telemetry::maintenance_section(s, t));
+                }
             }
             if path == "worktrees" && title == "Branches" {
                 page = page.child(super::storage::worktree_cleanup(s, cx, t));

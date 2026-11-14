@@ -23,6 +23,7 @@ mod icon_index;
 mod pages;
 pub(crate) mod permissions;
 mod qr;
+pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;
@@ -102,6 +103,7 @@ pub struct Ui {
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
     pub session: permissions::Session,
+    pub telemetry: telemetry::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -525,7 +527,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();

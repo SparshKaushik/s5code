@@ -19,6 +19,14 @@ const ACCESS: [(&str, &str, &str); 5] = [
     ("full-access", "Full access", "Allow commands and edits without prompts."),
 ];
 
+/// Web `resolveEnvironmentIconPickerLock`.
+pub(super) fn icon_lock(connected: bool, may_write: bool) -> Option<&'static str> {
+    if !connected {
+        return Some("Connect to this environment to change its icon.");
+    }
+    (!may_write).then_some("Your session on this environment cannot change its settings.")
+}
+
 /// Web `ANOTHER_ADDRESS`: link by an address typed in.
 const ANOTHER_ADDRESS: &str = "another-address";
 
@@ -76,9 +84,6 @@ pub struct Ui {
     /// its list is open.
     link_machine: Option<String>,
     link_machine_open: bool,
-    /// Machines whose session this client is asking about, and those that may mint codes.
-    link_sessions: Vec<(String, u64)>,
-    link_may_mint: Vec<String>,
     /// The pairing code being minted on a machine, and machines where minting failed.
     link_mint: Option<(String, u64)>,
     mint_failed: Vec<String>,
@@ -544,8 +549,8 @@ fn routes_list(s: &App, t: &T, saved: &Saved) -> El {
             .child(icon(&icons::GRIP_VERTICAL, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
             .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut rune::Tx| {
                 let to = match e.key {
-                    rune::Key::ArrowUp if i > 0 => i - 1,
-                    rune::Key::ArrowDown if i + 1 < count => i + 1,
+                    rune::Key::Up if i > 0 => i - 1,
+                    rune::Key::Down if i + 1 < count => i + 1,
                     _ => return false,
                 };
                 reorder_route(s, &keys, i, to);
@@ -703,8 +708,7 @@ fn env_menu(s: &App, t: &T, layers: &mut Vec<El>) {
     let detected_kind = config.and_then(|c| c["environment"]["platform"]["machine"].as_str());
     let resolved = machine_kind(config.and_then(|c| c["settings"]["environmentIcon"].as_str()), detected_kind);
     let detected = detected_kind.unwrap_or("server").to_owned();
-    // Web `resolveEnvironmentIconPickerLock`; Rune reads only this machine's session grants.
-    let lock = config.is_none().then_some("Connect to this environment to change its icon.");
+    let lock = icon_lock(config.is_some(), super::permissions::can_on(s, &saved.id, "settings:write"));
     let mut icons_entries = Vec::new();
     if let Some(lock) = lock {
         icons_entries.push(MenuEntry::item(MenuItem::new(lock).disabled(true)));
@@ -1253,16 +1257,9 @@ fn machines(s: &App) -> Vec<Machine> {
 }
 
 fn open_link(s: &mut App) {
-    let keys: Vec<String> = machines(s).into_iter().filter(|m| m.connected).map(|m| m.key).collect();
-    let mut sessions = Vec::new();
-    for key in keys {
-        if let Some(id) = env::net_of(s, &key).map(|net| net.http_request("GET", "/api/auth/session", json!({}))) {
-            sessions.push((key, id));
-        }
-    }
-    let ui = &mut s.ui.settings.connections;
-    ui.linking = true;
-    ui.link_sessions = sessions;
+    // Whether this client may mint a code on each machine is that machine's session.
+    super::permissions::load(s);
+    s.ui.settings.connections.linking = true;
 }
 
 fn close_link(s: &mut App) {
@@ -1273,28 +1270,15 @@ fn close_link(s: &mut App) {
     ui.link_access = None;
     ui.link_machine = None;
     ui.link_machine_open = false;
-    ui.link_sessions.clear();
-    ui.link_may_mint.clear();
     ui.mint_failed.clear();
 }
 
-/// The sessions on other machines, then a minted pairing code, which is linked with.
+/// A pairing code minted on another machine, which is then linked with.
 fn poll_machines(s: &mut App) -> bool {
-    let mut changed = false;
-    for (key, id) in std::mem::take(&mut s.ui.settings.connections.link_sessions) {
-        match env::net_of(s, &key).map(|net| net.take_reply(id)) {
-            Some(None) => s.ui.settings.connections.link_sessions.push((key, id)),
-            Some(Some(Ok(session))) if super::permissions::grants(&session, "access:write") => {
-                s.ui.settings.connections.link_may_mint.push(key);
-                changed = true;
-            }
-            _ => changed = true,
-        }
-    }
-    let Some((key, id)) = s.ui.settings.connections.link_mint.clone() else { return changed };
+    let Some((key, id)) = s.ui.settings.connections.link_mint.clone() else { return false };
     let reply = env::net_of(s, &key).map(|net| net.take_reply(id));
     let code = match reply {
-        Some(None) => return changed,
+        Some(None) => return false,
         Some(Some(Ok(minted))) => minted["credential"].as_str().map(str::to_owned),
         _ => None,
     };
@@ -1318,7 +1302,7 @@ fn link_target(s: &App) -> (Option<Machine>, bool, bool) {
     let machine = all.into_iter().find(|m| Some(&m.key) == selected.as_ref());
     let needs_address = selected.as_deref() == Some(ANOTHER_ADDRESS) || machine.as_ref().is_some_and(|m| m.urls.is_empty());
     let can_mint = machine.as_ref().is_some_and(|m| {
-        m.connected && ui.link_may_mint.contains(&m.key) && !ui.mint_failed.contains(&m.key)
+        m.connected && super::permissions::can_on(s, &m.key, "access:write") && !ui.mint_failed.contains(&m.key)
     });
     (machine, needs_address, can_mint)
 }
@@ -1431,33 +1415,35 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let mut form = col().w_full().gap(16.0);
     let mut popup = Vec::new();
     if !all.is_empty() {
-        // Web `LinkMachineSelect`: each machine's icon, name and badge, then an address.
-        let mut options: Vec<String> = all.iter().map(|m| m.label.clone()).collect();
-        options.push("Another address…".into());
+        // Web `LinkMachineSelect`: each machine's icon, name and badge by its id, then an address.
+        let mut options: Vec<String> = all.iter().map(|m| m.key.clone()).collect();
+        options.push(ANOTHER_ADDRESS.into());
         let mut select = kit::Select::new("link-machine", &options)
             .label("Machine")
             .placeholder("Choose a machine")
             .width(400.0)
-            .current(match selected.as_deref() {
-                Some(ANOTHER_ADDRESS) => Some("Another address…"),
-                _ => machine.as_ref().map(|m| m.label.as_str()),
-            })
+            .current(selected.as_deref())
+            .option_name(ANOTHER_ADDRESS, "Another address…")
             .open(ui.link_machine_open && !busy)
             .disabled(busy)
             .on_toggle(|s: &mut App| s.ui.settings.connections.link_machine_open ^= true)
             .on_close(|s: &mut App| s.ui.settings.connections.link_machine_open = false)
-            .on_choose(|s: &mut App, label: &str, _: &mut rune::Tx| {
-                let key = machines(s).into_iter().find(|m| m.label == label).map_or_else(|| ANOTHER_ADDRESS.to_owned(), |m| m.key);
+            .on_choose(|s: &mut App, key: &str, _: &mut rune::Tx| {
                 let ui = &mut s.ui.settings.connections;
-                ui.link_machine = Some(key);
+                ui.link_machine = Some(key.to_owned());
                 ui.link_machine_open = false;
             });
         if let Some(m) = &machine {
             select = select.leading(icon(machine_icon(&m.kind), 16.0).color(t.c.foreground).opacity(0.8), 16.0);
         }
         for m in &all {
-            let badge = if m.linked { "Linked" } else if m.connected { "Connected" } else { "Not connected" };
-            select = select.option_detail(m.label.clone(), machine_icon(&m.kind), badge);
+            select = select.option_name(m.key.clone(), m.label.clone()).option_detail(m.key.clone(), machine_icon(&m.kind), "");
+            // Web `LinkMachineBadge`.
+            if m.linked {
+                select = select.option_trailing(m.key.clone(), kit::badge("Linked", "success", "sm", t));
+            } else if !m.connected {
+                select = select.option_trailing(m.key.clone(), kit::badge("Not connected", "outline", "sm", t));
+            }
         }
         form = form.child(field("Machine", select.build(&kit::theme(t), &mut popup)));
     }
@@ -1623,14 +1609,12 @@ mod tests {
         assert_eq!(all[0].urls, ["https://box.ts.net"]);
         assert!(!link_ready(&s), "a machine must be chosen first");
         s.ui.settings.connections.link_machine = Some("env-box".into());
-        assert!(!link_ready(&s), "no code, and no session there that may mint one");
-        s.ui.settings.connections.link_code = TextEdit::new("PAIR-1234");
-        assert!(link_ready(&s));
-        s.ui.settings.connections.link_code = TextEdit::new("");
-        s.ui.settings.connections.link_may_mint.push("env-box".into());
+        // A fixture stands for a session that may do anything, so this client mints there.
         assert!(link_target(&s).2 && link_ready(&s), "this client mints the code there");
         s.ui.settings.connections.mint_failed.push("env-box".into());
         assert!(!link_ready(&s), "after a failed mint the dialog asks for a code");
+        s.ui.settings.connections.link_code = TextEdit::new("PAIR-1234");
+        assert!(link_ready(&s));
         s.ui.settings.connections.link_machine = Some(ANOTHER_ADDRESS.into());
         s.ui.settings.connections.link_code = TextEdit::new("PAIR-1234");
         assert!(!link_ready(&s), "another address needs the address typed");
@@ -1638,6 +1622,13 @@ mod tests {
         assert!(link_ready(&s));
         s.ui.settings.results.insert("peerLinks.list".into(), json!({"links": [{"environmentId": "env-box", "status": "reachable"}]}));
         assert!(machines(&s)[0].linked);
+    }
+
+    #[test]
+    fn the_icon_lock_reads_like_web_resolve_environment_icon_picker_lock() {
+        assert_eq!(icon_lock(false, true), Some("Connect to this environment to change its icon."));
+        assert_eq!(icon_lock(true, false), Some("Your session on this environment cannot change its settings."));
+        assert_eq!(icon_lock(true, true), None);
     }
 
     #[test]

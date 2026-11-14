@@ -437,7 +437,7 @@ fn rebase(s: &mut App, id: &str, base: String, bearer: Option<String>) {
 }
 
 /// Whether `base` is the SSH tunnel of the saved environment `id`.
-pub(super) fn is_tunnel(s: &App, id: &str, base: &str) -> bool {
+pub(crate) fn is_tunnel(s: &App, id: &str, base: &str) -> bool {
     s.ui.env.ssh.targets.iter().any(|(k, _)| k == id) && super::route_kind(base) == "loopback"
 }
 
