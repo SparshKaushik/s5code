@@ -18,6 +18,17 @@ pub enum Event {
     /// Connect (or reconnect, if the port changed after a restart) with a bearer token.
     Ready { url: String, token: String },
     Failed(String),
+    /// The server keeps exiting before it is ready; the supervisor still retries.
+    Failing(StartupFailure),
+}
+
+/// Electron's `BackendStartupFailure`, for the startup recovery screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartupFailure {
+    pub reason: String,
+    /// The tail of what the failed attempt wrote.
+    pub output: String,
+    pub log: PathBuf,
 }
 
 const FIRST_PORT: u16 = 3773;
@@ -28,6 +39,9 @@ const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 /// contracts' SERVER_EXIT_CODE_STATE_DIR_OWNED and SERVER_EXIT_CODE_MANAGED_POLICY: never restart.
 const EXIT_STATE_DIR_OWNED: i32 = 78;
 const EXIT_MANAGED_POLICY: i32 = 77;
+/// Electron's STARTUP_FAILURE_RESTART_ATTEMPTS and STARTUP_FAILURE_OUTPUT_CHARS.
+const STARTUP_FAILURE_ATTEMPTS: u32 = 3;
+const STARTUP_FAILURE_OUTPUT_CHARS: usize = 4_000;
 
 struct Supervisor {
     child: Mutex<Option<Child>>,
@@ -123,6 +137,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         };
         port = Some(p);
         let base = format!("http://127.0.0.1:{p}");
+        let (serve, serve_port) = crate::desktop::exposure::tailscale_serve();
         let bootstrap = serde_json::json!({
             "mode": "desktop",
             "noBrowser": true,
@@ -130,9 +145,10 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "t3Home": home.to_string_lossy(),
             "host": crate::desktop::exposure::bind_host(),
             "desktopBootstrapToken": credential,
-            "tailscaleServeEnabled": false,
-            "tailscaleServePort": 443,
+            "tailscaleServeEnabled": serve,
+            "tailscaleServePort": serve_port,
         });
+        let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
         let child = match spawn(&binary, &log_path, &bootstrap.to_string()) {
             Ok(c) => c,
             Err(e) => return send(Event::Failed(format!("Could not start {}: {e}", binary.display()))),
@@ -141,6 +157,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
 
         let started = Instant::now();
         let mut ready = false;
+        let mut timed_out = false;
         let exit = loop {
             if let Some(status) = exited(&mut sup.child.lock().unwrap()) {
                 break status;
@@ -167,6 +184,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
                     }
                 } else if started.elapsed() > READINESS_TIMEOUT {
                     terminate(&sup);
+                    timed_out = true;
                     break None;
                 }
             }
@@ -192,9 +210,48 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             return send(Event::Failed("Your organization's policy refused to start the S5 Code server.".into()));
         }
         log(&log_path, &format!("server exited ({code:?}); restarting"));
+        if !ready && (timed_out || attempt + 1 >= STARTUP_FAILURE_ATTEMPTS) {
+            let reason = if timed_out { "The server started but did not become ready in time.".to_owned() } else { format!("The server could not start ({}).", exit_reason(exit)) };
+            send(Event::Failing(StartupFailure { reason, output: output_tail(&log_path, output_from), log: log_path.clone() }));
+        }
         std::thread::sleep(Duration::from_millis(500).saturating_mul(1 << attempt.min(5)).min(Duration::from_secs(10)));
         attempt += 1;
     }
+}
+
+/// Electron's exit reason: `code=N`, or `killed by SIGNAL`.
+fn exit_reason(status: Option<std::process::ExitStatus>) -> String {
+    let Some(status) = status else { return "code=null".into() };
+    if let Some(code) = status.code() {
+        return format!("code={code}");
+    }
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        let name = match signal {
+            6 => "SIGABRT".to_owned(),
+            9 => "SIGKILL".to_owned(),
+            11 => "SIGSEGV".to_owned(),
+            15 => "SIGTERM".to_owned(),
+            n => format!("signal {n}"),
+        };
+        return format!("killed by {name}");
+    }
+    "code=null".into()
+}
+
+/// What the log gained since `from`, its last `STARTUP_FAILURE_OUTPUT_CHARS` characters.
+fn output_tail(log_path: &PathBuf, from: u64) -> String {
+    let bytes = std::fs::read(log_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(bytes.get(from as usize..).unwrap_or_default());
+    // Only what the server wrote, as Electron captures; the app's own notes share the log.
+    let server: String = text.split_inclusive('\n').filter(|l| !l.starts_with("[desktop-rune] ")).collect();
+    tail_chars(&server, STARTUP_FAILURE_OUTPUT_CHARS).to_owned()
+}
+
+fn tail_chars(text: &str, n: usize) -> &str {
+    let count = text.chars().count();
+    let skip = count.saturating_sub(n);
+    text.char_indices().nth(skip).map_or("", |(i, _)| &text[i..])
 }
 
 /// Whether the server is gone, with its status when known. `terminate` (a restart) takes the
@@ -305,6 +362,10 @@ pub fn check() -> i32 {
             eprintln!("check-server: {e}");
             1
         }
+        Ok(Event::Failing(f)) => {
+            eprintln!("check-server: {}\n{}", f.reason, f.output);
+            1
+        }
         Err(_) => {
             eprintln!("check-server: timed out waiting for the server");
             1
@@ -328,5 +389,21 @@ mod tests {
         child.wait().unwrap();
         let mut done = Some(child);
         assert!(matches!(exited(&mut done), Some(Some(_))));
+        assert_eq!(exit_reason(done.take().unwrap().wait().ok()), "killed by SIGKILL");
+    }
+
+    #[test]
+    fn a_failed_start_reports_its_exit_and_the_output_it_wrote() {
+        let status = Command::new("sh").args(["-c", "exit 3"]).status().unwrap();
+        assert_eq!(exit_reason(Some(status)), "code=3");
+        assert_eq!(exit_reason(None), "code=null");
+        assert_eq!(tail_chars("abcdé", 2), "dé");
+        assert_eq!(tail_chars("ab", 4000), "ab");
+        assert_eq!(tail_chars("", 10), "");
+        let path = std::env::temp_dir().join(format!("s5-host-tail-{}.log", std::process::id()));
+        std::fs::write(&path, "first launch\nsecond: boom\n[desktop-rune] server exited (Some(3)); restarting\n").unwrap();
+        assert_eq!(output_tail(&path, "first launch\n".len() as u64), "second: boom\n");
+        assert_eq!(output_tail(&path, 999), "");
+        let _ = std::fs::remove_file(&path);
     }
 }

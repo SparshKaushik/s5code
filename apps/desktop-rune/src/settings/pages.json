@@ -890,25 +890,6 @@
           "placeholder": "No prefix"
         }
       ]
-    },
-    {
-      "title": "Cleanup",
-      "rows": [
-        {
-          "key": "storageCleanup.worktreeOnDelete",
-          "title": "Delete worktrees with deleted threads",
-          "description": "Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept.",
-          "kind": "switch",
-          "options": []
-        },
-        {
-          "key": "storageCleanup.worktreeOnMerge",
-          "title": "Delete merged worktrees",
-          "description": "Remove worktrees whose pull request is merged and whose commits are included in the default branch.",
-          "kind": "switch",
-          "options": []
-        }
-      ]
     }
   ],
   "maintenance": [
@@ -930,10 +911,6 @@
           "options": []
         }
       ]
-    },
-    {
-      "title": "Background activity",
-      "rows": []
     }
   ],
   "snap-shot": [

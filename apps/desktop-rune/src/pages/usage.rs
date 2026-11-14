@@ -223,7 +223,7 @@ fn clock(s: &App) -> Clock {
     let u = &s.ui.pages.usage;
     let format = s.client_settings.values.get("timestampFormat").and_then(Value::as_str).unwrap_or("locale");
     let until = u.answered.as_ref().and_then(|r| r["untilTime"].as_str()).and_then(iso_ms).unwrap_or(s.now_ms);
-    Clock { zone: u.zone, hour12: format != "24-hour", now: until }
+    Clock { zone: u.zone, hour12: crate::desktop::locale::hour12(Some(format)), now: until }
 }
 
 fn model_aliases(s: &App) -> Value {

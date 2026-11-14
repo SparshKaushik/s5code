@@ -19,10 +19,12 @@ use crate::data::Source;
 use crate::theme::{self, T};
 use crate::{App, Route, icons, kit};
 
+pub mod ssh;
+
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
 /// Marks a row copied in from another environment, holding that environment's key.
-const TAG: &str = "_environment";
+pub(crate) const TAG: &str = "_environment";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Saved {
@@ -48,6 +50,9 @@ pub struct Ui {
     /// Rows copied into `App::src`, and which environment owns each copied id.
     foreign: usize,
     owners: HashMap<String, String>,
+    /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
+    pub merges: u64,
+    pub ssh: ssh::Ui,
 }
 
 fn path() -> PathBuf {
@@ -106,6 +111,7 @@ pub fn start(s: &mut App) {
         s.ui.env.parked.push((env.id.clone(), src));
     }
     s.ui.env.saved.extend(saved);
+    ssh::start(s);
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -143,7 +149,7 @@ pub fn park(s: &mut App, key: &str, src: Source) {
     s.ui.env.parked.push((key.into(), src));
 }
 
-fn local_id(s: &App) -> Option<String> {
+pub fn local_id(s: &App) -> Option<String> {
     source(s, LOCAL)?.state().config.as_ref()?["environment"]["environmentId"].as_str().map(str::to_owned)
 }
 
@@ -161,9 +167,18 @@ pub fn status(s: &App, key: &str) -> String {
     let st = src.state();
     match &st.conn {
         s5_net::Conn::Open if st.shell_ready => "Connected".into(),
-        s5_net::Conn::Open | s5_net::Conn::Connecting => "Connecting…".into(),
-        s5_net::Conn::Closed(reason) => format!("Reconnecting · {reason}"),
+        s5_net::Conn::Open | s5_net::Conn::Connecting => "Connecting...".into(),
+        // connectionStatusText (client-runtime/connection/presentation.ts); a rejected credential is
+        // the web's blocked "authentication" failure, which retrying cannot fix, so it asks to pair again.
+        s5_net::Conn::Closed(reason) if rejected(reason) => format!("Connection failed. Reason: {reason}. Pair this environment again."),
+        s5_net::Conn::Closed(reason) if reason.is_empty() => "Reconnecting...".into(),
+        s5_net::Conn::Closed(reason) => format!("Failed to connect. Reconnecting... Reason: {reason}"),
     }
+}
+
+/// The server refused the bearer during the WebSocket upgrade (tungstenite's "HTTP error: 401 …").
+fn rejected(reason: &str) -> bool {
+    reason.starts_with("HTTP error: 401") || reason.starts_with("HTTP error: 403")
 }
 
 /// Makes `key`'s environment the one `App::src` talks to; the others' rows are copied back in.
@@ -214,10 +229,59 @@ pub fn location(s: &App, row: &Value) -> String {
     }
 }
 
+/// `ProjectEnvironmentBadge`: "On X" when every member project is remote, "Also on X" when one
+/// lives on this machine; None when none is remote.
+pub fn badge(s: &App, members: &[String]) -> Option<String> {
+    let keys: Vec<String> = members.iter().map(|m| owner(s, m)).collect();
+    let mut labels: Vec<String> = keys.iter().filter(|k| *k != LOCAL).map(|k| Some(label(s, k)).filter(|l| !l.is_empty()).unwrap_or_else(|| "Remote".into())).collect();
+    if labels.is_empty() {
+        return None;
+    }
+    labels.sort();
+    labels.dedup();
+    let also = keys.iter().any(|k| k == LOCAL);
+    Some(format!("{} {}", if also { "Also on" } else { "On" }, labels.join(", ")))
+}
+
 /// The environment a row lives on, when that's not this machine.
+#[cfg(test)]
 pub fn remote_label(s: &App, row: &Value) -> Option<String> {
     let key = of(s, row);
     (key != LOCAL).then(|| label(s, &key))
+}
+
+/// Every environment this window knows: this machine first, then the saved ones by label.
+pub fn keys(s: &App) -> Vec<String> {
+    let mut saved: Vec<&Saved> = s.ui.env.saved.iter().collect();
+    saved.sort_by(|a, b| a.label.cmp(&b.label));
+    std::iter::once(LOCAL.to_owned()).chain(saved.into_iter().map(|e| e.id.clone())).collect()
+}
+
+/// Whether the environment is connected and has its shell (`canCreateProjectInEnvironment`).
+pub fn connected(s: &App, key: &str) -> bool {
+    source(s, key).is_some_and(|src| matches!(src.state().conn, s5_net::Conn::Open) && src.state().shell_ready)
+}
+
+/// The client of the environment `key`, on screen or parked.
+pub fn net_of<'a>(s: &'a mut App, key: &str) -> Option<&'a mut s5_net::Net> {
+    source_mut(s, key)?.net()
+}
+
+/// Records that `id` belongs to `key` before that environment's shell lists it, so navigating to
+/// a project a flow just created there lands on the right server.
+pub fn adopt(s: &mut App, id: &str, key: &str) {
+    s.ui.env.owners.insert(id.to_owned(), key.to_owned());
+}
+
+/// Sends one request to every connected environment; each reply reaches `App::src` (see [`drain`]).
+pub fn request_all(s: &mut App, method: &str, params: &Value) -> Vec<u64> {
+    let mut ids: Vec<u64> = s.src.net().map(|net| net.request(method, params.clone())).into_iter().collect();
+    for (_, src) in &mut s.ui.env.parked {
+        if let Some(net) = src.net() {
+            ids.push(net.request(method, params.clone()));
+        }
+    }
+    ids
 }
 
 /// The client to send a command about `id` through; an id no environment lists goes to `App::src`.
@@ -277,6 +341,7 @@ fn merge(s: &mut App) -> bool {
             }
         }
     }
+    env.merges += 1;
     true
 }
 
@@ -302,6 +367,7 @@ pub fn remove(s: &mut App, id: &str) {
     s.ui.env.parked.retain(|(k, _)| k != id);
     s.ui.env.saved.retain(|e| e.id != id);
     s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    ssh::forget(s, id);
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
@@ -314,7 +380,11 @@ fn pair(host: String, code: String) -> Result<Saved, String> {
     Ok(Saved { id, label, base, bearer })
 }
 
-fn add(s: &mut App) {
+pub fn pairing(s: &App) -> bool {
+    s.ui.env.pairing.is_some()
+}
+
+pub(crate) fn add(s: &mut App) {
     if s.ui.env.pairing.is_some() {
         return;
     }
@@ -362,16 +432,13 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
 }
 
-/// Lands a pairing that finished.
+/// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
+    let changed = ssh::poll(s);
+    let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
     true
-}
-
-pub fn keys(s: &App) -> Vec<String> {
-    std::iter::once(LOCAL.to_owned()).chain(s.ui.env.saved.iter().map(|e| e.id.clone())).collect()
 }
 
 /// Settings > Connections > Environments: this machine, each saved environment, and the pairing form.
@@ -382,10 +449,11 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
         if key == LOCAL {
             detail = format!("This machine · {detail}");
         } else if let Some(env) = s.ui.env.saved.iter().find(|e| e.id == key) {
-            detail = format!("{} · {detail}", env.base);
+            detail = ssh::detail(s, &key, &detail).unwrap_or_else(|| format!("{} · {detail}", env.base));
         }
         let mut actions = row().gap(8.0).center_y();
         if key != LOCAL {
+            actions = actions.children(ssh::row_action(s, t, &key));
             let target = key.clone();
             actions = actions.child(
                 kit::icon_button(&icons::TRASH_2, "Remove environment").variant("ghost").size("icon-xs").on_press(move |s: &mut App| remove(s, &target)).build(t),
@@ -412,6 +480,7 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
         );
     }
     rows.push(pairing_form(s, t));
+    rows.push(ssh::form(s, t));
     rows
 }
 
@@ -465,6 +534,23 @@ mod tests {
         assert_eq!(decode(&encode(&list)), list);
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
+    }
+
+    #[test]
+    fn status_reads_like_the_web_and_a_rejected_credential_asks_to_pair_again() {
+        let mut s = App::new();
+        let mut remote = crate::data::empty_state();
+        s.ui.env.saved.push(saved("a"));
+        for (conn, expected) in [
+            (s5_net::Conn::Connecting, "Connecting..."),
+            (s5_net::Conn::Closed("Connection refused (os error 111)".into()), "Failed to connect. Reconnecting... Reason: Connection refused (os error 111)"),
+            (s5_net::Conn::Closed("HTTP error: 401 Unauthorized".into()), "Connection failed. Reason: HTTP error: 401 Unauthorized. Pair this environment again."),
+        ] {
+            remote.conn = conn;
+            s.ui.env.parked = vec![("a".into(), Source::Fixture(remote.clone()))];
+            assert_eq!(status(&s, "a"), expected);
+        }
+        assert_eq!(status(&s, "gone"), "Not connected");
     }
 
     #[test]
