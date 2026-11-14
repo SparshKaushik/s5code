@@ -1677,6 +1677,14 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
+/// The fixture as a cut preview still listing untracked files, for headless scenes.
+pub fn banners_fixture(app: &mut App) {
+    fixture(app);
+    let source = &mut app.ui.panel.diff.source;
+    source.truncated = true;
+    source.incomplete = true;
+}
+
 /// The persisted layout setting, which other clients may change too, and the wrap toggle.
 fn sync_settings(app: &mut App) {
     let split = app.client_settings.values.get("diffLayout").and_then(Value::as_str) == Some("split");

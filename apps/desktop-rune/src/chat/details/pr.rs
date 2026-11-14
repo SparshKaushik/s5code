@@ -108,6 +108,15 @@ pub fn open_checkout(s: &mut App, reference: Option<String>) {
     s.ui.chat.details.checkout = Some(Checkout { reference: edit, seen, ..Checkout::default() });
 }
 
+/// The dialog with a resolved pull request, for headless scenes.
+pub fn scene(s: &mut App) {
+    open_checkout(s, Some("#42".into()));
+    let pr = serde_json::json!({"number": 42, "title": "Queue keystrokes until the terminal attaches", "url": "https://github.com/acme/demo/pull/42", "headBranch": "fix/terminal-first-key", "baseBranch": "main", "state": "open"});
+    if let Some(c) = s.ui.chat.details.checkout.as_mut() {
+        c.resolved = parse_reference("#42").map(|r| (r, pr));
+    }
+}
+
 fn close(s: &mut App) {
     if s.ui.chat.details.checkout.as_ref().is_some_and(|c| c.preparing.is_none()) {
         s.ui.chat.details.checkout = None;

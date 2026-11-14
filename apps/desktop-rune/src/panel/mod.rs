@@ -943,6 +943,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             "term-1",
         );
     }),
+    ("panel-diff-banners", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::banners_fixture(s);
+    }),
+    ("panel-terminal-close", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(s, drawer::Owner::Panel, &[(&[("term-1", TERMINAL_DEV), ("term-2", TERMINAL_VIM)], false)], "term-1");
+        s.ui.shell.panel_open = true;
+        s.ui.panel.surfaces.push(Surface::Terminal);
+        s.ui.panel.active = Some(Surface::Terminal);
+        close(s, Surface::Terminal);
+    }),
+    ("checkout-pr", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        crate::chat::details::pr::scene(s);
+    }),
     ("terminal-drawer-close", |s| {
         (crate::shell::SCENES[1].1)(s);
         drawer::fixture(s, drawer::Owner::Drawer, &[(&[("term-1", TERMINAL_DEV)], false)], "term-1");
