@@ -20,6 +20,7 @@ use crate::theme::{self, T};
 use crate::{App, Route, icons, kit};
 
 pub mod ssh;
+mod catalog;
 
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
@@ -58,7 +59,7 @@ pub struct Ui {
 fn path() -> PathBuf {
     match std::env::var_os("S5_ENVIRONMENTS") {
         Some(path) => path.into(),
-        None => crate::settings::client::config_path().with_file_name("environments.json"),
+        None => crate::settings::client::sibling_path("environments.json"),
     }
 }
 
@@ -78,9 +79,16 @@ fn encode(saved: &[Saved]) -> Value {
     json!({ "version": 1, "environments": rows })
 }
 
-/// Bearer tokens are credentials: the file is the user's alone.
+/// Bearer tokens are credentials: the file is the user's alone. Electron's catalog follows.
 fn save(saved: &[Saved]) -> Result<(), String> {
     let path = path();
+    let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
+    write(&path, saved)?;
+    catalog::export(&old, saved);
+    Ok(())
+}
+
+fn write(path: &std::path::Path, saved: &[Saved]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -112,6 +120,28 @@ pub fn start(s: &mut App) {
     }
     s.ui.env.saved.extend(saved);
     ssh::start(s);
+    if !rune::is_headless() {
+        std::thread::spawn(|| *CATALOG.lock().unwrap() = Some(catalog::read()));
+    }
+}
+
+/// Electron's saved connections, read off the UI thread at launch.
+static CATALOG: std::sync::Mutex<Option<Vec<Saved>>> = std::sync::Mutex::new(None);
+
+/// Connections paired in the Electron app that this list lacks join it, and connect.
+fn adopt_catalog(s: &mut App) -> bool {
+    let Some(found) = CATALOG.lock().unwrap().take() else { return false };
+    let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
+    if new.is_empty() {
+        return false;
+    }
+    for env in new {
+        let src = connect(s, &env);
+        s.ui.env.parked.push((env.id.clone(), src));
+        s.ui.env.saved.push(env);
+    }
+    s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    true
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -436,7 +466,7 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s);
+    let changed = ssh::poll(s) | adopt_catalog(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
