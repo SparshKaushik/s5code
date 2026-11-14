@@ -65,6 +65,11 @@ impl Grouping {
         !root.is_empty() && self.scratch_roots.contains(&root)
     }
 
+    /// `derivePhysicalProjectKey`: the checkout's environment and normalized root.
+    fn physical(&self, project: &Value) -> String {
+        format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")))
+    }
+
     /// The environment id a project row belongs to (`project.environmentId` on the web).
     fn environment_of<'a>(&'a self, project: &'a Value) -> &'a str {
         match project[crate::env::TAG].as_str() {
@@ -80,7 +85,7 @@ impl Grouping {
         if self.is_scratch(project) {
             return SCRATCH_KEY.to_string();
         }
-        let physical = format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")));
+        let physical = self.physical(project);
         let mode = self.overrides[&physical].as_str().unwrap_or(&self.mode);
         if mode == "separate" {
             return physical;
@@ -478,6 +483,11 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
 }
 
 /// The folder's right-click menu (`SidebarProjectFolderHeader`'s context menu).
+/// A checkout's grouping override key.
+pub fn physical_key(s: &App, project: &Value) -> String {
+    Grouping::read(s).physical(project)
+}
+
 /// `canPinProjectGroup`: every member's server organizes projects and its session lets this
 /// client change it.
 pub fn can_pin(s: &App, members: &[String]) -> bool {

@@ -13,6 +13,7 @@ mod background;
 mod balance;
 pub mod client;
 mod connection_diagnosis;
+mod checkout_grouping;
 mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
@@ -129,6 +130,7 @@ pub struct Ui {
     pub theme_remove: Option<String>,
     pub thread_details_open: bool,
     pub about: about::Ui,
+    pub checkout_grouping_open: bool,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -1046,6 +1048,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     background::overlays(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     about::overlays(s, t, &mut overlays);
+    checkout_grouping::overlays(s, t, &mut overlays);
     restore::confirm(s, t, &mut overlays);
     thread_details::overlay(s, t, &mut overlays);
     themes::remove_dialog(s, t, &mut overlays);
