@@ -250,11 +250,13 @@ pub fn remote_label(s: &App, row: &Value) -> Option<String> {
     (key != LOCAL).then(|| label(s, &key))
 }
 
-/// Every environment this window knows: this machine first, then the saved ones by label.
+/// Every environment this window knows: this machine first, then the saved ones by label. With
+/// the local environment off there is no primary environment, as web's `readPrimaryEnvironmentTarget`.
 pub fn keys(s: &App) -> Vec<String> {
     let mut saved: Vec<&Saved> = s.ui.env.saved.iter().collect();
     saved.sort_by(|a, b| a.label.cmp(&b.label));
-    std::iter::once(LOCAL.to_owned()).chain(saved.into_iter().map(|e| e.id.clone())).collect()
+    let local = (!s.ui.desktop.local_off).then(|| LOCAL.to_owned());
+    local.into_iter().chain(saved.into_iter().map(|e| e.id.clone())).collect()
 }
 
 /// Whether the environment is connected and has its shell (`canCreateProjectInEnvironment`).
@@ -569,6 +571,10 @@ mod tests {
         remote.shell_revision = 1;
         s.ui.env.saved.push(saved("a"));
         s.ui.env.parked.push(("a".into(), Source::Fixture(remote)));
+        assert_eq!(keys(&s), [LOCAL, "a"]);
+        s.ui.desktop.local_off = true;
+        assert_eq!(keys(&s), ["a"], "web drops the primary environment while it is off");
+        s.ui.desktop.local_off = false;
         let ids = |s: &App| s.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).collect::<Vec<_>>();
 
         assert!(drain(&mut s));
