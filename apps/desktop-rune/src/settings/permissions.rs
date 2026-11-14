@@ -66,7 +66,7 @@ pub fn reply(s: &App) -> Option<&Result<Value, Value>> {
     reply_on(s, &target(s))
 }
 
-fn reply_on<'a>(s: &'a App, key: &str) -> Option<&'a Result<Value, Value>> {
+pub fn reply_on<'a>(s: &'a App, key: &str) -> Option<&'a Result<Value, Value>> {
     s.ui.settings.session.by_env.get(key)?.reply.as_ref()
 }
 

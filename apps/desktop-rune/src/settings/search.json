@@ -569,6 +569,14 @@
   ]
  },
  {
+  "id": "update-track",
+  "title": "Update track",
+  "to": "about",
+  "terms": [
+   "release channel stable latest nightly prerelease"
+  ]
+ },
+ {
   "id": "cli-command",
   "title": "t3 command",
   "to": "about",
