@@ -62,6 +62,8 @@ pub struct Ui {
     pub permissions_open: bool,
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
+    /// Threads launched in the background: their launch reply doesn't open them.
+    background: Vec<String>,
     /// Messages waiting on their attachments to be stored.
     uploads: Vec<attachments::Upload>,
     /// Commands whose failure shows in the route's error banner (setThreadError).
@@ -434,6 +436,12 @@ fn rewinding(s: &App) -> bool {
 }
 
 fn send(s: &mut App, alternate: bool) {
+    send_in(s, alternate, false);
+}
+
+/// `background` is web's background submission intent: a new thread starts without opening, and
+/// a message to a thread opens a new draft in its project after sending.
+fn send_in(s: &mut App, alternate: bool, background: bool) {
     if rewinding(s) {
         return;
     }
@@ -550,6 +558,10 @@ fn send(s: &mut App, alternate: bool) {
         }
     };
     let launch = launch.then(|| thread_id.clone());
+    if background && launch.is_some() {
+        s.ui.chat.composer.background.push(thread_id.clone());
+    }
+    let new_draft = background && launch.is_none();
     crate::chat::timeline::error_banner::set_local(s, &key, None);
     let outgoing = Outgoing { key, draft: snapshot };
     let Some(net) = s.src.net() else { return };
@@ -560,6 +572,9 @@ fn send(s: &mut App, alternate: bool) {
         composer.uploads.push(attachments::start(net, &thread_id, &message_id, uploads, payload, launch, outgoing));
     }
     sent(s);
+    if new_draft {
+        crate::shell::sidebar::new_local(s);
+    }
 }
 
 /// Pasted files join the draft's attachments (ChatComposer onPaste): copied files as they are,
@@ -718,6 +733,7 @@ pub fn poll(s: &mut App) -> bool {
         let (request, outgoing) = composer.sends.remove(i);
         let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
         match (reply, launch) {
+            (Ok(_), Some(thread_id)) if composer.background.contains(&thread_id) => composer.background.retain(|b| *b != thread_id),
             (Ok(v), Some(thread_id)) => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
             (Ok(_), None) => {}
             (Err(e), _) => failed.push((outgoing, e)),
@@ -905,14 +921,26 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     let thread = ctx(s).thread.map(|t| data::s(t, "id").to_owned());
     let plain = !e.mods.shift && !e.mods.cmd && !e.mods.alt && !e.mods.ctrl && !e.mods.logo;
     let answering = question::editor(s).is_some();
-    match e.key {
-        Key::Enter if e.mods.cmd && e.mods.shift => {
+    // composerSubmissionIntentForKey: the bound send variants, each under its own `when`.
+    let bound = SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, e, c));
+    match bound {
+        Some("thread.steerQueuedMessage") => {
             if let Some(thread) = thread {
                 crate::chat::timeline::queue::steer_next(s, &thread);
             }
-            true
+            return true;
         }
-        Key::Enter if !answering && (e.mods.cmd || plain) => {
+        Some("thread.editQueuedMessage") if !answering => {
+            return thread.is_some_and(|thread| crate::chat::timeline::queue::edit_latest(s, &thread));
+        }
+        Some("composer.sendAlternate" | "composer.sendBackground" | "composer.sendAndNewThread") if !answering && !tx.key_repeat() => {
+            send_in(s, bound == Some("composer.sendAlternate"), bound != Some("composer.sendAlternate"));
+            return true;
+        }
+        _ => {}
+    }
+    match e.key {
+        Key::Enter if !answering && !e.mods.shift && !e.mods.alt && (e.mods.cmd || plain) => {
             let text = draft(s).map(|d| d.edit.text.as_str()).unwrap_or("");
             let shortcut = crate::settings::value(s, "sendShortcut");
             let shortcut = shortcut.as_str().unwrap_or("enter");
@@ -920,15 +948,10 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             if plain && needs_mod {
                 draft_mut(s).edit.insert("\n");
             } else {
-                // Mod+Enter while a turn runs is the alternate follow-up (steer <-> queue).
-                send(s, e.mods.cmd);
+                send(s, false);
             }
             true
         }
-        Key::Up if e.mods.alt && !e.mods.shift && !answering => match thread {
-            Some(thread) => crate::chat::timeline::queue::edit_latest(s, &thread),
-            None => false,
-        },
         Key::Up | Key::Down if plain && !answering => recall(s, e.key == Key::Up),
         Key::Escape if editing_run(s).is_some() => {
             cancel_queued_edit(s);
@@ -944,6 +967,13 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+const SEND_COMMANDS: [&str; 5] = ["thread.steerQueuedMessage", "thread.editQueuedMessage", "composer.sendAlternate", "composer.sendBackground", "composer.sendAndNewThread"];
+
+/// Whether the open route's prompt has the keys (`composerFocus`).
+pub fn focused(s: &App) -> bool {
+    s.ui.chat.composer.drafts.get(&active_key(s)).is_some_and(|d| d.edit.focused)
+}
+
 /// The composer's window-wide shortcuts (`modelPicker.toggle`, `composer.effort`,
 /// `composer.mode`), which the web binds outside the terminal. Effort lives in the model picker.
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
@@ -951,6 +981,13 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         return false;
     }
     if picker::step_provider(s, e) {
+        return true;
+    }
+    // ChatView binds steering the next queued message outside the prompt too.
+    if let Some(thread) = ctx(s).thread.map(|t| data::s(t, "id").to_owned())
+        && crate::panel::shortcut(s, e, "thread.steerQueuedMessage")
+    {
+        crate::chat::timeline::queue::steer_next(s, &thread);
         return true;
     }
     if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
@@ -1757,6 +1794,42 @@ mod tests {
         assert_eq!(d.edit.pills().map(|(r, id)| (r, id.to_owned())).collect::<Vec<_>>(), [(4..21, chips::pill_id(&record))]);
         assert_eq!(d.contexts, [record]);
         assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+    }
+
+    #[test]
+    fn send_chords_resolve_by_route_run_and_focus_like_the_web() {
+        let mut s = App::new();
+        let id = |n: &str| json!({"type": "identifier", "name": n});
+        let and = |l: Value, r: Value| json!({"type": "and", "left": l, "right": r});
+        let enter = |alt: bool| json!({"key": "enter", "modKey": true, "altKey": alt});
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([
+                {"command": "composer.sendAlternate", "shortcut": enter(false), "whenAst": and(id("composerFocus"), id("turnRunning"))},
+                {"command": "composer.sendBackground", "shortcut": enter(false), "whenAst": and(id("composerFocus"), id("draftThreadRoute"))},
+                {"command": "composer.sendBackground", "shortcut": enter(true), "whenAst": and(id("composerFocus"), id("draftThreadRoute"))},
+                {"command": "composer.sendAndNewThread", "shortcut": enter(true), "whenAst": and(id("composerFocus"), json!({"type": "not", "node": id("draftThreadRoute")}))},
+            ]);
+        }
+        let resolved = |s: &App, alt: bool| {
+            let mut e = KeyEvent::from(Key::Enter);
+            e.mods.cmd = true;
+            e.mods.ctrl = !cfg!(target_os = "macos");
+            e.mods.alt = alt;
+            SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, &e, c))
+        };
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project) });
+        draft_mut(&mut s).edit.focused = true;
+        assert_eq!(resolved(&s, false), Some("composer.sendBackground"), "FAILED: Mod+Enter on a draft starts it in the background");
+        assert_eq!(resolved(&s, true), Some("composer.sendBackground"));
+        on_replay_showcase(&mut s);
+        draft_mut(&mut s).edit.focused = true;
+        assert_eq!(resolved(&s, false), None, "FAILED: an idle thread sends Mod+Enter in the foreground");
+        assert_eq!(resolved(&s, true), Some("composer.sendAndNewThread"));
+        seed_running(&mut s);
+        assert_eq!(resolved(&s, false), Some("composer.sendAlternate"), "FAILED: a running turn flips steer and queue");
+        draft_mut(&mut s).edit.focused = false;
+        assert_eq!(resolved(&s, false), None, "FAILED: the prompt must have the keys");
     }
 
     #[test]

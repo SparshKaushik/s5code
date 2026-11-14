@@ -191,7 +191,7 @@ fn close(app: &mut App) {
 
 /// Ctrl+F on a thread opens (or refocuses) the bar.
 pub fn on_key(app: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
-    if e.is_command('f') && !e.mods.shift && matches!(app.frame_route(), Route::Thread(_)) {
+    if matches!(app.frame_route(), Route::Thread(_)) && crate::panel::shortcut(app, e, "chat.find") {
         open(app);
         return true;
     }

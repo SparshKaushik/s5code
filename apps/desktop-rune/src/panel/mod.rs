@@ -629,6 +629,9 @@ fn when_context(app: &App, name: &str) -> bool {
         "previewFocus" => app.ui.panel.browser.focused,
         "usagePageOpen" => matches!(app.route, crate::Route::Usage),
         "modelPickerOpen" => app.ui.chat.composer.picker.open,
+        "composerFocus" => crate::chat::composer::focused(app),
+        "turnRunning" => crate::chat::composer::running(app),
+        "draftThreadRoute" => matches!(app.frame_route(), crate::Route::Home { .. }),
         _ => false,
     }
 }
