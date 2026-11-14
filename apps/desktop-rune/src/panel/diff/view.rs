@@ -503,12 +503,19 @@ fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
             if !tail {
                 buttons.push(("up", "Expand up", &icons::ARROW_UP, Expand::Up));
             }
+            buttons.push(("all", "Expand all lines", &icons::CHEVRONS_UP_DOWN, Expand::All));
         }
+        cell = cell.min_w(buttons.len() as f32 * 22.0);
         for (key, label, glyph, how) in buttons {
             cell = cell.child(micro(l, key, label, glyph, 14.0, l.sep_fg).on_press(move |s: &mut App| super::expand(s, f, h, how)));
         }
     }
-    let mut inner = row().key("inner").h(SEP_H).items_center().child(cell).child(text(label.clone()).font(l.small).color(l.sep_fg).pl(CODE_PAD.0));
+    let mut caption = text(label.clone()).font(l.small).color(l.sep_fg).pl(CODE_PAD.0);
+    if st.expandable {
+        // The count expands the whole gap, as pierre's separator label does.
+        caption = caption.cursor(Cursor::Pointer).on_press(move |s: &mut App| super::expand(s, f, h, super::Expand::All));
+    }
+    let mut inner = row().key("inner").h(SEP_H).items_center().child(cell).child(caption);
     if let Some(w) = view_w(st) {
         inner = inner.w(w).sticky_left(0.0);
     }
@@ -546,6 +553,9 @@ fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
 }
 
 /// A 20-point ghost icon button (`icon-micro`).
+/// How long the copy-path button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
+const COPIED_MS: i64 = 1000;
+
 fn micro(l: &Look, key: &'static str, label: &str, glyph: &'static Icon, size: f32, color: Color) -> El {
     row()
         .key(key)
@@ -598,7 +608,11 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
         .shrink()
         .key("title")
         .cursor(Cursor::Pointer)
-        .on_press(move |s: &mut App| crate::panel::open_file(s, open.clone()))
+        .on_press(move |s: &mut App| {
+            if let Some(path) = crate::panel::workspace_path(s, &open) {
+                crate::panel::open_file(s, path);
+            }
+        })
         .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| super::file_menu::open(s, menu.clone(), (at.x, at.y)));
     let mut name = row().key("name").items_center().gap(6.0).min_w(0.0).shrink();
     if let (FileStatus::Renamed | FileStatus::Copied, Some(old)) = (file.status, file.old_path.as_deref()) {
@@ -607,7 +621,13 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
             .child(icon(&icons::ARROW_RIGHT, 12.0).color(l.muted).key("arrow"));
     }
     name = name.child(title);
-    let copy = micro(l, "copy", "Copy path", &icons::COPY, 12.0, l.muted).on_press_tx(move |_: &mut App, tx| tx.copy(path.clone()));
+    let done = s.ui.panel.diff.copied.as_ref().is_some_and(|(p, at)| *p == path && crate::data::now_ms() - at < COPIED_MS);
+    let copy = if done { micro(l, "copy", "Copied", &icons::CHECK, 12.0, l.add.count) } else { micro(l, "copy", "Copy path", &icons::COPY, 12.0, l.muted) };
+    let copy = copy.on_press_tx(move |s: &mut App, tx| {
+        tx.copy(path.clone());
+        s.ui.panel.diff.copied = Some((path.clone(), crate::data::now_ms()));
+        tx.wake_after(std::time::Duration::from_millis(COPIED_MS as u64));
+    });
     let mut inner = row()
         .key("inner")
         .w_full()

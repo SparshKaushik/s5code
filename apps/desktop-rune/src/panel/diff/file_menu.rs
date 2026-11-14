@@ -70,6 +70,47 @@ fn items(config: &Value) -> (bool, Option<&'static str>, Vec<String>) {
     (manager, reveal, editors.into_iter().filter(|e| e != "file-manager").collect())
 }
 
+fn windows_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// Path segments without `.`; `None` for an absolute path or one that climbs out with `..`.
+fn relative_segments(path: &str) -> Option<Vec<String>> {
+    if path.starts_with('/') || windows_absolute(path) {
+        return None;
+    }
+    let segments: Vec<String> = path.replace('\\', "/").split('/').filter(|s| !s.is_empty() && *s != ".").map(str::to_string).collect();
+    (!segments.is_empty() && !segments.iter().any(|s| s == "..")).then_some(segments)
+}
+
+/// `workspaceRelativeFilePath`: an absolute path under `root`, relative to it.
+fn under(path: &str, root: &str) -> Option<String> {
+    let fold = windows_absolute(root.trim_start_matches('/'));
+    let norm = |p: &str| if fold { p.replace('\\', "/").to_ascii_lowercase() } else { p.to_string() };
+    let root = norm(root.trim_end_matches(['/', '\\']));
+    let full = norm(path);
+    full.strip_prefix(&format!("{root}/")).map(|rest| path[path.len() - rest.len()..].replace('\\', "/"))
+}
+
+/// `resolveDiffPathForWorkspace`: a diff names files by repository-relative path (or absolute,
+/// from Claude and ACP tool calls); the workspace may be a folder inside the repository.
+pub fn resolve_diff_path(file: &str, workspace: Option<&str>, repository: Option<&str>) -> Option<String> {
+    if file.starts_with('/') || windows_absolute(file) {
+        return relative_segments(&under(file, workspace?)?).map(|s| s.join("/"));
+    }
+    let segments = relative_segments(file)?;
+    let inner = match (workspace, repository) {
+        (Some(w), Some(r)) if w.trim_end_matches('/') != r.trim_end_matches('/') => under(w, r)?,
+        _ => return Some(segments.join("/")),
+    };
+    let fold = repository.is_some_and(windows_absolute);
+    let prefix: Vec<&str> = inner.split('/').filter(|s| !s.is_empty()).collect();
+    let belongs = prefix.len() < segments.len()
+        && prefix.iter().zip(&segments).all(|(p, s)| if fold { p.eq_ignore_ascii_case(s) } else { p == s });
+    belongs.then(|| segments[prefix.len()..].join("/"))
+}
+
 pub fn open(app: &mut App, path: String, at: (f32, f32)) {
     let ui = &mut app.ui.panel.diff.file_menu;
     (ui.at, ui.sub) = (Some((path, at)), false);
@@ -82,7 +123,8 @@ fn close(app: &mut App) {
 fn run(app: &mut App, path: &str, action: Action) {
     close(app);
     let Some((_, cwd)) = crate::panel::diff_context(app) else { return };
-    let absolute = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", cwd.trim_end_matches('/')) };
+    let Some(relative) = crate::panel::workspace_path(app, path) else { return };
+    let absolute = format!("{}/{relative}", cwd.trim_end_matches('/'));
     let (editor, title) = match &action {
         Action::Open => ("file-manager".to_string(), "Could not open file".to_string()),
         Action::Reveal => ("file-manager".to_string(), "Unable to reveal file".to_string()),
@@ -157,5 +199,19 @@ mod tests {
         let bare = json!({"availableEditors": ["vscode"], "shellRevealInFileManager": true});
         assert_eq!(items(&bare), (false, None, vec!["vscode".to_string()]));
         assert_eq!(label("vscode"), "VS Code");
+    }
+
+    #[test]
+    fn diff_paths_resolve_against_a_workspace_inside_the_repository() {
+        assert_eq!(resolve_diff_path("src/a.rs", Some("/repo"), Some("/repo")).as_deref(), Some("src/a.rs"));
+        assert_eq!(resolve_diff_path("./src//a.rs", Some("/repo"), None).as_deref(), Some("src/a.rs"));
+        assert_eq!(resolve_diff_path("app/src/a.rs", Some("/repo/app"), Some("/repo")).as_deref(), Some("src/a.rs"));
+        assert_eq!(resolve_diff_path("other/a.rs", Some("/repo/app"), Some("/repo")), None, "outside the workspace");
+        assert_eq!(resolve_diff_path("app", Some("/repo/app"), Some("/repo")), None, "the workspace itself");
+        assert_eq!(resolve_diff_path("../etc/passwd", Some("/repo"), None), None);
+        assert_eq!(resolve_diff_path("/repo/app/src/a.rs", Some("/repo/app"), None).as_deref(), Some("src/a.rs"));
+        assert_eq!(resolve_diff_path("/elsewhere/a.rs", Some("/repo"), None), None);
+        assert_eq!(resolve_diff_path("/repo/a.rs", None, None), None);
+        assert_eq!(resolve_diff_path("C:\\Repo\\App\\x.rs", Some("c:/repo"), None).as_deref(), Some("App/x.rs"));
     }
 }

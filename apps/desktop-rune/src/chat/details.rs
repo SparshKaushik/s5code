@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
 mod git;
+pub mod pr;
 pub mod scripts;
 
 #[derive(Default)]
@@ -25,10 +26,17 @@ pub struct Ui {
     /// The thread whose card is open as a popover, when the lane is too narrow for it inline.
     popover: Option<String>,
     pub menu: Option<Menu>,
-    /// Refs from `vcs.listRefs`, loaded when the branch menu opens; `None` while loading.
+    /// Refs from `vcs.listRefs` for `refs_query`, page after page; `None` while the first loads.
     refs: Option<Vec<Ref>>,
-    /// More refs than the first page: `(listed, total)` ("Showing N of M refs").
-    refs_more: Option<(usize, u64)>,
+    refs_query: String,
+    /// The next page's cursor, and how many refs match in all ("Showing N of M refs").
+    refs_next: Option<u64>,
+    refs_total: u64,
+    /// The `vcs.listRefs` in flight: its request, query, and whether it is a next page.
+    listing: Option<(u64, String, bool)>,
+    /// Set by the list's scroll when it nears the end going down (`shouldLoadNextBranchPageAfterScroll`).
+    near_end: std::rc::Rc<std::cell::Cell<bool>>,
+    last_scroll: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     branch_query: TextEdit,
     /// The highlighted branch picker row.
     branch_active: usize,
@@ -39,10 +47,18 @@ pub struct Ui {
     drafts: HashMap<String, DraftRun>,
     pub git: git::State,
     pub scripts: scripts::State,
+    pub checkout: Option<pr::Checkout>,
+    /// "Show N more" under the thread's pull request.
+    pr_expanded: bool,
+    /// Branch mismatches (by `mismatch_key`) shown once the composer had content, and the ones
+    /// dismissed for this session.
+    mismatch_shown: HashSet<String>,
+    mismatch_dismissed: HashSet<String>,
+    /// "Switch to {branch}?" over uncommitted changes.
+    restore_confirm: Option<String>,
 }
 
 enum Pending {
-    List,
     /// A switch or create; its reply moves the thread onto the branch, in that worktree. The
     /// title is the toast for a failure.
     Branch(String, Option<String>, &'static str),
@@ -262,19 +278,78 @@ fn toggle_menu(s: &mut App, menu: Menu) {
         ui.branch_query.focused = true;
         ui.branch_active = 0;
         ui.refs = None;
-        ui.refs_more = None;
-        if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
-            let id = net.request("vcs.listRefs", json!({"cwd": cwd, "limit": REF_LIMIT}));
-            s.ui.chat.details.pending = Some((id, Pending::List));
-        }
+        ui.refs_query.clear();
+        ui.refs_next = None;
+        ui.refs_total = 0;
+        ui.last_scroll.set(None);
+        ui.near_end.set(false);
+        list_refs(s, false);
     }
 }
 
 const REF_LIMIT: u64 = 100;
 
+/// `usePaginatedBranches`: the server searches refs by the sanitized query, 100 at a time; a
+/// next page continues from the last one's cursor.
+fn list_refs(s: &mut App, next: bool) {
+    let Some(cwd) = cwd(s) else { return };
+    let query: String = sanitize_ref_name(s.ui.chat.details.branch_query.text.trim()).chars().take(256).collect();
+    let mut params = json!({"cwd": cwd, "limit": REF_LIMIT});
+    if !query.is_empty() {
+        params["query"] = json!(query);
+    }
+    if next {
+        let Some(cursor) = s.ui.chat.details.refs_next else { return };
+        params["cursor"] = json!(cursor);
+    }
+    let Some(net) = s.src.net() else { return };
+    let id = net.request("vcs.listRefs", params);
+    s.ui.chat.details.listing = Some((id, query, next));
+}
+
+/// `1234567` as `1,234,567`.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Scrolling down to within 96 points of the list's end asks for the next page.
+fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
+    previous.is_some_and(|p| offset > p) && max - offset <= 96.0
+}
+
+/// Folds a `vcs.listRefs` page into the picker: a first page replaces the list, a next one
+/// appends the refs it doesn't already have.
+fn take_refs(ui: &mut Ui, query: String, next: bool, page: &Value) {
+    let refs = page["refs"].as_array().into_iter().flatten().map(Ref::from);
+    match ui.refs.as_mut().filter(|_| next) {
+        Some(list) => {
+            for r in refs {
+                if !list.iter().any(|l| l.name == r.name) {
+                    list.push(r);
+                }
+            }
+        }
+        None => ui.refs = Some(refs.collect()),
+    }
+    ui.refs_next = page["nextCursor"].as_u64();
+    let total = page["totalCount"].as_u64().unwrap_or(0);
+    ui.refs_total = if next { ui.refs_total.max(total) } else { total };
+    ui.refs_query = query;
+}
+
 /// A branch picker row: a ref, or creating one named by the search.
 #[derive(Clone, Debug, PartialEq)]
 enum Item {
+    /// "Checkout pull request" for a query that names one (`parsePullRequestReference`).
+    CheckoutPr(String),
     Ref(usize),
     Create(String),
 }
@@ -371,6 +446,7 @@ fn set_env_mode(s: &mut App, worktree: bool) {
 fn pick_item(s: &mut App, item: Item) {
     s.ui.chat.details.menu = None;
     match item {
+        Item::CheckoutPr(reference) => return pr::open_checkout(s, Some(reference)),
         Item::Create(name) => create_ref(s, &name),
         Item::Ref(i) => {
             if let Some(r) = s.ui.chat.details.refs.as_ref().and_then(|v| v.get(i)).cloned() {
@@ -378,6 +454,9 @@ fn pick_item(s: &mut App, item: Item) {
             }
         }
     }
+    // onComposerFocusRequest: the caret goes back to the prompt after a pick.
+    let route = s.frame_route().clone();
+    composer::focus(s, &route);
 }
 
 /// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
@@ -431,9 +510,128 @@ fn set_thread_branch(s: &mut App, branch: &str, worktree: Option<String>) {
     }
 }
 
+/// `resolveLocalCheckoutBranchMismatch`: a local-checkout thread whose branch is no longer the
+/// one checked out, as `(thread branch, current branch)`.
+fn branch_mismatch(thread_branch: &str, worktree: &str, current: &str) -> Option<(String, String)> {
+    (worktree.is_empty() && !thread_branch.is_empty() && !current.is_empty() && thread_branch != current).then(|| (thread_branch.to_string(), current.to_string()))
+}
+
+/// The open thread's mismatch and its key (`threadId:threadBranch:currentBranch`).
+fn mismatch(s: &App) -> Option<(String, String, String)> {
+    let thread = composer::ctx(s).thread?;
+    let current = vcs(s).map(|v| data::s(&v["local"], "refName")).unwrap_or_default();
+    let (from, to) = branch_mismatch(data::s(thread, "branch"), data::s(thread, "worktreePath"), current)?;
+    Some((format!("{}:{from}:{to}", data::s(thread, "id")), from, to))
+}
+
+fn composer_has_content(s: &App) -> bool {
+    s.ui.chat.composer.drafts.get(&composer::draft_key(s, s.frame_route())).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
+}
+
+/// The mismatch notice appears once the composer has content and stays for that mismatch.
+fn note_mismatch(s: &mut App) -> bool {
+    match mismatch(s) {
+        Some((key, ..)) if composer_has_content(s) => s.ui.chat.details.mismatch_shown.insert(key),
+        _ => false,
+    }
+}
+
+fn restore_branch(s: &mut App, confirmed: bool) {
+    let Some((_, branch, _)) = mismatch(s) else { return };
+    if switching(s) {
+        return;
+    }
+    if !confirmed && vcs(s).is_some_and(|v| v["local"]["hasWorkingTreeChanges"] == true) {
+        s.ui.chat.details.restore_confirm = Some(branch);
+        return;
+    }
+    s.ui.chat.details.restore_confirm = None;
+    if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
+        let id = net.request("vcs.switchRef", json!({"cwd": cwd, "refName": branch}));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(branch, None, "Failed to switch checkout")));
+    }
+}
+
+/// "Branch changed from X", docked on the composer (branchMismatchBannerItem).
+pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
+    let (key, from, to) = mismatch(s)?;
+    let ui = &s.ui.chat.details;
+    if ui.mismatch_dismissed.contains(&key) || !(ui.mismatch_shown.contains(&key) || composer_has_content(s)) {
+        return None;
+    }
+    let muted = t.c.muted_foreground;
+    let restoring = switching(s);
+    let dismiss = key.clone();
+    Some(
+        row()
+            .key("branch-mismatch")
+            .w_full()
+            .corners([radius::XL2, radius::XL2, 0.0, 0.0])
+            .fill(if t.dark { t.c.surface_raised } else { t.c.card })
+            .border(1.0, if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.08) })
+            .pl(16.0)
+            .pr(8.0)
+            .pt(4.0)
+            .pb(17.0 + 4.0)
+            .gap(8.0)
+            .center_y()
+            .child(icon(&icons::GIT_BRANCH, 14.0).color(t.c.info_foreground))
+            .child(text("Branch changed from").font(theme::TEXT_XS).color(muted))
+            .child(
+                text(from.clone())
+                    .font(theme::mono(theme::XS_MEDIUM))
+                    .color(t.c.foreground)
+                    .single_line()
+                    .truncate()
+                    .shrink()
+                    .min_w(0.0)
+                    .help(format!("This thread last ran on {from}. Sending will continue on {to}.")),
+            )
+            .child(el().grow(1.0))
+            .child(
+                crate::kit::Button::new(if restoring { "Restoring..." } else { "Restore branch" })
+                    .variant("ghost")
+                    .size("xs")
+                    .disabled(restoring)
+                    .on_press(|s: &mut App| restore_branch(s, false))
+                    .build(t),
+            )
+            .child(
+                crate::kit::icon_button(&icons::X, "Dismiss branch change notice")
+                    .size("icon-xs")
+                    .on_press(move |s: &mut App| {
+                        s.ui.chat.details.mismatch_dismissed.insert(dismiss.clone());
+                    })
+                    .build(t),
+            ),
+    )
+}
+
+fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
+    let Some(branch) = s.ui.chat.details.restore_confirm.clone() else { return };
+    let close = |s: &mut App| s.ui.chat.details.restore_confirm = None;
+    let footer = row()
+        .w_full()
+        .gap(8.0)
+        .child(el().grow(1.0))
+        .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
+        .child(crate::kit::Button::new("Switch branch").on_press(|s: &mut App| restore_branch(s, true)).build(t));
+    crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
+        .open(true)
+        .alert()
+        .description("You have uncommitted changes. They'll carry over to the other branch, or block the switch if they conflict.")
+        .child(footer)
+        .on_close(close)
+        .build(t, out);
+}
+
 fn visible_items(s: &App) -> Vec<Item> {
     let ui = &s.ui.chat.details;
-    branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s))
+    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s));
+    if let Some(reference) = pr::parse_reference(&ui.branch_query.text) {
+        items.insert(0, Item::CheckoutPr(reference));
+    }
+    items
 }
 
 fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
@@ -458,8 +656,41 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s);
     poll_branch(s) || changed
+}
+
+/// The open picker's ref listing: a new search when the query changes, the next page when the
+/// list scrolls near its end, and the pages coming back.
+fn poll_refs(s: &mut App) -> bool {
+    let mut changed = false;
+    if let Some((id, query, next)) = s.ui.chat.details.listing.clone()
+        && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
+    {
+        let ui = &mut s.ui.chat.details;
+        ui.listing = None;
+        changed = true;
+        match reply {
+            Ok(page) => take_refs(ui, query, next, &page),
+            Err(e) => {
+                ui.refs.get_or_insert_with(Vec::new);
+                palette::toast_error_brief(s, "Failed to load refs.", Some(&palette::error_message(&e, "An error occurred.")));
+            }
+        }
+    }
+    let ui = &s.ui.chat.details;
+    if ui.menu != Some(Menu::Branch) {
+        return changed;
+    }
+    let want: String = sanitize_ref_name(ui.branch_query.text.trim()).chars().take(256).collect();
+    let asking = ui.listing.as_ref().filter(|l| !l.2).map(|l| l.1.clone());
+    if asking.as_ref().map_or(want != ui.refs_query && ui.refs.is_some(), |q| *q != want) {
+        list_refs(s, false);
+    } else if ui.listing.is_none() && ui.refs_next.is_some() && ui.near_end.replace(false) {
+        list_refs(s, true);
+        changed = true;
+    }
+    changed
 }
 
 fn poll_branch(s: &mut App) -> bool {
@@ -467,22 +698,14 @@ fn poll_branch(s: &mut App) -> bool {
     let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
     let Some((_, pending)) = s.ui.chat.details.pending.take() else { return false };
     match (pending, reply) {
-        (Pending::List, Ok(v)) => {
-            let refs: Vec<Ref> = v["refs"].as_array().into_iter().flatten().map(Ref::from).collect();
-            let ui = &mut s.ui.chat.details;
-            ui.refs_more = (!v["nextCursor"].is_null()).then(|| (refs.len(), v["totalCount"].as_u64().unwrap_or(0)));
-            ui.refs = Some(refs);
-        }
         (Pending::Branch(name, worktree, _), Ok(v)) => {
             let branch = v["refName"].as_str().unwrap_or(&name).to_string();
             set_thread_branch(s, &branch, worktree);
             git::refresh(s);
+            let route = s.frame_route().clone();
+            composer::focus(s, &route);
         }
-        (Pending::List, Err(e)) => {
-            s.ui.chat.details.refs = Some(vec![]);
-            palette::toast(s, "Failed to load branches.", Some(&palette::error_message(&e, "An error occurred.")));
-        }
-        (Pending::Branch(_, _, title), Err(e)) => palette::toast(s, title, Some(&palette::error_message(&e, "An error occurred."))),
+        (Pending::Branch(_, _, title), Err(e)) => palette::toast_error_brief(s, title, Some(&palette::error_message(&e, "An error occurred."))),
     }
     true
 }
@@ -584,6 +807,7 @@ fn card(s: &App, t: &T) -> Option<El> {
             .role("button")
             .expanded(s.ui.chat.details.menu == Some(Menu::RunContext))
             .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted).ml(9.0))
+            .help(with_shortcut(s, mode, "composer.workspace"))
             .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
     let editor = split(
@@ -632,9 +856,13 @@ fn card(s: &App, t: &T) -> Option<El> {
             .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)))
             .child(
                 branch_row(t, &branch, fg, muted)
+                    .help(with_shortcut(s, &branch, "composer.branch"))
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
+        if let Some(prs) = pr::rows(s, t) {
+            section = section.child(prs);
+        }
         // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
         let Some(git) = git::view(s, t, v, draft) else { return Some(card.child(section)) };
         section = section.child(git);
@@ -645,8 +873,8 @@ fn card(s: &App, t: &T) -> Option<El> {
             .child(
                 row()
                     .gap(6.0)
-                    .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
-                    .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
+                    .child(text(format!("+{}", thousands(add))).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
+                    .child(text(format!("-{}", thousands(del))).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
             );
         section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
         card = card.child(section);
@@ -738,8 +966,13 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
     let mut rows = col().w_full();
     for (i, item) in items.into_iter().enumerate() {
         let (label, badge) = match &item {
+            Item::CheckoutPr(_) => (format!("Checkout {}", pr::singular(s)), None),
             Item::Ref(r) => (refs[*r].name.clone(), refs[*r].badge(&project_cwd)),
             Item::Create(name) => (format!("Create new ref \"{name}\""), None),
+        };
+        let subtitle = match &item {
+            Item::CheckoutPr(reference) => Some(reference.clone()),
+            _ => None,
         };
         let mut line = row()
             .key(format!("details-branch-item-{i}"))
@@ -760,6 +993,9 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             });
         }
         let mut line = line.on_press(move |s: &mut App| pick_item(s, item.clone()));
+        if let Some(subtitle) = subtitle {
+            line = line.child(text(subtitle).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).max_w(160.0));
+        }
         if let Some(badge) = badge {
             line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
@@ -768,9 +1004,23 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
         }
         rows = rows.child(line);
     }
-    list = list.child(rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }));
-    if let Some((shown, total)) = ui.refs_more {
-        list = list.child(row().px(8.0).py(6.0).child(text(format!("Showing {shown} of {total} refs")).font(theme::TEXT_XS).color(muted)));
+    let (near_end, last) = (ui.near_end.clone(), ui.last_scroll.clone());
+    let waker = s.ui.panel.waker.clone();
+    let rows = rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
+        if next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
+            if let Some(w) = &waker {
+                w();
+            }
+        }
+    });
+    list = list.child(rows);
+    let footer = match &ui.listing {
+        Some((_, _, true)) => Some("Loading more refs...".to_string()),
+        _ if ui.refs_next.is_some() => Some(format!("Showing {} of {} refs", thousands(refs.len() as u64), thousands(ui.refs_total))),
+        _ => None,
+    };
+    if let Some(footer) = footer {
+        list = list.child(row().px(8.0).py(6.0).child(text(footer).font(theme::TEXT_XS).color(muted)));
     }
     if selecting_base(s) {
         let on = draft_run(s).is_some_and(|r| r.from_origin);
@@ -804,6 +1054,8 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     let mut out = vec![];
     git::overlays(s, t, &mut out);
     scripts::overlays(s, t, &mut out);
+    pr::overlays(s, t, &mut out);
+    restore_dialog(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {
         let copy = crate::kit::MenuItem::new("Copy branch name").icon(&icons::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             s.ui.chat.details.branch_copy = None;
@@ -820,6 +1072,38 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
             .overlay(&crate::kit::theme(t), &mut out);
     }
     out
+}
+
+/// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
+/// showing the card first when it is closed. Web binds both outside the terminal.
+pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    if crate::panel::terminal_active(s) || composer::ctx(s).project.is_none() {
+        return false;
+    }
+    let menu = if crate::panel::shortcut(s, e, "composer.branch") && vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
+        Menu::Branch
+    } else if crate::panel::shortcut(s, e, "composer.workspace") && draft_run(s).is_some() {
+        Menu::RunContext
+    } else {
+        return false;
+    };
+    let key = composer::draft_key(s, s.frame_route());
+    let ui = &mut s.ui.chat.details;
+    ui.closed.remove(&key);
+    ui.popover = Some(key);
+    if ui.menu != Some(menu) {
+        ui.menu = None;
+        toggle_menu(s, menu);
+    }
+    true
+}
+
+/// A control's tooltip with its shortcut, as web's `{label} · {shortcut}`.
+fn with_shortcut(s: &App, label: &str, command: &str) -> String {
+    match palette::shortcut_label(s, command) {
+        k if k.is_empty() => label.to_string(),
+        k => format!("{label} · {k}"),
+    }
 }
 
 /// Escape closes an open menu even when the terminal has focus; then script editor shortcut
@@ -871,9 +1155,35 @@ mod tests {
     }
 
     #[test]
-    fn a_pick_waits_for_the_switch_under_way_but_not_for_a_ref_listing() {
+    fn ref_pages_append_without_duplicates_and_load_on_a_downward_scroll_near_the_end() {
+        let mut ui = super::Ui::default();
+        let page = |names: &[&str], next: Option<u64>| json!({"refs": names.iter().map(|n| json!({"name": n})).collect::<Vec<_>>(), "nextCursor": next, "totalCount": 1234});
+        super::take_refs(&mut ui, "fe".into(), false, &page(&["feat/a", "feat/b"], Some(2)));
+        super::take_refs(&mut ui, "fe".into(), true, &page(&["feat/b", "feat/c"], None));
+        let names: Vec<_> = ui.refs.as_ref().unwrap().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["feat/a", "feat/b", "feat/c"]);
+        assert_eq!((ui.refs_next, ui.refs_total, ui.refs_query.as_str()), (None, 1234, "fe"));
+        super::take_refs(&mut ui, "x".into(), false, &page(&["x"], Some(1)));
+        assert_eq!(ui.refs.as_ref().unwrap().len(), 1, "a new search replaces the list");
+        assert!(!super::next_page_after_scroll(None, 400.0, 420.0), "the first offset is not a scroll");
+        assert!(super::next_page_after_scroll(Some(300.0), 330.0, 420.0));
+        assert!(!super::next_page_after_scroll(Some(340.0), 330.0, 420.0), "scrolling up");
+        assert!(!super::next_page_after_scroll(Some(100.0), 200.0, 420.0), "far from the end");
+        assert_eq!((super::thousands(0), super::thousands(999), super::thousands(1234), super::thousands(1234567)), ("0".into(), "999".into(), "1,234".into(), "1,234,567".into()));
+    }
+
+    #[test]
+    fn a_local_thread_off_its_branch_is_a_mismatch() {
+        assert_eq!(super::branch_mismatch("feature", "", "main"), Some(("feature".into(), "main".into())));
+        assert_eq!(super::branch_mismatch("main", "", "main"), None);
+        assert_eq!(super::branch_mismatch("feature", "/wt/feature", "main"), None, "a worktree thread has its own checkout");
+        assert_eq!(super::branch_mismatch("", "", "main"), None);
+        assert_eq!(super::branch_mismatch("feature", "", ""), None, "detached or unknown");
+    }
+
+    #[test]
+    fn a_pick_waits_for_the_switch_under_way() {
         let mut s = App::new();
-        s.ui.chat.details.pending = Some((1, Pending::List));
         assert!(!switching(&s));
         s.ui.chat.details.pending = Some((2, Pending::Branch("feature".into(), None, "Failed to switch ref.")));
         assert!(switching(&s));

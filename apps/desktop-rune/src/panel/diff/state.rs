@@ -477,6 +477,11 @@ impl DiffState {
         self.unselect = false;
     }
 
+    /// The first row in the viewport.
+    pub fn first_visible_row(&self) -> u32 {
+        self.visible_rows.start as u32
+    }
+
     pub fn visible_file(&self) -> usize {
         self.visible
     }

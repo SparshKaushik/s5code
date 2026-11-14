@@ -1,7 +1,7 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 mod comments;
-mod file_menu;
+pub(crate) mod file_menu;
 mod find;
 mod state;
 mod view;
@@ -86,6 +86,14 @@ struct Source {
     /// The git source's kind, as `review.getDiffFileContents` takes it.
     kind: Option<String>,
     truncated: bool,
+    /// Tracked changes only: the server is still listing untracked files (`preview.incomplete`).
+    incomplete: bool,
+    /// The server listed every file's totals, so they hold even when patches were cut.
+    totals: bool,
+    /// A tool call that recorded file contents instead of a diff: each label and text.
+    content: Vec<(&'static str, String)>,
+    /// A patch with no file the parser understood, shown as text with the reason.
+    raw: Option<(&'static str, String)>,
 }
 
 pub struct Ui {
@@ -99,6 +107,8 @@ pub struct Ui {
     /// The scope whose patch `files` holds.
     shown: Option<Scope>,
     pending: Option<(u64, Scope)>,
+    /// The path a header's copy button last copied, and when.
+    copied: Option<(String, i64)>,
     error: Option<String>,
     /// What the shown patch was read from, to refetch when it moves.
     seen: u64,
@@ -157,6 +167,7 @@ impl Default for Ui {
             source: Source::default(),
             shown: None,
             pending: None,
+            copied: None,
             error: None,
             seen: 0,
             touched: false,
@@ -272,7 +283,7 @@ fn select(app: &mut App, scope: Scope) {
     load(app);
 }
 
-fn is_repo(app: &App) -> Option<bool> {
+pub(super) fn is_repo(app: &App) -> Option<bool> {
     let (_, cwd) = super::diff_context(app)?;
     app.state().vcs.get(&cwd).and_then(|v| v["local"]["isRepo"].as_bool())
 }
@@ -590,7 +601,8 @@ pub fn poll(app: &mut App) -> bool {
                     Scope::Turn(_) => (v["diff"].as_str().unwrap_or("").to_string(), Source::default(), vec![]),
                     Scope::ToolCall { .. } => {
                         let (patch, truncated) = tool_patch(&v["item"]);
-                        (patch, Source { truncated, ..Source::default() }, vec![])
+                        let (content, cut) = tool_content(&v["item"]);
+                        (patch, Source { truncated: truncated || cut, content, ..Source::default() }, vec![])
                     }
                     _ => {
                         let src = git_source(&v, &scope);
@@ -600,13 +612,19 @@ pub fn poll(app: &mut App) -> bool {
                             base: opt("baseRef"),
                             subject: opt("commitSubject"),
                             kind: opt("kind"),
-                            truncated: src["truncated"].as_bool().unwrap_or(false) || v["incomplete"].as_bool().unwrap_or(false),
+                            truncated: src["truncated"].as_bool().unwrap_or(false),
+                            incomplete: v["incomplete"].as_bool().unwrap_or(false),
+                            totals: src["files"].is_array(),
+                            ..Source::default()
                         };
                         (src["diff"].as_str().unwrap_or("").to_string(), source, file_stats(&src))
                     }
                 };
                 let mut files = rune_kit::diff::parse(&patch);
-                if source.truncated && !meta.is_empty() {
+                if files.is_empty() && !patch.trim().is_empty() {
+                    source.raw = Some(("Unsupported diff format. Showing raw patch.", patch.clone()));
+                }
+                if (source.truncated || source.incomplete) && !meta.is_empty() {
                     missing = incomplete(&files, &meta);
                     files.retain(|f| !missing.iter().any(|m| m.path == f.path()));
                     source.truncated = missing.len() > FILE_FETCH_LIMIT;
@@ -682,6 +700,29 @@ pub fn poll(app: &mut App) -> bool {
         }
     }
     changed
+}
+
+/// web's `toolCallDiff` content: with no recorded diff, the file's recorded contents before and
+/// after (an add or delete with an empty diff reads as empty content), and whether any was cut.
+fn tool_content(item: &Value) -> (Vec<(&'static str, String)>, bool) {
+    const CUT: &str = "\n… output truncated for transport";
+    let diff = item["diffStr"].as_str();
+    if diff.is_some_and(|d| !d.strip_suffix(CUT).unwrap_or(d).trim().is_empty()) {
+        return (vec![], false);
+    }
+    let op = data::s(&item["changes"][0], "operation");
+    let empty = diff.map(|d| d.strip_suffix(CUT).unwrap_or(d)).filter(|d| d.is_empty()).map(|_| "");
+    let before = item["oldStr"].as_str().or(if op == "delete" { empty } else { None });
+    let after = item["newStr"].as_str().or(if op == "add" { empty } else { None });
+    let mut cut = false;
+    let mut out = vec![];
+    for (label, text) in [("Recorded content before", before), ("Recorded content after", after)] {
+        if let Some(text) = text {
+            cut |= text.ends_with(CUT);
+            out.push((label, text.strip_suffix(CUT).unwrap_or(text).to_string()));
+        }
+    }
+    (out, cut)
 }
 
 /// web's `toolCallDiff`: a file_change item's recorded patch made whole, and whether the server
@@ -1287,7 +1328,12 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
         );
     }
     if !matches!(ui.scope, Scope::Turn(_) | Scope::ToolCall { .. }) && git_ok {
-        right = right.child(icon_button(t, "panel-diff-refresh", "Refresh diff", &icons::REFRESH_CW, load));
+        right = right.child(if ui.pending.is_some() {
+            let spin = kit::Spinner::new().size("xs").tone("muted").build(&kit::theme(t));
+            row().key("panel-diff-refresh").size(28.0, 28.0).center().role("button").label("Refreshing diff").help("Refreshing diff…").child(spin)
+        } else {
+            icon_button(t, "panel-diff-refresh", "Refresh diff", &icons::REFRESH_CW, load)
+        });
     }
     if !files.is_empty() {
         let all = st.all_collapsed();
@@ -1456,10 +1502,67 @@ fn body(app: &App, t: &T) -> El {
     if ui.state.files().is_empty() && !ui.file_pending.is_empty() {
         return super::notice(t, "Loading changes...");
     }
-    if ui.state.files().is_empty() && !ui.source.truncated {
+    if ui.state.files().is_empty() && !ui.source.content.is_empty() {
+        return banners(app, t).child(recorded_content(app, t));
+    }
+    if ui.state.files().is_empty()
+        && let Some((reason, patch)) = &ui.source.raw
+    {
+        return banners(app, t).child(raw_patch(app, t, reason, patch));
+    }
+    if ui.state.files().is_empty() && !ui.source.truncated && !ui.source.incomplete {
         return super::notice(t, "No net changes in this selection.");
     }
     diff_body(app, t)
+}
+
+/// The notes above the files: untracked files still loading, and a patch cut at the size limit.
+fn banners(app: &App, t: &T) -> El {
+    let ui = &app.ui.panel.diff;
+    let mut out = col().grow(1.0).min_h(0.0).w_full();
+    let line = |message: String| {
+        col()
+            .w_full()
+            .child(row().w_full().px(12.0).py(6.0).fill(t.c.muted.alpha_mul(0.4)).child(text(message).font(theme::TEXT_2XS).color(t.c.muted_foreground).wrap()))
+            .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.7)))
+    };
+    if ui.source.incomplete {
+        out = out.child(line("Showing tracked changes. Checking untracked files...".into()).key("diff-incomplete"));
+    }
+    if ui.source.truncated {
+        let totals = if ui.source.totals && !ui.source.incomplete { " Totals include all changes." } else { "" };
+        out = out.child(line(format!("This preview exceeds the size limit. Changes shown are incomplete.{totals}")).key("diff-truncated"));
+    }
+    out
+}
+
+fn mono_block(app: &App, t: &T, body: &str) -> El {
+    let block = text(body.to_string()).font(theme::mono(theme::TEXT_2XS)).color(t.c.foreground).selectable(true);
+    if wrap_on(app) { block.wrap() } else { block.single_line() }
+}
+
+/// A tool call that recorded contents without a diff.
+fn recorded_content(app: &App, t: &T) -> El {
+    let mut list = col().w_full().gap(12.0).padding(12.0).child(text("The provider recorded file content without a diff.").font(theme::TEXT_XS).color(t.c.muted_foreground));
+    for (label, body) in &app.ui.panel.diff.source.content {
+        let body = if body.is_empty() { "Empty content." } else { body.as_str() };
+        list = list.child(col().w_full().gap(4.0).child(text(*label).font(theme::TEXT_XS).color(t.c.muted_foreground)).child(mono_block(app, t, body)));
+    }
+    col().key("diff-recorded-content").grow(1.0).min_h(0.0).w_full().child(list).scroll(ScrollSpec { stick_bottom: false })
+}
+
+/// A patch the parser could not read, as text.
+fn raw_patch(app: &App, t: &T, reason: &str, patch: &str) -> El {
+    col()
+        .key("diff-raw-patch")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .child(text(reason.to_string()).font(theme::TEXT_2XS).color(t.c.muted_foreground))
+        .child(mono_block(app, t, patch))
+        .scroll(ScrollSpec { stick_bottom: false })
 }
 
 fn diff_body(app: &App, t: &T) -> El {
@@ -1469,20 +1572,7 @@ fn diff_body(app: &App, t: &T) -> El {
     if ui.tree_open && !ui.state.files().is_empty() {
         main = main.child(el().w(1.0).self_stretch().fill(t.c.border.alpha_mul(0.6))).child(tree_pane(app, t));
     }
-    let mut out = col().grow(1.0).min_h(0.0).w_full();
-    if ui.source.truncated {
-        out = out
-            .child(
-                row()
-                    .w_full()
-                    .px(12.0)
-                    .py(6.0)
-                    .fill(t.c.muted.alpha_mul(0.4))
-                    .child(text("This preview exceeds the size limit. Changes shown are incomplete.").font(theme::TEXT_2XS).color(t.c.muted_foreground).wrap()),
-            )
-            .child(el().h(1.0).w_full().fill(t.c.border));
-    }
-    out.child(main)
+    banners(app, t).child(main)
 }
 
 pub fn view(app: &App, t: &T, refs_w: Option<f32>) -> El {
@@ -1573,7 +1663,6 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     if ui.refs_combo.open && ui.scope == Scope::Branch {
         refs_combo(app, t, &mut layer);
     }
-    file_menu::overlay(app, t, &mut layer);
     layer
 }
 
@@ -1586,6 +1675,14 @@ pub fn fixture(app: &mut App) {
     ui.touched = true;
     ui.shown = Some(ui.scope.clone());
     apply(app);
+}
+
+/// The fixture as a cut preview still listing untracked files, for headless scenes.
+pub fn banners_fixture(app: &mut App) {
+    fixture(app);
+    let source = &mut app.ui.panel.diff.source;
+    source.truncated = true;
+    source.incomplete = true;
 }
 
 /// The persisted layout setting, which other clients may change too, and the wrap toggle.
@@ -1615,6 +1712,13 @@ mod tests {
         let files = rune_kit::diff::parse(&added);
         assert_eq!((files.len(), files[0].path(), files[0].additions()), (1, "src/a.rs", 2));
         assert_eq!(tool_patch(&item("", "update")).0, "");
+        // Without a diff, the recorded contents show instead; an empty add reads as empty.
+        assert_eq!(tool_content(&item(hunk, "update")), (vec![], false));
+        let recorded = json!({"diffStr": "", "oldStr": "a", "newStr": "b… output truncated for transport".replace('…', "\n…"), "changes": [{"operation": "update"}]});
+        assert_eq!(tool_content(&recorded), (vec![("Recorded content before", "a".into()), ("Recorded content after", "b".into())], true));
+        let added = json!({"diffStr": "", "changes": [{"operation": "add"}]});
+        assert_eq!(tool_content(&added), (vec![("Recorded content after", String::new())], false));
+        assert_eq!(tool_content(&json!({"changes": [{"operation": "add"}]})), (vec![], false), "no diff at all is not empty content");
     }
 
     #[test]

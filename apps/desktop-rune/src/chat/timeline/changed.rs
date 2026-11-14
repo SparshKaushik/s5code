@@ -97,11 +97,29 @@ pub fn tree(files: &[Value], open: &dyn Fn(&str) -> bool) -> Vec<Entry> {
     out
 }
 
+/// Every folder's path, open or not.
+fn folders(files: &[Value]) -> Vec<String> {
+    tree(files, &|_| true).into_iter().filter_map(|e| e.dir).collect()
+}
+
+/// "Expand all folders" opens every folder; once all are open it reads "Collapse all folders"
+/// and folds them again.
+fn toggle_all(app: &mut App, keys: &[String]) {
+    let expanded = &mut app.ui.chat.timeline.expanded;
+    if keys.iter().all(|k| expanded.contains(k)) {
+        for k in keys {
+            expanded.remove(k);
+        }
+    } else {
+        expanded.extend(keys.iter().cloned());
+    }
+}
+
 fn stat(add: u64, del: u64, font: rune::tok::TextStyle, t: &T) -> El {
     row()
         .gap(4.0)
-        .child(text(format!("+{add}")).font(theme::mono(font)).color(t.c.diff_addition_foreground))
-        .child(text(format!("-{del}")).font(theme::mono(font)).color(t.c.diff_deletion_foreground))
+        .child(text(format!("+{}", crate::chat::details::thousands(add))).font(theme::mono(font)).color(t.c.diff_addition_foreground))
+        .child(text(format!("-{}", crate::chat::details::thousands(del))).font(theme::mono(font)).color(t.c.diff_deletion_foreground))
 }
 
 pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
@@ -128,11 +146,26 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
         .py(8.0)
         .gap(12.0)
         .center_y()
-        .child(text(format!("{count} changed file{}", if count == 1 { "" } else { "s" })).font(theme::XS_MEDIUM).color(t.c.foreground));
+        .child(text(format!("{} changed file{}", crate::chat::details::thousands(count), if count == 1 { "" } else { "s" })).font(theme::XS_MEDIUM).color(t.c.foreground));
     if add + del > 0 {
         head = head.child(stat(add, del, theme::TEXT_XS, t));
     }
-    let head = head.child(rune::spacer()).child(
+    let mut head = head.child(rune::spacer());
+    let all: Vec<String> = folders(files).iter().map(|p| fold_key(p)).collect();
+    if !all.is_empty() {
+        let open = all.iter().all(|k| expanded.contains(k));
+        let label = if open { "Collapse all folders" } else { "Expand all folders" };
+        head = head.child(
+            Button::new(label)
+                .icon(if open { &icons::CHEVRONS_DOWN_UP } else { &icons::CHEVRONS_UP_DOWN })
+                .size("icon-xs")
+                .variant("ghost-muted")
+                .on_press(move |app: &mut App| toggle_all(app, &all))
+                .build(t)
+                .help(label),
+        );
+    }
+    let head = head.child(
         Button::new("Open diff").variant("ghost-muted").size("xs").icon(&icons::FILE_DIFF).on_press(open_diff.clone()).build(t).help("Open the full diff"),
     );
     let nested = entries.iter().any(|e| e.dir.is_some());
@@ -152,8 +185,9 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
             }
             None => {
                 let line = if nested || entry.depth > 0 { line.child(rune::el().size(14.0, 14.0)) } else { line };
-                let (checkpoint, path) = (checkpoint.clone(), entry.path.clone());
+                let (checkpoint, path, menu) = (checkpoint.clone(), entry.path.clone(), entry.path.clone());
                 line.label(entry.name.clone())
+                    .on_secondary_press(move |app: &mut App, at: rune::PointerPress, _: &mut rune::Tx| crate::panel::file_menu(app, menu.clone(), (at.x, at.y)))
                     .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
                     .child(text(entry.name).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground.alpha_mul(0.85)).truncate().shrink().min_w(0.0))
                     .on_press(move |app: &mut App| crate::panel::open_diff_at(app, checkpoint.clone(), &path))
@@ -201,6 +235,7 @@ mod tests {
         let folded = tree(files, &|_| false);
         let names: Vec<_> = folded.iter().map(|e| (e.depth, e.name.as_str(), e.additions)).collect();
         assert_eq!(names, [(0, "src/chat", 3), (0, "README.md", 4)]);
+        assert_eq!(folders(files), ["src/chat"]);
         let open = tree(files, &|p| p == "src/chat");
         let names: Vec<_> = open.iter().map(|e| (e.depth, e.name.as_str())).collect();
         assert_eq!(names, [(0, "src/chat"), (1, "a.rs"), (1, "b.rs"), (0, "README.md")]);
