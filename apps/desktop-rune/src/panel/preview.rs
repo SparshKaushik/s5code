@@ -744,7 +744,7 @@ fn session_event(app: &mut App, event: Value) {
                 t.session = Some(key);
             }
             apply(app, tab, snapshot, &Value::Null);
-            reveal(app, tab, &thread, snapshot, true);
+            reveal_session(app, tab, &thread, snapshot, true);
         }
         Some("closed") => {
             let Some(tab) = bound else { return };
@@ -758,11 +758,11 @@ fn session_event(app: &mut App, event: Value) {
         Some("resized") => {
             let Some(tab) = bound else { return };
             apply(app, tab, snapshot, &event["request"]);
-            reveal(app, tab, &thread, snapshot, false);
+            reveal_session(app, tab, &thread, snapshot, false);
         }
         Some("navigated") => {
             if let Some(tab) = bound {
-                reveal(app, tab, &thread, snapshot, false);
+                reveal_session(app, tab, &thread, snapshot, false);
             }
         }
         _ => {}
@@ -771,7 +771,7 @@ fn session_event(app: &mut App, event: Value) {
 
 /// Web's `revealServerTabs`: every session but a hidden one is a tab on its thread's panel; an
 /// agent's reveal floats a new one over the chat, and a forced one brings its tab forward.
-fn reveal(app: &mut App, tab: TabId, thread: &str, snapshot: &Value, opened: bool) {
+fn reveal_session(app: &mut App, tab: TabId, thread: &str, snapshot: &Value, opened: bool) {
     if snapshot["reveal"] == false {
         return;
     }
