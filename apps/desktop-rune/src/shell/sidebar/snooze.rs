@@ -87,13 +87,14 @@ fn add_months((y, m): (i64, i64), by: i64) -> (i64, i64) {
     (n.div_euclid(12), n.rem_euclid(12) + 1)
 }
 
-/// DayPicker's month: whole Sunday-first weeks covering the month, outside days included.
-fn month_grid((y, m): (i64, i64)) -> Vec<(i64, i64, i64)> {
+/// DayPicker's month: whole weeks from `week_start` (0 is Sunday) covering the month, outside
+/// days included.
+fn month_grid((y, m): (i64, i64), week_start: u8) -> Vec<(i64, i64, i64)> {
     let first = days_from_civil(y, m, 1);
     let (ny, nm) = add_months((y, m), 1);
     let len = days_from_civil(ny, nm, 1) - first;
     // The epoch was a Thursday.
-    let lead = (first + 4).rem_euclid(7);
+    let lead = (first + 4 - i64::from(week_start)).rem_euclid(7);
     let weeks = (lead + len + 6) / 7;
     (0..weeks * 7).map(|i| civil_from_days(first - lead + i)).collect()
 }
@@ -297,11 +298,14 @@ fn calendar(month: (i64, i64), selected: Option<(i64, i64, i64)>, today: (i64, i
         .child(row().grow(1.0).justify_center().child(text(caption).font(theme::SM_MEDIUM).color(t.c.foreground)))
         .child(nav("sb-cal-next", &icons::CHEVRON_RIGHT, "Go to the Next Month", 1));
     let muted = t.c.muted_foreground.alpha_mul(0.72);
-    let weekdays = row().children(["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(|d| {
+    let week_start = crate::desktop::locale::week_start();
+    let mut names = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+    names.rotate_left(usize::from(week_start));
+    let weekdays = row().children(names.map(|d| {
         el().size(CELL, CELL).center().child(text(d).font(theme::XS_MEDIUM).color(muted))
     }));
     let mut grid = col().child(weekdays);
-    for week in month_grid(month).chunks(7) {
+    for week in month_grid(month, week_start).chunks(7) {
         grid = grid.child(row().children(week.iter().map(|&day| {
             let (y, m, d) = day;
             let is_selected = selected == Some(day);
@@ -386,12 +390,15 @@ mod tests {
 
     #[test]
     fn month_grids_hold_whole_sunday_first_weeks() {
-        let nov = month_grid((2026, 11));
+        let nov = month_grid((2026, 11), 0);
         assert_eq!((nov.len(), nov[0], nov[34]), (35, (2026, 11, 1), (2026, 12, 5)));
-        let feb = month_grid((2026, 2));
+        let feb = month_grid((2026, 2), 0);
         assert_eq!((feb.len(), feb[0], feb[27]), (28, (2026, 2, 1), (2026, 2, 28)));
-        let jan = month_grid((2027, 1));
+        let jan = month_grid((2027, 1), 0);
         assert_eq!(jan[0], (2026, 12, 27), "outside days lead into a Friday first");
+        // A Monday-first locale's weeks: November 2026 starts on a Sunday, so six rows.
+        let monday = month_grid((2026, 11), 1);
+        assert_eq!((monday.len(), monday[0], monday[6]), (42, (2026, 10, 26), (2026, 11, 1)));
         assert_eq!((add_months((2026, 1), -1), add_months((2026, 12), 1)), ((2025, 12), (2027, 1)));
         assert_eq!(date_label((2026, 11, 9)), "Nov 9, 2026");
     }

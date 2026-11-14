@@ -261,3 +261,34 @@ pub fn alert(message: &str, detail: &str) {
         msg!(alert, c"release"; ());
     }
 }
+
+/// Electron's `nativeTheme.themeSource`: the app's appearance, so AppKit's title bar, menus,
+/// alerts and file dialogs match the theme; `None` follows the system.
+pub fn set_appearance(dark: Option<bool>) {
+    unsafe {
+        let app = msg!(class(c"NSApplication"), c"sharedApplication"; Id);
+        if app.is_null() {
+            return;
+        }
+        let appearance = match dark {
+            None => std::ptr::null_mut(),
+            Some(dark) => {
+                let name = ns_string(if dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" });
+                msg!(class(c"NSAppearance"), c"appearanceNamed:", name => Id; Id)
+            }
+        };
+        msg!(app, c"setAppearance:", appearance => Id; ());
+    }
+}
+
+/// `[NSLocale currentLocale].localeIdentifier`, as Electron's `getSystemLocale` reads the region.
+pub fn locale_identifier() -> Option<String> {
+    unsafe {
+        let locale = msg!(class(c"NSLocale"), c"currentLocale"; Id);
+        if locale.is_null() {
+            return None;
+        }
+        let id = rust_string(msg!(locale, c"localeIdentifier"; Id));
+        (!id.is_empty()).then_some(id)
+    }
+}

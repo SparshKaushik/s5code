@@ -3,12 +3,20 @@
     "light": {
       "canvas": "#fcfcfc",
       "accent": "#f4f4f5",
-      "messageAction": "#4f46e5"
+      "messageAction": "#4f46e5",
+      "sidebar": "#fafafa",
+      "surface": "#ffffff",
+      "accentSurface": "#f4f4f5",
+      "messageSurface": "#e4e4e7"
     },
     "dark": {
       "canvas": "#0a0a0a",
       "accent": "#1c1c1f",
-      "messageAction": "#8b9cff"
+      "messageAction": "#8b9cff",
+      "sidebar": "#0f0f10",
+      "surface": "#121212",
+      "accentSurface": "#27272a",
+      "messageSurface": "#27272a"
     }
   },
   "specs": {

@@ -14,7 +14,10 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// The web's `PROJECT_PATH_SEARCH_DEBOUNCE_MS`-style pause before a search goes out.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const SEARCH_LIMIT: usize = 200;
-const CODE: TextStyle = theme::mono(TextStyle::new(13., 400.).lh(20.));
+/// The code size (web's `--diffs-font-size`) on Pierre's fixed 20 px lines.
+fn code(t: &T) -> TextStyle {
+    theme::mono(TextStyle::new(t.code, 400.).lh(20.))
+}
 
 /// A write in flight (`id`), or queued behind one to the same file (`None`).
 struct Write {
@@ -689,16 +692,17 @@ fn editor(ui: &Ui, t: &T) -> El {
     let lang = ui.selected.rsplit('.').next();
     let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark)
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
-    let cell = rune::text::advance("MMMMMMMMMM", CODE) / 10.;
+    let font = code(t);
+    let cell = rune::text::advance("MMMMMMMMMM", font) / 10.;
     let width = (ui.columns + 2) as f32 * cell;
     let mark = ui.line.and_then(|n| line_range(&ui.editor.text, n)).map(|range| rune::TextHighlight::new(range, t.c.primary.alpha_mul(0.25)).key("file-line"));
     let code = if ui.truncated {
         text(&ui.editor.text)
-            .font(CODE)
+            .font(font)
             .color(t.c.contrast_foreground)
             .spans(spans)
     } else {
-        text_input(&ui.editor, CODE)
+        text_input(&ui.editor, font)
             .key("file-editor")
             .label(&ui.selected)
             .color(t.c.contrast_foreground)
@@ -718,7 +722,7 @@ fn editor(ui: &Ui, t: &T) -> El {
             .py(8.)
             .child(
                 text(&ui.numbers)
-                    .font(CODE)
+                    .font(font)
                     .color(t.c.muted_foreground)
                     .pl(12.)
                     .pr(16.),

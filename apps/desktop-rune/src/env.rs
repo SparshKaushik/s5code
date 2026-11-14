@@ -19,6 +19,8 @@ use crate::data::Source;
 use crate::theme::{self, T};
 use crate::{App, Route, icons, kit};
 
+pub mod ssh;
+
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
 /// Marks a row copied in from another environment, holding that environment's key.
@@ -50,6 +52,7 @@ pub struct Ui {
     owners: HashMap<String, String>,
     /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
     pub merges: u64,
+    pub ssh: ssh::Ui,
 }
 
 fn path() -> PathBuf {
@@ -108,6 +111,7 @@ pub fn start(s: &mut App) {
         s.ui.env.parked.push((env.id.clone(), src));
     }
     s.ui.env.saved.extend(saved);
+    ssh::start(s);
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -363,6 +367,7 @@ pub fn remove(s: &mut App, id: &str) {
     s.ui.env.parked.retain(|(k, _)| k != id);
     s.ui.env.saved.retain(|e| e.id != id);
     s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    ssh::forget(s, id);
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
@@ -375,7 +380,11 @@ fn pair(host: String, code: String) -> Result<Saved, String> {
     Ok(Saved { id, label, base, bearer })
 }
 
-fn add(s: &mut App) {
+pub fn pairing(s: &App) -> bool {
+    s.ui.env.pairing.is_some()
+}
+
+pub(crate) fn add(s: &mut App) {
     if s.ui.env.pairing.is_some() {
         return;
     }
@@ -423,9 +432,10 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
 }
 
-/// Lands a pairing that finished.
+/// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
+    let changed = ssh::poll(s);
+    let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
     true
@@ -439,10 +449,11 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
         if key == LOCAL {
             detail = format!("This machine · {detail}");
         } else if let Some(env) = s.ui.env.saved.iter().find(|e| e.id == key) {
-            detail = format!("{} · {detail}", env.base);
+            detail = ssh::detail(s, &key, &detail).unwrap_or_else(|| format!("{} · {detail}", env.base));
         }
         let mut actions = row().gap(8.0).center_y();
         if key != LOCAL {
+            actions = actions.children(ssh::row_action(s, t, &key));
             let target = key.clone();
             actions = actions.child(
                 kit::icon_button(&icons::TRASH_2, "Remove environment").variant("ghost").size("icon-xs").on_press(move |s: &mut App| remove(s, &target)).build(t),
@@ -469,6 +480,7 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
         );
     }
     rows.push(pairing_form(s, t));
+    rows.push(ssh::form(s, t));
     rows
 }
 
