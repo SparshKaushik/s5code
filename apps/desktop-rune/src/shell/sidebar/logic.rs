@@ -977,6 +977,8 @@ pub enum UndoAction {
     Snoozed,
     Unpinned,
     Archived,
+    /// A sidebar draft row's discard; its id is the draft key.
+    Discarded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -986,6 +988,8 @@ pub enum UndoStep {
     Snooze(i64),
     Unsnooze,
     Unarchive,
+    /// The discarded draft, as stored.
+    RestoreDraft(Value),
 }
 
 /// `planThreadUndo`: the commands that put a thread back where the action found it.
@@ -996,6 +1000,7 @@ pub fn undo_plan(action: UndoAction, t: &Thread) -> Vec<UndoStep> {
     match action {
         UndoAction::Snoozed => vec![UndoStep::Unsnooze],
         UndoAction::Archived => vec![UndoStep::Unarchive],
+        UndoAction::Discarded => Vec::new(),
         UndoAction::Unpinned => std::iter::once(pin).chain(snooze).collect(),
         UndoAction::Settled => std::iter::once(UndoStep::Unsettle).chain(t.pinned.then_some(pin)).chain(snooze).collect(),
     }

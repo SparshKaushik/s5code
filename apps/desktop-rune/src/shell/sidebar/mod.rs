@@ -4,6 +4,7 @@
 
 mod brand;
 mod chrome;
+mod drafts;
 pub mod favicon;
 pub(crate) mod folders;
 pub mod logic;
@@ -142,6 +143,7 @@ pub struct Ui {
     pub folders: folders::State,
     pub visits: logic::Visits,
     pub undos: logic::Undos,
+    pub drafts: drafts::Ui,
     /// The server's message matches for a search: (query, thread ids).
     pub content: (String, Vec<String>),
     content_due: Option<(i64, String)>,
@@ -691,6 +693,11 @@ pub fn undo(s: &mut App) -> bool {
                 logic::UndoStep::Snooze(until) if *until > crate::data::now_ms() => set_snooze(s, id, *until),
                 logic::UndoStep::Snooze(_) => {}
                 logic::UndoStep::Unsnooze => unsnooze(s, id),
+                logic::UndoStep::RestoreDraft(stored) => {
+                    if !crate::chat::composer::put_draft(s, id, stored) {
+                        crate::shell::palette::toast_error_brief(s, "Failed to restore draft", Some("The draft has new content."));
+                    }
+                }
                 logic::UndoStep::Unarchive => {
                     dispatch(s, "thread.unarchive", id, json!({}));
                     if let Some(p) = s.ui.shell.sidebar.patches.get_mut(id) {
@@ -926,6 +933,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 pub fn poll(s: &mut App) -> bool {
     folders::ensure_loaded(s);
     folders::sync_scope(s);
+    drafts::poll(s);
     let searched = poll_content(s) | favicon::poll(s) | updates::poll(s) | share::poll(s) | poll_inflight(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
@@ -1417,6 +1425,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
     folders::menu(s, t, overlays);
+    drafts::menu(s, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()
         .w(layout::SIDEBAR_W + 1.0)

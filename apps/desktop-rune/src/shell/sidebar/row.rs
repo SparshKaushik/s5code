@@ -917,7 +917,8 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 
     let s_all = &model.sections;
     let nothing = [&s_all.pinned, &s_all.active, &s_all.working, &s_all.snoozed, &s_all.settled].iter().all(|v| v.is_empty());
-    if nothing && model.folders.is_empty() {
+    let drafts = super::drafts::view(s, t);
+    if nothing && model.folders.is_empty() && drafts.is_none() {
         let muted = t.sb.muted_foreground.alpha_mul(0.6);
         let mut empty = col().w_full().px(8.0).py(24.0).gap(8.0).center();
         if s.state().projects.is_empty() {
@@ -952,6 +953,9 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 
     // `sidebarTree`: Up/Down, Home and End move focus between rows without opening them.
     let mut content = col().key("sb-list").role("list").label("Threads").focus_group().w_full().min_h(viewport).px(8.0).py(8.0);
+    if let Some(drafts) = drafts {
+        content = content.child(drafts);
+    }
     let mut first = true;
     for (n, it) in items.iter().enumerate() {
         let shift = shifts.as_ref().map_or(Some(0.0), |v| v[n]);
