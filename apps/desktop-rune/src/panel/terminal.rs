@@ -1591,7 +1591,7 @@ mod tests {
                 moved.push((1000 + rows, before, vt.cursor_point()));
             }
         }
-        panic!("DIAG round trips that moved the cursor from (28, 2): {moved:?}");
+        panic!("error: DIAG round trips that moved the cursor from (28, 2): {moved:?}");
     }
 
     #[test]
