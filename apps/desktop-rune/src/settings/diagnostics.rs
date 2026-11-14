@@ -1074,6 +1074,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
         .child(history_section(ui, s.now_ms, t))
         .child(trace_section(s, ui, t))
         .children(trace_tables(ui, s.now_ms, t))
+        .child(super::telemetry::view(s, t))
 }
 
 fn processes_section(s: &App, ui: &Ui, t: &T) -> El {
