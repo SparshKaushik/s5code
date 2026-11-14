@@ -172,7 +172,7 @@ pub fn inert(key: &str, control: El, message: String) -> El {
                 *tip = None;
             }
         })
-        .child(control.disabled(true).opacity(0.5))
+        .child(control.disabled(true).inert().opacity(0.5))
 }
 
 /// `inert` when `message` is set, else the control as-is.

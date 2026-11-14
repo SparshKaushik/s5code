@@ -19,6 +19,9 @@ const ACCESS: [(&str, &str, &str); 5] = [
     ("full-access", "Full access", "Allow commands and edits without prompts."),
 ];
 
+/// Web `ANOTHER_ADDRESS`: link by an address typed in.
+const ANOTHER_ADDRESS: &str = "another-address";
+
 /// Web `ENVIRONMENT_MACHINE_KINDS` with `ENVIRONMENT_MACHINE_KIND_LABELS`.
 pub(super) const KINDS: [(&str, &str); 7] = [
     ("server", "Server"),
@@ -64,7 +67,16 @@ pub struct Ui {
     link_code: TextEdit,
     link_access: Option<&'static str>,
     link_pending: Option<u64>,
-    link_error: Option<String>,
+    /// Web `LinkMachineSelect`: the chosen environment key or [`ANOTHER_ADDRESS`], and whether
+    /// its list is open.
+    link_machine: Option<String>,
+    link_machine_open: bool,
+    /// Machines whose session this client is asking about, and those that may mint codes.
+    link_sessions: Vec<(String, u64)>,
+    link_may_mint: Vec<String>,
+    /// The pairing code being minted on a machine, and machines where minting failed.
+    link_mint: Option<(String, u64)>,
+    mint_failed: Vec<String>,
     forget: Option<(String, String)>,
     pub(super) access: super::access::State,
 }
@@ -152,16 +164,18 @@ pub fn poll(s: &mut App) -> bool {
     if std::mem::replace(&mut s.ui.settings.connections.was_pairing, pairing) && !pairing {
         changed |= pairing_failed(s);
     }
+    changed |= poll_machines(s);
     let ui = &mut s.ui.settings.connections;
     let pending = ui.link_pending;
     if let Some(reply) = take(s, pending) {
         s.ui.settings.connections.link_pending = None;
         match reply {
-            Ok(_) => {
+            Ok(linked) => {
                 close_link(s);
+                toast(s, &format!("Linked {}", linked["label"].as_str().unwrap_or("the environment")), None);
                 request(s, "peerLinks.list", json!({}));
             }
-            Err(error) => s.ui.settings.connections.link_error = Some(reason(&error)),
+            Err(error) => toast_error(s, "Could not link the environment", Some(&reason(&error))),
         }
         changed = true;
     }
@@ -177,8 +191,18 @@ pub fn escape(s: &mut App) -> bool {
         || std::mem::take(&mut ui.local_confirm)
         || std::mem::take(&mut ui.ssh_suggest)
         || ui.adding.take().is_some()
-        || std::mem::take(&mut ui.linking);
-    closed || super::access::escape(s)
+        || std::mem::take(&mut ui.link_machine_open);
+    if closed {
+        return true;
+    }
+    if ui.linking {
+        // Web keeps the dialog open while a link is in flight.
+        if ui.link_pending.is_none() && ui.link_mint.is_none() {
+            close_link(s);
+        }
+        return true;
+    }
+    super::access::escape(s)
 }
 
 pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
@@ -958,9 +982,11 @@ fn linked(s: &App, t: &T) -> El {
     let action = kit::Button::new("Link")
         .size("xs")
         .icon(&icons::PLUS)
-        .on_press(|s: &mut App| s.ui.settings.connections.linking = true)
+        .on_press(open_link)
         .build(t);
-    c::section_with_actions("Linked environments", vec![action], rows, t)
+    // Web shows Link only to a session that may link.
+    let actions = if super::permissions::allowed(s, "peerLinks.link") { vec![action] } else { vec![] };
+    c::section_with_actions("Linked environments", actions, rows, t)
 }
 
 fn link_row(s: &App, t: &T, link: &Value) -> El {
@@ -1006,13 +1032,13 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
                         .truncate(),
                 ),
         )
-        .child(
+        .children(super::permissions::allowed(s, "peerLinks.unlink").then(|| {
             kit::Button::new("Forget")
                 .variant("destructive-outline")
                 .size("xs")
                 .on_press(move |s: &mut App| s.ui.settings.connections.forget = Some(target.clone()))
-                .build(t),
-        )
+                .build(t)
+        }))
 }
 
 fn forget_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
@@ -1043,29 +1069,185 @@ fn forget_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
+/// Web `LinkableMachine`: another environment this client knows.
+struct Machine {
+    key: String,
+    id: String,
+    label: String,
+    kind: String,
+    connected: bool,
+    linked: bool,
+    urls: Vec<String>,
+}
+
+/// Web `linkableMachines`' addresses: those the server reports, then the saved route. A
+/// machine reached over SSH has none, since its forward lives in this client.
+fn machine_urls(config: Option<&Value>, route: Option<&str>) -> Vec<String> {
+    let reported = config.and_then(|c| c["directEndpoints"].as_array()).into_iter().flatten();
+    let mut urls: Vec<String> = Vec::new();
+    for url in reported.filter_map(|e| e["httpBaseUrl"].as_str()).chain(route) {
+        let url = url.trim_end_matches('/').to_owned();
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+/// Web `linkableMachines` over this client's environments other than the one in Settings.
+fn machines(s: &App) -> Vec<Machine> {
+    let links = s.ui.settings.results.get("peerLinks.list").and_then(|r| r["links"].as_array());
+    let linked = |id: &str| links.into_iter().flatten().any(|l| l["environmentId"] == id && l["status"] != "expired");
+    env::keys(s)
+        .into_iter()
+        .filter(|key| *key != s.ui.env.active)
+        .filter_map(|key| {
+            let config = env::source(s, &key).and_then(|src| src.state().config.as_ref());
+            let id = if key == env::LOCAL { env::local_id(s)? } else { key.clone() };
+            let saved = s.ui.env.saved.iter().find(|e| e.id == key);
+            let route = saved.filter(|_| env::ssh::transport(s, &key).is_none()).map(|e| e.base.as_str());
+            Some(Machine {
+                label: env::label(s, &key),
+                kind: machine_kind(
+                    config.and_then(|c| c["settings"]["environmentIcon"].as_str()),
+                    config.and_then(|c| c["environment"]["platform"]["machine"].as_str()),
+                )
+                .to_owned(),
+                connected: env::connected(s, &key),
+                linked: linked(&id),
+                urls: machine_urls(config, route),
+                key,
+                id,
+            })
+        })
+        .collect()
+}
+
+fn open_link(s: &mut App) {
+    let keys: Vec<String> = machines(s).into_iter().filter(|m| m.connected).map(|m| m.key).collect();
+    let mut sessions = Vec::new();
+    for key in keys {
+        if let Some(id) = env::net_of(s, &key).map(|net| net.http_request("GET", "/api/auth/session", json!({}))) {
+            sessions.push((key, id));
+        }
+    }
+    let ui = &mut s.ui.settings.connections;
+    ui.linking = true;
+    ui.link_sessions = sessions;
+}
+
 fn close_link(s: &mut App) {
     let ui = &mut s.ui.settings.connections;
     ui.linking = false;
     ui.link_url.clear();
     ui.link_code.clear();
     ui.link_access = None;
-    ui.link_error = None;
+    ui.link_machine = None;
+    ui.link_machine_open = false;
+    ui.link_sessions.clear();
+    ui.link_may_mint.clear();
+    ui.mint_failed.clear();
+}
+
+/// The sessions on other machines, then a minted pairing code, which is linked with.
+fn poll_machines(s: &mut App) -> bool {
+    let mut changed = false;
+    for (key, id) in std::mem::take(&mut s.ui.settings.connections.link_sessions) {
+        match env::net_of(s, &key).map(|net| net.take_reply(id)) {
+            Some(None) => s.ui.settings.connections.link_sessions.push((key, id)),
+            Some(Some(Ok(session))) if super::permissions::grants(&session, "access:write") => {
+                s.ui.settings.connections.link_may_mint.push(key);
+                changed = true;
+            }
+            _ => changed = true,
+        }
+    }
+    let Some((key, id)) = s.ui.settings.connections.link_mint.clone() else { return changed };
+    let reply = env::net_of(s, &key).map(|net| net.take_reply(id));
+    let code = match reply {
+        Some(None) => return changed,
+        Some(Some(Ok(minted))) => minted["credential"].as_str().map(str::to_owned),
+        _ => None,
+    };
+    s.ui.settings.connections.link_mint = None;
+    match code {
+        Some(code) => send_link(s, &code),
+        None => {
+            s.ui.settings.connections.mint_failed.push(key);
+            toast_error(s, "Could not link the environment", Some("Could not get a pairing code from there. Paste a code from there instead."));
+        }
+    }
+    true
+}
+
+/// What the dialog would link: the machine chosen (if any), whether it needs an address typed
+/// and whether this client mints the code there.
+fn link_target(s: &App) -> (Option<Machine>, bool, bool) {
+    let ui = &s.ui.settings.connections;
+    let all = machines(s);
+    let selected = ui.link_machine.clone().or_else(|| all.is_empty().then(|| ANOTHER_ADDRESS.to_owned()));
+    let machine = all.into_iter().find(|m| Some(&m.key) == selected.as_ref());
+    let needs_address = selected.as_deref() == Some(ANOTHER_ADDRESS) || machine.as_ref().is_some_and(|m| m.urls.is_empty());
+    let can_mint = machine.as_ref().is_some_and(|m| {
+        m.connected && ui.link_may_mint.contains(&m.key) && !ui.mint_failed.contains(&m.key)
+    });
+    (machine, needs_address, can_mint)
+}
+
+fn link_ready(s: &App) -> bool {
+    let ui = &s.ui.settings.connections;
+    let (machine, needs_address, can_mint) = link_target(s);
+    (machine.is_some() || needs_address)
+        && (!needs_address || !ui.link_url.text.trim().is_empty())
+        && (can_mint || !ui.link_code.text.trim().is_empty())
 }
 
 fn link(s: &mut App) {
     let ui = &s.ui.settings.connections;
-    let (url, code) = (ui.link_url.text.trim().to_owned(), ui.link_code.text.trim().to_owned());
-    if ui.link_pending.is_some() || url.is_empty() || code.is_empty() {
+    if ui.link_pending.is_some() || ui.link_mint.is_some() || !link_ready(s) {
         return;
     }
-    let access = ui.link_access.unwrap_or("approval-required");
-    let id = s
-        .src
-        .net()
-        .map(|net| net.request("peerLinks.link", json!({"url": url, "pairingCode": code, "access": access})));
-    let ui = &mut s.ui.settings.connections;
-    ui.link_error = None;
-    ui.link_pending = id;
+    let (machine, _, can_mint) = link_target(s);
+    match machine.filter(|_| can_mint) {
+        Some(machine) => {
+            let access = ui.link_access.unwrap_or("approval-required");
+            let payload = json!({"label": "T3 Code link", "scopes": mcp_client_scopes(access)});
+            let id = env::net_of(s, &machine.key).map(|net| net.http_request("POST", "/api/auth/pairing-token", payload));
+            s.ui.settings.connections.link_mint = id.map(|id| (machine.key, id));
+        }
+        None => {
+            let code = ui.link_code.text.trim().to_owned();
+            send_link(s, &code);
+        }
+    }
+}
+
+/// Contracts `mcpClientScopes`.
+fn mcp_client_scopes(access: &str) -> Vec<&'static str> {
+    match access {
+        "read-only" => vec!["orchestration:read"],
+        "full-access" => vec!["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"],
+        _ => vec!["orchestration:read", "orchestration:operate"],
+    }
+}
+
+fn send_link(s: &mut App, code: &str) {
+    let (machine, needs_address, _) = link_target(s);
+    let ui = &s.ui.settings.connections;
+    let urls = match &machine {
+        Some(m) if !needs_address => m.urls.clone(),
+        _ => vec![ui.link_url.text.trim().to_owned()],
+    };
+    let mut input = json!({"url": urls[0], "pairingCode": code, "access": ui.link_access.unwrap_or("approval-required")});
+    if urls.len() > 1 {
+        input["alternateUrls"] = json!(urls[1..]);
+    }
+    if let Some(m) = &machine {
+        input["expectedEnvironmentId"] = json!(m.id);
+        input["expectedLabel"] = json!(m.label);
+    }
+    let id = s.src.net().map(|net| net.request("peerLinks.link", input));
+    s.ui.settings.connections.link_pending = id;
 }
 
 /// Web `LinkEnvironmentAction` for an address and pairing code.
@@ -1074,9 +1256,12 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     if !ui.linking {
         return;
     }
-    let busy = ui.link_pending.is_some();
-    let ready = !ui.link_url.text.trim().is_empty() && !ui.link_code.text.trim().is_empty();
+    let busy = ui.link_pending.is_some() || ui.link_mint.is_some();
+    let ready = link_ready(s);
     let current = ui.link_access.unwrap_or("approval-required");
+    let all = machines(s);
+    let (machine, needs_address, can_mint) = link_target(s);
+    let selected = ui.link_machine.clone().or_else(|| all.is_empty().then(|| ANOTHER_ADDRESS.to_owned()));
     let field = |label: &str, input: El| {
         col().w_full().gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input)
     };
@@ -1106,16 +1291,52 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                         .child(text(description).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
                 )
                 .on_press(move |s: &mut App| {
-                    if s.ui.settings.connections.link_pending.is_none() {
-                        s.ui.settings.connections.link_access = Some(key);
+                    let ui = &mut s.ui.settings.connections;
+                    if ui.link_pending.is_none() && ui.link_mint.is_none() {
+                        ui.link_access = Some(key);
                     }
                 }),
         );
     }
-    let mut form = col()
-        .w_full()
-        .gap(16.0)
-        .child(field(
+    let hint = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+    let mut form = col().w_full().gap(16.0);
+    let mut popup = Vec::new();
+    if !all.is_empty() {
+        // Web `LinkMachineSelect`: each machine's icon, name and badge, then an address.
+        let mut options: Vec<String> = all.iter().map(|m| m.label.clone()).collect();
+        options.push("Another address…".into());
+        let mut select = kit::Select::new("link-machine", &options)
+            .label("Machine")
+            .placeholder("Choose a machine")
+            .width(400.0)
+            .current(match selected.as_deref() {
+                Some(ANOTHER_ADDRESS) => Some("Another address…"),
+                _ => machine.as_ref().map(|m| m.label.as_str()),
+            })
+            .open(ui.link_machine_open && !busy)
+            .disabled(busy)
+            .on_toggle(|s: &mut App| s.ui.settings.connections.link_machine_open ^= true)
+            .on_close(|s: &mut App| s.ui.settings.connections.link_machine_open = false)
+            .on_choose(|s: &mut App, label: &str, _: &mut rune::Tx| {
+                let key = machines(s).into_iter().find(|m| m.label == label).map_or_else(|| ANOTHER_ADDRESS.to_owned(), |m| m.key);
+                let ui = &mut s.ui.settings.connections;
+                ui.link_machine = Some(key);
+                ui.link_machine_open = false;
+            });
+        if let Some(m) = &machine {
+            select = select.leading(icon(machine_icon(&m.kind), 16.0).color(t.c.foreground).opacity(0.8), 16.0);
+        }
+        for m in &all {
+            let badge = if m.linked { "Linked" } else if m.connected { "Connected" } else { "Not connected" };
+            select = select.option_detail(m.label.clone(), machine_icon(&m.kind), badge);
+        }
+        form = form.child(field("Machine", select.build(&kit::theme(t), &mut popup)));
+    }
+    if machine.as_ref().is_some_and(|m| m.linked) {
+        form = form.child(hint("Already linked. Linking again renews it with the access you pick.".into()));
+    }
+    if needs_address {
+        let mut address = col().w_full().gap(6.0).child(field(
             "Address",
             kit::Input::new(&ui.link_url)
                 .placeholder("https://box.example.ts.net")
@@ -1124,26 +1345,46 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .on_submit(|s: &mut App, _| link(s))
                 .build(t)
                 .single_line(),
-        ))
-        .child(field(
+        ));
+        if let Some(m) = &machine {
+            address = address.child(hint(format!(
+                "This app has no address for {} that another machine can reach. Enter its https or Tailscale address.",
+                m.label
+            )));
+        }
+        form = form.child(address);
+    }
+    if selected.is_some() && !can_mint {
+        let mut code = col().w_full().gap(6.0).child(field(
             "Pairing code",
             kit::Input::new(&ui.link_code)
-                .placeholder("From that environment's Connections, or t3 pair there")
+                .placeholder(if machine.is_none() { "From that environment's Connections, or t3 pair there" } else { "Paste the code" })
                 .disabled(busy)
                 .on_edit(|s: &mut App| &mut s.ui.settings.connections.link_code)
                 .on_submit(|s: &mut App, _| link(s))
                 .build(t)
                 .single_line(),
-        ))
-        .child(access);
-    if let Some(error) = &ui.link_error {
-        form = form.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+        ));
+        if let Some(m) = &machine {
+            code = code.child(hint(format!(
+                "Create a link on {}: Settings → Connections → Create link, then paste its code here.",
+                m.label
+            )));
+        }
+        form = form.child(code);
     }
+    form = form.child(access);
+    let close = |s: &mut App| {
+        let ui = &s.ui.settings.connections;
+        if ui.link_pending.is_none() && ui.link_mint.is_none() {
+            close_link(s);
+        }
+    };
     kit::Dialog::new("link-environment", "Link an environment")
         .open(true)
         .description("Agents here can then launch, message and wait on threads there. It appears in that environment's Connections, where it can be revoked.")
         .width(448.0)
-        .on_close(close_link)
+        .on_close(close)
         .child(form)
         .child(
             row()
@@ -1157,6 +1398,7 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 ),
         )
         .build(t, layers);
+    layers.extend(popup);
 }
 
 #[cfg(test)]
@@ -1188,6 +1430,24 @@ mod tests {
             link_status(&link("reachable", at, Some("401 Unauthorized")), expires - 30 * day),
             ("401 Unauthorized".into(), Health::Failing)
         );
+    }
+
+    #[test]
+    fn linkable_machines_offer_reported_addresses_then_the_saved_route() {
+        let config = json!({"directEndpoints": [
+            {"httpBaseUrl": "https://box.tail1234.ts.net/"},
+            {"httpBaseUrl": "http://192.168.1.20:3773"},
+        ]});
+        assert_eq!(
+            machine_urls(Some(&config), Some("https://box.tail1234.ts.net")),
+            ["https://box.tail1234.ts.net", "http://192.168.1.20:3773"]
+        );
+        assert_eq!(machine_urls(None, Some("http://10.0.0.2:3773")), ["http://10.0.0.2:3773"]);
+        // An SSH-only machine has no address another server can reach.
+        assert!(machine_urls(None, None).is_empty());
+        assert_eq!(mcp_client_scopes("read-only"), ["orchestration:read"]);
+        assert_eq!(mcp_client_scopes("auto"), ["orchestration:read", "orchestration:operate"]);
+        assert_eq!(mcp_client_scopes("full-access").len(), 4);
     }
 
     #[test]

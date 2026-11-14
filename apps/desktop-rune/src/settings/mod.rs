@@ -21,6 +21,7 @@ mod host_logos;
 mod icon_index;
 mod pages;
 pub(crate) mod permissions;
+mod qr;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;

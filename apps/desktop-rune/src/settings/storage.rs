@@ -475,7 +475,7 @@ fn cleanup(s: &App, cx: &Cx<App>, t: &T) -> El {
     let delete = crate::kit::Button::new(if pending { "Deleting…" } else { "Delete now" })
         .variant("outline")
         .size("sm")
-        .disabled(pending || !rules)
+        .disabled(pending || !rules || !super::permissions::allowed(s, "server.runStorageCleanup"))
         .on_press(run)
         .build(t);
     let mut section = c::section("Cleanup", vec![setting(cx, t, "storage-delete-now", title("Delete now", t), &description, delete)], t);

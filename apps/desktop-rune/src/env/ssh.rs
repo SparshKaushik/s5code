@@ -367,7 +367,7 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
 }
 
 /// Re-ensures a switched-on SSH environment's tunnel.
-pub(super) fn revive(s: &mut App, id: &str) {
+pub(super) fn resume(s: &mut App, id: &str) {
     if s.ui.env.ssh.targets.iter().any(|(k, _)| k == id) && !rune::is_headless() {
         reconnect(s, id, false);
     }

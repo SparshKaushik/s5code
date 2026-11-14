@@ -411,7 +411,7 @@ pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
         s.ui.env.off.retain(|k| k != id);
         let src = connect(s, &env);
         s.ui.env.parked.push((env.id.clone(), src));
-        ssh::revive(s, id);
+        ssh::resume(s, id);
     } else {
         if s.ui.env.active == id {
             s.navigate(Route::Home { project_id: None });

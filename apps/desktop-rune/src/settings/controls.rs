@@ -11,6 +11,11 @@ pub fn button(label: &str, t: &T) -> El {
         .build(t)
 }
 
+/// `on_press` when `allowed`; otherwise dimmed like a disabled kit button and unreachable.
+pub fn press_if(control: El, allowed: bool, f: impl Fn(&mut App) + 'static) -> El {
+    if allowed { control.on_press(f) } else { control.disabled(true).inert().opacity(0.64) }
+}
+
 pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
     let current = value(s, key);
     let on = if key == "sidebarProjectGroupingMode" {
