@@ -11,6 +11,9 @@ unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Id;
     fn sel_registerName(name: *const c_char) -> Id;
     fn objc_msgSend();
+    fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+    fn objc_registerClassPair(class: Id);
+    fn class_addMethod(class: Id, name: Id, imp: *const c_void, types: *const c_char) -> i8;
 }
 
 /// `objc_msgSend` cast to the method's exact signature.
@@ -290,5 +293,73 @@ pub fn locale_identifier() -> Option<String> {
         }
         let id = rust_string(msg!(locale, c"localeIdentifier"; Id));
         (!id.is_empty()).then_some(id)
+    }
+}
+
+/// `'aevt'` and `'odoc'`: the open-documents Apple event; `'----'` is its file list.
+const CORE_EVENT: u32 = u32::from_be_bytes(*b"aevt");
+const OPEN_DOCUMENTS: u32 = u32::from_be_bytes(*b"odoc");
+const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+
+static OPENED: std::sync::Mutex<Option<rune::AppHandle<crate::App>>> = std::sync::Mutex::new(None);
+
+extern "C" fn open_documents(_: Id, _: Id, event: Id, _reply: Id) {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let list = msg!(event, c"paramDescriptorForKeyword:", DIRECT_OBJECT => u32; Id);
+        if list.is_null() {
+            return;
+        }
+        let n = msg!(list, c"numberOfItems"; isize);
+        let urls: Vec<String> = (1..=n)
+            .filter_map(|i| {
+                let url = msg!(msg!(list, c"descriptorAtIndex:", i => isize; Id), c"fileURLValue"; Id);
+                (!url.is_null()).then(|| rust_string(msg!(url, c"absoluteString"; Id)))
+            })
+            .collect();
+        let Some(app) = OPENED.lock().ok().and_then(|a| a.clone()) else { return };
+        app.update(move |s, _| {
+            for url in &urls {
+                crate::links::open(s, url);
+            }
+        });
+    }));
+    if caught.is_err() {
+        eprintln!("s5code-rune: open-documents handler panicked");
+    }
+}
+
+/// Electron's `open-file`: HTML files the Finder opens with the app reach `links::open` as file
+/// URLs. AppKit may install its own handler while launching, so the window installs this again.
+pub fn handle_open_documents(app: rune::AppHandle<crate::App>) {
+    if let Ok(mut slot) = OPENED.lock() {
+        *slot = Some(app);
+    }
+    install_open_documents();
+}
+
+pub fn install_open_documents() {
+    thread_local! { static HANDLER: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) }; }
+    unsafe {
+        let mut handler = HANDLER.with(|h| h.get());
+        if handler.is_null() {
+            let name = c"S5CodeOpenDocumentsHandler";
+            let mut made = class(name);
+            if made.is_null() {
+                made = objc_allocateClassPair(class(c"NSObject"), name.as_ptr(), 0);
+                if made.is_null() {
+                    return;
+                }
+                class_addMethod(made, sel(c"handleOpenDocuments:withReplyEvent:"), open_documents as *const c_void, c"v@:@@".as_ptr());
+                objc_registerClassPair(made);
+            }
+            // Kept for the process: the event manager doesn't retain its handler.
+            handler = msg!(made, c"new"; Id);
+            HANDLER.with(|h| h.set(handler));
+        }
+        let manager = msg!(class(c"NSAppleEventManager"), c"sharedAppleEventManager"; Id);
+        if manager.is_null() || handler.is_null() {
+            return;
+        }
+        msg!(manager, c"setEventHandler:andSelector:forEventClass:andEventID:", handler => Id, sel(c"handleOpenDocuments:withReplyEvent:") => Id, CORE_EVENT => u32, OPEN_DOCUMENTS => u32; ());
     }
 }

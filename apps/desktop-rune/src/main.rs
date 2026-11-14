@@ -271,6 +271,8 @@ fn main() {
     instance.serve(app.handle());
     #[cfg(unix)]
     desktop::activation::serve(app.handle());
+    #[cfg(target_os = "macos")]
+    desktop::macos::handle_open_documents(app.handle());
     #[cfg(unix)]
     desktop::signals::install(app.handle());
     app.run();

@@ -3,6 +3,9 @@
 //! project. Nothing is sent; the person reads the prompt in the composer first. They arrive on
 //! the command line (Linux and Windows hand links to a new process) or through macOS's
 //! `on_open_url`, and wait for the shell before they land.
+//!
+//! Web pages the OS hands over (macOS: http links and `.html` files) open in a thread's browser,
+//! as DesktopWebLinkCoordinator's `openInBrowser`.
 
 use crate::{App, Route, data};
 
@@ -27,6 +30,26 @@ pub struct Ui {
     paired: Vec<String>,
     /// A confirmed pairing link is pairing, to report how it went.
     pairing: bool,
+    web: Web,
+}
+
+/// Electron's `isWebLink` or `isWebPageFile`: an http(s) URL, or the path of an HTML file.
+#[derive(Debug, PartialEq, Clone)]
+pub enum WebPage {
+    Url(String),
+    File(String),
+}
+
+/// A web page on its way to a browser tab.
+#[derive(Debug, Default)]
+enum Web {
+    #[default]
+    Idle,
+    Pending(WebPage),
+    /// No thread shows a browser, so a scratch thread is starting for it.
+    Scratch(WebPage),
+    /// The file's `assets.createUrl` request; this machine's server serves the page.
+    Asset(u64, String),
 }
 
 /// `HIDDEN_CHARACTERS`: characters that let a model read instructions the person can't see.
@@ -93,6 +116,24 @@ pub fn pairing_link(url: &str) -> Option<String> {
     parsed.query_pairs().find(|(k, _)| k == "pairingUrl").map(|(_, v)| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
+pub fn web_page(url: &str) -> Option<WebPage> {
+    let parsed = s5_net::url::Url::parse(url.trim()).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => Some(WebPage::Url(parsed.to_string())),
+        "file" => {
+            let path = parsed.to_file_path().ok()?.to_str()?.to_owned();
+            is_web_page_file(&path).then_some(WebPage::File(path))
+        }
+        _ => None,
+    }
+}
+
+/// `isWebPageFile`: `/\.x?html?$/i`.
+fn is_web_page_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.rsplit_once('.').is_some_and(|(_, ext)| matches!(ext, "htm" | "html" | "xhtm" | "xhtml"))
+}
+
 /// Prompt links and pairing links: what a second launch hands to the running app.
 pub fn is_app_link(url: &str) -> bool {
     parse(url).is_some() || pairing_link(url).is_some()
@@ -148,7 +189,12 @@ pub fn open(s: &mut App, url: &str) -> bool {
         }
         return true;
     }
-    let Some(link) = parse(url) else { return false };
+    let Some(link) = parse(url) else {
+        let Some(page) = web_page(url) else { return false };
+        s.ui.links.web = Web::Pending(page);
+        poll_web(s);
+        return true;
+    };
     s.ui.links.pending = Some(link);
     poll(s);
     true
@@ -230,8 +276,90 @@ fn poll_pairing(s: &mut App) -> bool {
     true
 }
 
+fn web_failed(s: &mut App, page: &WebPage, description: Option<&str>) {
+    let shown = match page {
+        WebPage::Url(url) | WebPage::File(url) => url,
+    };
+    crate::shell::palette::toast(s, "Could not open the link", Some(description.unwrap_or(shown)));
+}
+
+/// `openInBrowser`: the thread showing a browser takes the page, else a new scratch thread
+/// does. Only this machine's server serves files, so a file needs it active.
+fn poll_web(s: &mut App) -> bool {
+    use crate::shell::palette::actions;
+    match std::mem::take(&mut s.ui.links.web) {
+        Web::Idle => false,
+        Web::Pending(page) if !s.state().shell_ready => {
+            s.ui.links.web = Web::Pending(page);
+            false
+        }
+        Web::Pending(page) => {
+            if matches!(page, WebPage::File(_)) && (s.ui.env.active != crate::env::LOCAL || s.ui.desktop.local_off) {
+                web_failed(s, &page, Some("HTML files open on this machine's environment."));
+            } else if crate::panel::showing_browser(s) {
+                show_web(s, page);
+            } else if actions::scratch_available(s) {
+                actions::new_without_project(s);
+                s.ui.links.web = Web::Scratch(page);
+            } else {
+                web_failed(s, &page, None);
+            }
+            true
+        }
+        Web::Scratch(page) if actions::scratch_pending(s) => {
+            s.ui.links.web = Web::Scratch(page);
+            false
+        }
+        // The scratch flow reports its own failure.
+        Web::Scratch(page) => {
+            if matches!(s.route, Route::Home { project_id: Some(_) }) {
+                show_web(s, page);
+            }
+            true
+        }
+        Web::Asset(request, path) => {
+            let Some(net) = s.src.net() else {
+                s.ui.links.web = Web::Asset(request, path);
+                return false;
+            };
+            let Some(reply) = net.take_reply(request) else {
+                s.ui.links.web = Web::Asset(request, path);
+                return false;
+            };
+            let base = net.base_url().trim_end_matches('/').to_owned();
+            match reply {
+                Ok(v) => crate::panel::open_preview(s, &format!("{base}{}", data::s(&v, "relativeUrl"))),
+                Err(e) => {
+                    let message = crate::shell::palette::error_message(&e, &path);
+                    web_failed(s, &WebPage::File(path), Some(&message));
+                }
+            }
+            true
+        }
+    }
+}
+
+/// An absolute `media-file` is served without looking up its thread (`assetsCreateUrl`), so a
+/// draft passes a fresh id.
+fn show_web(s: &mut App, page: WebPage) {
+    match page {
+        WebPage::Url(url) => crate::panel::open_preview(s, &url),
+        WebPage::File(path) => {
+            let thread = match &s.route {
+                Route::Thread(id) => id.clone(),
+                _ => s5_net::uuid(),
+            };
+            let resource = serde_json::json!({"resource":{"_tag":"media-file","threadId":thread,"path":path}});
+            match s.src.net().map(|net| net.request("assets.createUrl", resource)) {
+                Some(request) => s.ui.links.web = Web::Asset(request, path),
+                None => web_failed(s, &WebPage::File(path), None),
+            }
+        }
+    }
+}
+
 pub fn poll(s: &mut App) -> bool {
-    let paired = poll_pairing(s);
+    let paired = poll_pairing(s) | poll_web(s);
     if s.ui.links.pending.is_none() || !s.state().shell_ready {
         return paired;
     }
@@ -259,6 +387,19 @@ pub fn poll(s: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_pages_follow_electrons_link_and_file_rules() {
+        assert_eq!(web_page("https://example.com/a?b=1"), Some(WebPage::Url("https://example.com/a?b=1".into())));
+        assert_eq!(web_page("http://localhost:3000"), Some(WebPage::Url("http://localhost:3000/".into())));
+        assert_eq!(web_page("file:///home/a%20b/Index.HTML"), Some(WebPage::File("/home/a b/Index.HTML".into())));
+        for page in ["file:///x/page.htm", "file:///x/page.xhtml", "file:///x/page.xhtm"] {
+            assert!(matches!(web_page(page), Some(WebPage::File(_))), "{page}");
+        }
+        for other in ["file:///x/notes.md", "file:///x.html/notes", "file:///x/html", "mailto:a@b.c", "s5code://new?prompt=x", "ftp://a/b.html"] {
+            assert_eq!(web_page(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn prompt_links_parse_like_the_web() {
