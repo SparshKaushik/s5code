@@ -420,7 +420,7 @@ pub struct State {
 pub fn poll(app: &mut App) -> bool {
     let waker = app.ui.panel.waker.clone();
     let wanted = std::mem::take(app.ui.chat.timeline.assets.media.wanted.get_mut());
-    let net = app.src.net();
+    let mut net = app.src.net();
     let state = &mut app.ui.chat.timeline.assets.media;
     let mut changed = false;
     for (key, media, access) in wanted {
@@ -430,7 +430,7 @@ pub fn poll(app: &mut App) -> bool {
         let mut entry = Entry { media, request: None, loaded: None, failed: false };
         match access {
             Access::Direct(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), waker.clone())),
-            Access::Asset(resource) => match net {
+            Access::Asset(resource) => match net.as_deref_mut() {
                 Some(net) => entry.request = Some(net.request("assets.createUrl", json!({ "resource": resource }))),
                 None => entry.failed = true,
             },
