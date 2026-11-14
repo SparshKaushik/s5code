@@ -386,6 +386,12 @@ pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&s
         notice.until = data::now_ms() + 4000;
     }
 }
+/// Closes the open toast when it is still the one titled `title`.
+pub(crate) fn dismiss_toast(s: &mut App, title: &str) {
+    if s.ui.shell.palette.notice.as_ref().is_some_and(|n| n.title == title) {
+        s.ui.shell.palette.notice = None;
+    }
+}
 pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
     if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
         notice.actions = actions;

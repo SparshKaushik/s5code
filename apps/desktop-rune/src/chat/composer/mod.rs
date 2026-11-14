@@ -1056,12 +1056,15 @@ pub fn poll(s: &mut App) -> bool {
             continue;
         };
         let upload = composer.uploads.remove(i);
-        match stored {
-            Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
-            Err(e) => {
-                let background = upload.launch.as_ref().map(|id| composer.background.contains(id));
-                composer.background.retain(|b| Some(b) != upload.launch.as_ref());
-                failed.push((upload.outgoing, e, background));
+        let messages = std::iter::once((upload.payload, upload.launch, upload.outgoing)).chain(upload.also);
+        for (payload, launch, outgoing) in messages {
+            match &stored {
+                Ok(stored) => deliver(net, composer, payload, launch, stored.clone(), outgoing),
+                Err(e) => {
+                    let background = launch.as_ref().map(|id| composer.background.contains(id));
+                    composer.background.retain(|b| Some(b) != launch.as_ref());
+                    failed.push((outgoing, e.clone(), background));
+                }
             }
         }
         changed = true;
@@ -1077,8 +1080,7 @@ pub fn poll(s: &mut App) -> bool {
         let (request, outgoing) = composer.sends.remove(i);
         let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
         changed = true;
-        let outcome = reply.as_ref().map(|_| ()).map_err(|e| crate::shell::palette::error_message(e, "Failed to send message."));
-        if fanout::settle(&mut composer.fanout, &outgoing.key, outcome) {
+        if fanout::settle(&mut composer.fanout, &outgoing.key, reply.as_ref().map(|_| ()), true) {
             continue;
         }
         // A background launch stays where the user is.
@@ -1094,8 +1096,7 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     for (outgoing, error, background) in failed {
-        let message = crate::shell::palette::error_message(&error, "Failed to send message.");
-        if !fanout::settle(&mut s.ui.chat.composer.fanout, &outgoing.key, Err(message)) {
+        if !fanout::settle(&mut s.ui.chat.composer.fanout, &outgoing.key, Err(&error), false) {
             send_failed(s, outgoing, &error, background);
         }
     }

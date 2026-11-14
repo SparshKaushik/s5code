@@ -19,6 +19,30 @@ pub struct State {
     picks: HashMap<String, Vec<(String, String)>>,
     batches: Vec<Batch>,
     next: u64,
+    /// Launches that may have reached the server before failing, by `retry_key`, with the
+    /// thread they would have made (`uncertainSubmissions`).
+    uncertain: HashMap<String, String>,
+    /// The "Allow retry" confirmation: its retry key, thread and toast title.
+    retry: Option<(String, String, String)>,
+}
+
+/// One model's place in a draft's sends (`retryKey`).
+fn retry_key(key: &str, (instance, model): &(String, String)) -> String {
+    json!([key, instance, model]).to_string()
+}
+
+const MAY_HAVE_STARTED: &str = "The previous request may have started. Open its thread to check before sending again.";
+const ALLOW_RETRY: &str = "The previous request may already be running. Check its thread first. Allow another send that could create a duplicate thread?";
+
+/// `wasBootstrapThreadDeleted` or `wasBootstrapThreadNotCreated`: the server says no thread exists.
+fn no_thread(error: &Value) -> bool {
+    match error {
+        Value::Object(map) => {
+            matches!(map.get("bootstrapThreadDisposition").and_then(Value::as_str), Some("deleted" | "not-created")) || map.values().any(no_thread)
+        }
+        Value::Array(rows) => rows.iter().any(no_thread),
+        _ => false,
+    }
 }
 
 /// One send: its draft and what it sent, and each model's outcome once the server answers.
@@ -27,6 +51,8 @@ struct Batch {
     key: String,
     draft: Value,
     models: Vec<((String, String), Option<Result<(), String>>)>,
+    /// Each model's thread id, in `models` order.
+    threads: Vec<String>,
 }
 
 fn supported(s: &App) -> bool {
@@ -116,10 +142,13 @@ pub(super) fn send(s: &mut App) -> bool {
     if text.is_empty() && paths.is_empty() && contexts.is_empty() {
         return true;
     }
-    if let Err(message) = paths.iter().map(|p| attachments::stage(p)).collect::<Result<Vec<_>, _>>() {
-        crate::chat::timeline::error_banner::set_local(s, &key, Some(&message));
-        return true;
-    }
+    let staged = match paths.iter().map(|p| attachments::stage_upload(p)).collect::<Result<Vec<_>, _>>() {
+        Ok(staged) => staged,
+        Err(message) => {
+            crate::chat::timeline::error_banner::set_local(s, &key, Some(&message));
+            return true;
+        }
+    };
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let mut workspace = json!({"type": "worktree", "baseRef": branch});
     if from_origin {
@@ -131,7 +160,16 @@ pub(super) fn send(s: &mut App) -> bool {
     s.ui.chat.composer.fanout.next += 1;
     let Some(net) = s.src.net() else { return true };
     let composer = &mut s.ui.chat.composer;
-    for (n, (instance, model)) in picks.iter().enumerate() {
+    let mut models = Vec::new();
+    let mut threads = Vec::new();
+    let mut messages = Vec::new();
+    for (n, pick) in picks.into_iter().enumerate() {
+        if let Some(thread) = composer.fanout.uncertain.get(&retry_key(&key, &pick)) {
+            threads.push(thread.clone());
+            models.push((pick, Some(Err(MAY_HAVE_STARTED.to_owned()))));
+            continue;
+        }
+        let (instance, model) = &pick;
         let thread_id = format!("thread:project:{project}:{}", s5_net::uuid());
         let message_id = s5_net::uuid();
         let mut payload = json!({
@@ -144,15 +182,23 @@ pub(super) fn send(s: &mut App) -> bool {
             payload["initialMessage"]["context"] = json!({"version": 1, "records": contexts});
         }
         let outgoing = Outgoing { key: format!("{KEY}{id}:{n}"), draft: Value::Null };
-        // Staged above, so each restage succeeds; every thread stores its own copy.
-        let staged: Vec<_> = paths.iter().filter_map(|p| attachments::stage(p).ok()).collect();
-        if staged.is_empty() {
-            deliver(net, composer, payload, Some(thread_id), json!([]), outgoing);
-        } else {
-            composer.uploads.push(attachments::start(net, &thread_id, &message_id, staged, payload, Some(thread_id.clone()), outgoing));
-        }
+        threads.push(thread_id.clone());
+        models.push((pick, None));
+        messages.push((payload, Some(thread_id), outgoing, message_id));
     }
-    composer.fanout.batches.push(Batch { id, key, draft: snapshot, models: picks.into_iter().map(|m| (m, None)).collect() });
+    // Uploaded once; the stored records are shared by every model's first message.
+    let mut messages = messages.into_iter();
+    if staged.is_empty() {
+        for (payload, launch, outgoing, _) in messages {
+            deliver(net, composer, payload, launch, json!([]), outgoing);
+        }
+    } else if let Some((payload, launch, outgoing, message_id)) = messages.next() {
+        let thread_id = launch.clone().unwrap_or_default();
+        let mut upload = attachments::start(net, &thread_id, &message_id, staged, payload, launch, outgoing);
+        upload.also = messages.map(|(payload, launch, outgoing, _)| (payload, launch, outgoing)).collect();
+        composer.uploads.push(upload);
+    }
+    composer.fanout.batches.push(Batch { id, key, draft: snapshot, models, threads });
     let d = super::draft_mut(s);
     d.edit.clear();
     d.attachments.clear();
@@ -160,13 +206,21 @@ pub(super) fn send(s: &mut App) -> bool {
     true
 }
 
-/// Takes a fan-out launch's outcome; false when `key` is not one.
-pub(super) fn settle(state: &mut State, key: &str, outcome: Result<(), String>) -> bool {
+/// Takes a fan-out launch's outcome; false when `key` is not one. A launch that `reached` the
+/// server and failed without the server ruling out its thread is remembered as uncertain.
+pub(super) fn settle(state: &mut State, key: &str, outcome: Result<(), &Value>, reached: bool) -> bool {
     let Some((batch, n)) = key.strip_prefix(KEY).and_then(|k| k.split_once(':')) else { return false };
     let (Ok(batch), Ok(n)) = (batch.parse::<u64>(), n.parse::<usize>()) else { return false };
-    if let Some(slot) = state.batches.iter_mut().find(|b| b.id == batch).and_then(|b| b.models.get_mut(n)) {
-        slot.1 = Some(outcome);
+    let State { batches, uncertain, .. } = state;
+    let Some(batch) = batches.iter_mut().find(|b| b.id == batch) else { return true };
+    let (Some(slot), Some(thread)) = (batch.models.get_mut(n), batch.threads.get(n)) else { return true };
+    if let Err(error) = outcome
+        && reached
+        && !no_thread(error)
+    {
+        uncertain.entry(retry_key(&batch.key, &slot.0)).or_insert_with(|| thread.clone());
     }
+    slot.1 = Some(outcome.map_err(|e| palette::error_message(e, "Failed to send message.")));
     true
 }
 
@@ -181,14 +235,15 @@ pub(super) fn finish(s: &mut App) -> bool {
     if started > 0 {
         palette::toast(s, &format!("Started {started} {} in background", if started == 1 { "thread" } else { "threads" }), None);
     }
-    let Some(((_, model), error)) = failed.first().cloned() else { return true };
+    // One toast shows at a time: the failure whose thread may exist wins, as it needs a decision.
+    let uncertain = &s.ui.chat.composer.fanout.uncertain;
+    let shown = failed.iter().find(|(m, _)| uncertain.contains_key(&retry_key(&batch.key, m))).or(failed.first()).cloned();
+    let Some((pick, error)) = shown else { return true };
     s.ui.chat.composer.fanout.picks.insert(batch.key.clone(), failed.into_iter().map(|(m, _)| m).collect());
-    if restore(s, &batch.key, &batch.draft) {
-        palette::toast_error(s, &format!("Could not start {model}"), Some(&error));
-        return true;
-    }
+    let restored = restore(s, &batch.key, &batch.draft);
+    let retry = retry_key(&batch.key, &pick);
     let (key, draft) = (batch.key, batch.draft);
-    let action: palette::ToastAction = ("Restore prompt".into(), true, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| {
+    let restore_action: palette::ToastAction = ("Restore prompt".into(), true, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| {
         if restore(s, &key, &draft) {
             if let Some(project) = key.strip_prefix("home:") {
                 s.navigate(Route::Home { project_id: Some(project.to_owned()) });
@@ -197,8 +252,53 @@ pub(super) fn finish(s: &mut App) -> bool {
             palette::toast(s, "A background prompt could not be sent", Some("Return to the original draft and send or clear its current prompt before restoring."));
         }
     }));
-    palette::toast_with(s, "A background prompt could not be sent", Some("Your newer draft is unchanged. Restore the failed prompt when this composer is empty."), vec![action]);
+    let title = format!("Could not start {}", pick.1);
+    if let Some(thread) = s.ui.chat.composer.fanout.uncertain.get(&retry).cloned() {
+        palette::toast_error(s, &title, Some(&error));
+        let open = thread.clone();
+        let mut actions: Vec<palette::ToastAction> = vec![
+            ("Open thread".into(), true, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| s.navigate(Route::Thread(open.clone())))),
+            ("Allow retry".into(), false, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| {
+                s.ui.chat.composer.fanout.retry = Some((retry.clone(), thread.clone(), title.clone()));
+            })),
+        ];
+        if !restored {
+            actions.push(restore_action);
+        }
+        palette::set_toast_actions(s, actions);
+    } else if restored {
+        palette::toast_error(s, &title, Some(&error));
+    } else {
+        palette::toast_with(s, "A background prompt could not be sent", Some("Your newer draft is unchanged. Restore the failed prompt when this composer is empty."), vec![restore_action]);
+    }
     true
+}
+
+/// "Allow retry": forgets the uncertain launch, so the next send starts that model again.
+fn allow_retry(s: &mut App) {
+    let Some((key, thread, title)) = s.ui.chat.composer.fanout.retry.take() else { return };
+    let uncertain = &mut s.ui.chat.composer.fanout.uncertain;
+    if uncertain.get(&key) == Some(&thread) {
+        uncertain.remove(&key);
+        palette::dismiss_toast(s, &title);
+    }
+}
+
+/// Web's `dialogs.confirm` for "Allow retry"; one question, so ConfirmDialogHost titles it whole.
+pub fn retry_dialog(s: &App, t: &crate::theme::T, out: &mut Vec<rune::El>) {
+    if s.ui.chat.composer.fanout.retry.is_none() {
+        return;
+    }
+    let close = |s: &mut App| s.ui.chat.composer.fanout.retry = None;
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t);
+    let confirm = crate::kit::Button::new("Confirm").on_press(allow_retry).build(t);
+    crate::kit::Dialog::new("fanout-allow-retry", ALLOW_RETRY)
+        .alert()
+        .width(448.0)
+        .open(true)
+        .child(rune::row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
+        .on_close(close)
+        .build(t, out);
 }
 
 /// Puts a sent draft back when its composer is still empty.
@@ -262,16 +362,44 @@ mod tests {
         let key = "home:p1".to_string();
         let draft = json!({"prompt": "ship it", "pills": [], "attachments": []});
         let models = vec![(("opencode".into(), "a".into()), None), (("opencode".into(), "b".into()), None), (("codex".into(), "c".into()), None)];
-        s.ui.chat.composer.fanout.batches.push(Batch { id: 7, key: key.clone(), draft, models });
+        let threads = vec!["t0".into(), "t1".into(), "t2".into()];
+        s.ui.chat.composer.fanout.batches.push(Batch { id: 7, key: key.clone(), draft, models, threads });
         let state = &mut s.ui.chat.composer.fanout;
-        assert!(settle(state, "fanout:7:0", Ok(())));
-        assert!(settle(state, "fanout:7:2", Err("no auth".into())));
-        assert!(!settle(state, "home:p1", Ok(())), "other sends are not ours");
+        assert!(settle(state, "fanout:7:0", Ok(()), true));
+        assert!(settle(state, "fanout:7:2", Err(&json!({"message": "no auth"})), false));
+        assert!(!settle(state, "home:p1", Ok(()), true), "other sends are not ours");
+        assert!(state.uncertain.is_empty(), "FAILED: a launch that never reached the server is not uncertain");
         assert!(!finish(&mut s), "waits for every model");
-        assert!(settle(&mut s.ui.chat.composer.fanout, "fanout:7:1", Ok(())));
+        assert!(settle(&mut s.ui.chat.composer.fanout, "fanout:7:1", Ok(()), true));
         assert!(finish(&mut s));
         assert_eq!(s.ui.chat.composer.fanout.picks.get(&key).cloned(), Some(vec![("codex".to_string(), "c".to_string())]));
         assert_eq!(s.ui.chat.composer.drafts.get(&key).map(|d| d.edit.text.clone()).as_deref(), Some("ship it"), "the empty composer gets the prompt back");
         assert!(s.ui.chat.composer.fanout.batches.is_empty());
+    }
+
+    #[test]
+    fn a_launch_that_may_have_started_blocks_its_model_until_retry_is_allowed() {
+        let mut s = App::new();
+        let key = "home:p1".to_string();
+        let (a, b) = (("opencode".to_string(), "a".to_string()), ("opencode".to_string(), "b".to_string()));
+        let models = vec![(a.clone(), None), (b.clone(), None)];
+        let threads = vec!["t-a".into(), "t-b".into()];
+        s.ui.chat.composer.fanout.batches.push(Batch { id: 1, key: key.clone(), draft: json!({"prompt": "go"}), models, threads });
+        let state = &mut s.ui.chat.composer.fanout;
+        settle(state, "fanout:1:0", Err(&json!({"message": "socket closed"})), true);
+        let not_created = json!({"_tag": "OrchestrationDispatchCommandError", "message": "no", "bootstrapThreadDisposition": "not-created"});
+        settle(state, "fanout:1:1", Err(&not_created), true);
+        assert_eq!(state.uncertain.get(&retry_key(&key, &a)).map(String::as_str), Some("t-a"), "FAILED: the dropped launch keeps its thread");
+        assert!(!state.uncertain.contains_key(&retry_key(&key, &b)), "FAILED: the server said no thread exists");
+        assert!(finish(&mut s));
+        assert_eq!(palette::toast_title(&s), Some("Could not start a"));
+
+        s.ui.chat.composer.fanout.retry = Some((retry_key(&key, &a), "t-other".into(), "Could not start a".into()));
+        allow_retry(&mut s);
+        assert!(!s.ui.chat.composer.fanout.uncertain.is_empty(), "FAILED: a newer uncertain launch is not cleared by an old toast");
+        s.ui.chat.composer.fanout.retry = Some((retry_key(&key, &a), "t-a".into(), "Could not start a".into()));
+        allow_retry(&mut s);
+        assert!(s.ui.chat.composer.fanout.uncertain.is_empty(), "FAILED: confirming allows the retry");
+        assert_eq!(palette::toast_title(&s), None, "FAILED: confirming closes the failure toast");
     }
 }

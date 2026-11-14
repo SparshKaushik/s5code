@@ -1391,6 +1391,7 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     scripts::overlays(s, t, &mut out);
     pr::overlays(s, t, &mut out);
     restore_dialog(s, t, &mut out);
+    composer::fanout::retry_dialog(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {
         let copy = crate::kit::MenuItem::new("Copy branch name").icon(&icons::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             s.ui.chat.details.branch_copy = None;
