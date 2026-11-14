@@ -777,7 +777,7 @@ fn paste_clipboard(tx: &mut Tx, thread: &str, id: &str) {
 }
 
 fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool {
-    if super::drawer::shortcut(app, thread, id, e) {
+    if crate::shell::quit::held_close(e, tx.key_repeat()) || super::drawer::shortcut(app, thread, id, e) {
         return true;
     }
     let Some(session) = app.ui.panel.terminal.get(thread, id) else {

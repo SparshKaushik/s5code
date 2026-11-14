@@ -738,8 +738,7 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
     if let Some(at) = ts(d, "updatedAt") {
         meta = meta.child(text(format!("updated {}", relative(at, s.now_ms))).font(theme::TEXT_XS).color(t.c.muted_foreground).shrink());
     }
-    if field(d, "provider") == "github" || field(d, "url").contains("github.com") {
-        let command = format!("gh pr checkout {}", d["number"]);
+    if let Some(command) = checkout_command(d) {
         let copy = command.clone();
         meta = meta.child(spacer()).child(
             row()
@@ -1029,8 +1028,43 @@ fn review_label(state: &str) -> Option<(&'static str, &'static rune::Icon)> {
     }
 }
 
+/// openOnHostLabel for the open pull request's host.
+fn on_host(s: &App) -> String {
+    match s.ui.pages.detail.entry.as_ref() {
+        Some(e) => super::pull_requests::open_label(e, &s.ui.pages.pull_requests.hosts),
+        None => "Open on host".into(),
+    }
+}
+
+/// The source control definition's `checkoutCommand`, when the host has one for this pull request.
+fn checkout_command(d: &Value) -> Option<String> {
+    let number = d["number"].as_u64()?;
+    let provider = match field(d, "provider") {
+        "" if field(d, "url").contains("github.com") => "github",
+        p => p,
+    };
+    let safe = |v: &str, extra: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c));
+    match provider {
+        "github" => Some(format!("gh pr checkout {number}")),
+        "gitlab" => Some(format!("glab mr checkout {number}")),
+        "azure-devops" => Some(format!("az repos pr checkout --id {number}")),
+        "gitcafe" => Some(format!("cafe pr checkout {number}")),
+        "bitbucket" => {
+            let (repo, branch) = (field(d, "headRepositoryNameWithOwner"), field(d, "headBranch"));
+            let named = repo.split_once('/').is_some_and(|(owner, name)| safe(owner, "._-") && safe(name, "._-"));
+            (named && safe(branch, "._/@+=,-")).then(|| format!("git clone --single-branch --branch {branch} https://bitbucket.org/{repo}.git t3code-pr-{number}"))
+        }
+        "forgejo" => {
+            let repository = field(d, "url").rsplit_once("/pulls/")?.0;
+            Some(format!("git fetch '{}' refs/pull/{number}/head && git checkout -B pulls/{number} FETCH_HEAD", repository.replace('\'', "'\\''")))
+        }
+        _ => None,
+    }
+}
+
 fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
     let avatars = &s.ui.pages.avatars;
+    let open_label = on_host(s);
     let head_line = |c: &Value, path: Option<String>| {
         let mut h = row()
             .w_full()
@@ -1062,7 +1096,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
                     .radius(radius::SM)
                     .hover(t.c.accent)
                     .cursor(Cursor::Pointer)
-                    .label("Open on GitHub")
+                    .label(open_label.clone())
                     .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
                     .on_press_tx(move |_: &mut App, tx: &mut Tx| {
                         let _ = tx.open_url(&url);
@@ -1171,7 +1205,7 @@ fn code(s: &App, t: &T) -> El {
     }
     let mut out = col().w_full().px(16.0).pt(12.0).pb(48.0).gap(8.0);
     if u.diff_truncated {
-        out = out.child(text("This diff is too large to show in full. Open it on GitHub for the rest.").font(theme::TEXT_XS).color(t.c.warning_foreground).wrap());
+        out = out.child(text(format!("This diff is too large to show in full. {} for the rest.", on_host(s))).font(theme::TEXT_XS).color(t.c.warning_foreground).wrap());
     }
     for f in files {
         out = out.child(file_view(s, t, f));
@@ -1214,12 +1248,12 @@ fn file_view(s: &App, t: &T, f: &FileDiff) -> El {
         });
     let mut card = col().w_full().radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).clip_rounded(radius::LG).child(head);
     if open {
-        card = card.child(diff_lines(t, f));
+        card = card.child(diff_lines(t, f, &on_host(s)));
     }
     card
 }
 
-fn diff_lines(t: &T, f: &FileDiff) -> El {
+fn diff_lines(t: &T, f: &FileDiff, open_label: &str) -> El {
     let mono = theme::mono(theme::TEXT_XS).lh(20.0);
     let num = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
     let mut out = col().w_full();
@@ -1258,7 +1292,7 @@ fn diff_lines(t: &T, f: &FileDiff) -> El {
         }
     }
     if total > shown {
-        out = out.child(row().w_full().h(28.0).px(12.0).center_y().child(text(format!("{} more lines. Open the pull request on GitHub to read the rest.", total - shown)).font(theme::TEXT_XS).color(t.c.muted_foreground)));
+        out = out.child(row().w_full().h(28.0).px(12.0).center_y().child(text(format!("{} more lines. {} to read the rest.", total - shown, open_label)).font(theme::TEXT_XS).color(t.c.muted_foreground)));
     }
     out
 }
@@ -1299,7 +1333,7 @@ fn unavailable(t: &T, entry: &Value, error: &str) -> El {
                     ui(s).error = None;
                     reload(s);
                 }).build(t))
-                .child(kit::Button::new("Open on GitHub").variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                .child(kit::Button::new(super::pull_requests::open_label(entry, &[])).variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&url);
                 })),
         )
@@ -1334,6 +1368,29 @@ mod tests {
         assert_eq!(with(json!({})), Some(Primary::EnableAutoMerge));
         assert_eq!(with(json!({"checks": []})), Some(Primary::Merge));
         assert_eq!(with(json!({"checks": [], "mergeCapabilities": {"merge": false, "squash": false, "rebase": false}})), None);
+    }
+
+    #[test]
+    fn the_checkout_command_follows_each_hosts_definition() {
+        let pr = |provider: &str, extra: Value| {
+            let mut d = json!({"provider": provider, "number": 7, "url": format!("https://{provider}.example/o/r/pulls/7")});
+            d.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            checkout_command(&d)
+        };
+        assert_eq!(pr("github", json!({})).as_deref(), Some("gh pr checkout 7"));
+        assert_eq!(pr("gitlab", json!({})).as_deref(), Some("glab mr checkout 7"));
+        assert_eq!(pr("azure-devops", json!({})).as_deref(), Some("az repos pr checkout --id 7"));
+        assert_eq!(
+            pr("bitbucket", json!({"headRepositoryNameWithOwner": "acme/app", "headBranch": "fix/clamp"})).as_deref(),
+            Some("git clone --single-branch --branch fix/clamp https://bitbucket.org/acme/app.git t3code-pr-7")
+        );
+        assert_eq!(pr("bitbucket", json!({"headRepositoryNameWithOwner": "acme/app", "headBranch": "x;rm"})), None, "an unsafe branch has no command");
+        assert_eq!(
+            pr("forgejo", json!({})).as_deref(),
+            Some("git fetch 'https://forgejo.example/o/r' refs/pull/7/head && git checkout -B pulls/7 FETCH_HEAD")
+        );
+        assert_eq!(pr("", json!({"url": "https://github.com/o/r/pull/7"})).as_deref(), Some("gh pr checkout 7"));
+        assert_eq!(pr("unknown", json!({})), None);
     }
 
     #[test]

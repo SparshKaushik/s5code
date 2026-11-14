@@ -258,9 +258,19 @@ fn quick_actions(e: &Value, host: &[String]) -> Vec<&'static str> {
     for_state.iter().copied().filter(|a| host.iter().any(|h| h == a)).collect()
 }
 
+/// legacyParents: the scope an older credential holds in place of a newer one.
+fn legacy_parent(scope: &str) -> Option<&'static str> {
+    match scope {
+        "filesystem:read" | "diagnostics:read" => Some("orchestration:read"),
+        "settings:write" | "providers:manage" | "environment:maintain" | "preview:operate" | "source-control:write" | "filesystem:write" => Some("orchestration:operate"),
+        "terminal:read" => Some("terminal:operate"),
+        _ => None,
+    }
+}
+
 /// sessionGrantsScope: the session's permissions when it lists them, else its scopes, where a
-/// legacy credential's `orchestration:operate` still grants source control writes.
-fn grants(session: &Value, scope: &str) -> bool {
+/// legacy credential's parent scope still grants the newer one.
+pub(super) fn grants(session: &Value, scope: &str) -> bool {
     let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|v| v == scope));
     if session["authenticated"] != true {
         return false;
@@ -274,7 +284,7 @@ fn grants(session: &Value, scope: &str) -> bool {
     if session["auth"].get("serverUpdateScope").is_some() {
         return false;
     }
-    scope == SOURCE_CONTROL_WRITE && has(&session["scopes"], "orchestration:operate")
+    legacy_parent(scope).is_some_and(|parent| has(&session["scopes"], parent))
 }
 
 /// runAction's permissionAtom: whether this connection may act on pull requests. Unknown until the
@@ -781,7 +791,7 @@ pub(crate) fn checks_body(t: &T, checks: &[Value], all: bool, toggle: fn(&mut Ap
             .w_full()
             .gap(8.0)
             .center_y()
-            .child(icon(glyph, 14.0).color(ink))
+            .child(super::pull_requests::busy_icon(field(c, "status") == "pending", glyph, 14.0).color(ink))
             .child(
                 text(field(c, "name").to_string())
                     .font(theme::TEXT_XS)
@@ -968,10 +978,7 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
                     let entry = e.clone();
                     menu = menu.item(kit::MenuItem::new("Retry stack refresh").on_select(move |s: &mut App| want(s, Kind::Stack, &entry)));
                 }
-                for layer in stack["layers"].as_array().into_iter().flatten().rev() {
-                    menu = menu.row(layer_row(t, e, layer));
-                }
-                menu = menu.group_label(format!("↳ {}", field(&stack, "base")));
+                menu = menu.row(stack_layers(t, e, &stack));
             }
             (None, _) => {
                 let status = match read {
@@ -984,6 +991,16 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
         }
     }
     Some(menu.build(&kit::theme(t), overlays))
+}
+
+/// PullRequestStackLayers: the layers top first, then the base, scrolling past 320 points.
+fn stack_layers(t: &T, e: &Value, stack: &Value) -> El {
+    let mut list = col().w_full().max_h(320.0).items_stretch().scroll(ScrollSpec { stick_bottom: false });
+    for layer in stack["layers"].as_array().into_iter().flatten().rev() {
+        list = list.child(layer_row(t, e, layer));
+    }
+    let base = row().px(8.0).py(6.0).child(text(format!("↳ {}", field(stack, "base"))).font(theme::XS_MEDIUM).color(t.c.contrast_muted_foreground));
+    kit::scroll_area("pr-stack-layers", list.child(base), t)
 }
 
 /// PullRequestStackLayerContent in a menu row, checked on the row's own layer.
@@ -1087,8 +1104,17 @@ fn breakdown_grid(t: &T, b: &Value, (additions, deletions): (i64, i64)) -> El {
 
 // ---- row meta ---------------------------------------------------------------------------
 
-/// The badge on a row the hosts matched by its description, where no shown field holds the search.
-pub fn matched_badge(t: &T) -> El {
+/// The meta line's `@xs` container width (20rem), from which the matched badge spells itself out.
+const META_XS: f32 = 320.0;
+
+/// `@xs/pr-row-meta`: whether a meta line laid out at `rect` fits the badge's words.
+pub fn meta_wide(rect: [f32; 4]) -> bool {
+    rect[2] >= META_XS
+}
+
+/// The badge on a row the hosts matched by its description, where no shown field holds the search;
+/// its words show only on a `wide` meta line.
+pub fn matched_badge(t: &T, wide: bool) -> El {
     row()
         .h(16.0)
         .min_w(24.0)
@@ -1101,7 +1127,7 @@ pub fn matched_badge(t: &T) -> El {
         .label("matched in the description")
         .help("Matched in the description")
         .child(icon(&i::SEARCH, 12.0).color(t.c.muted_foreground))
-        .child(text("matched in the description").font(theme::TEXT_3XS).color(t.c.muted_foreground).truncate().shrink())
+        .children(wide.then(|| text("matched in the description").font(theme::TEXT_3XS).color(t.c.muted_foreground).truncate().shrink()))
 }
 
 /// PullRequestRow's provider mark, with its name as the tooltip, once the list spans more than one
@@ -1183,6 +1209,21 @@ pub fn scene(s: &mut App, number: i64, part: &str) {
         "stack" => {
             want(s, Kind::Stack, &e);
             ui(s).stack_open = Some(key);
+        }
+        "stack-long" => {
+            want(s, Kind::Stack, &e);
+            let u = ui(s);
+            if let Some(layers) = u.stacks.get_mut(&key).and_then(|r| r.data.as_mut()).and_then(|stack| stack["layers"].as_array_mut()) {
+                let top = layers.last().cloned().unwrap_or(Value::Null);
+                for n in 1..=12 {
+                    let mut layer = top.clone();
+                    layer["number"] = json!(2479 + n);
+                    layer["title"] = json!(format!("refactor(web): split the diff tree, part {n}"));
+                    layer["headBranch"] = json!(format!("perf/diff-tree-{n}"));
+                    layers.push(layer);
+                }
+            }
+            u.stack_open = Some(key);
         }
         "stack-unlisted" => {
             let stack = recorded(Kind::Stack);
@@ -1341,6 +1382,9 @@ mod tests {
         assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "server:update"}}), w));
         assert!(!grants(&json!({"authenticated": true, "scopes": [w], "permissions": ["orchestration:read"]}), w));
         assert!(!grants(&json!({"authenticated": false, "scopes": [w]}), w));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"]}), "settings:write"));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["terminal:operate"]}), "terminal:read"));
+        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:read"]}), "settings:write"));
         let mut s = App::new();
         assert!(can_write(&s), "the recorded scenes may act");
         s.ui.pages.pull_requests.row.session.data = Some(json!({"authenticated": true, "scopes": ["orchestration:read"]}));
@@ -1418,5 +1462,11 @@ mod tests {
         assert_eq!(stack_view(Some(&read(Some(Value::Null), None, None)), saved.clone()), (None, None));
         assert_eq!(stack_view(Some(&read(Some(json!({"number": 3})), None, None)), None), (Some(json!({"number": 3})), None));
         assert_eq!(stack_view(None, None), (None, None));
+    }
+
+    #[test]
+    fn the_matched_badge_spells_itself_out_from_a_20rem_meta_line() {
+        assert!(!meta_wide([0.0, 0.0, 319.5, 16.0]));
+        assert!(meta_wide([12.0, 40.0, 320.0, 16.0]));
     }
 }

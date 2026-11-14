@@ -6,11 +6,12 @@ use std::sync::OnceLock;
 pub struct Item {
     pub title: String,
     pub to: String,
-    terms: Vec<String>,
+    pub terms: Vec<String>,
     secondary: bool,
 }
 
-fn items() -> &'static [Item] {
+/// Every setting this client has, for the command palette's own matcher.
+pub fn items() -> &'static [Item] {
     static ITEMS: OnceLock<Vec<Item>> = OnceLock::new();
     ITEMS.get_or_init(|| {
         let raw: Vec<Value> = serde_json::from_str(include_str!("search.json")).unwrap();
