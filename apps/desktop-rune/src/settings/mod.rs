@@ -894,7 +894,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                         .any(|(key, v)| s.client_settings.values.get(key) != Some(v)),
                 )
                 .build(t)
-                .on_press(|s: &mut App| {
+                .on_press_tx(|s: &mut App, tx: &mut rune::Tx| {
+                    // Restoring the interface size zooms the window; land it at once.
+                    if s.client_settings.values.get(fonts::ZOOM_KEY) != client::ClientSettings::default().values.get(fonts::ZOOM_KEY) {
+                        tx.instant();
+                    }
                     let defaults = client::ClientSettings::default();
                     s.client_settings.values.extend(defaults.values);
                     s.client_settings
