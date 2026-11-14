@@ -1,4 +1,5 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
+pub(crate) mod agent;
 pub mod browser;
 mod closed;
 mod diff;
@@ -288,6 +289,40 @@ fn remove_surface(app: &mut App, surface: Surface) {
     app.ui.panel.surfaces.retain(|v| *v != surface);
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
+    }
+}
+/// Gives `thread`'s panel, on screen or put away, a browser tab, leaving the panel shut.
+/// Whether that panel is the one on screen.
+fn add_browser(app: &mut App, thread: &str, tab: browser::TabId, float: bool) -> bool {
+    let surface = Surface::Browser(tab);
+    let panel = &mut app.ui.panel;
+    let (surfaces, active, pip) = if panel.stash_key == thread {
+        (&mut panel.surfaces, &mut panel.active, &mut panel.browser.pip)
+    } else {
+        let stash = panel.stash.entry(thread.to_owned()).or_default();
+        (&mut stash.surfaces, &mut stash.active, &mut stash.pip)
+    };
+    if !surfaces.contains(&surface) {
+        surfaces.push(surface);
+    }
+    active.get_or_insert(surface);
+    if float {
+        *pip = Some(tab);
+    }
+    panel.stash_key == thread
+}
+/// Takes a browser tab off every thread's panel.
+fn drop_browser(app: &mut App, tab: browser::TabId) {
+    let surface = Surface::Browser(tab);
+    remove_surface(app, surface);
+    for stash in app.ui.panel.stash.values_mut() {
+        stash.surfaces.retain(|v| *v != surface);
+        if stash.active == Some(surface) {
+            stash.active = stash.surfaces.last().copied();
+        }
+        if stash.pip == Some(tab) {
+            stash.pip = None;
+        }
     }
 }
 /// Opens a workspace file in the Files surface (the palette's "Go to file").
