@@ -230,6 +230,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "shellEnvironmentPrepared": prepared,
             "desktopBrowserFd": BROWSER_EVENTS_FD,
             "desktopBrowserControlFd": BROWSER_CONTROL_FD,
+            "desktopTelemetryFd": TELEMETRY_FD,
         });
         let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
         let child = match spawn(&binary, &log_path, &bootstrap.to_string(), env) {
@@ -375,6 +376,8 @@ const DESKTOP_BACKEND_ENV_NAMES: &[&str] = &[
 /// Electron shell's backend manager hands them over (`DesktopBrowserChannel`).
 const BROWSER_EVENTS_FD: i32 = 6;
 const BROWSER_CONTROL_FD: i32 = 7;
+/// The server reads host power snapshots here (`desktop::telemetry`).
+const TELEMETRY_FD: i32 = 4;
 
 fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, String)]) -> std::io::Result<Child> {
     use std::os::fd::AsRawFd;
@@ -382,7 +385,12 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
     let out = File::options().create(true).append(true).open(log_path)?;
     let (events, server_events) = std::os::unix::net::UnixStream::pair()?;
     let (commands, server_commands) = std::os::unix::net::UnixStream::pair()?;
-    let fds = [(server_events.as_raw_fd(), BROWSER_EVENTS_FD), (server_commands.as_raw_fd(), BROWSER_CONTROL_FD)];
+    let (server_telemetry, telemetry) = std::io::pipe()?;
+    let fds = [
+        (server_events.as_raw_fd(), BROWSER_EVENTS_FD),
+        (server_commands.as_raw_fd(), BROWSER_CONTROL_FD),
+        (server_telemetry.as_raw_fd(), TELEMETRY_FD),
+    ];
     let mut command = Command::new(binary);
     for name in DESKTOP_BACKEND_ENV_NAMES {
         command.env_remove(name);
@@ -393,7 +401,7 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
         command.pre_exec(move || {
             // Copies above both targets first, so placing one never closes the other's source;
             // the copies and their targets lose close-on-exec.
-            let mut high = [0; 2];
+            let mut high = [0; 3];
             for (i, (fd, _)) in fds.iter().enumerate() {
                 high[i] = fcntl(*fd, F_DUPFD, 10);
                 if high[i] < 0 {
@@ -409,7 +417,8 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
         });
     }
     let mut child = command.spawn()?;
-    drop((server_events, server_commands));
+    drop((server_events, server_commands, server_telemetry));
+    crate::desktop::telemetry::publish(telemetry);
     crate::panel::agent::connect(events, commands);
     // One JSON line; the server reads fd 0 once and the pipe closes on drop.
     let mut stdin = child.stdin.take().unwrap();

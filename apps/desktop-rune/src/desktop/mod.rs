@@ -11,6 +11,8 @@ pub(crate) mod macos;
 pub mod cli;
 pub mod exposure;
 pub mod policy;
+#[cfg(unix)]
+pub mod telemetry;
 pub mod locale;
 pub mod recovery;
 #[cfg(unix)]

@@ -363,3 +363,20 @@ pub fn install_open_documents() {
         msg!(manager, c"setEventHandler:andSelector:forEventClass:andEventID:", handler => Id, sel(c"handleOpenDocuments:withReplyEvent:") => Id, CORE_EVENT => u32, OPEN_DOCUMENTS => u32; ());
     }
 }
+
+/// `[NSProcessInfo processInfo].thermalState`, as Electron's `getCurrentThermalState`.
+pub fn thermal_state() -> &'static str {
+    unsafe {
+        let info = msg!(class(c"NSProcessInfo"), c"processInfo"; Id);
+        if info.is_null() {
+            return "unknown";
+        }
+        match msg!(info, c"thermalState"; isize) {
+            0 => "nominal",
+            1 => "fair",
+            2 => "serious",
+            3 => "critical",
+            _ => "unknown",
+        }
+    }
+}
