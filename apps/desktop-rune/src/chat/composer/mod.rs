@@ -42,11 +42,22 @@ pub struct Draft {
     /// Records behind the prompt's context chips (`chips::pill_id`); a chip deleted from the
     /// prompt leaves its record unsent.
     pub contexts: Vec<Value>,
+    /// Other model options picked in this draft (speed, agent, switches), as `{id, value}`.
+    pub options: Vec<Value>,
 }
 
 impl Default for Draft {
     fn default() -> Draft {
-        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, effort: None, contexts: Vec::new() }
+        Draft {
+            edit: TextEdit::new(""),
+            attachments: Vec::new(),
+            model: None,
+            runtime_mode: None,
+            interaction_mode: None,
+            effort: None,
+            contexts: Vec::new(),
+            options: Vec::new(),
+        }
     }
 }
 
@@ -70,6 +81,12 @@ pub struct Ui {
     pub context: context::Hover,
     /// The queued run being rewritten in the composer: thread and run.
     editing: Option<(String, String)>,
+    /// The queued message's text when its edit began, to tell a changed edit apart.
+    editing_original: String,
+    /// The draft whose send was refused for its length; the message follows the prompt.
+    length_error: Option<String>,
+    /// Threads launched in the background, which stay closed when their launch lands.
+    background: Vec<String>,
     /// The prompt Up last recalled: the draft it went into, the message, and the text.
     recalled: Option<(String, String, String)>,
     /// Drafts on disk: read once connected, then the last written copy and the next write check.
@@ -128,19 +145,36 @@ pub fn editing_run(s: &App) -> Option<&str> {
 
 pub fn edit_queued(s: &mut App, thread: &str, run: &str, text: &str) {
     s.ui.chat.composer.editing = Some((thread.to_owned(), run.to_owned()));
+    s.ui.chat.composer.editing_original = text.to_owned();
     let d = draft_mut(s);
     d.edit = TextEdit::new(text);
     d.edit.set_caret(text.len());
     d.edit.focused = true;
 }
 
+/// Leaves a queued-message edit (recoverQueuedMessageEdit): a changed edit moves into the thread's
+/// draft when that is empty, so nothing typed is lost; otherwise the edit goes.
 pub fn cancel_queued_edit(s: &mut App) {
-    if editing_run(s).is_some() {
-        let key = active_key(s);
-        s.ui.chat.composer.drafts.remove(&key);
-        s.ui.chat.composer.editing = None;
-        draft_mut(s).edit.focused = true;
+    end_queued_edit(s, true);
+}
+
+fn end_queued_edit(s: &mut App, recover: bool) {
+    let Some(thread) = s.ui.chat.composer.editing.as_ref().map(|(thread, _)| thread.clone()) else { return };
+    if editing_run(s).is_none() {
+        return;
     }
+    let key = active_key(s);
+    let composer = &mut s.ui.chat.composer;
+    let edit = composer.drafts.remove(&key);
+    composer.editing = None;
+    let changed = edit.as_ref().is_some_and(|d| d.edit.text != composer.editing_original || !d.attachments.is_empty());
+    let thread_empty = composer.drafts.get(&thread).is_none_or(|d| d.edit.text.trim().is_empty() && d.attachments.is_empty());
+    if let Some(edit) = edit.filter(|_| recover && changed && thread_empty) {
+        let d = composer.drafts.entry(thread).or_default();
+        d.edit = edit.edit;
+        d.attachments = edit.attachments;
+    }
+    draft_mut(s).edit.focused = true;
 }
 
 /// How a message sent now is delivered (resolveComposerDispatchMode): an idle thread starts a
@@ -218,7 +252,8 @@ fn step_history(entries: &[(&str, String)], recalled: Option<(&str, &str)>, curr
 
 fn recall(s: &mut App, backward: bool) -> bool {
     let Some(thread) = ctx(s).thread.map(|t| data::s(t, "id").to_owned()) else { return false };
-    if editing_run(s).is_some() || has_attachments(s) {
+    let has_chips = draft(s).is_some_and(|d| d.contexts.iter().any(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))));
+    if editing_run(s).is_some() || has_attachments(s) || has_chips {
         return false;
     }
     let key = active_key(s);
@@ -278,16 +313,102 @@ fn selection_of(v: &Value) -> Option<(String, String)> {
     (!instance.is_empty()).then(|| (instance.to_string(), data::s(v, "model").to_string()))
 }
 
-/// The selected model's effort descriptor (`effort` or `reasoningEffort`) and its options,
-/// without the values a prompt keyword turns on (ultrathink).
+/// Option ids that name a model's reasoning control (REASONING_EFFORT_OPTION_IDS, `thinking`).
+const REASONING_IDS: [&str; 7] = ["reasoningEffort", "effort", "reasoning", "variant", "reasoning_effort", "thinking_level", "thinking"];
+
+/// The selected model's option descriptors.
+pub fn descriptors(s: &App) -> Vec<Value> {
+    let Some((instance, slug)) = selection(s) else { return Vec::new() };
+    provider(s, &instance)
+        .and_then(|p| p["models"].as_array()?.iter().find(|m| data::s(m, "slug") == slug)?["capabilities"]["optionDescriptors"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// isReasoningControl.
+fn is_reasoning(d: &Value) -> bool {
+    (data::s(d, "type") == "select" && data::s(d, "role") == "reasoning") || REASONING_IDS.contains(&data::s(d, "id"))
+}
+
+/// The model's reasoning levels: the first reasoning select among its options.
+pub fn effort_descriptor(s: &App) -> Option<Value> {
+    descriptors(s).into_iter().find(|d| data::s(d, "type") != "boolean" && is_reasoning(d) && d["options"].is_array())
+}
+
+/// The selected model's effort descriptor id and its options, without the values a prompt
+/// keyword turns on (ultrathink).
 pub fn effort_options(s: &App) -> Option<(String, Vec<Value>)> {
-    let (instance, slug) = selection(s)?;
-    let model = provider(s, &instance)?["models"].as_array()?.iter().find(|x| data::s(x, "slug") == slug)?.clone();
-    let descriptors = model["capabilities"]["optionDescriptors"].as_array()?;
-    let d = descriptors.iter().find(|d| matches!(data::s(d, "id"), "effort" | "reasoningEffort"))?;
+    let d = effort_descriptor(s)?;
     let injected: Vec<&str> = d["promptInjectedValues"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let options = d["options"].as_array()?.iter().filter(|o| !injected.contains(&data::s(o, "id"))).cloned().collect();
-    Some((data::s(d, "id").to_owned(), options))
+    Some((data::s(&d, "id").to_owned(), options))
+}
+
+/// The footer's speed control (splitSpeed): Codex service tiers or a fast-mode switch.
+pub fn speed_descriptor(s: &App) -> Option<Value> {
+    let codex = selection(s).and_then(|(i, _)| provider(s, &i).map(|p| data::s(p, "driver") == "codex")).unwrap_or(false);
+    descriptors(s).into_iter().find(|d| {
+        (codex && data::s(d, "id") == "serviceTier" && data::s(d, "type") == "select") || (data::s(d, "id") == "fastMode" && data::s(d, "type") == "boolean")
+    })
+}
+
+/// The options the effort column lists below the levels: everything but the levels and speed.
+pub fn column_options(s: &App) -> Vec<Value> {
+    let effort = effort_descriptor(s).map(|d| data::s(&d, "id").to_owned());
+    let speed = speed_descriptor(s).map(|d| data::s(&d, "id").to_owned());
+    descriptors(s)
+        .into_iter()
+        .filter(|d| {
+            let id = data::s(d, "id");
+            Some(id) != effort.as_deref() && Some(id) != speed.as_deref() && matches!(data::s(d, "type"), "boolean" | "select")
+        })
+        .collect()
+}
+
+/// A descriptor's value for the next message: the draft's pick, the thread's, what the provider
+/// reports, else the default choice (or off).
+pub fn option_value(s: &App, d: &Value) -> Value {
+    let id = data::s(d, "id");
+    if let Some(v) = draft(s).and_then(|draft| draft.options.iter().find(|o| data::s(o, "id") == id)).map(|o| o["value"].clone()) {
+        return v;
+    }
+    if let Some(v) = source_options(s).into_iter().find(|o| data::s(o, "id") == id).map(|o| o["value"].clone()) {
+        return v;
+    }
+    if !d["currentValue"].is_null() {
+        return d["currentValue"].clone();
+    }
+    if data::s(d, "type") == "boolean" {
+        return Value::Bool(false);
+    }
+    d["options"].as_array().and_then(|o| o.iter().find(|o| o["isDefault"] == true)).map_or(Value::Null, |o| o["id"].clone())
+}
+
+pub fn set_option(s: &mut App, id: &str, value: Value) {
+    let d = draft_mut(s);
+    d.options.retain(|o| data::s(o, "id") != id);
+    d.options.push(json!({"id": id, "value": value}));
+}
+
+/// The level `step` places away from `current`, stopping at either end.
+fn stepped(ids: &[String], current: Option<&str>, step: isize) -> Option<String> {
+    let at = current.and_then(|c| ids.iter().position(|i| i == c))?;
+    ids.get(at.checked_add_signed(step)?).cloned()
+}
+
+/// `composer.increaseEffort` / `composer.decreaseEffort` (stepReasoningEffort).
+fn step_effort(s: &mut App, step: isize) {
+    let Some((_, options)) = effort_options(s) else { return };
+    let ids: Vec<String> = options.iter().map(|o| data::s(o, "id").to_owned()).collect();
+    if let Some(next) = stepped(&ids, effort(s).as_deref(), step) {
+        draft_mut(s).effort = Some(next);
+    }
+}
+
+/// isClaudeUltrathinkPrompt: the word on its own, any case.
+fn mentions_ultrathink(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    lower.match_indices("ultrathink").any(|(i, m)| !word(lower[..i].chars().next_back()) && !word(lower[i + m.len()..].chars().next()))
 }
 
 /// The options the selection already carries: the thread's (or, on a home draft, the source the
@@ -311,14 +432,24 @@ pub fn effort(s: &App) -> Option<String> {
     if let Some(e) = draft(s).and_then(|d| d.effort.clone()).filter(|e| options.iter().any(|o| data::s(o, "id") == e)) {
         return Some(e);
     }
+    let listed = |v: &str| options.iter().any(|o| data::s(o, "id") == v);
     let thread = source_options(s).into_iter().find(|o| data::s(o, "id") == id).and_then(|o| o["value"].as_str().map(str::to_owned));
-    thread.or_else(|| options.iter().find(|o| o["isDefault"] == true).map(|o| data::s(o, "id").to_owned()))
+    let reported = effort_descriptor(s).and_then(|d| d["currentValue"].as_str().filter(|v| listed(*v)).map(str::to_owned));
+    thread.or(reported).or_else(|| options.iter().find(|o| o["isDefault"] == true).map(|o| data::s(o, "id").to_owned()))
 }
 
 /// The modelSelection to send: the model plus its options, a picked effort replacing the thread's.
 fn model_selection(s: &App) -> Option<Value> {
     let (instance, model) = selection(s)?;
     let mut options = source_options(s);
+    let known: Vec<String> = descriptors(s).iter().map(|d| data::s(d, "id").to_owned()).collect();
+    for picked in draft(s).map(|d| d.options.clone()).unwrap_or_default() {
+        let id = data::s(&picked, "id").to_owned();
+        if known.contains(&id) {
+            options.retain(|o| data::s(o, "id") != id);
+            options.push(picked);
+        }
+    }
     if let (Some(e), Some((id, _))) = (draft(s).and_then(|d| d.effort.clone()), effort_options(s)) {
         options.retain(|o| data::s(o, "id") != id);
         options.push(json!({"id": id, "value": e}));
@@ -393,6 +524,157 @@ pub const RUNTIME_MODES: [(&str, &str, &str, &rune::Icon); 4] = [
     ("full-access", "Full access", "Allow commands and edits without prompts.", &icons::SHIELD_OFF),
 ];
 
+/// A runtime mode the composer offers, and why an administrator's policy refuses it.
+#[derive(Clone)]
+pub struct ModeOption {
+    pub mode: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub icon: &'static rune::Icon,
+    pub disabled: Option<String>,
+}
+
+/// resolveCompatibleRuntimeMode + resolveRuntimeModeOptions: the provider's modes (all when it
+/// names none), those above the policy's `maxRuntimeMode` disabled with the reason.
+fn mode_options(supported: &[&str], policy: &Value) -> Vec<ModeOption> {
+    let ceiling = RUNTIME_MODES.iter().position(|m| m.0 == data::s(&policy["limits"], "maxRuntimeMode"));
+    RUNTIME_MODES
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| supported.is_empty() || supported.contains(&m.0))
+        .map(|(rank, &(mode, label, description, icon))| ModeOption {
+            mode,
+            label,
+            description,
+            icon,
+            disabled: ceiling.filter(|c| rank > *c).map(|c| format!("{} limits threads to {}.", data::s(policy, "organization"), RUNTIME_MODES[c].1)),
+        })
+        .collect()
+}
+
+pub fn runtime_mode_options(s: &App) -> Vec<ModeOption> {
+    let supported: Vec<&str> = selection(s)
+        .and_then(|(i, _)| provider(s, &i))
+        .and_then(|p| p["supportedRuntimeModes"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let policy = s.state().config.as_ref().map_or(&Value::Null, |c| &c["managedPolicy"]);
+    mode_options(&supported, policy)
+}
+
+/// The mode the thread really runs in: its own when the provider supports it, else the first
+/// the provider does.
+pub fn effective_runtime_mode(s: &App) -> String {
+    let mode = runtime_mode(s);
+    match runtime_mode_options(s).first() {
+        Some(first) if !runtime_mode_options(s).iter().any(|o| o.mode == mode) => first.mode.to_owned(),
+        _ => mode,
+    }
+}
+
+/// Why Send is refused (sendDisabledReason): the thread's mode is above the policy's ceiling.
+fn send_block(s: &App) -> Option<String> {
+    let mode = effective_runtime_mode(s);
+    runtime_mode_options(s).into_iter().find(|o| o.mode == mode).and_then(|o| o.disabled)
+}
+
+/// No model can be picked: the catalog loaded with no provider to send to.
+fn no_provider(s: &App) -> bool {
+    s.state().config.is_some() && selection(s).is_none_or(|(i, _)| provider(s, &i).is_none())
+}
+
+/// A new-thread draft with no project to start in.
+fn project_required(s: &App) -> bool {
+    !matches!(s.frame_route(), Route::Thread(_)) && ctx(s).project.is_none()
+}
+
+fn disconnected(s: &App) -> bool {
+    matches!(s.state().conn, s5_net::Conn::Closed(_))
+}
+
+/// The driver a started thread is bound to (deriveLockedProvider), unless its provider session
+/// can hand the conversation to another.
+pub fn locked_driver(s: &App) -> Option<String> {
+    let t = ctx(s).thread?;
+    let started = !data::s(t, "latestRunId").is_empty() || t["itemCount"].as_u64().is_some_and(|n| n > 0);
+    if !started {
+        return None;
+    }
+    if s.state().thread_views.get(data::s(t, "id")).is_some_and(|v| crate::chat::timeline::queue::supports_handoff(&v.projection)) {
+        return None;
+    }
+    // A provider missing from the catalog still binds the thread to its own driver.
+    let driver = |instance: &str| provider(s, instance).map(|p| data::s(p, "driver").to_owned()).or_else(|| (!instance.is_empty()).then(|| instance.to_owned()));
+    let session = provider(s, data::s(t, "providerInstanceId")).map(|p| data::s(p, "driver").to_owned());
+    session
+        .or_else(|| driver(data::s(&t["modelSelection"], "instanceId")))
+        .or_else(|| draft(s).and_then(|d| d.model.as_ref()).and_then(|(i, _)| driver(i.as_str())))
+}
+
+/// deriveResumableRunId: the latest run that ran, when it was interrupted or stopped at a usage
+/// limit.
+fn resumable_run(p: &Value) -> Option<String> {
+    let runs = p["runs"].as_array()?;
+    let end = |r: &Value| data::ts(r, "completedAt").unwrap_or(i64::MAX);
+    let ran = |r: &&Value| data::s(r, "status") != "queued" && !(data::s(r, "status") == "cancelled" && r["startedAt"].is_null());
+    let run = runs.iter().filter(ran).max_by_key(|r| (end(*r), r["ordinal"].as_i64().unwrap_or(0)))?;
+    let limited = data::s(run, "status") == "failed"
+        && crate::chat::timeline::error_banner::runtime_error(p).is_some_and(|e| e.class.as_deref() == Some("usage_limit"));
+    (data::s(run, "status") == "interrupted" || limited).then(|| data::s(run, "id").to_owned())
+}
+
+fn held_queue(p: &Value) -> bool {
+    p["runs"].as_array().into_iter().flatten().any(|r| data::s(r, "status") == "queued" && r["queueHeld"] == true)
+}
+
+/// The Resume action shows on an idle, resumable thread whose draft is empty (showResumeAction).
+fn show_resume(s: &App) -> bool {
+    let Some(t) = ctx(s).thread else { return false };
+    let Some(view) = s.state().thread_views.get(data::s(t, "id")) else { return false };
+    let empty = draft(s).is_none_or(|d| d.edit.text.trim().is_empty() && d.attachments.is_empty() && d.contexts.is_empty());
+    empty && editing_run(s).is_none() && !running(s) && (resumable_run(&view.projection).is_some() || held_queue(&view.projection))
+}
+
+/// useComposerResume: continues the interrupted run, then releases the turns held behind it.
+fn resume(s: &mut App) {
+    let Some(id) = ctx(s).thread.map(|t| data::s(t, "id").to_owned()) else { return };
+    let Some(view) = s.state().thread_views.get(&id) else { return };
+    let (run, held) = (resumable_run(&view.projection), held_queue(&view.projection));
+    if run.is_none() && !held {
+        return;
+    }
+    let model = model_selection(s);
+    crate::chat::timeline::error_banner::set_local(s, &id, None);
+    let Some(net) = s.src.net() else { return };
+    let mut requests = Vec::new();
+    if let Some(run) = run {
+        let mut cmd = json!({
+            "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
+            "threadId": id, "messageId": s5_net::uuid(), "manualContinuationOfRunId": run,
+            "text": "Continue where you left off.", "attachments": [], "dispatchMode": {"type": "start_immediately"},
+        });
+        if let Some(m) = model {
+            cmd["modelSelection"] = m;
+        }
+        requests.push(net.dispatch(cmd));
+    }
+    if held {
+        requests.push(net.dispatch(json!({"type": "queue.resume", "commandId": s5_net::uuid(), "threadId": id})));
+    }
+    for request in requests {
+        watch(s, request, &id);
+    }
+}
+
+/// The send in flight for the open draft: its files uploading, or its thread launching.
+fn send_busy(s: &App) -> bool {
+    let key = active_key(s);
+    let c = &s.ui.chat.composer;
+    c.uploads.iter().any(|u| u.outgoing.key == key) || c.sends.iter().any(|(r, o)| o.key == key && c.launches.iter().any(|(l, _)| l == r))
+}
+
 /// The mode new threads start in (`defaultRuntimeMode`); the footer names any other.
 fn default_runtime_mode(s: &App) -> String {
     s.state().config.as_ref().map(|c| data::s(&c["settings"], "defaultRuntimeMode").to_string()).filter(|m| !m.is_empty()).unwrap_or_else(|| "full-access".into())
@@ -435,8 +717,45 @@ fn rewinding(s: &App) -> bool {
     matches!(s.frame_route(), Route::Thread(id) if crate::chat::timeline::actions::rewinding(s, id))
 }
 
+/// getComposerPromptLengthValidationMessage: what the provider accepts in one turn.
+const MAX_PROMPT_CHARS: usize = 120_000;
+
+fn prompt_length_message(text: &str) -> Option<String> {
+    let over = text.trim().encode_utf16().count().checked_sub(MAX_PROMPT_CHARS).filter(|n| *n > 0)?;
+    let unit = if over == 1 { "character" } else { "characters" };
+    Some(format!(
+        "Prompt is {} {unit} over the {}-character limit. Shorten or split it before sending.",
+        context::thousands(over as u64),
+        context::thousands(MAX_PROMPT_CHARS as u64)
+    ))
+}
+
+/// The length message under the editor, once a send was refused for it; it clears as the prompt
+/// shrinks back under the limit.
+fn length_error(s: &App) -> Option<String> {
+    if s.ui.chat.composer.length_error.as_deref() != Some(active_key(s).as_str()) {
+        return None;
+    }
+    let d = draft(s)?;
+    prompt_length_message(&chips::outgoing(&d.edit, &d.contexts).0)
+}
+
+/// parseStandaloneComposerSlashCommand: `/plan` or `/default` sent alone switches the mode.
+fn standalone_mode(text: &str) -> Option<&'static str> {
+    match text.trim().to_lowercase().as_str() {
+        "/plan" => Some("plan"),
+        "/default" => Some("default"),
+        _ => None,
+    }
+}
+
 fn send(s: &mut App, alternate: bool) {
-    if rewinding(s) {
+    send_with(s, alternate, false);
+}
+
+/// Sends the draft; `background` launches a new thread without opening it (composer.sendBackground).
+fn send_with(s: &mut App, alternate: bool, background: bool) {
+    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) {
         return;
     }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
@@ -448,7 +767,7 @@ fn send(s: &mut App, alternate: bool) {
             let request = net.dispatch(json!({"type": "queued-run.edit", "commandId": s5_net::uuid(), "threadId": thread, "runId": run, "text": text}));
             s.ui.chat.composer.sends.push((request, Outgoing { key: thread, draft: Value::Null }));
         }
-        cancel_queued_edit(s);
+        end_queued_edit(s, false);
         return;
     }
     if crate::chat::details::run_on::holds_send(s) || fanout::send(s) {
@@ -460,6 +779,15 @@ fn send(s: &mut App, alternate: bool) {
     let snapshot = stored_draft(d);
     let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
     let mut text = text.trim().to_string();
+    if prompt_length_message(&text).is_some() {
+        s.ui.chat.composer.length_error = Some(key);
+        return;
+    }
+    if let Some(mode) = standalone_mode(&text).filter(|_| supports_plan(s) && d.attachments.is_empty() && contexts.is_empty()) {
+        set_interaction_mode(s, mode);
+        draft_mut(s).edit.clear();
+        return;
+    }
     // A file that can no longer be sent keeps the draft as it is and says why.
     let uploads = match d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).map(|p| attachments::stage(p)).collect::<Result<Vec<_>, _>>() {
         Ok(uploads) => uploads,
@@ -510,7 +838,7 @@ fn send(s: &mut App, alternate: bool) {
         return;
     }
     let model = model_selection(s);
-    let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
+    let (runtime, interaction) = (effective_runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
@@ -555,6 +883,10 @@ fn send(s: &mut App, alternate: bool) {
         }
     };
     let launch = launch.then(|| thread_id.clone());
+    if background && launch.is_some() {
+        s.ui.chat.composer.background.push(thread_id.clone());
+    }
+    s.ui.chat.composer.length_error = None;
     crate::chat::timeline::error_banner::set_local(s, &key, None);
     let outgoing = Outgoing { key, draft: snapshot };
     let Some(net) = s.src.net() else { return };
@@ -587,13 +919,25 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
     true
 }
 
-/// Queues files in the open route's draft; the route's banner says why one was refused.
+/// Queues files in the open route's draft; the route's banner says why one was refused. A folder
+/// becomes an @ mention instead, relative to the workspace it sits in.
 fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
     if editing_run(s).is_some() {
         return;
     }
     let key = active_key(s);
-    let error = attachments::intake(&mut draft_mut(s).attachments, paths);
+    let root = menu::search_root(s);
+    let (folders, files): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| std::path::Path::new(p).is_dir());
+    let d = draft_mut(s);
+    for folder in folders {
+        let path = std::path::Path::new(&folder);
+        let relative = root.as_deref().and_then(|r| path.strip_prefix(r).ok()).map(|p| p.display().to_string()).filter(|p| !p.is_empty());
+        let name = path.file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
+        d.edit.insert_pill(relative.unwrap_or_else(|| folder.clone()), &name);
+        d.edit.insert(" ");
+        d.edit.focused = true;
+    }
+    let error = attachments::intake(&mut d.attachments, files);
     crate::chat::timeline::error_banner::set_local(s, &key, error.as_deref());
 }
 
@@ -727,9 +1071,14 @@ pub fn poll(s: &mut App) -> bool {
         if fanout::settle(&mut composer.fanout, &outgoing.key, outcome) {
             continue;
         }
+        // A background launch stays where the user is.
+        let quiet = launch.as_ref().is_some_and(|id| composer.background.contains(id));
+        if let Some(id) = &launch {
+            composer.background.retain(|b| b != id);
+        }
         match (reply, launch) {
-            (Ok(v), Some(thread_id)) => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
-            (Ok(_), None) => {}
+            (Ok(v), Some(thread_id)) if !quiet => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
+            (Ok(_), _) => {}
             (Err(e), _) => failed.push((outgoing, e)),
         }
         changed = true;
@@ -758,7 +1107,7 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
     let mut out = serde_json::Map::new();
     for (key, d) in drafts {
         let blank = d.edit.text.trim().is_empty() && d.attachments.is_empty();
-        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none() && d.effort.is_none()) {
+        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none() && d.effort.is_none() && d.options.is_empty()) {
             continue;
         }
         out.insert(key.clone(), stored_draft(d));
@@ -772,6 +1121,7 @@ fn stored_draft(d: &Draft) -> Value {
     json!({
         "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
         "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
+        "options": d.options,
     })
 }
 
@@ -825,6 +1175,7 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 interaction_mode: text(&d["interactionMode"]),
                 effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
+                options: d["options"].as_array().cloned().unwrap_or_default(),
             },
         );
     }
@@ -933,6 +1284,9 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             let needs_mod = shortcut == "mod-enter" || (shortcut == "mod-enter-multiline" && text.contains('\n'));
             if plain && needs_mod {
                 draft_mut(s).edit.insert("\n");
+            } else if e.mods.cmd && !matches!(s.frame_route(), Route::Thread(_)) {
+                // composer.sendBackground: a new thread starts without leaving the draft.
+                send_with(s, false, true);
             } else {
                 // Mod+Enter while a turn runs is the alternate follow-up (steer <-> queue).
                 send(s, e.mods.cmd);
@@ -968,8 +1322,21 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         picker::toggle(s);
         return true;
     }
-    if crate::panel::shortcut(s, e, "composer.mode") && supports_plan(s) {
-        toggle_plan(s);
+    // composer.mode opens Permissions: the footer chip's menu, else the picker's.
+    if crate::panel::shortcut(s, e, "composer.mode") {
+        if permissions_chip_shown(s) {
+            s.ui.chat.composer.permissions_open = true;
+        } else {
+            picker::open_permissions(s);
+        }
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "composer.increaseEffort") {
+        step_effort(s, 1);
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "composer.decreaseEffort") {
+        step_effort(s, -1);
         return true;
     }
     // A pending question has no prompt to set aside, so the shortcut only shows the stash.
@@ -988,6 +1355,15 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
 fn placeholder(s: &App) -> &'static str {
     let pending = approvals(s);
     if pending.is_empty() {
+        if plan::follow_up(s).is_some() {
+            return "Add feedback to refine the plan, or leave this blank to implement it";
+        }
+        if project_required(s) {
+            return "Choose a project above to start a thread";
+        }
+        if no_provider(s) {
+            return "Enable a provider in Settings to send a message";
+        }
         PLACEHOLDER
     } else if crate::chat::timeline::requests::takes_feedback(&pending.iter().collect::<Vec<_>>()) {
         "Send feedback to decline this request"
@@ -1007,6 +1383,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let field = if let Some(q) = question::editor(s).filter(|q| q.choice_only) {
         // The web disables the field; with nothing to type into, digits pick the options.
         text(q.placeholder).font(theme::TEXT_SM.lh(22.75)).color(t.c.placeholder).w_full()
+    } else if project_required(s) {
+        text(placeholder(s)).font(theme::TEXT_SM.lh(22.75)).color(t.c.placeholder).opacity(0.64).w_full().key("composer-editor")
     } else if let Some(q) = question::editor(s) {
         let key = q.key.clone();
         text_input(&q.edit, theme::TEXT_SM.lh(22.75))
@@ -1040,7 +1418,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
                 menu::refresh(s);
             })
     };
-    let editor = col().w_full().px(16.0).pt(16.0).child(auto_grow(field, 2, 8));
+    let mut editor = col().w_full().px(16.0).pt(16.0).child(auto_grow(field, 2, 8));
+    if let Some(message) = length_error(s) {
+        editor = editor.child(text(message).font(theme::TEXT_XS).color(t.c.destructive).wrap().w_full().pt(8.0).role("alert"));
+    }
 
     let mut body = col()
         .key("composer")
@@ -1083,7 +1464,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut layers = picker::view(s, cx, t);
     if s.ui.chat.composer.permissions_open {
-        let menu = picker::runtime_menu(t, &runtime_mode(s), "composer-permissions-menu", "composer-permissions", rune::Align::Start);
+        let menu = picker::runtime_menu(t, &runtime_mode_options(s), &effective_runtime_mode(s), "composer-permissions-menu", "composer-permissions", rune::Align::Start);
         layers.push(menu.modal(true, |s: &mut App| s.ui.chat.composer.permissions_open = false));
     }
     layers.extend(chip_details(s, t));
@@ -1122,16 +1503,107 @@ fn composer_outline(t: &T) -> Color {
     if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.08) }
 }
 
+/// The permissions chip shows only while the thread differs from the default (accessDisplay).
+fn permissions_chip_shown(s: &App) -> bool {
+    let mode = effective_runtime_mode(s);
+    !mode.is_empty() && mode != default_runtime_mode(s)
+}
+
+/// The model chip's name: the model's short name where it has one.
+fn chip_name(s: &App, instance: &str, model: &str) -> String {
+    provider(s, instance)
+        .and_then(|p| p["models"].as_array()?.iter().find(|m| data::s(m, "slug") == model).map(|m| data::s(m, "shortName").to_owned()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| model_name(s, instance, model))
+}
+
+/// The label of `d`'s chosen option (getProviderOptionCurrentLabel).
+fn option_label(s: &App, d: &Value) -> Option<String> {
+    let value = option_value(s, d);
+    d["options"].as_array()?.iter().find(|o| o["id"] == value).map(|o| data::s(o, "label").to_owned()).filter(|l| !l.is_empty())
+}
+
+/// What follows the model name on its chip (describeComposerEffort): the effort word or bars,
+/// a bolt for Fast, and the context window.
+fn chip_suffix(s: &App, t: &T) -> Vec<El> {
+    let mut out = Vec::new();
+    let prompt = draft(s).map(|d| d.edit.text.as_str()).unwrap_or("");
+    let injected = effort_descriptor(s).is_some_and(|d| d["promptInjectedValues"].as_array().is_some_and(|v| v.iter().any(|x| x == "ultrathink")));
+    let word = |label: String| text(label).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0);
+    if injected && mentions_ultrathink(prompt) {
+        out.push(word("Ultrathink".to_owned()));
+    } else {
+        // The level's name, or bars when Appearance's effort display says so; named levels such
+        // as Max keep their name.
+        let bars_setting = crate::settings::value(s, "effortDisplay") == "bars";
+        let effort = effort(s).and_then(|e| {
+            let (_, options) = effort_options(s)?;
+            let label = options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())?;
+            Some(match effort_bars(&options, &e).filter(|_| bars_setting) {
+                Some((count, filled)) => effort_glyph(count, filled, t.c.muted_foreground),
+                None => word(label),
+            })
+        });
+        out.extend(effort);
+    }
+    let fast = speed_descriptor(s).is_some_and(|d| {
+        if data::s(&d, "type") == "boolean" { option_value(s, &d) == true } else { option_label(s, &d).is_some_and(|l| l == "Fast" || l == "Ultrafast") }
+    });
+    if fast {
+        out.push(icon(&icons::ZAP, 14.0).color(t.c.muted_foreground));
+    }
+    if let Some(window) = descriptors(s).iter().find(|d| data::s(d, "id") == "contextWindow").and_then(|d| option_label(s, d)) {
+        out.push(text(window).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().max_w(96.0));
+    }
+    out
+}
+
+/// Without a provider to send to, the model chip's place offers provider setup.
+fn provider_unavailable(s: &App, t: &T) -> El {
+    let setup = providers(s)
+        .iter()
+        .any(|p| data::s(p, "driver") == "antigravity" || p["setup"]["canAuthenticate"] == true || p["setup"]["canInstall"] == true);
+    let label = if setup { "Open provider settings" } else { "No provider available" };
+    let control = control(t, &icons::CIRCLE_ALERT, label, t.c.foreground.alpha_mul(0.8)).key("composer-provider-unavailable").role("button");
+    if setup { control.on_press(|s: &mut App| s.navigate(Route::Settings("providers".into()))) } else { control.opacity(0.64) }
+}
+
+/// [attach] … [model][permissions][Build/Plan] [meter][send] (ChatComposer's footer).
 fn footer(s: &App, t: &T) -> El {
-    let mut left = row().gap(4.0).center_y().child(
-        icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
-    );
-    // The permissions chip shows only while the thread differs from the default (accessDisplay).
-    let mode = runtime_mode(s);
-    if !mode.is_empty() && mode != default_runtime_mode(s) {
+    let attach = icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx));
+    let mut controls = row().gap(2.0).center_y().shrink().min_w(0.0);
+    if no_provider(s) {
+        controls = controls.child(provider_unavailable(s, t));
+    } else if let Some((instance, model)) = selection(s) {
+        let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
+        // Several models read "A, B, N more", every name in the tooltip (ProviderModelPicker).
+        let multiple = fanout::chip_label(s);
+        let name = multiple.as_ref().map_or_else(|| chip_name(s, &instance, &model), |(shown, _)| shown.clone());
+        let mut chip = row()
+            .key("composer-model-chip")
+            .h(28.0)
+            .px(9.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .label(multiple.as_ref().map_or_else(|| model_name(s, &instance, &model), |(_, all)| all.clone()))
+            .child(provider_icon(t, &driver, 16.0))
+            .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+            .children(if multiple.is_some() { Vec::new() } else { chip_suffix(s, t) })
+            .on_press(|s: &mut App| picker::toggle(s));
+        if let Some((_, all)) = multiple {
+            chip = chip.help(all);
+        }
+        controls = controls.child(chip);
+    }
+    if permissions_chip_shown(s) {
+        let mode = effective_runtime_mode(s);
         let (_, label, description, glyph) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[0]);
-        left = left.child(
+        controls = controls.child(
             control(t, glyph, label, t.c.foreground.alpha_mul(0.8))
+                .pl(6.0)
                 .key("composer-permissions")
                 .role("button")
                 .label(format!("Permissions: {label}"))
@@ -1145,45 +1617,10 @@ fn footer(s: &App, t: &T) -> El {
         } else {
             (&icons::BOT, "Build", "Default mode. Click to enter plan mode")
         };
-        left = left.child(control(t, glyph, label, t.c.foreground.alpha_mul(0.8)).key("composer-interaction-mode").help(help).on_press(toggle_plan));
+        controls = controls.child(control(t, glyph, label, t.c.foreground.alpha_mul(0.8)).key("composer-interaction-mode").help(help).on_press(toggle_plan));
     }
-    let mut right = row().h(28.0).gap(8.0).center_y();
-    if let Some((instance, model)) = selection(s) {
-        let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
-        let multiple = fanout::chip_label(s);
-        let name = multiple.as_ref().map_or_else(|| model_name(s, &instance, &model), |(shown, _)| shown.clone());
-        // ComposerModelEffort: the level's name, or bars when Appearance's effort display says
-        // so; named levels such as Max keep their name.
-        let bars_setting = crate::settings::value(s, "effortDisplay") == "bars";
-        let effort = effort(s).and_then(|e| {
-            let (_, options) = effort_options(s)?;
-            let label = options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())?;
-            Some(match effort_bars(&options, &e).filter(|_| bars_setting) {
-                Some((count, filled)) => effort_glyph(count, filled, t.c.muted_foreground),
-                None => text(label).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0),
-            })
-        });
-        let mut chip = row()
-            .key("composer-model-chip")
-            .h(28.0)
-            .px(9.0)
-            .gap(6.0)
-            .center_y()
-            .radius(theme::layout::CONTROL_RADIUS)
-            .hover(t.c.accent)
-            .cursor(Cursor::Pointer)
-            .label(name.clone())
-            .child(provider_icon(t, &driver, 16.0))
-            .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
-            .children(effort.filter(|_| multiple.is_none()))
-            .on_press(|s: &mut App| picker::toggle(s));
-        if let Some((_, all)) = multiple {
-            chip = chip.help(all);
-        }
-        right = right.child(chip);
-    }
-    right = right.children(context::meter(s, t)).child(primary_action(s, t));
-    row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
+    let right = row().h(28.0).gap(8.0).center_y().children(context::meter(s, t)).child(primary_action(s, t));
+    row().w_full().px(8.0).pt(10.0).gap(8.0).center_y().child(attach).child(spacer()).child(controls).child(right)
 }
 
 /// resolveEffortGlyph over the selectable levels: `(bars, filled)`, or `None` when the level is
@@ -1214,26 +1651,31 @@ fn effort_glyph(count: usize, filled: usize, color: Color) -> El {
 
 fn primary_action(s: &App, t: &T) -> El {
     if question::active(s).is_some() {
-        let stop = running(s).then(|| stop_button(t));
+        let stop = running(s).then(|| stop_button(t, 28.0));
         if let Some(actions) = question::actions(s, t, stop) {
             return actions;
         }
     }
     let typed = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty());
-    if let Some(action) = plan::action(s, t, typed) {
-        return action;
+    let resume = show_resume(s);
+    // With nothing typed, Resume wins over Implement (showPlanFollowUpPrompt && !canResume).
+    if typed || !resume {
+        if let Some(action) = plan::action(s, t, typed) {
+            return action;
+        }
     }
     let sendable = !rewinding(s) && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
-    if running(s) && !sendable {
-        return stop_button(t);
+    if running(s) && !sendable && editing_run(s).is_none() {
+        return stop_button(t, 32.0);
     }
-    send_button(s, t, sendable)
+    send_button(s, t, sendable, resume)
 }
 
-fn stop_button(t: &T) -> El {
+/// The red stop button; 28 points beside a pending question's actions.
+fn stop_button(t: &T, size: f32) -> El {
     el()
         .key("composer-stop")
-        .size(32.0, 32.0)
+        .size(size, size)
         .center()
         .radius(radius::FULL)
         .fill(t.c.destructive.alpha_mul(0.9))
@@ -1245,30 +1687,59 @@ fn stop_button(t: &T) -> El {
         .on_press(stop)
 }
 
-fn send_button(s: &App, t: &T, sendable: bool) -> El {
+/// The send button (ComposerPrimaryActions): its glyph and tooltip follow what a click does.
+fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     let editing = editing_run(s).is_some();
     let (mode, alternate) = (mode_for(s, false), mode_for(s, true));
-    let label = match (editing, mode) {
-        (true, _) => "Update queued message",
-        (_, "queue") => "Queue message",
-        (_, "steer") => "Steer message",
+    let busy = send_busy(s);
+    let label = match (resume, editing, mode) {
+        (true, ..) => "Resume thread",
+        (_, true, _) => "Update queued message",
+        (.., "queue") => "Queue message",
+        (.., "steer") => "Steer message",
         _ => "Submit message",
     };
-    // Mod-click sends the other way while a turn runs (ComposerPrimaryActions).
-    let help = if !editing && mode != alternate {
-        let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-        format!("Click to {mode}, {key}-click to {alternate}")
-    } else {
-        label.to_owned()
-    };
-    let (bg, fg) = if sendable { (t.c.message_action, t.c.message_action_foreground) } else { (t.c.foreground.alpha_mul(0.12), t.c.muted_foreground) };
-    let mut b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(label).child(icon(&icons::ARROW_UP, 14.0).color(fg));
-    if sendable {
-        b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(help).on_press_tx(|s: &mut App, tx| send(s, tx.mods().cmd));
+    let status = if disconnected(s) || no_provider(s) || project_required(s) {
+        Some("Environment disconnected".to_owned())
+    } else if let Some(reason) = send_block(s) {
+        Some(reason)
     } else if rewinding(s) {
-        b = b.help("Rewinding conversation");
+        Some("Rewinding conversation".to_owned())
+    } else if busy {
+        Some(if editing { "Updating queued message" } else { "Submitting message" }.to_owned())
+    } else {
+        None
+    };
+    // Mod-click (or the sendAlternate shortcut) sends the other way while a turn runs.
+    let help = status.clone().unwrap_or_else(|| {
+        if !resume && !editing && mode != alternate {
+            let key = if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" };
+            let shortcut = crate::shell::palette::shortcut_label(s, "composer.sendAlternate");
+            let or = if shortcut.is_empty() { String::new() } else { format!(" or {shortcut}") };
+            format!("Click to {mode}, {key}-click{or} to {alternate}")
+        } else {
+            label.to_owned()
+        }
+    });
+    let enabled = !busy && status.is_none() && (sendable || resume);
+    let (bg, fg) = if enabled { (t.c.message_action, t.c.message_action_foreground) } else { (t.c.foreground.alpha_mul(0.12), t.c.muted_foreground) };
+    let glyph = if busy {
+        crate::kit::Spinner::new().size("sm").build(&crate::kit::theme(t))
+    } else if resume {
+        icon(&icons::PLAY, 16.0).color(fg)
+    } else if editing {
+        icon(&icons::CHECK, 16.0).color(fg)
+    } else if running(s) {
+        icon(if mode == "queue" { &icons::LIST_PLUS } else { &icons::CORNER_UP_RIGHT }, 16.0).color(fg)
+    } else {
+        icon(&icons::ARROW_UP, 14.0).color(fg)
+    };
+    let b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(status.unwrap_or_else(|| label.to_owned())).help(help).child(glyph);
+    match (enabled, resume) {
+        (false, _) => b,
+        (true, true) => b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).on_press(self::resume),
+        (true, false) => b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).on_press_tx(|s: &mut App, tx| send(s, tx.mods().cmd)),
     }
-    b
 }
 
 /// A chip per queued file (ComposerAttachmentStrip): its name and size, or in red why it cannot
@@ -1461,9 +1932,33 @@ fn set_text(s: &mut App, text: &str) {
     d.edit.focused = true;
 }
 
+/// Changes the open thread's projection in the fixture.
+fn patch_projection(s: &mut App, patch: impl FnOnce(&mut Value)) {
+    let Route::Thread(id) = s.route.clone() else { return };
+    if let data::Source::Fixture(state) = &mut s.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        patch(&mut v.projection);
+    }
+}
+
+/// Changes the fixture's server config.
+fn patch_config(s: &mut App, patch: impl FnOnce(&mut Value)) {
+    if let data::Source::Fixture(state) = &mut s.src
+        && let Some(config) = state.config.as_mut()
+    {
+        patch(config);
+    }
+}
+
+fn meter_on(s: &mut App) {
+    s.client_settings.values.insert("contextWindowMeterEnabled".into(), json!(true));
+}
+
 /// The showcase thread's live turn reporting `used` of a 200k window.
 fn context_scene(s: &mut App, used: f64) {
     on_replay_showcase(s);
+    meter_on(s);
     let Route::Thread(id) = s.route.clone() else { return };
     if let data::Source::Fixture(state) = &mut s.src
         && let Some(v) = state.thread_views.get_mut(&id)
@@ -1578,6 +2073,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-context-full", |s| context_scene(s, 186_000.0)),
     ("composer-context-popover", |s| {
         on_replay_showcase(s);
+        meter_on(s);
         let Route::Thread(id) = s.route.clone() else { return };
         if let data::Source::Fixture(state) = &mut s.src
             && let Some(v) = state.thread_views.get_mut(&id)
@@ -1627,6 +2123,72 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         draft_mut(s).runtime_mode = Some("approval-required".into());
         s.ui.chat.composer.permissions_open = true;
     }),
+    ("composer-mode-shortcut", |s| {
+        on_replay_showcase(s);
+        picker::open_permissions(s);
+    }),
+    ("composer-permissions-limited", |s| {
+        on_replay_showcase(s);
+        patch_config(s, |c| c["managedPolicy"] = json!({"organization": "Example Corp", "lockedSettings": [], "limits": {"maxRuntimeMode": "auto-accept-edits"}}));
+        draft_mut(s).runtime_mode = Some("approval-required".into());
+        s.ui.chat.composer.permissions_open = true;
+    }),
+    ("composer-resume", |s| {
+        on_replay_showcase(s);
+        patch_projection(s, |p| {
+            if let Some(run) = p["runs"].as_array_mut().and_then(|runs| runs.last_mut()) {
+                run["status"] = json!("interrupted");
+            }
+        });
+    }),
+    ("composer-steer", |s| {
+        on_replay_showcase(s);
+        seed_running(s);
+        set_text(s, "Also cover the reconnect path");
+    }),
+    ("composer-queue", |s| {
+        on_replay_showcase(s);
+        seed_running(s);
+        s.client_settings.values.insert("followUpBehavior".into(), json!("queue"));
+        set_text(s, "Then update the docs");
+    }),
+    ("composer-prompt-too-long", |s| {
+        on_replay_showcase(s);
+        let line = format!("{}\n", "lorem ipsum ".repeat(9));
+        set_text(s, &line.repeat(120_050 / line.len() + 1));
+        s.ui.chat.composer.length_error = Some(active_key(s));
+    }),
+    ("composer-no-provider", |s| {
+        on_replay_showcase(s);
+        patch_config(s, |c| c["providers"] = json!([]));
+    }),
+    ("composer-locked-provider", |s| {
+        on_replay_showcase(s);
+        patch_projection(s, |p| {
+            p["providerThreads"] = json!([]);
+            p["providerSessions"] = json!([{"id": "scene-session", "status": "ready", "capabilities": {"sessions": {"supportsProviderSwitchingViaHandoff": false}}}]);
+        });
+        picker::toggle(s);
+    }),
+    ("composer-favorites", |s| {
+        on_replay_showcase(s);
+        s.client_settings.values.insert("favorites".into(), json!([{"provider": "opencode", "model": "opencode/big-pickle"}, {"provider": "claudeAgent", "model": "claude-opus-5-5"}]));
+        picker::toggle(s);
+        s.ui.chat.composer.picker.rail = Some("favorites".into());
+        s.ui.chat.composer.picker.hovered = Some(0);
+    }),
+    ("composer-model-options", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).model = Some(("opencode".into(), "opencode/beam-free".into()));
+        picker::toggle(s);
+    }),
+    ("composer-fast", |s| {
+        on_replay_showcase(s);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        set_option(s, "fastMode", json!(true));
+        set_text(s, "ultrathink about the retry loop");
+        picker::toggle(s);
+    }),
     ("topbar-rename", |s| {
         on_replay_showcase(s);
         crate::chat::topbar::start_rename(s);
@@ -1667,6 +2229,80 @@ mod tests {
         draft_mut(&mut s).effort = Some("high".into());
         assert_eq!(effort(&s).as_deref(), Some("high"));
         assert_eq!(model_selection(&s).unwrap()["options"], json!([{"id": "effort", "value": "high"}]));
+        set_option(&mut s, "fastMode", json!(true));
+        set_option(&mut s, "notAnOption", json!(1));
+        assert_eq!(model_selection(&s).unwrap()["options"], json!([{"id": "fastMode", "value": true}, {"id": "effort", "value": "high"}]));
+        let ids = ["low", "medium", "high"].map(String::from);
+        assert_eq!(stepped(&ids, Some("medium"), 1).as_deref(), Some("high"));
+        assert_eq!(stepped(&ids, Some("high"), 1), None);
+        assert_eq!(stepped(&ids, Some("low"), -1), None);
+        assert_eq!(stepped(&ids, None, 1), None);
+        assert!(mentions_ultrathink("Ultrathink: fix it") && mentions_ultrathink("please ultrathink."));
+        assert!(!mentions_ultrathink("ultrathinking") && !mentions_ultrathink("no_ultrathink"));
+    }
+
+    #[test]
+    fn runtime_modes_follow_the_provider_and_the_policy_ceiling() {
+        let modes = |o: &[ModeOption]| o.iter().map(|o| o.mode).collect::<Vec<_>>();
+        let all = mode_options(&[], &Value::Null);
+        assert_eq!(modes(&all), ["approval-required", "auto-accept-edits", "auto", "full-access"]);
+        assert!(all.iter().all(|o| o.disabled.is_none()));
+        assert_eq!(modes(&mode_options(&["approval-required", "full-access"], &Value::Null)), ["approval-required", "full-access"]);
+        let policy = json!({"organization": "Example Corp", "limits": {"maxRuntimeMode": "auto-accept-edits"}});
+        let reason = "Example Corp limits threads to Auto-accept edits.";
+        let limited = mode_options(&[], &policy);
+        assert_eq!(limited.iter().map(|o| o.disabled.as_deref()).collect::<Vec<_>>(), [None, None, Some(reason), Some(reason)]);
+    }
+
+    #[test]
+    fn an_interrupted_run_or_a_held_queue_can_resume() {
+        let runs = |runs: Value| json!({"runs": runs});
+        let done = json!({"id": "r1", "status": "completed", "startedAt": "2026-01-01T00:00:00.000Z", "completedAt": "2026-01-01T00:01:00.000Z", "ordinal": 1});
+        let interrupted = json!({"id": "r2", "status": "interrupted", "startedAt": "2026-01-01T00:02:00.000Z", "completedAt": "2026-01-01T00:03:00.000Z", "ordinal": 2});
+        let held = json!({"id": "r3", "status": "queued", "ordinal": 3, "queueHeld": true});
+        let later = json!({"id": "r4", "status": "completed", "startedAt": "2026-01-01T00:04:00.000Z", "completedAt": "2026-01-01T00:05:00.000Z", "ordinal": 4});
+        let p = runs(json!([done.clone(), interrupted.clone(), held]));
+        assert_eq!(resumable_run(&p).as_deref(), Some("r2"));
+        assert!(held_queue(&p));
+        let p = runs(json!([done, interrupted, later]));
+        assert_eq!(resumable_run(&p), None);
+        assert!(!held_queue(&p));
+    }
+
+    #[test]
+    fn long_prompts_and_standalone_mode_commands_are_caught_before_sending() {
+        assert_eq!(prompt_length_message(&format!("  {}  ", "a".repeat(120_000))), None);
+        assert_eq!(
+            prompt_length_message(&"a".repeat(120_001)).as_deref(),
+            Some("Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending.")
+        );
+        assert_eq!(
+            prompt_length_message(&"\u{1F600}".repeat(61_000)).as_deref(),
+            Some("Prompt is 2,000 characters over the 120,000-character limit. Shorten or split it before sending.")
+        );
+        assert_eq!(standalone_mode(" /PLAN "), Some("plan"));
+        assert_eq!(standalone_mode("/default"), Some("default"));
+        assert_eq!(standalone_mode("/plan the migration"), None);
+    }
+
+    #[test]
+    fn a_changed_queued_edit_moves_into_an_empty_thread_draft_when_left() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id.clone()));
+        edit_queued(&mut s, &id, "run-1", "original");
+        cancel_queued_edit(&mut s);
+        assert!(s.ui.chat.composer.editing.is_none());
+        assert!(s.ui.chat.composer.drafts.get(&id).is_none_or(|d| d.edit.text.is_empty()));
+        edit_queued(&mut s, &id, "run-1", "original");
+        set_text(&mut s, "rewritten");
+        cancel_queued_edit(&mut s);
+        assert_eq!(s.ui.chat.composer.drafts[&id].edit.text, "rewritten");
+        edit_queued(&mut s, &id, "run-1", "original");
+        set_text(&mut s, "again");
+        cancel_queued_edit(&mut s);
+        assert_eq!(s.ui.chat.composer.drafts[&id].edit.text, "rewritten");
+        assert!(!s.ui.chat.composer.drafts.keys().any(|k| k.starts_with("queued-edit:")));
     }
 
     #[test]
@@ -1760,6 +2396,7 @@ mod tests {
         d.edit.insert(" and @a");
         d.contexts = vec![record.clone(), chips::terminal("t", "Terminal 1", 5, 5, "deleted chip")];
         d.runtime_mode = Some("approval-required".into());
+        d.options = vec![json!({"id": "fastMode", "value": true})];
         let mut drafts = HashMap::new();
         drafts.insert("thread-1".to_owned(), d);
         drafts.insert("home".to_owned(), Draft::default());
@@ -1771,6 +2408,7 @@ mod tests {
         assert_eq!(d.edit.pills().map(|(r, id)| (r, id.to_owned())).collect::<Vec<_>>(), [(4..21, chips::pill_id(&record))]);
         assert_eq!(d.contexts, [record]);
         assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+        assert_eq!(d.options, [json!({"id": "fastMode", "value": true})]);
     }
 
     #[test]

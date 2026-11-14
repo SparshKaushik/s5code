@@ -3,7 +3,7 @@
 
 use super::rows;
 use crate::data::{Zone, iso_ms, s};
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route, icons};
 use rune::{Cursor, El, icon, row, text};
 use serde_json::{Value, json};
@@ -107,6 +107,39 @@ pub fn timestamp(iso: &str, now: i64, zone: Zone, hour12: bool) -> String {
     }
 }
 
+/// formatUpcomingTimestamp: "2:16 PM", "tomorrow at 2:16 PM" or "11/12 2:16 PM".
+pub fn upcoming(iso: &str, now: i64, zone: Zone, hour12: bool) -> String {
+    let Some(at) = iso_ms(iso) else { return String::new() };
+    let (wall, today) = (zone.wall(at), zone.wall(now).div_euclid(DAY));
+    let time = clock(wall, hour12);
+    match wall.div_euclid(DAY) - today {
+        days if days < 0 => timestamp(iso, now, zone, hour12),
+        0 => time,
+        1 => format!("tomorrow at {time}"),
+        _ => {
+            let ((year, month, day), (this_year, _, _)) = (civil(wall.div_euclid(DAY)), civil(today));
+            if year == this_year { format!("{month}/{day} {time}") } else { format!("{month}/{day}/{} {time}", year % 100) }
+        }
+    }
+}
+
+/// The machine's IANA zone name, as the web's `Intl` resolves it ("UTC" when it has none).
+pub fn zone_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let from_path = |p: &str| p.split_once("zoneinfo/").map(|(_, name)| name.to_owned()).filter(|n| !n.is_empty());
+        if let Some(tz) = std::env::var("TZ").ok().map(|t| t.trim_start_matches(':').to_owned()).filter(|t| !t.is_empty()) {
+            let named = if tz.starts_with('/') { from_path(tz.as_str()) } else { Some(tz) };
+            return named.unwrap_or_else(|| "UTC".to_owned());
+        }
+        std::fs::read_link("/etc/localtime")
+            .ok()
+            .and_then(|p| from_path(&*p.to_string_lossy()))
+            .or_else(|| std::fs::read_to_string("/etc/timezone").ok().map(|f| f.trim().to_owned()).filter(|f| f.contains('/')))
+            .unwrap_or_else(|| "UTC".to_owned())
+    })
+}
+
 /// "9:41 AM, 3rd March 2026" (formatChatTimestampTooltip).
 pub fn full_timestamp(iso: &str, zone: Zone, hour12: bool) -> String {
     const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -161,7 +194,7 @@ fn first_time<'a>(item: &'a Value, keys: &[&str]) -> &'a str {
     keys.iter().map(|k| s(item, k)).find(|v| !v.is_empty()).unwrap_or_default()
 }
 
-fn stamp(app: &App, iso: &str, t: &T) -> El {
+pub(super) fn stamp(app: &App, iso: &str, t: &T) -> El {
     let h12 = hour12(app);
     text(timestamp(iso, app.now_ms, Zone::Local, h12)).font(theme::TEXT_XS).color(t.c.muted_foreground).help(full_timestamp(iso, Zone::Local, h12))
 }
@@ -236,10 +269,28 @@ fn ask(app: &mut App, rewind: &Rewind) {
     }
 }
 
-/// The row under a finished reply: copy, fork, timestamp.
+/// An item's own time (TimelineRowTimestamp), when it has one.
+pub(super) fn item_stamp(app: &App, item: &Value, t: &T) -> Option<El> {
+    let iso = first_time(item, &["createdAt", "startedAt", "updatedAt", "completedAt"]);
+    (!iso.is_empty()).then(|| stamp(app, iso, t))
+}
+
+/// The row under a finished reply: an unfinished reply's status, copy, fork, timestamp.
 pub fn assistant(app: &App, thread: &str, item: &Value, t: &T) -> El {
     let streaming = item["streaming"] == true;
     let mut out = row().gap(8.0).center_y();
+    let status = s(item, "status");
+    if !status.is_empty() && status != "completed" {
+        out = out.child(
+            text(status.to_owned())
+                .font(theme::mono(theme::TEXT_3XS))
+                .color(t.c.muted_foreground)
+                .px(6.0)
+                .py(2.0)
+                .radius(theme::radius::FULL)
+                .border(1.0, t.c.border.alpha_mul(0.7)),
+        );
+    }
     if !streaming {
         out = out.child(super::copy_button(app, s(item, "text"), t, "Copy message"));
     }
@@ -801,6 +852,9 @@ mod tests {
         assert_eq!(timestamp("2026-11-08T00:30:00.000Z", now, new_york, true), "yesterday at 7:30 PM");
         assert_eq!(full_timestamp("2026-03-03T09:41:00.000Z", utc, true), "9:41 AM, 3rd March 2026");
         assert_eq!(full_timestamp("2026-03-11T21:41:00.000Z", utc, false), "21:41, 11th March 2026");
+        assert_eq!(upcoming("2026-11-08T17:16:00.000Z", now, utc, true), "5:16 PM");
+        assert_eq!(upcoming("2026-11-09T14:16:00.000Z", now, utc, true), "tomorrow at 2:16 PM");
+        assert_eq!(upcoming("2026-11-12T14:16:00.000Z", now, utc, true), "11/12 2:16 PM");
     }
 
     #[test]

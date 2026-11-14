@@ -12,9 +12,11 @@ pub struct Dialog {
     open: bool,
     width: f32,
     outside: bool,
+    button_only: bool,
     scroll_all: bool,
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
+    glyph: Option<El>,
 }
 impl Dialog {
     pub fn new(key: impl Into<String>, title: impl Into<String>) -> Self {
@@ -26,13 +28,20 @@ impl Dialog {
             open: false,
             width: 512.,
             outside: true,
+            button_only: false,
             scroll_all: false,
             close: None,
             button: None,
+            glyph: None,
         }
     }
     pub fn open(mut self, open: bool) -> Self {
         self.open = open;
+        self
+    }
+    /// Shown before the title (web `DialogHeader`'s leading icon).
+    pub fn title_icon(mut self, glyph: El) -> Self {
+        self.glyph = Some(glyph);
         self
     }
     pub fn description(mut self, description: impl Into<String>) -> Self {
@@ -57,11 +66,23 @@ impl Dialog {
         self.outside = false;
         self
     }
+    /// Web's `onOpenChange` that cancels every reason but `close-press`: the X closes, while
+    /// Escape and outside presses do nothing. Call before `on_close`.
+    pub fn button_only(mut self) -> Self {
+        self.outside = false;
+        self.button_only = true;
+        self
+    }
     pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S) + Clone + 'static) -> Self {
         let button = f.clone();
         self.button = Some(Box::new(move |e| e.on_press(button)));
         let outside = self.outside;
-        self.close = Some(Box::new(move |e| e.modal(outside, f)));
+        let close: Box<dyn FnOnce(El) -> El> = if self.button_only {
+            Box::new(|e: El| e.modal(false, |_: &mut S| {}))
+        } else {
+            Box::new(move |e: El| e.modal(outside, f))
+        };
+        self.close = Some(close);
         self
     }
     pub fn build(self, t: &T, layer: &mut Vec<El>) {
@@ -73,7 +94,7 @@ impl Dialog {
         };
         // Web `DialogPopup`'s close button: `size="icon" variant="ghost"` at `absolute end-2 top-2`;
         // alert dialogs (`AlertDialogPopup`) have none.
-        let dismiss = (self.outside).then(|| {
+        let dismiss = (self.outside || self.button_only).then(|| {
             let dismiss = Button::new("Close").size("icon").variant("ghost").icon(&crate::icons::X).build(t);
             match self.button {
                 Some(f) => f(dismiss),
@@ -81,12 +102,14 @@ impl Dialog {
             }
             .pin(None, Some(8.), Some(8.), None)
         });
-        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(
-            text(&self.title)
-                .font(theme::weight(theme::TEXT_LG, 600.))
-                .color(t.c.contrast_foreground)
-                .wrap(),
-        );
+        let title = text(&self.title)
+            .font(theme::weight(theme::TEXT_LG, 600.))
+            .color(t.c.contrast_foreground)
+            .wrap();
+        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(match self.glyph {
+            Some(glyph) => row().gap(8.).center_y().child(glyph).child(title.shrink()),
+            None => title,
+        });
         if let Some(description) = self.description {
             heading = heading.child(
                 text(description)

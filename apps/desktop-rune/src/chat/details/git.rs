@@ -685,7 +685,7 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
 /// A commit dialog file row opens in the editor, against the worktree root (`openChangedFileInEditor`).
 fn open_file(s: &mut App, path: &str) {
     let root = status(s).and_then(|v| v["workingTree"]["rootPath"].as_str().map(str::to_string));
-    let (Some(root), Some((editor, _))) = (root, super::editors(s).into_iter().next()) else {
+    let (Some(root), Some((editor, _))) = (root, super::preferred_editor(s)) else {
         return palette::toast_error(s, "Editor opening is unavailable.", None);
     };
     let target = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", root.trim_end_matches('/')) };

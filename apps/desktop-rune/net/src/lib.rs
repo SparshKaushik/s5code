@@ -150,9 +150,12 @@ impl Net {
                 }
                 Incoming::Item(route, item) => {
                     if let Route::Resource(method, _) = &route {
-                        // Ordered events: terminal output bursts, and preview sessions that
-                        // open and close between two polls.
-                        if method == "terminal.attach" || method == "subscribeTerminalMetadata" || method == "subscribePreviewEvents" {
+                        // Ordered events: terminal output bursts, command output, preview sessions
+                        // that open and close between two polls, and server lifecycle.
+                        if matches!(
+                            method.as_str(),
+                            "terminal.attach" | "subscribeTerminalMetadata" | "subscribePreviewEvents" | "orchestration.subscribeCommandOutput" | "subscribeServerLifecycle"
+                        ) {
                             self.resource_events.entry(route.clone()).or_default().push(item.clone());
                         }
                         if method == "subscribeAuthAccess" {
@@ -179,6 +182,10 @@ impl Net {
     }
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+    /// The session token, for a connection of the client's own such as `api_socket`.
+    pub fn bearer(&self) -> &str {
+        &self.bearer
     }
     pub fn state(&self) -> &State {
         &self.state
@@ -300,10 +307,20 @@ impl Net {
     /// Fetches the history page before a bounded thread's window; `merge_history` applies the reply.
     pub fn load_earlier(&mut self, thread_id: &str) -> Option<(u64, String)> {
         let cursor = self.state.thread_views.get(thread_id)?.history_cursor.clone()?;
+        let id = self.history_page(thread_id, &[("cursor", cursor.as_str()), ("deferWork", "1")])?;
+        Some((id, cursor))
+    }
+    /// Fetches the next page of the work deferred behind `anchor`; `merge_work` applies the reply.
+    pub fn load_work(&mut self, thread_id: &str, anchor: &str) -> Option<(u64, String)> {
+        let cursor = self.state.work_cursor(thread_id, anchor)?.to_owned();
+        let id = self.history_page(thread_id, &[("cursor", cursor.as_str()), ("view", "work"), ("throughEntryId", anchor)])?;
+        Some((id, cursor))
+    }
+    fn history_page(&self, thread_id: &str, query: &[(&str, &str)]) -> Option<u64> {
         let id = next_id();
         let mut url = url::Url::parse(&self.base_url).ok()?;
         url.path_segments_mut().ok()?.clear().extend(["api", "orchestration", "threads", thread_id, "history"]);
-        url.query_pairs_mut().clear().append_pair("cursor", &cursor);
+        url.query_pairs_mut().clear().extend_pairs(query.iter().copied());
         url.set_fragment(None);
         let bearer = self.bearer.clone();
         let tx = self.incoming_tx.clone();
@@ -327,7 +344,7 @@ impl Net {
             let _ = tx.send(Incoming::Reply(id, result));
             wake();
         });
-        Some((id, cursor))
+        Some(id)
     }
     /// POSTs a file's bytes to an `attachments.createUploadUrl` URL, on the RPC reply channel.
     pub fn upload_file(&mut self, relative_url: &str, path: &std::path::Path, mime: &str) -> u64 {
@@ -406,6 +423,45 @@ impl Drop for Net {
     fn drop(&mut self) {
         let _ = self.tx.send(Command::Stop);
     }
+}
+/// A WebSocket to one of the server's `/api` routes as this client, such as the preview frame
+/// stream. Reads time out after `read_timeout`, so the caller's loop can also write.
+pub fn api_socket(
+    base: &str,
+    bearer: &str,
+    path: &str,
+    query: &str,
+    read_timeout: std::time::Duration,
+) -> Result<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, String> {
+    use tungstenite::client::IntoClientRequest;
+    use tungstenite::stream::MaybeTlsStream;
+    if !path.starts_with("/api/") {
+        return Err("Unsupported API path".into());
+    }
+    let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    let scheme = match url.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => return Err("unsupported server URL scheme".into()),
+    };
+    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
+    url.set_path(path);
+    url.set_query(Some(query).filter(|q| !q.is_empty()));
+    url.set_fragment(None);
+    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {bearer}").parse().map_err(|_| "invalid bearer token")?,
+    );
+    let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+    let tcp = match socket.get_mut() {
+        MaybeTlsStream::Plain(tcp) => tcp,
+        MaybeTlsStream::Rustls(tls) => &mut tls.sock,
+        _ => return Err("unsupported TLS stream".into()),
+    };
+    tcp.set_read_timeout(Some(read_timeout)).map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    Ok(socket)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
@@ -505,6 +561,29 @@ impl State {
         projection::merge_older(&mut view.projection, projection::rows(page, "items"));
         view.history_cursor = page["nextCursor"].as_str().map(str::to_owned);
         view.has_more_history = page["hasMoreHistory"] == true;
+    }
+    /// The cursor of the work the server deferred behind `anchor`, while some is left.
+    pub fn work_cursor(&self, thread_id: &str, anchor: &str) -> Option<&str> {
+        let view = self.thread_views.get(thread_id)?;
+        let row = projection::rows(&view.projection, "visibleTurnItems").iter().find(|r| r["sourceItemId"] == anchor)?;
+        row["item"]["deferredWork"]["cursor"].as_str()
+    }
+    /// Applies a page of `anchor`'s deferred work fetched with `cursor` (`loadEarlierHistory` with
+    /// a `workAnchorId`). `Ok(true)` means more is deferred and the next page should be asked for.
+    /// A reply the anchor moved past fails while its work is still deferred.
+    pub fn merge_work(&mut self, thread_id: &str, anchor: &str, cursor: &str, page: &Value) -> Result<bool, String> {
+        match self.work_cursor(thread_id, anchor) {
+            None => return Ok(false),
+            Some(current) if current != cursor => return Err("Work history changed. Retry loading it.".into()),
+            Some(_) => {}
+        }
+        let next = page["nextCursor"].as_str().filter(|c| !c.is_empty());
+        if next == Some(cursor) {
+            return Err("Work history did not advance.".into());
+        }
+        let Some(view) = self.thread_views.get_mut(thread_id) else { return Ok(false) };
+        projection::merge_work(&mut view.projection, anchor, projection::rows(page, "items"), next);
+        Ok(next.is_some())
     }
     fn fold(&mut self, route: Route, item: Value) {
         match route {
@@ -609,11 +688,18 @@ impl State {
                 };
                 match item["kind"].as_str().unwrap_or("") {
                     "snapshot" => {
-                        view.projection = item["projection"].clone();
+                        let mut fresh = item["projection"].clone();
+                        let kept = projection::kept_before(&view.projection, &fresh);
                         view.sequence = item["snapshotSequence"].as_u64().unwrap_or(0);
                         view.synchronized = false;
-                        view.history_cursor = item["historyCursor"].as_str().map(str::to_owned);
-                        view.has_more_history = item["hasMoreHistory"] == true;
+                        if kept.is_empty() {
+                            view.history_cursor = item["historyCursor"].as_str().map(str::to_owned);
+                            view.has_more_history = item["hasMoreHistory"] == true;
+                        } else {
+                            // A reconnect keeps the turns already shown; paging resumes before them.
+                            projection::merge_older(&mut fresh, &kept);
+                        }
+                        view.projection = fresh;
                     }
                     "synchronized" => view.synchronized = true,
                     "event" => {

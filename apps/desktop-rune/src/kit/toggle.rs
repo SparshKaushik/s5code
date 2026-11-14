@@ -14,6 +14,7 @@ pub struct ToggleGroup {
     vertical: bool,
     tabs: bool,
     pick: Option<Pick>,
+    tips: Vec<String>,
 }
 impl ToggleGroup {
     pub fn new<S: AsRef<str>>(labels: &[S], selected: &[usize]) -> Self {
@@ -26,6 +27,7 @@ impl ToggleGroup {
             vertical: false,
             tabs: false,
             pick: None,
+            tips: vec![],
         }
     }
     pub fn variant(mut self, value: &str) -> Self {
@@ -38,6 +40,11 @@ impl ToggleGroup {
     }
     pub fn orientation(mut self, value: &str) -> Self {
         self.vertical = value == "vertical";
+        self
+    }
+    /// Per-item native titles, in label order (web `Toggle title`).
+    pub fn tips<S: AsRef<str>>(mut self, tips: &[S]) -> Self {
+        self.tips = tips.iter().map(|v| v.as_ref().into()).collect();
         self
     }
     pub fn item_state(mut self, index: usize, value: State) -> Self {
@@ -151,6 +158,9 @@ impl ToggleGroup {
                 State::Focus => item = item.outline(2., -2., k.c.border_focus),
                 State::Disabled => item = item.opacity(0.64),
                 _ => {}
+            }
+            if let Some(tip) = self.tips.get(index) {
+                item = item.help(tip.clone());
             }
             if !disabled && let Some(pick) = &self.pick {
                 item = pick(index)(item);

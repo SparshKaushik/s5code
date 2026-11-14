@@ -244,6 +244,18 @@
  "diff": {
   "patch": "diff --git a/apps/desktop-rune/src/pages/mod.rs b/apps/desktop-rune/src/pages/mod.rs\nnew file mode 100644\nindex 0000000..3b18e51\n--- /dev/null\n+++ b/apps/desktop-rune/src/pages/mod.rs\n@@ -0,0 +1,6 @@\n+//! The sidebar footer's utility pages.\n+\n+pub mod pull_requests;\n+pub mod usage;\n+\n+use rune::{KeyEvent, Tx};\ndiff --git a/apps/desktop-rune/src/pages/usage.rs b/apps/desktop-rune/src/pages/usage.rs\nindex 9c1e2f0..a41d7b2 100644\n--- a/apps/desktop-rune/src/pages/usage.rs\n+++ b/apps/desktop-rune/src/pages/usage.rs\n@@ -208,7 +208,8 @@ fn period_label(m: &Merged, n: usize) -> String {\n     let start = m.periods[n];\n     if m.hourly {\n-        format!(\"{:02}:00\", start / 3_600_000 % 24)\n+        let wall = m.zone.wall(start);\n+        hour_label(wall, m.hour12)\n     } else {\n         day_short(start)\n     }\n }\ndiff --git a/apps/desktop-rune/src/main.rs b/apps/desktop-rune/src/main.rs\nindex 4d5e6f7..8a9b0c1 100644\n--- a/apps/desktop-rune/src/main.rs\n+++ b/apps/desktop-rune/src/main.rs\n@@ -40,4 +40,6 @@ pub enum Route {\n     Thread(String),\n     Settings(String),\n+    /// `/pull-requests`, which replaces the main column.\n+    PullRequests,\n     Usage,\n }\n",
   "truncated": false,
-  "nextCursor": null
+  "nextCursor": null,
+  "commits": {
+   "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b": {
+    "patch": "diff --git a/apps/desktop-rune/src/pages/mod.rs b/apps/desktop-rune/src/pages/mod.rs\nnew file mode 100644\nindex 0000000..3b18e51\n--- /dev/null\n+++ b/apps/desktop-rune/src/pages/mod.rs\n@@ -0,0 +1,6 @@\n+//! The sidebar footer's utility pages.\n+\n+pub mod pull_requests;\n+pub mod usage;\n+\n+use rune::{KeyEvent, Tx};\ndiff --git a/apps/desktop-rune/src/main.rs b/apps/desktop-rune/src/main.rs\nindex 4d5e6f7..8a9b0c1 100644\n--- a/apps/desktop-rune/src/main.rs\n+++ b/apps/desktop-rune/src/main.rs\n@@ -40,4 +40,6 @@ pub enum Route {\n     Thread(String),\n     Settings(String),\n+    /// `/pull-requests`, which replaces the main column.\n+    PullRequests,\n     Usage,\n }\n",
+    "truncated": false,
+    "nextCursor": null
+   },
+   "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b": {
+    "patch": "diff --git a/apps/desktop-rune/src/pages/usage.rs b/apps/desktop-rune/src/pages/usage.rs\nindex 9c1e2f0..a41d7b2 100644\n--- a/apps/desktop-rune/src/pages/usage.rs\n+++ b/apps/desktop-rune/src/pages/usage.rs\n@@ -208,7 +208,8 @@ fn period_label(m: &Merged, n: usize) -> String {\n     let start = m.periods[n];\n     if m.hourly {\n-        format!(\"{:02}:00\", start / 3_600_000 % 24)\n+        let wall = m.zone.wall(start);\n+        hour_label(wall, m.hour12)\n     } else {\n         day_short(start)\n     }\n }\n",
+    "truncated": false,
+    "nextCursor": null
+   }
+  }
  }
 }
