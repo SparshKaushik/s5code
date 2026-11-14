@@ -1,6 +1,7 @@
 //! What the open thread is doing now, at the end of the timeline (ThreadNow and
 //! ThreadStatusLine): a subagent or side chat waiting on you, background work or an unanswered
-//! Stop, the goal, then whether the thread is snoozed, settled or just woke.
+//! Stop, its messages loading, the goal, then whether the thread is snoozed, settled or just woke.
+//! Wake now and Un-settle apply optimistically, so their lines have no in-flight label.
 
 use std::collections::HashSet;
 
@@ -20,6 +21,8 @@ pub struct State {
     /// again (`None` while the Stop is in flight).
     background_stop: Option<(String, Vec<String>, Option<i64>)>,
     force_stopping: Option<String>,
+    /// The route thread's sync line (useDelayedStatus over resolveThreadSyncPhase).
+    sync: (String, Delayed),
 }
 
 enum Request {
@@ -117,6 +120,74 @@ fn child_inputs_title(children: &[&Value]) -> String {
     } else {
         format!("{} {noun}s need {need}", children.len())
     }
+}
+
+/// childInputNowItem's waitingLabel, for the Scroll to end summary.
+pub fn waiting_label(app: &App, thread: &str) -> Option<&'static str> {
+    let state = app.state();
+    let shell = state.threads.iter().find(|r| s(r, "id") == thread)?;
+    let asking = s(&shell["pendingRuntimeRequest"], "kind");
+    if !asking.is_empty() && asking != "auth_refresh" {
+        return None;
+    }
+    let children = child_inputs(&state.threads, thread);
+    if children.is_empty() {
+        return None;
+    }
+    Some(if children.iter().all(|c| c["lineage"]["sideChat"] == true) { "Side chat waiting" } else { "Subagent waiting" })
+}
+
+// --- Sync -------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sync {
+    Loading,
+    Syncing,
+}
+
+/// stepDelayedStatus: a status shows after it held for a moment, then stays a moment.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Delayed {
+    #[default]
+    Idle,
+    Pending(i64),
+    Shown(Sync, i64),
+}
+
+const STATUS_DELAY_MS: i64 = 400;
+
+fn step(state: Delayed, value: Option<Sync>, now: i64) -> Delayed {
+    match (state, value) {
+        (Delayed::Idle, None) => state,
+        (Delayed::Idle, Some(_)) => Delayed::Pending(now + STATUS_DELAY_MS),
+        (Delayed::Pending(_), None) => Delayed::Idle,
+        (Delayed::Pending(at), Some(v)) => if now >= at { Delayed::Shown(v, now + STATUS_DELAY_MS) } else { state },
+        (Delayed::Shown(_, until), None) => if now >= until { Delayed::Idle } else { state },
+        (Delayed::Shown(shown, _), Some(v)) => if v == shown { state } else { Delayed::Shown(v, now + STATUS_DELAY_MS) },
+    }
+}
+
+/// resolveThreadSyncPhase: no detail yet is loading, one still catching up is syncing.
+fn sync_phase(app: &App, thread: &str) -> Option<Sync> {
+    if matches!(app.state().conn, s5_net::Conn::Closed(_)) || !app.state().threads.iter().any(|r| s(r, "id") == thread) {
+        return None;
+    }
+    match app.state().thread_views.get(thread) {
+        None => Some(Sync::Loading),
+        Some(view) if !view.synchronized => Some(Sync::Syncing),
+        Some(_) => None,
+    }
+}
+
+fn poll_sync(s: &mut App) -> bool {
+    let crate::Route::Thread(thread) = s.frame_route().clone() else { return false };
+    let value = sync_phase(s, &thread);
+    let (key, state) = &s.ui.chat.topbar.now.sync;
+    let state = if *key == thread { *state } else { Delayed::Idle };
+    let next = step(state, value, data::now_ms());
+    let changed = *key != thread || next != state;
+    s.ui.chat.topbar.now.sync = (thread, next);
+    changed
 }
 
 // --- Background work ---------------------------------------------------------------------------
@@ -421,10 +492,11 @@ fn can_force_stop(s: &App) -> bool {
 /// Takes the footer's replies: a refused Stop or `/goal` shows in the thread's error banner, a
 /// Force stop reports how it went.
 pub fn poll(s: &mut App) -> bool {
+    let synced = poll_sync(s);
     if s.ui.chat.topbar.now.requests.is_empty() {
-        return false;
+        return synced;
     }
-    let Some(net) = s.src.net() else { return false };
+    let Some(net) = s.src.net() else { return synced };
     let mut done = Vec::new();
     for (id, request) in std::mem::take(&mut s.ui.chat.topbar.now.requests) {
         match net.take_reply(id) {
@@ -472,7 +544,7 @@ pub fn poll(s: &mut App) -> bool {
             (Request::Goal(..), Ok(_)) => {}
         }
     }
-    changed
+    changed | synced
 }
 
 // --- View -------------------------------------------------------------------------------------
@@ -486,17 +558,24 @@ fn action(t: &T, label: &str, strong: bool, on_press: Option<impl Fn(&mut App) +
     }
 }
 
+/// A line's detail text, fainter than its title.
+fn detail(t: &T, detail: Option<String>) -> Option<El> {
+    let detail = detail.filter(|d| !d.is_empty())?;
+    let faint = t.c.muted_foreground.alpha_mul(if t.dark { 0.6 } else { 0.8 });
+    Some(text(detail.clone()).font(theme::TEXT_XS).color(faint).single_line().truncate().shrink().min_w(0.0).help_when_truncated(detail))
+}
+
 /// One line at the end of the timeline: icon, title and detail as one truncating line, then
 /// the actions.
-fn line(t: &T, key: &str, glyph: El, title: &str, detail: Option<String>, actions: Vec<El>) -> El {
+fn line(t: &T, key: &str, glyph: El, title: &str, detail: Option<El>, actions: Vec<El>) -> El {
     let muted = t.c.muted_foreground;
-    let mut words = row().shrink().min_w(0.0).gap(5.0).center_y().child(
-        text(title.to_string()).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).help_when_truncated(title.to_string()),
-    );
-    if let Some(detail) = detail.filter(|d| !d.is_empty()) {
-        let faint = muted.alpha_mul(if t.dark { 0.6 } else { 0.8 });
-        words = words.child(text(detail.clone()).font(theme::TEXT_XS).color(faint).single_line().truncate().shrink().min_w(0.0).help_when_truncated(detail));
-    }
+    let words = row()
+        .shrink()
+        .min_w(0.0)
+        .gap(5.0)
+        .center_y()
+        .child(text(title.to_string()).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).help_when_truncated(title.to_string()))
+        .children(detail);
     let mut out = row().key(key.to_string()).w_full().min_w(0.0).gap(6.0).px(4.0).pb(8.0).center_y().child(el().size(14.0, 14.0).center().child(glyph)).child(words);
     if !actions.is_empty() {
         out = out.child(row().ml(6.0).gap(10.0).center_y().children(actions));
@@ -520,7 +599,8 @@ fn stop_line(app: &App, t: &T, thread: &str, stop: &RunStop) -> El {
         actions.push(action(t, if stopping { "Force stopping..." } else { "Force stop" }, true, press));
     }
     if stop.unresponsive {
-        line(t, "thread-now-stop", icon(&icons::TRIANGLE_ALERT, 14.0).color(t.c.warning_foreground), "Agent not responding to Stop", Some("It may be short on memory. Force stop kills its processes.".into()), actions)
+        let why = detail(t, Some("It may be short on memory. Force stop kills its processes.".into()));
+        line(t, "thread-now-stop", icon(&icons::TRIANGLE_ALERT, 14.0).color(t.c.warning_foreground), "Agent not responding to Stop", why, actions)
     } else {
         line(t, "thread-now-stop", glyph(t, &icons::CIRCLE_STOP), "Stopping", None, actions)
     }
@@ -530,10 +610,15 @@ fn child_line(t: &T, children: &[&Value]) -> Option<El> {
     let first = children.first()?;
     let approval = child_request(first) == Some(true);
     let mark = icon(if approval { &icons::SHIELD_QUESTION_MARK } else { &icons::MESSAGE_CIRCLE }, 14.0).color(t.c.info_foreground);
-    let names: Vec<&str> = children.iter().map(|c| s(c, "title")).collect();
+    // Each child's name opens it.
+    let names = row().shrink().min_w(0.0).gap(4.0).center_y().children(children.iter().enumerate().map(|(n, child)| {
+        let id = s(child, "id").to_string();
+        let name = format!("{}{}", s(child, "title"), if n + 1 < children.len() { "," } else { "" });
+        super::inline_button(&name, false, t).label(s(child, "title").to_string()).single_line().truncate().shrink().min_w(0.0).on_press(move |s: &mut App| crate::shell::sidebar::open_thread(s, &id))
+    }));
     let id = s(first, "id").to_string();
     let open = action(t, if approval { "Open approval" } else { "Open question" }, true, Some(move |s: &mut App| crate::shell::sidebar::open_thread(s, &id)));
-    Some(line(t, "thread-now-child", mark, &child_inputs_title(children), Some(names.join(", ")), vec![open]))
+    Some(line(t, "thread-now-child", mark, &child_inputs_title(children), Some(names), vec![open]))
 }
 
 fn work_line(app: &App, t: &T, thread: &str, tasks: &[Value], projection: Option<&Value>) -> Option<El> {
@@ -546,13 +631,14 @@ fn work_line(app: &App, t: &T, thread: &str, tasks: &[Value], projection: Option
     let activity = |task: &Task| {
         turn_item(task.id.as_str()).filter(|i| s(i, "type") == "subagent").map(|i| s(i, "progress").split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty())
     };
+    let updated = |task: &Task| turn_item(task.id.as_str()).and_then(|i| data::ts(i, "updatedAt")).unwrap_or(0);
     let only = if items.len() == 1 { items.first() } else { None };
-    let detail = match only {
-        Some(task) => activity(task),
-        None => match items.iter().find_map(|i| activity(i).map(|a| (i, a))) {
-            Some((task, progress)) => Some(format!("{}: {progress}", task.label)),
-            None => Some(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>().join(", ")),
-        },
+    // The subagent that reported last speaks for the group.
+    let newest = items.iter().filter_map(|i| activity(i).map(|a| (i, a))).max_by_key(|(i, _)| updated(*i));
+    let summary = match (only, newest) {
+        (Some(task), _) => activity(task),
+        (None, Some((task, progress))) => Some(format!("{}: {progress}", task.label)),
+        (None, None) => Some(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>().join(", ")),
     };
     let mut actions = Vec::new();
     if let Some(started) = only.and_then(|task| turn_item(task.id.as_str())).and_then(|i| data::ts(i, "startedAt")) {
@@ -566,7 +652,7 @@ fn work_line(app: &App, t: &T, thread: &str, tasks: &[Value], projection: Option
     let (thread, ids) = (thread.to_string(), items.iter().map(|i| i.id.clone()).collect::<Vec<_>>());
     let press = (!stopping).then(|| move |s: &mut App| stop_background(s, &thread, ids.clone()));
     actions.push(action(t, if stopping { "Stopping..." } else { "Stop" }, true, press));
-    Some(line(t, "thread-now-work", glyph(t, if commands { &icons::TERMINAL } else { &icons::CIRCLE_DASHED }), &title, detail, actions))
+    Some(line(t, "thread-now-work", glyph(t, if commands { &icons::TERMINAL } else { &icons::CIRCLE_DASHED }), &title, detail(t, summary), actions))
 }
 
 fn goal_view(t: &T, thread: &str, goal: &Value, working: bool) -> El {
@@ -579,7 +665,7 @@ fn goal_view(t: &T, thread: &str, goal: &Value, working: bool) -> El {
     }
     let id = thread.to_string();
     actions.push(action(t, "Clear", false, Some(move |s: &mut App| goal_command(s, &id, "/goal clear", "Failed to clear goal."))));
-    line(t, "thread-now-goal", glyph(t, &icons::TARGET), &title, Some(s(goal, "objective").to_string()), actions)
+    line(t, "thread-now-goal", glyph(t, &icons::TARGET), &title, detail(t, Some(s(goal, "objective").to_string())), actions)
 }
 
 /// ThreadStatusLine: snoozed, settled, or woke from a snooze, with the way back.
@@ -639,8 +725,15 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         Some(r) => (child_line(t, &children), Some(stop_line(app, t, thread, r))),
         None => (child_line(t, &children), work_line(app, t, thread, tasks, projection)),
     };
+    let sync = match app.ui.chat.topbar.now.sync {
+        (ref key, Delayed::Shown(phase, _)) if key == thread => {
+            let label = if phase == Sync::Loading { "Loading messages..." } else { "Syncing messages..." };
+            Some(line(t, "thread-now-sync", glyph(t, &icons::REFRESH_CW), label, None, Vec::new()).role("status"))
+        }
+        _ => None,
+    };
     let goal = shell["goal"].is_object().then(|| goal_view(t, thread, &shell["goal"], working));
-    let lines: Vec<El> = [attention, work, goal, status_line(app, t, thread, shell)].into_iter().flatten().collect();
+    let lines: Vec<El> = [attention, work, sync, goal, status_line(app, t, thread, shell)].into_iter().flatten().collect();
     (!lines.is_empty()).then(|| rune::col().key("thread-now").w_full().children(lines))
 }
 
@@ -720,6 +813,19 @@ mod tests {
         assert_eq!(goal_line(&json!({"status": "active"}), false), ("Goal set".to_string(), false));
         assert_eq!(goal_line(&json!({"status": "active", "tokensUsed": 0}), true), ("Pursuing goal".to_string(), false));
         assert_eq!(goal_line(&json!({"status": "complete", "tokensUsed": 2_000_000}), false), ("Goal complete · 2m tokens".to_string(), false));
+    }
+
+    #[test]
+    fn a_sync_line_waits_before_showing_and_lingers_before_hiding() {
+        let pending = step(Delayed::Idle, Some(Sync::Loading), 0);
+        assert_eq!(pending, Delayed::Pending(400));
+        assert_eq!(step(pending, Some(Sync::Loading), 399), pending, "a quick load never shows");
+        assert_eq!(step(pending, None, 399), Delayed::Idle);
+        let shown = step(pending, Some(Sync::Loading), 400);
+        assert_eq!(shown, Delayed::Shown(Sync::Loading, 800));
+        assert_eq!(step(shown, Some(Sync::Syncing), 500), Delayed::Shown(Sync::Syncing, 900));
+        assert_eq!(step(shown, None, 799), shown, "held for its minimum time");
+        assert_eq!(step(shown, None, 800), Delayed::Idle);
     }
 
     #[test]

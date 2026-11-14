@@ -170,33 +170,41 @@ fn subline(s: &App, t: &T, hero: &Hero) -> Option<El> {
     Some(button)
 }
 
-/// The draft hero, or a loaded thread's empty prompt (MessagesTimeline's empty state), centred
-/// in the lane above the composer.
+/// A loaded thread's empty prompt (MessagesTimeline's empty state) centred above the composer,
+/// or the draft hero resting 16 points above the centred composer (ChatView's draft hero),
+/// clear of anything docked on its shoulder.
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
-    let content = if matches!(s.frame_route(), Route::Thread(_)) {
-        text("Send a message to start the conversation.").font(theme::TEXT_SM).color(t.c.muted_foreground)
-    } else {
-        let project = draft_project(s);
-        let scratch = project.is_some_and(|p| crate::shell::palette::actions::is_scratch_project(s, p));
-        let can_choose = s.state().projects.iter().any(|p| p["archivedAt"].is_null());
-        let hero = hero(project.map(|p| (data::s(p, "title"), scratch)), can_choose);
-        col().items_center().w_full().child(headline(t, &hero, lane.width)).children(subline(s, t, &hero).map(|line| row().h(24.0).mt(8.0).center_y().justify_center().child(line)))
-    };
-    col()
-        .key("home")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .justify_center()
-        .pl(lane.left)
-        .pb(composer_h + composer::BOTTOM + 8.0)
-        .child(row().w(lane.width).justify_center().child(content))
+    let page = col().key("home").w_full().grow(1.0).min_h(0.0).pl(lane.left);
+    if !composer::draft_hero(s) {
+        let empty = text("Send a message to start the conversation.").font(theme::TEXT_SM).color(t.c.muted_foreground);
+        return page.justify_center().pb(composer_h + composer::BOTTOM + 8.0).child(row().w(lane.width).justify_center().child(empty));
+    }
+    let project = draft_project(s);
+    let scratch = project.is_some_and(|p| crate::shell::palette::actions::is_scratch_project(s, p));
+    let can_choose = s.state().projects.iter().any(|p| p["archivedAt"].is_null());
+    let hero = hero(project.map(|p| (data::s(p, "title"), scratch)), can_choose);
+    let content = col().items_center().w_full().child(headline(t, &hero, lane.width)).children(subline(s, t, &hero).map(|line| row().h(24.0).mt(8.0).center_y().justify_center().child(line)));
+    let card_h = cx.layout_with("composer", |r| r[3].round()).unwrap_or(composer_h);
+    let above = hero_gap(card_h, composer_h);
+    page.justify_end().pb(composer::bottom_inset(s, cx) + above).child(row().w(lane.width).justify_center().child(content))
+}
+
+/// From the composer card's bottom to the hero's: the card and `pb-4`, or whatever rides the
+/// card's shoulder when that stands taller.
+fn hero_gap(card_h: f32, lane_h: f32) -> f32 {
+    (card_h + 16.0).max(lane_h)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Hero, hero, offers_scratch};
+    use super::{Hero, hero, hero_gap, offers_scratch};
+
+    #[test]
+    fn the_hero_sits_16_points_over_the_card_or_over_its_shoulder() {
+        assert_eq!(hero_gap(112.0, 112.0), 128.0);
+        assert_eq!(hero_gap(112.0, 160.0), 160.0, "a docked notice or stash tab lifts the hero");
+    }
 
     #[test]
     fn the_draft_hero_asks_about_the_drafts_project() {

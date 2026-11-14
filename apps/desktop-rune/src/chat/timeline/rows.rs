@@ -54,6 +54,12 @@ pub enum Row<'a> {
         request: &'a Value,
         item: Option<&'a Value>,
     },
+    /// A settled reply's status, copy, fork and time, moved below the tool work still showing
+    /// after it (MessagesTimeline "assistant-meta").
+    Meta {
+        id: String,
+        item: &'a Value,
+    },
 }
 
 pub fn duration(start: i64, end: i64) -> String {
@@ -226,8 +232,9 @@ pub fn revert_targets(p: &Value) -> HashMap<String, (String, String)> {
     out
 }
 
-pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
-    let mut items: Vec<&Value> = if p["visibleTurnItems"].is_array() {
+/// The projection's turn items in timeline order.
+fn ordered(p: &Value) -> Vec<&Value> {
+    if p["visibleTurnItems"].is_array() {
         let mut visible: Vec<_> = array(p, "visibleTurnItems").iter().collect();
         visible.sort_by_key(|v| v["position"].as_i64().unwrap_or(0));
         visible.into_iter().map(|v| &v["item"]).collect()
@@ -235,7 +242,19 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         let mut items: Vec<_> = array(p, "turnItems").iter().collect();
         items.sort_by_key(|v| v["ordinal"].as_i64().unwrap_or(0));
         items
-    };
+    }
+}
+
+/// Superseded attempts' items, by id, with their attempt's id: a finished turn's open fold
+/// nests each attempt's work under its own "Superseded attempt" (deriveSupersededAttemptFolds).
+pub fn fold_attempts(p: &Value) -> HashMap<String, String> {
+    let mut items = ordered(p);
+    items.retain(|i| !hidden(i));
+    superseded(p, &items).0.into_iter().map(|(item, attempt)| (item.to_owned(), attempt.to_owned())).collect()
+}
+
+pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
+    let mut items = ordered(p);
     if items.is_empty() && !p["visibleTurnItems"].is_array() && !array(p, "messages").is_empty() {
         return array(p, "messages")
             .iter()
@@ -402,7 +421,11 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
             rows.push(working_row(run, now, compacting.contains(s(run, "id"))));
         }
     }
-    let mut rows = group_tools(rows);
+    let settled = |reply: &Value| {
+        let run = s(reply, "runId");
+        !run.is_empty() && !active(run) && terminal.get(run) == Some(&s(reply, "id"))
+    };
+    let mut rows = attach_meta(group_tools(rows), settled);
     // Nothing thinks while a request waits on the user or the context compacts (ThinkingTimelineRow).
     if pending.is_empty() {
         for run in array(p, "runs").iter().filter(|r| run_active(r)) {
@@ -454,6 +477,56 @@ fn group_tools(rows: Vec<Row<'_>>) -> Vec<Row<'_>> {
         }
     }
     out
+}
+
+/// attachTrailingToolGroupsToAssistant: a turn's settled last reply followed by its own tool
+/// work outside any fold (a stopped or failed turn) takes its meta row below that work.
+fn attach_meta<'a>(rows: Vec<Row<'a>>, settled: impl Fn(&Value) -> bool) -> Vec<Row<'a>> {
+    let mut after: HashMap<usize, &'a Value> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let &Row::Assistant(reply) = row else { continue };
+        if !settled(reply) {
+            continue;
+        }
+        let run = s(reply, "runId");
+        let (mut tools, mut last) = (false, None);
+        for (at, next) in rows.iter().enumerate().skip(index + 1) {
+            match next {
+                Row::User(_) | Row::Assistant(_) => break,
+                Row::Tools { items, .. } if s(items[0], "runId") == run => {
+                    tools = true;
+                    last = Some(at);
+                }
+                Row::Item(item) if s(item, "runId") == run && work_entry(item) => {
+                    tools |= groupable(item) || (s(item, "type") == "error" && s(item, "status") == "failed");
+                    if tools {
+                        last = Some(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(at) = last {
+            after.insert(at, reply);
+        }
+    }
+    if after.is_empty() {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len() + after.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        out.push(row);
+        if let Some(reply) = after.remove(&index) {
+            out.push(Row::Meta { id: format!("assistant-meta:{}", s(reply, "id")), item: reply });
+        }
+    }
+    out
+}
+
+/// Items the web keeps as work-log entries rather than lifecycle events.
+fn work_entry(item: &Value) -> bool {
+    (groupable(item) && s(item, "type") != "thread_created")
+        || matches!(s(item, "type"), "error" | "notification" | "system_notice" | "todo_list" | "approval_request" | "user_input_request")
 }
 
 /// Items the web timeline leaves out (session-logic.ts deriveTimelineEntries): workspace
@@ -609,12 +682,8 @@ fn dynamic_label(item: &Value, root: Option<&str>) -> Option<String> {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect())
 }
 
-/// A work row's label when it has no better one (session-logic.ts projectedWorkEntry).
-pub fn label(item: &Value) -> String {
-    entry_label(item, None)
-}
-
-/// [`label`], with paths read relative to the workspace at `root`.
+/// A work row's label when it has no better one (session-logic.ts projectedWorkEntry), with
+/// paths read relative to the workspace at `root`.
 pub fn entry_label(item: &Value, root: Option<&str>) -> String {
     if s(item, "type") == "dynamic_tool"
         && let Some(label) = dynamic_label(item, root)
@@ -696,6 +765,10 @@ mod tests {
     use super::*;
 
     use serde_json::json;
+
+    fn label(item: &Value) -> String {
+        entry_label(item, None)
+    }
 
     #[test]
     fn todo_label_counts_done_steps_and_names_the_current_one() {
@@ -945,6 +1018,44 @@ mod tests {
         let mut finished = p.clone();
         finished["turnItems"][2]["completedAt"] = json!("1970-01-01T00:00:05Z");
         assert_eq!(shape(&finished), ["u", "working", "t1", "m1", "s", "t2"]);
+        assert!(fold_attempts(&finished).is_empty());
+        // Once the turn ends, its fold nests the attempt's work.
+        let mut done = p.clone();
+        done["runs"][0]["status"] = json!("completed");
+        let nested = fold_attempts(&done);
+        assert_eq!(nested.get("t1").map(String::as_str), Some("a1"));
+        assert_eq!(nested.get("m1").map(String::as_str), Some("a1"));
+        assert!(!nested.contains_key("u") && !nested.contains_key("t2"));
+    }
+
+    #[test]
+    fn a_stopped_turns_reply_moves_its_meta_below_its_trailing_work() {
+        let items = json!([
+            {"id":"u","type":"user_message","runId":"r","ordinal":1},
+            {"id":"a","type":"assistant_message","runId":"r","status":"completed","ordinal":2},
+            {"id":"t1","type":"command_execution","runId":"r","ordinal":3},
+            {"id":"t2","type":"dynamic_tool","runId":"r","ordinal":4},
+            {"id":"n","type":"notification","runId":"r","ordinal":5},
+            {"id":"x","type":"run_interrupt_result","runId":"r","ordinal":6}]);
+        let shape = |p: &Value| -> Vec<String> {
+            derive(p, 0)
+                .iter()
+                .map(|r| match r {
+                    Row::User(v) | Row::Assistant(v) | Row::Item(v) => s(v, "id").to_owned(),
+                    Row::Tools { id, .. } | Row::Meta { id, .. } => id.clone(),
+                    _ => "?".to_owned(),
+                })
+                .collect()
+        };
+        let stopped = json!({"runs":[{"id":"r","status":"interrupted"}],"turnItems":items});
+        assert_eq!(shape(&stopped), ["u", "a", "tools:t1", "n", "assistant-meta:a", "x"]);
+        // A notice alone is no tool work; a running turn's reply has no meta yet.
+        let mut quiet = stopped.clone();
+        quiet["turnItems"] = json!([items[0], items[1], items[4], items[5]]);
+        assert_eq!(shape(&quiet), ["u", "a", "n", "x"]);
+        let mut live = stopped.clone();
+        live["runs"][0]["status"] = json!("running");
+        assert!(!derive(&live, 0).iter().any(|r| matches!(r, Row::Meta { .. })));
     }
 
     #[test]
