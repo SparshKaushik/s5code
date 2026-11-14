@@ -3031,6 +3031,7 @@ dependencies = [
  "alacritty_terminal",
  "base64",
  "image",
+ "pulldown-cmark",
  "regex-automata",
  "ring",
  "rune",

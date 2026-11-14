@@ -179,7 +179,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
     settings::fonts::follow(s, tx);
-    changed |= chat::timeline::poll(s);
+    changed |= chat::timeline::poll(s, tx);
     changed |= chat::composer::poll(s);
     changed |= chat::remember_route(s);
     changed |= shell::palette::poll(s);
