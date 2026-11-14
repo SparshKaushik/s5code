@@ -750,7 +750,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
     let mut apply = Menu::new("usage-prices-apply")
         .trigger(apply_trigger(t, &selection, pending || has_changes))
         .placement(Placement::BottomStart)
-        .min_width(220.0)
+        // Web's popup grows to fit a reason beside the label; ours keeps the label readable.
+        .min_width(if all.iter().any(|t| t.unavailable.is_some()) { 300.0 } else { 220.0 })
         .open(u.menu)
         .on_close(|s: &mut App| ui(s).menu = false)
         .item(MenuItem::new("All environments").checked(u.selected.is_none()).on_select(|s: &mut App| {
