@@ -337,6 +337,11 @@ pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&s
         notice.until = data::now_ms() + 4000;
     }
 }
+pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.actions = actions;
+    }
+}
 /// The first `message` in an Effect cause, else the reply's own text.
 pub(crate) fn error_message(error: &serde_json::Value, fallback: &str) -> String {
     fn find(v: &serde_json::Value) -> Option<&str> {

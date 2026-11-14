@@ -1053,7 +1053,11 @@ pub fn poll(s: &mut App) -> bool {
         let upload = composer.uploads.remove(i);
         match stored {
             Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
-            Err(e) => failed.push((upload.outgoing, e)),
+            Err(e) => {
+                let background = upload.launch.as_ref().map(|id| composer.background.contains(id));
+                composer.background.retain(|b| Some(b) != upload.launch.as_ref());
+                failed.push((upload.outgoing, e, background));
+            }
         }
         changed = true;
     }
@@ -1075,12 +1079,12 @@ pub fn poll(s: &mut App) -> bool {
         match (reply, launch) {
             (Ok(v), Some(thread_id)) if !quiet => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
             (Ok(_), _) => {}
-            (Err(e), _) => failed.push((outgoing, e)),
+            (Err(e), launch) => failed.push((outgoing, e, launch.map(|_| quiet))),
         }
         changed = true;
     }
-    for (outgoing, error) in failed {
-        send_failed(s, outgoing, &error);
+    for (outgoing, error, background) in failed {
+        send_failed(s, outgoing, &error, background);
     }
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
@@ -1123,9 +1127,15 @@ fn watch(s: &mut App, request: u64, key: &str) {
 }
 
 /// A failed send shows in its route's banner, and its draft comes back unless a new one was started.
-fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
+/// `launch` is set for a new thread's launch: whether it went to the background.
+fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value, launch: Option<bool>) {
     let message = crate::shell::palette::error_message(error, "Failed to send message.");
     crate::chat::timeline::error_banner::set_local(s, &outgoing.key, Some(&message));
+    if let Some(background) = launch
+        && (background || draft_key(s, s.frame_route()) != outgoing.key)
+    {
+        launch_failed(s, &outgoing.key, background, &message);
+    }
     if outgoing.draft.is_null() {
         return;
     }
@@ -1133,6 +1143,20 @@ fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
     if blank && let Some(draft) = restored(&json!({"draft": outgoing.draft})).remove("draft") {
         s.ui.chat.composer.drafts.insert(outgoing.key, draft);
     }
+}
+
+/// Web's toast for a new thread that failed to start out of sight: in the background, or after
+/// the user left its draft. "Open draft" returns to the restored draft.
+fn launch_failed(s: &mut App, key: &str, background: bool, message: &str) {
+    let title = if background { "Background task failed" } else { "Could not start thread" };
+    let project = key.strip_prefix("home:").map(str::to_owned);
+    let open: crate::shell::palette::ToastAction = (
+        "Open draft".to_owned(),
+        true,
+        std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| s.navigate(Route::Home { project_id: project.clone() })),
+    );
+    crate::shell::palette::toast_error_brief(s, title, Some(message));
+    crate::shell::palette::set_toast_actions(s, vec![open]);
 }
 
 fn restored(v: &Value) -> HashMap<String, Draft> {
@@ -2489,5 +2513,29 @@ mod tests {
         assert_eq!(step_history(&entries, Some(("4", "second")), "second", false), Some((None, String::new())));
         // An edited recall is the user's own text again.
         assert_eq!(step_history(&entries, Some(("4", "second")), "second!", true), None);
+    }
+
+    #[test]
+    fn a_launch_that_fails_out_of_sight_toasts_like_the_web() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).next().unwrap();
+        let thread = s.state().threads.iter().map(|t| data::s(t, "id").to_owned()).next().unwrap();
+        let draft = Outgoing { key: home_key(&project), draft: json!({"prompt": "ship it"}) };
+        let error = json!({"message": "Provider is not ready"});
+        let toast = |s: &App| crate::shell::palette::toast_title(s).map(str::to_owned);
+        s.navigate(Route::Home { project_id: Some(project.clone()) });
+
+        send_failed(&mut s, Outgoing { key: draft.key.clone(), draft: draft.draft.clone() }, &error, Some(false));
+        assert_eq!(toast(&s), None, "FAILED: a failed launch on its own draft shows only the banner");
+        send_failed(&mut s, Outgoing { key: thread.clone(), draft: Value::Null }, &error, None);
+        assert_eq!(toast(&s), None, "FAILED: a failed message to a thread shows only the banner");
+
+        send_failed(&mut s, Outgoing { key: draft.key.clone(), draft: draft.draft.clone() }, &error, Some(true));
+        assert_eq!(toast(&s).as_deref(), Some("Background task failed"), "FAILED: a background launch failure toasts");
+
+        s.navigate(Route::Thread(thread.clone()));
+        send_failed(&mut s, draft, &error, Some(false));
+        assert_eq!(toast(&s).as_deref(), Some("Could not start thread"), "FAILED: a launch failure after leaving its draft toasts");
+        assert_eq!(s.ui.chat.composer.drafts.get(&home_key(&project)).map(|d| d.edit.text.as_str()), Some("ship it"), "FAILED: the draft comes back to open");
     }
 }
