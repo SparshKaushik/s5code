@@ -1483,7 +1483,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::add_to_machine::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    // On the draft hero web moves its notices below the composer (isDraftHeroState).
+    let hero = matches!(s.frame_route(), Route::Home { .. });
+    let detached = crate::add_to_machine::banner(s, t, true).filter(|_| hero);
+    let docked = crate::chat::timeline::composer_requests(s, t)
+        .or_else(|| plan::banner(s, t))
+        .or_else(|| crate::add_to_machine::banner(s, t, false).filter(|_| !hero))
+        .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !s.ui.chat.composer.stash.open);
     match (docked, badge) {
@@ -1494,7 +1500,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         (None, Some(badge)) => stack = stack.child(row().w_full().px(22.0).mb(-17.0).child(spacer()).child(badge)),
         (None, None) => {}
     }
-    stack.child(body)
+    stack.child(body).children(detached.map(|banner| col().w_full().pt(16.0).child(banner)))
 }
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.

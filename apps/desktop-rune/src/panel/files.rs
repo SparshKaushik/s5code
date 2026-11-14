@@ -53,6 +53,12 @@ pub struct Ui {
     sent: String,
     truncated: bool,
     numbers: String,
+    /// Bumped on every text change, for the wrapped gutter's cache.
+    rev: u64,
+    /// The wrapped editor's text width, from its last layout.
+    wrap_width: f32,
+    /// `numbers` laid out beside wrapped lines, for (rev, width, cell width).
+    gutter: std::cell::RefCell<Option<((u64, u32, u32), String)>>,
     columns: usize,
     due: Option<Instant>,
     writes: Vec<Write>,
@@ -165,6 +171,9 @@ impl Default for Ui {
             sent: String::new(),
             truncated: false,
             numbers: String::new(),
+            rev: 0,
+            wrap_width: 0.,
+            gutter: Default::default(),
             columns: 0,
             due: None,
             writes: vec![],
@@ -501,6 +510,7 @@ fn show(ui: &mut Ui, contents: String, truncated: bool) {
 }
 
 fn measure(ui: &mut Ui) {
+    ui.rev += 1;
     let text = &ui.editor.text;
     let lines = text.split('\n').count();
     let digits = lines.to_string().len();
@@ -872,9 +882,20 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
             .on_input_key(on_key)
     };
     let code = code.text_highlights(mark);
-    // Wrapped lines can't keep the gutter's numbers beside them, so wrapping drops it.
     if wrap {
-        return scroll(code.wrap().w_full().px(12.).py(8.));
+        let numbers = if ui.wrap_width > cell { wrapped_gutter(ui, font, cell) } else { ui.numbers.clone() };
+        return scroll(
+            row()
+                .w_full()
+                .py(8.)
+                .child(text(numbers).font(font).color(t.c.muted_foreground).pl(12.).pr(16.))
+                .child(code.wrap().grow(1.).min_w(0.).pr(12.).on_layout(|s: &mut App, r| {
+                    let ui = &mut s.ui.panel.files;
+                    if (ui.wrap_width - (r[2] - 12.)).abs() > 0.5 {
+                        ui.wrap_width = r[2] - 12.;
+                    }
+                })),
+        );
     }
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(
         row()
@@ -888,6 +909,47 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
             )
             .child(code.min_w(width).grow(1.).pr(12.)),
     )
+}
+
+/// CodeMirror's gutter under lineWrapping: each line's number on its first visual row, blank
+/// rows beside its continuations.
+fn wrapped_numbers(text: &str, rows: impl Fn(&str) -> usize) -> String {
+    let digits = text.split('\n').count().to_string().len();
+    let mut out = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{:>digits$}", i + 1));
+        for _ in 1..rows(line).max(1) {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// How many 20 px rows `line` wraps to at `width`. Lines that fit by their cell count skip
+/// shaping; the rest measure as the editor lays them out.
+fn visual_rows(line: &str, font: TextStyle, cell: f32, width: f32) -> usize {
+    let cells: usize = line.chars().map(|c| if c == '\t' { 8 } else { 1 }).sum();
+    if cells as f32 * cell <= width {
+        return 1;
+    }
+    let (_, height) = rune::text::measure(line, &[], font, Some(width));
+    (height / 20.).round().max(1.) as usize
+}
+
+fn wrapped_gutter(ui: &Ui, font: TextStyle, cell: f32) -> String {
+    let key = (ui.rev, ui.wrap_width.to_bits(), cell.to_bits());
+    let mut cache = ui.gutter.borrow_mut();
+    if let Some((k, numbers)) = cache.as_ref()
+        && *k == key
+    {
+        return numbers.clone();
+    }
+    let numbers = wrapped_numbers(&ui.editor.text, |line| visual_rows(line, font, cell, ui.wrap_width));
+    *cache = Some((key, numbers.clone()));
+    numbers
 }
 
 /// The field `workspace.focusNext` lands on: the search, or the open file's editor. `None`
@@ -1221,6 +1283,14 @@ mod tests {
         assert_eq!(line_range(text, 3), Some(14..14));
         assert_eq!(&text[line_range(text, 4).unwrap()], "last");
         assert_eq!(line_range(text, 5), None);
+    }
+
+    #[test]
+    fn the_wrapped_gutter_numbers_each_lines_first_row() {
+        let rows = |line: &str| line.len().div_ceil(4);
+        assert_eq!(wrapped_numbers("ab\nabcdefghij\n\nxyz", rows), "1\n2\n\n\n3\n4");
+        let long = (0..12).map(|_| "x").collect::<Vec<_>>().join("\n");
+        assert_eq!(wrapped_numbers(&long, |_| 1).lines().next(), Some(" 1"), "numbers right-align to the widest");
     }
 
     #[test]
