@@ -1538,7 +1538,19 @@ pub(super) fn scene(s: &mut App, open: &str) {
             ui.env_menu = Some("env-box".into());
             ui.routes_open.push("env-box".into());
         }
+        "routes" | "route-remove" => {
+            ui.routes_open.push("env-box".into());
+            if open == "route-remove" {
+                ui.route_remove = Some(("env-box".into(), 1));
+            }
+            let alt = |base: &str| env::Alt { base: base.into(), bearer: "token".into() };
+            s.ui.env.alternates.insert("env-box".into(), vec![alt("http://192.168.1.20:3773"), alt("https://box.example.com")]);
+        }
         "link" => {
+            // A second machine with the same name, told apart by its address.
+            s.ui.env.saved.push(Saved { id: "env-box-2".into(), label: "Hetzner box".into(), base: "http://10.0.0.7:3773".into(), bearer: String::new() });
+            env::park(s, "env-box-2", crate::data::Source::Fixture(crate::data::fixture_state()));
+            let ui = &mut s.ui.settings.connections;
             ui.linking = true;
             ui.link_machine_open = true;
         }

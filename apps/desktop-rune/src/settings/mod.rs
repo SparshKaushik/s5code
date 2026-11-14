@@ -625,7 +625,7 @@ pub const NAV: &[(&str, &[(&str, &str)])] = &[
             ("maintenance", "Maintenance"),
             ("labs", "Labs"),
             ("about", "About"),
-            ("archived", "Archived threads"),
+            ("archived", "Archive"),
         ],
     ),
 ];
@@ -1089,6 +1089,19 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-access-desktop", |s| {
         scene(s, "access");
         crate::desktop::exposure::scene(s);
+    }),
+    ("settings-access-share", |s| {
+        scene(s, "access");
+        crate::desktop::exposure::scene(s);
+        access::scene_share(s);
+    }),
+    ("settings-connections-routes", |s| {
+        scene(s, "connections");
+        connections::scene(s, "routes");
+    }),
+    ("settings-connections-route-remove", |s| {
+        scene(s, "connections");
+        connections::scene(s, "route-remove");
     }),
     ("settings-secrets", |s| scene(s, "secrets")),
     ("settings-maintenance", |s| scene(s, "maintenance")),
