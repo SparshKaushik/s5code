@@ -195,6 +195,7 @@ pub fn view(s: &App, t: &T) -> El {
         s.ui.env.saved.iter().map(|env| saved_row(s, t, env)).collect()
     };
     page = page.child(c::section_with_actions("Environments", vec![add], rows, t));
+    page = page.child(c::section("SSH", vec![env::ssh::form(s, t)], t));
     if offers_links(s) {
         page = page.child(linked(s, t));
     }
@@ -305,12 +306,16 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
                 .gap(4.0)
                 .child(text(saved.label.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
                 .child(
-                    text(format!("{} · {}", saved.base, env::status(s, &saved.id)))
+                    text({
+                        let status = env::status(s, &saved.id);
+                        env::ssh::detail(s, &saved.id, &status).unwrap_or_else(|| format!("{} · {status}", saved.base))
+                    })
                         .font(theme::TEXT_XS)
                         .color(t.c.muted_foreground)
                         .truncate(),
                 ),
         )
+        .children(env::ssh::row_action(s, t, &saved.id))
         .child(
             row().key(format!("saved-env-more-{}", saved.id)).child(
                 kit::icon_button(&icons::ELLIPSIS, "More actions")

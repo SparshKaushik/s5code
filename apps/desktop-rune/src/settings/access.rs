@@ -302,11 +302,7 @@ pub(super) fn view(s: &App, t: &T) -> El {
         el()
     };
     let mut rows = vec![about_row(t, "Version", if version.is_empty() { "Loading…" } else { version.as_str() }, status)];
-    if let Some(network) = crate::desktop::exposure::network_row(s, t) {
-        let state = &s.ui.settings.connections.access;
-        rows.push(network);
-        rows.push(info_row(t, "Tailscale HTTPS", tailscale_description(state.network, state.tailscale_serve)));
-    }
+    rows.extend(crate::desktop::exposure::rows(s, t));
     rows.push(permissions(s, t));
     col()
         .w_full()
