@@ -78,6 +78,7 @@ enum Action {
     ShowPrs,
     Files,
     ContentSearch,
+    CheckForUpdates,
     OpenFile(String),
     ProjectSettings(String),
     /// A message match: open its thread with find on the matched words.
@@ -1401,6 +1402,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
         Action::ContentSearch => crate::search::open(s),
+        Action::CheckForUpdates => crate::desktop::check_for_updates(s),
         Action::CopyThread => {
             actions::copy_thread(s, tx);
         }

@@ -29,6 +29,8 @@ pub enum Recovery {
     Pending,
     /// The bundled server gave up (`host::Event::Failed`); its supervisor has returned.
     Failed(String),
+    /// The bundled server keeps exiting before it is ready: Electron's startup recovery.
+    Failing(crate::host::StartupFailure),
     /// Still no shell after the timeout. The host restarts the server and Net reconnects on
     /// their own, so there is nothing to reload, only to wait for.
     Stalled,
@@ -58,8 +60,11 @@ pub fn recovery(s: &App) -> Option<Recovery> {
     }
     match (&s.src, &st.conn) {
         (Source::Fixture(_), Conn::Closed(reason)) => Some(Recovery::Failed(reason.clone())),
-        _ if s.ui.onboarding.stalled => Some(Recovery::Stalled),
-        _ => Some(Recovery::Pending),
+        _ => match &s.ui.desktop.startup_failure {
+            Some(failure) => Some(Recovery::Failing(failure.clone())),
+            None if s.ui.onboarding.stalled => Some(Recovery::Stalled),
+            None => Some(Recovery::Pending),
+        },
     }
 }
 
@@ -78,6 +83,7 @@ pub fn recovery_view(recovery: Recovery, t: &T) -> El {
     let page = col().key("first-run-recovery").role("main").w_full().h_full().fill(t.c.background).child(el().w_full().h(layout::TOPBAR_H).window_drag());
     let (title, description, action) = match &recovery {
         Recovery::Pending => return page,
+        Recovery::Failing(failure) => return crate::desktop::recovery::view(failure, t),
         Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), true),
         Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", false),
     };
