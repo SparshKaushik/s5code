@@ -328,13 +328,17 @@ fn permissions(s: &App, t: &T) -> El {
             let state = &mut s.ui.settings.connections.access;
             state.permissions = !state.permissions;
         });
-    let mut details = col().w_full().px(16.0).child(summary);
+    let details = col().w_full().px(16.0).child(summary);
     if !open {
         return details;
     }
     let connected = matches!(s.state().conn, s5_net::Conn::Open);
-    let session = super::permissions::reply(s);
-    details = details.child(match session {
+    details.child(session_permissions(t, super::permissions::reply(s), connected, false))
+}
+
+/// Web `SessionPermissions`; `route_context` for a saved environment's row.
+pub(super) fn session_permissions(t: &T, session: Option<&Result<Value, Value>>, connected: bool, route_context: bool) -> El {
+    match session {
         Some(Ok(session)) if connected && session["authenticated"] == true => {
             let mut list = col().w_full().gap(8.0);
             for pair in SCOPES.chunks(2) {
@@ -357,7 +361,11 @@ fn permissions(s: &App, t: &T) -> El {
                 .py(12.0)
                 .gap(12.0)
                 .child(
-                    text("These permissions apply to this client’s current connection.")
+                    text(if route_context {
+                        "These permissions apply to your active route. Other routes may have different permissions."
+                    } else {
+                        "These permissions apply to this client’s current connection."
+                    })
                         .font(theme::TEXT_XS)
                         .color(t.c.muted_foreground)
                         .wrap(),
@@ -369,8 +377,7 @@ fn permissions(s: &App, t: &T) -> El {
             let rejected = matches!(session, Some(Ok(v)) if v["authenticated"] == false);
             text(unavailable(connected, failed, rejected)).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().py(12.0)
         }
-    });
-    details
+    }
 }
 
 /// Web `FoldedSettingsSection` "Authorized clients".

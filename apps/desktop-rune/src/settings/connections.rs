@@ -67,8 +67,10 @@ pub struct Ui {
     was_pairing: bool,
     env_menu: Option<String>,
     env_icon_menu: bool,
-    /// Saved environments whose routes are showing.
+    /// Saved environments whose routes, permissions, or failure details are showing.
     routes_open: Vec<String>,
+    permissions_open: Vec<String>,
+    diagnosis_open: Vec<String>,
     /// A route being dragged (environment, position, distance), one to confirm removing, and
     /// the environment Add environment adds a route to.
     route_drag: Option<(String, usize, f32)>,
@@ -216,7 +218,8 @@ pub fn escape(s: &mut App) -> bool {
         || ui.adding.take().is_some()
         || std::mem::take(&mut ui.link_machine_open)
         || ui.machines.select.take().is_some()
-        || ui.machines.confirm.take().is_some();
+        || ui.machines.confirm.take().is_some()
+        || ui.machines.confirm_row.take().is_some();
     if closed {
         return true;
     }
@@ -411,44 +414,87 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
     // Web `environmentTransportLabel`: SSH and its target, else the address.
     let transport = env::ssh::transport(s, &saved.id).unwrap_or_else(|| saved.base.clone());
     let id = saved.id.clone();
-    let toggle = saved.id.clone();
-    let routes = row()
-        .key(format!("saved-env-routes-{}", saved.id))
-        .gap(2.0)
-        .center_y()
-        .role("button")
-        .label("Routes")
-        .expanded(routes_open)
-        .focusable(true)
-        .child(text("Routes").font(theme::TEXT_XS).color(t.c.muted_foreground))
-        .child(
-            icon(if routes_open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0)
-                .color(t.c.muted_foreground),
-        )
-        .on_press(move |s: &mut App| toggle_routes(s, &toggle));
+    let route_count = env::routes(s, &saved.id).len();
+    let fold = |name: &str, label: String, open: bool, toggle: fn(&mut App, &str)| {
+        let key = saved.id.clone();
+        row()
+            .key(format!("saved-env-{name}-{}", saved.id))
+            .gap(2.0)
+            .center_y()
+            .role("button")
+            .label(label.clone())
+            .expanded(open)
+            .focusable(true)
+            .child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground))
+            .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground))
+            .on_press(move |s: &mut App| toggle(s, &key))
+    };
+    let routes = fold("routes", if route_count <= 1 { "Routes".into() } else { format!("{route_count} routes") }, routes_open, toggle_routes);
+    let permissions_open = s.ui.settings.connections.permissions_open.contains(&saved.id);
+    let permissions = fold("permissions", "Permissions".into(), permissions_open, toggle_permissions);
+    let connected = env::connected(s, &saved.id);
+    let gap = (!off).then(|| super::machines::version_gap(s, &saved.id)).flatten();
+    let server_version = config.and_then(|c| c["environment"]["serverVersion"].as_str());
+    // Web `useConnectionDiagnosis`: while switched on and not connected, what failed.
+    let failure = match env::source(s, &saved.id).map(|src| &src.state().conn) {
+        Some(s5_net::Conn::Closed(reason)) if !off && env::ssh::state(s, &saved.id).is_none() => Some(reason.as_str()),
+        _ => None,
+    };
+    let diagnosis = failure.and_then(|reason| super::connection_diagnosis::present(&saved.label, reason, Some(env!("CARGO_PKG_VERSION")), server_version));
+    let mut parts = vec![transport];
+    if diagnosis.is_none() {
+        parts.push(status);
+    }
+    if let Some((server, _)) = &gap {
+        parts.push(server.clone());
+    }
+    let mut tip = env::status(s, &saved.id);
+    if let Some((server, client)) = &gap {
+        tip.push_str(&format!("\nUpdate available: {server} → {client}"));
+    }
     let subtitle = row()
         .w_full()
         .min_w(0.0)
         .gap(4.0)
         .center_y()
         .child(
-            text(format!("{transport} · {status}"))
+            text(parts.join(" · "))
                 .font(theme::TEXT_XS)
-                .color(if error { t.c.destructive } else { t.c.muted_foreground })
+                .color(if error && diagnosis.is_none() { t.c.destructive } else { t.c.muted_foreground })
                 .truncate()
-                .help(env::status(s, &saved.id))
+                .help(tip)
                 .shrink()
                 .min_w(0.0),
         )
         .child(text("·").font(theme::TEXT_XS).color(t.c.muted_foreground))
-        .child(routes);
-    let identity = col()
+        .child(routes)
+        .child(text("·").font(theme::TEXT_XS).color(t.c.muted_foreground))
+        .child(permissions);
+    let diagnosis_open = s.ui.settings.connections.diagnosis_open.contains(&saved.id);
+    let mut identity = col()
         .grow(1.0)
         .min_w(0.0)
         .gap(2.0)
         .opacity(if off { 0.6 } else { 1.0 })
         .child(text(saved.label.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
         .child(subtitle);
+    // Web `ConnectionDiagnosisSummary`; Rune's transport has no attempt count or retry deadline.
+    if let Some(d) = &diagnosis {
+        identity = identity
+            .child(text(d.headline.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap())
+            .child(fold("diagnosis", "Details".into(), diagnosis_open, toggle_diagnosis));
+    }
+    let updating = super::machines::row_updating(s, &saved.id);
+    // Web `ServerUpdateProgress`.
+    if updating || super::machines::row_failure(s, &saved.id).is_some() {
+        let (line, color) = match super::machines::row_failure(s, &saved.id).filter(|_| !updating) {
+            Some(message) => (message.to_owned(), t.c.destructive),
+            None => ("Downloading…".to_owned(), t.c.foreground),
+        };
+        identity = identity.child(
+            row().mt(4.0).gap(8.0).center_y().child(el().w(6.0).h(6.0).radius(3.0).fill(color)).child(text(line.clone()).font(theme::XS_MEDIUM).color(color).truncate().help(line).shrink().min_w(0.0)),
+        );
+    }
     let switch = kit::Switch::new(!off)
         .label(format!("{} {}", if off { "Switch on" } else { "Switch off" }, saved.label))
         .hide_label()
@@ -458,6 +504,17 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
             env::set_enabled(s, &id, on);
         })
         .build(&kit::theme(t));
+    // Web's row `ServerUpdateAction` (icon appearance) while this server is behind the client.
+    let update = (connected && gap.is_some() && !updating && super::machines::row_update(s, &saved.id)).then(|| {
+        let label = if super::machines::row_failure(s, &saved.id).is_some() { "Retry update" } else { "Update" };
+        let key = saved.id.clone();
+        kit::icon_button(&icons::CIRCLE_ARROW_UP, label)
+            .variant("ghost-muted")
+            .size("icon-xs")
+            .on_press(move |s: &mut App| super::machines::update_row(s, &key))
+            .build(t)
+            .help(label)
+    });
     let more = saved.id.clone();
     let line = row()
         .w_full()
@@ -470,6 +527,7 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
                 .gap(4.0)
                 .center_y()
                 .children(env::ssh::row_action(s, t, &saved.id))
+                .children(update)
                 .child(switch)
                 .child(
                     row().key(format!("saved-env-more-{}", saved.id)).child(
@@ -482,10 +540,98 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
                 ),
         );
     let mut body = col().key(format!("saved-env-{}", saved.id)).w_full().px(16.0).py(10.0).child(line);
+    if let Some(d) = diagnosis.filter(|_| diagnosis_open) {
+        body = body.child(diagnosis_panel(t, saved, d).ml(28.0));
+    }
     if routes_open {
         body = body.child(routes_list(s, t, saved).ml(28.0));
     }
+    if permissions_open {
+        let session = super::permissions::reply_on(s, &saved.id);
+        body = body.child(
+            col().ml(28.0).mt(8.0).child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5))).child(super::access::session_permissions(t, session, connected, true)),
+        );
+    }
     body
+}
+
+/// Web `ConnectionDiagnosisPanel`: hops in order, what to try, the facts, and the actions.
+fn diagnosis_panel(t: &T, saved: &Saved, d: super::connection_diagnosis::Diagnosis) -> El {
+    use super::connection_diagnosis::Hop;
+    let muted = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+    let mut hops = col().w_full().gap(2.0);
+    for (label, hop) in &d.hops {
+        let (mark, note) = match hop {
+            Hop::Ok => ("✓", ""),
+            Hop::Failed => ("✕", "Failed"),
+            Hop::Unchecked => ("–", "Not checked"),
+        };
+        let color = if *hop == Hop::Failed { t.c.destructive } else { t.c.muted_foreground };
+        hops = hops.child(
+            row()
+                .gap(8.0)
+                .child(text(mark).font(theme::TEXT_XS).color(color).w(12.0))
+                .child(text(label.clone()).font(theme::TEXT_XS).color(if *hop == Hop::Ok { t.c.foreground } else { color }))
+                .child(text(note).font(theme::TEXT_XS).color(color)),
+        );
+    }
+    let mut steps = col().w_full().gap(2.0).child(text("What to try").font(theme::XS_MEDIUM).color(t.c.foreground));
+    for (i, step) in d.steps.iter().enumerate() {
+        steps = steps.child(muted(format!("{}. {step}", i + 1)));
+    }
+    let mut facts = col().w_full().gap(2.0);
+    for (label, value) in &d.facts {
+        facts = facts.child(
+            row()
+                .w_full()
+                .gap(12.0)
+                .child(text(*label).font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground).w(96.0))
+                .child(text(value.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).wrap().grow(1.0).min_w(0.0)),
+        );
+    }
+    let key = saved.id.clone();
+    let report = super::connection_diagnosis::text(&saved.label, &d);
+    let actions = row()
+        .gap(8.0)
+        .child(kit::Button::new("Retry now").variant("outline").size("xs").on_press(move |s: &mut App| retry_now(s, &key)).build(t))
+        .child(kit::Button::new("Copy diagnostics").variant("outline").size("xs").build(t).on_press_tx(move |s: &mut App, tx| {
+            tx.copy(report.clone());
+            toast(s, "Diagnostics copied", None);
+        }));
+    col()
+        .w_full()
+        .mt(8.0)
+        .pt(8.0)
+        .gap(12.0)
+        .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)))
+        .child(hops)
+        .child(steps)
+        .child(facts)
+        .child(actions)
+}
+
+/// Web `environmentCatalog.retryNow`: skip the backoff wait and connect again.
+fn retry_now(s: &mut App, key: &str) {
+    if let Some(net) = env::net_of(s, key) {
+        net.reconnect();
+    }
+}
+
+fn toggle_permissions(s: &mut App, id: &str) {
+    toggle(&mut s.ui.settings.connections.permissions_open, id);
+    super::permissions::load(s);
+}
+
+fn toggle_diagnosis(s: &mut App, id: &str) {
+    toggle(&mut s.ui.settings.connections.diagnosis_open, id);
+}
+
+fn toggle(open: &mut Vec<String>, id: &str) {
+    if open.iter().any(|k| k == id) {
+        open.retain(|k| k != id);
+    } else {
+        open.push(id.to_owned());
+    }
 }
 
 fn toggle_routes(s: &mut App, id: &str) {
@@ -1556,6 +1702,13 @@ pub(super) fn scene(s: &mut App, open: &str) {
         "env-menu" => {
             ui.env_menu = Some("env-box".into());
             ui.routes_open.push("env-box".into());
+        }
+        "failing" => {
+            ui.diagnosis_open.push("env-box".into());
+            ui.permissions_open.push("env-box".into());
+            if let Some((_, crate::data::Source::Fixture(state))) = s.ui.env.parked.iter_mut().find(|(k, _)| k == "env-box") {
+                state.conn = s5_net::Conn::Closed("HTTP error: 502 Bad Gateway".into());
+            }
         }
         "routes" | "route-remove" => {
             ui.routes_open.push("env-box".into());

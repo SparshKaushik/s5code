@@ -14,6 +14,7 @@ use crate::{App, icons};
 use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
+mod updates;
 mod usage;
 pub use usage::IDLE_KEY;
 
@@ -53,6 +54,7 @@ pub struct Ui {
     /// Scenes only: open the detail pane scrolled to its end, where Models sits.
     pub scene_bottom: bool,
     pub usage: usage::Ui,
+    pub updates: updates::Ui,
 }
 
 /// `ProviderEnvironmentEditor`'s rows while they differ from what was published: blank rows,
@@ -1752,7 +1754,7 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
     col()
         .w_full()
         .gap(32.0)
-        .child(section(add, Some(row().mr(-8.0).child(refresh.build(t))), body, t))
+        .child(section(add, Some(row().mr(-8.0).gap(8.0).center_y().children(updates::action(s, t)).child(refresh.build(t))), body, t))
         .child(usage::section(s, t))
         .child(usage::advanced(s, cx, t))
 }
@@ -1763,7 +1765,7 @@ pub fn escape(s: &mut App) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    usage::poll(s)
+    usage::poll(s) | updates::poll(s)
 }
 
 /// The compact idle threads "Never" option on a server that can't store it.

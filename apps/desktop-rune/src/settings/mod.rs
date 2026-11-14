@@ -11,6 +11,7 @@ pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
+mod connection_diagnosis;
 mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
@@ -1160,6 +1161,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-access-managed", |s| {
         scene(s, "access");
         access::scene_managed(s);
+    }),
+    ("settings-connections-failing", |s| {
+        scene(s, "connections");
+        connections::scene(s, "failing");
     }),
     ("settings-connections-routes", |s| {
         scene(s, "connections");

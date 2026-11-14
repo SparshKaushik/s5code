@@ -21,6 +21,10 @@ pub struct Ui {
     /// Update all: the requests in flight, and desktop apps waiting on the confirmation.
     updating: Vec<(u64, Target)>,
     pub(super) confirm: Option<Vec<Target>>,
+    /// A saved row's own Update, waiting on its desktop app confirmation.
+    pub(super) confirm_row: Option<Target>,
+    /// Each environment's last failed update, until it is retried (web `ServerUpdateProgress`).
+    failed: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -472,8 +476,41 @@ fn update_all(s: &mut App) {
     start(s, available);
 }
 
+/// Web `resolveServerConfigVersionMismatch`: `(server, client)` while this server is behind.
+pub(super) fn version_gap(s: &App, key: &str) -> Option<(String, String)> {
+    let client = client_version(s)?;
+    let server = env::source(s, key)?.state().config.as_ref()?["environment"]["serverVersion"].as_str()?.trim().to_owned();
+    behind(&server, &client).then(|| (server, client.trim().to_owned()))
+}
+
+/// Web's per-row `ServerUpdateAction`: whether this saved server can update to this client.
+pub(super) fn row_update(s: &App, key: &str) -> bool {
+    targets(s).iter().any(|t| t.key == key)
+}
+
+pub(super) fn row_updating(s: &App, key: &str) -> bool {
+    s.ui.settings.connections.machines.updating.iter().any(|(_, t)| t.key == key)
+}
+
+pub(super) fn row_failure<'a>(s: &'a App, key: &str) -> Option<&'a str> {
+    s.ui.settings.connections.machines.failed.get(key).map(String::as_str)
+}
+
+pub(super) fn update_row(s: &mut App, key: &str) {
+    if row_updating(s, key) {
+        return;
+    }
+    let Some(target) = targets(s).into_iter().find(|t| t.key == key) else { return };
+    if target.self_update == "desktop-managed" {
+        s.ui.settings.connections.machines.confirm_row = Some(target);
+        return;
+    }
+    start(s, vec![target]);
+}
+
 fn start(s: &mut App, targets: Vec<Target>) {
     for target in targets {
+        s.ui.settings.connections.machines.failed.remove(&target.key);
         // Web `canUpdateServer`: the session there must hold environment:maintain.
         if !super::permissions::can_on(s, &target.key, "environment:maintain") {
             continue;
@@ -514,6 +551,7 @@ pub(super) fn poll(s: &mut App) -> bool {
             Err(error) => {
                 let message = error["message"].as_str().unwrap_or("Server update failed.").to_owned();
                 toast_error(s, &format!("{} update failed", target.label), Some(&message));
+                s.ui.settings.connections.machines.failed.insert(target.key.clone(), message);
             }
         }
     }
@@ -532,6 +570,30 @@ pub(super) fn update_all_button(s: &App, t: &T) -> Option<El> {
 
 /// Web `requestConfirmDialog` before desktop apps relaunch.
 pub(super) fn confirm_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
+    if let Some(target) = &s.ui.settings.connections.machines.confirm_row {
+        let close = |s: &mut App| s.ui.settings.connections.machines.confirm_row = None;
+        kit::Dialog::new("update-row-confirm", format!("Update the T3 Code desktop app that runs the {} server?", target.label))
+            .open(true)
+            .alert()
+            .description("It will close and relaunch on that machine.")
+            .on_close(close)
+            .child(
+                row()
+                    .gap(8.0)
+                    .child(kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
+                    .child(
+                        kit::Button::new("Confirm")
+                            .on_press(|s: &mut App| {
+                                if let Some(target) = s.ui.settings.connections.machines.confirm_row.take() {
+                                    start(s, vec![target]);
+                                }
+                            })
+                            .build(t),
+                    ),
+            )
+            .build(t, layers);
+        return;
+    }
     let Some(targets) = &s.ui.settings.connections.machines.confirm else { return };
     let desktops: Vec<&str> = targets.iter().filter(|t| t.self_update == "desktop-managed").map(|t| t.label.as_str()).collect();
     let close = |s: &mut App| s.ui.settings.connections.machines.confirm = None;

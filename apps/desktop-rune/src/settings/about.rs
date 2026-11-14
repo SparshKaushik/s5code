@@ -194,23 +194,36 @@ pub fn view(s: &App, t: &T) -> El {
         c::button("Check Server Release", t)
             .on_press(|s: &mut App| request(s, "server.getNpmRelease", json!({"spec":"latest"}))),
     );
-    if let Some(target) = target.filter(|target| *target != version) {
-        let target = target.to_owned();
-        controls = controls.child(
-            c::button("Update", t)
-                .disabled(!can_update)
-                .on_press(move |s: &mut App| s.ui.settings.update_version = Some(target.clone())),
-        );
-    }
-    app.push(about_row(
-        t,
-        "Server",
-        &match target {
-            Some(v) if v != version => format!("Version {version} · Latest release: {v}"),
-            _ => format!("Version {version}"),
-        },
-        controls,
-    ));
+    // One update state with the chat banner (`chat::server_update`).
+    use crate::chat::server_update::{self as update, Status};
+    let description = match update::status(s) {
+        Status::Running { stage, target, .. } => {
+            controls = controls.child(kit::Button::new(stage.label()).size("sm").variant("outline").disabled(true).build(t));
+            format!("Version {version} · Updating to {target}")
+        }
+        Status::Failed { target, message, .. } if !update::dismissed(s) => {
+            let retry = target.clone();
+            controls = controls
+                .child(c::button("Retry", t).disabled(!can_update).on_press(move |s: &mut App| update::start(s, &retry)))
+                .child(c::button("Dismiss", t).on_press(update::dismiss));
+            message.clone()
+        }
+        _ => {
+            if let Some(target) = target.filter(|target| *target != version) {
+                let target = target.to_owned();
+                controls = controls.child(
+                    c::button("Update", t)
+                        .disabled(!can_update)
+                        .on_press(move |s: &mut App| s.ui.settings.update_version = Some(target.clone())),
+                );
+            }
+            match target {
+                Some(v) if v != version => format!("Version {version} · Latest release: {v}"),
+                _ => format!("Version {version}"),
+            }
+        }
+    };
+    app.push(about_row(t, "Server", &description, controls));
     // Web's `CliCommandSettingsRow`, desktop only.
     #[cfg(unix)]
     if let Some(cli) = crate::desktop::cli::row(s) {
@@ -521,7 +534,7 @@ pub fn update_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .child(
                     crate::kit::Button::new("Update server")
                         .on_press(move |s: &mut App| {
-                            request(s, "server.updateServer", json!({"targetVersion":version}));
+                            crate::chat::server_update::start(s, &version);
                             s.ui.settings.update_version = None;
                         })
                         .build(t),
