@@ -347,7 +347,7 @@ pub(super) fn setting(cx: &Cx<App>, t: &T, key: &str, heading: El, description: 
 }
 
 pub(super) fn title(label: &str, t: &T) -> El {
-    row().gap(6.0).center_y().child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+    row().gap(6.0).center_y().child(text(label.to_owned()).key(super::title_key(label)).font(theme::SM_MEDIUM).color(t.c.foreground))
 }
 
 /// Web `NumberField` size sm: −, the amount and its unit, +, in one bordered group. Steps go

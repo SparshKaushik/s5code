@@ -208,6 +208,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
     let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
+            .key(super::title_key(title))
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
@@ -485,6 +486,7 @@ pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t:
                 .center_y()
                 .child(
                     text(title.to_owned())
+                        .key(super::title_key(title))
                         .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
                         .color(t.c.foreground)
                         .grow(1.0),

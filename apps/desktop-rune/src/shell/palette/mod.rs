@@ -77,6 +77,8 @@ enum Action {
     CopyPromptLink(String),
     ShareWithGuest(String),
     ToggleThemeEditor,
+    /// A settings search result: its page and title.
+    Setting(String, String),
     LinkPr(String),
     ShowPrs,
     Files,
@@ -640,7 +642,7 @@ fn items(s: &App) -> Vec<Item> {
     if !typed.trim().is_empty() && ui.page.is_empty() {
         for setting in crate::settings::search::items() {
             let page = crate::settings::label(&setting.to);
-            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Navigate(Route::Settings(setting.to.clone())));
+            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Setting(setting.to.clone(), setting.title.clone()));
             row.description = Some(format!("Settings · {page}"));
             row.fields = std::iter::once(page).chain(setting.terms.iter().map(String::as_str)).map(|v| SearchTerm::weighted(v, 0.6)).collect();
             out.push(row);
@@ -1414,6 +1416,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             toast(s, "Prompt link copied", None);
         }
         Action::ShareWithGuest(thread) => crate::shell::sidebar::share::open_guest(s, &thread),
+        Action::Setting(page, title) => crate::settings::open_setting(s, &page, &title),
         Action::ToggleThemeEditor => {
             let dark = s.ui.shell.dark.get();
             crate::settings::themes::toggle_editor(s, dark);
@@ -2211,7 +2214,7 @@ mod tests {
         let rows = items(&s);
         let hit = rows.iter().find(|v| v.group == "Settings" && v.title == "Keep worktrees with local changes").expect("the setting matches");
         assert_eq!(hit.description.as_deref(), Some("Settings · Worktrees"));
-        assert!(matches!(&hit.action, Action::Navigate(Route::Settings(page)) if page == "worktrees"));
+        assert!(matches!(&hit.action, Action::Setting(page, title) if page == "worktrees" && title == "Keep worktrees with local changes"));
 
         let (thread, project) = s
             .state()

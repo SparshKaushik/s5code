@@ -96,7 +96,7 @@ pub fn about_row(t: &T, title: &str, description: &str, control: El) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(4.0)
-                .child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(title.to_owned()).key(super::title_key(title)).font(theme::SM_MEDIUM).color(t.c.foreground))
                 .child(text(description.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
         )
         .child(control)

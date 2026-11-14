@@ -99,7 +99,7 @@ pub(super) fn info_row(t: &T, title: &str, description: &str) -> El {
         .px(16.0)
         .py(12.0)
         .gap(4.0)
-        .child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(title.to_owned()).key(super::title_key(title)).font(theme::SM_MEDIUM).color(t.c.foreground))
         .child(text(description.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap())
 }
 
