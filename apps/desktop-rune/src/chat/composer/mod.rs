@@ -755,7 +755,7 @@ fn send(s: &mut App, alternate: bool) {
 /// without opening (composer.sendBackground), and a message to a thread opens a new draft in its
 /// project after sending (composer.sendAndNewThread).
 fn send_with(s: &mut App, alternate: bool, background: bool) {
-    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) {
+    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) || crate::add_to_machine::send_block(s).is_some() {
         return;
     }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
@@ -1483,7 +1483,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::add_to_machine::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !s.ui.chat.composer.stash.open);
     match (docked, badge) {
@@ -1697,7 +1697,7 @@ fn primary_action(s: &App, t: &T) -> El {
             return action;
         }
     }
-    let sendable = !rewinding(s) && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = !rewinding(s) && crate::add_to_machine::send_block(s).is_none() && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable && editing_run(s).is_none() {
         return stop_button(t, 32.0);
     }
@@ -1734,7 +1734,7 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     };
     let status = if disconnected(s) || no_provider(s) || project_required(s) {
         Some("Environment disconnected".to_owned())
-    } else if let Some(reason) = send_block(s) {
+    } else if let Some(reason) = send_block(s).or_else(|| crate::add_to_machine::send_block(s)) {
         Some(reason)
     } else if rewinding(s) {
         Some("Rewinding conversation".to_owned())
