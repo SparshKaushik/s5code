@@ -76,6 +76,7 @@ enum Action {
     CopyThread,
     CopyPromptLink(String),
     ShareWithGuest(String),
+    ToggleThemeEditor,
     LinkPr(String),
     ShowPrs,
     Files,
@@ -302,6 +303,10 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         copied: Vec::new(),
     });
 }
+#[cfg(test)]
+pub(crate) fn toast_title(s: &App) -> Option<&str> {
+    s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
+}
 /// The open toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
     let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
@@ -476,6 +481,9 @@ fn items(s: &App) -> Vec<Item> {
         let mut appearance = item("Change appearance", "Actions", &icons::MONITOR, &shortcut_label(s, "appearance.cycle"), Action::Page("appearance"));
         appearance.fields = keywords(&["change appearance", "light", "dark", "system", "mode", "toggle"]);
         out.push(appearance);
+        let mut editor = item("Toggle theme editor", "Actions", &icons::PALETTE, &shortcut_label(s, "themeEditor.toggle"), Action::ToggleThemeEditor);
+        editor.fields = keywords(&["theme", "appearance", "colors", "palette", "customize"]);
+        out.push(editor);
         if crate::pages::pull_requests::supported(s) {
             let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
             prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
@@ -1406,6 +1414,10 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             toast(s, "Prompt link copied", None);
         }
         Action::ShareWithGuest(thread) => crate::shell::sidebar::share::open_guest(s, &thread),
+        Action::ToggleThemeEditor => {
+            let dark = s.ui.shell.dark.get();
+            crate::settings::themes::toggle_editor(s, dark);
+        }
         Action::LinkPr(thread) => actions::open_link(s, thread),
         Action::ShowPrs => actions::show_pull_requests(s),
         Action::OpenFile(path) => crate::panel::open_file(s, path),

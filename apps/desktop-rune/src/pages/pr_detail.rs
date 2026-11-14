@@ -270,8 +270,14 @@ fn action_verb(action: &str) -> &'static str {
     }
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
-    if !matches!(s.route, Route::PullRequests) || !matches!(e.key, rune::Key::Escape) {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if !matches!(s.route, Route::PullRequests) {
+        return false;
+    }
+    if !s.ui.shell.palette.open && crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
+        return copy_number(s, tx);
+    }
+    if !matches!(e.key, rune::Key::Escape) {
         return false;
     }
     let u = ui(s);
@@ -281,6 +287,19 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
         return true;
     }
     false
+}
+
+/// PullRequestDetailPanel's `pullRequest.copyNumber`: the open PR's `#number`, once per press.
+fn copy_number(s: &mut App, tx: &mut Tx) -> bool {
+    let u = &s.ui.pages.detail;
+    let Some(entry) = u.detail.as_ref().or(u.entry.as_ref()) else { return false };
+    let short = if field(entry, "url").contains("/-/merge_requests/") { "MR" } else { "PR" };
+    let number = format!("#{}", entry["number"]);
+    if !tx.key_repeat() {
+        tx.copy(&number);
+        crate::shell::palette::toast(s, &format!("{short} number copied"), None);
+    }
+    true
 }
 
 // ---- derived ----------------------------------------------------------------------------
@@ -679,7 +698,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
             tx.copy(&copy_url);
             ui(s).menu = false;
         }))
-        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).shortcut(crate::shell::palette::shortcut_label(s, "pullRequest.copyNumber")).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             tx.copy(&number);
             ui(s).menu = false;
         }));
@@ -1338,6 +1357,26 @@ mod tests {
     fn recorded() -> Value {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pull-request-detail.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_copy_number_chord_copies_the_open_pr_once_per_press() {
+        let mut s = App::new();
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([{"command": "pullRequest.copyNumber", "shortcut": {"key": "k", "modKey": true, "shiftKey": true}}]);
+        }
+        let mut chord = rune::KeyEvent::from(rune::Key::Command('k'));
+        chord.mods.cmd = true;
+        chord.mods.ctrl = !cfg!(target_os = "macos");
+        chord.mods.shift = true;
+        s.navigate(Route::PullRequests);
+        assert!(!on_key(&mut s, &chord, &mut Tx::default()), "FAILED: no PR open, nothing to copy");
+        s.ui.pages.detail.detail = Some(recorded()["detail"].clone());
+        s.ui.shell.palette.open = true;
+        assert!(!on_key(&mut s, &chord, &mut Tx::default()), "FAILED: the palette keeps the keys");
+        s.ui.shell.palette.open = false;
+        assert!(on_key(&mut s, &chord, &mut Tx::default()), "FAILED: the chord copies the number");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("PR number copied"));
     }
 
     #[test]
