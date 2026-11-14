@@ -770,6 +770,10 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
     s.ui.settings.reveal = Some(search::reveal(page, title).to_owned());
+    // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
+    if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
+        update(s, "typographyAdvanced", json!(true));
+    }
     s.navigate(Route::Settings(page.to_owned()));
 }
 
@@ -993,8 +997,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         })
         .child(page);
     if let Some(title) = s.ui.settings.reveal.clone() {
+        let fold = pages::fold_of(path, &title);
         scroller = scroller.on_layout_tx(move |s: &mut App, _, tx: &mut rune::Tx| {
             s.ui.settings.reveal = None;
+            // The fold drawn open for the reveal stays open, as web's `AdvancedSettings` does.
+            s.ui.settings.advanced.extend(fold.clone());
             tx.scroll_center_in(scroll.clone(), title_key(&title));
         });
     }
@@ -1645,6 +1652,8 @@ mod reveal_tests {
         "Thread details",
         "Usage providers",
     ];
+    /// Drawn only in other states: the desktop CLI row, and Linked environments behind its Labs flag.
+    const HIDDEN_HERE: &[&str] = &["Linked environments", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {
@@ -1655,7 +1664,7 @@ mod reveal_tests {
         for item in crate::settings::search::items() {
             rt.update(|s, _| {
                 s.ui.settings.project = (item.to == "projects").then(|| crate::data::s(&s.state().projects[0], "id").to_owned());
-                s.navigate(Route::Settings(item.to.clone()));
+                crate::settings::open_setting(s, &item.to, &item.title);
             });
             rt.frame(1. / 60.);
             let key = super::title_key(super::search::reveal(&item.to, &item.title));
@@ -1663,6 +1672,7 @@ mod reveal_tests {
                 missing.push(item.title.as_str());
             }
         }
+        missing.retain(|title| !HIDDEN_HERE.contains(title));
         missing.sort_unstable();
         assert_eq!(missing, UNBUILT, "FAILED: unkeyed search titles {missing:?}");
     }

@@ -3,6 +3,7 @@
   "id": "storage-worktree-keep-when",
   "title": "Keep worktrees with local changes",
   "to": "worktrees",
+  "target": "Worktree cleanup",
   "terms": [
    "any local files uncommitted changes edited tracked files ignored env build output cleanup"
   ]

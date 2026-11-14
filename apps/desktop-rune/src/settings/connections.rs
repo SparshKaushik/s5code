@@ -288,7 +288,7 @@ fn local_row(s: &App, t: &T) -> El {
         .grow(1.0)
         .min_w(0.0)
         .gap(4.0)
-        .child(text("Local environment").font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text("Local environment").key(super::title_key("Local environment")).font(theme::SM_MEDIUM).color(t.c.foreground))
         .child(text(description).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap());
     if let Some(error) = &ui.local_error {
         copy = copy.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());

@@ -1645,7 +1645,7 @@ fn placeholder(cx: &rune::Cx<App>, t: &T, title: &str, description: &str, error:
 }
 
 fn section(title_action: Option<El>, header_action: Option<El>, body: El, t: &T) -> El {
-    let mut left = row().grow(1.0).min_w(0.0).gap(4.0).center_y().child(row().min_h(28.0).center_y().child(heading("Providers", t)));
+    let mut left = row().grow(1.0).min_w(0.0).gap(4.0).center_y().child(row().min_h(28.0).center_y().child(heading("Providers", t).key(super::title_key("Providers"))));
     if let Some(action) = title_action {
         left = left.child(action);
     }

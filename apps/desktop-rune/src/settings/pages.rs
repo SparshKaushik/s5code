@@ -87,6 +87,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         page = page.child(super::themes::view(s, t));
     }
     if let Some(sections) = specs()[path].as_array() {
+        let revealing = s.ui.settings.reveal.as_deref().and_then(|title| fold_of(path, title));
         let mut groups: Vec<(&str, Vec<El>)> = Vec::new();
         for section in sections {
             let title = section["title"].as_str().unwrap_or("");
@@ -108,7 +109,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 if let Some((section, last)) = groups.last_mut() {
                     // Each section's fold opens on its own, as web's per-section `AdvancedSettings`.
                     let fold = format!("{path}/{section}");
-                    let open = s.ui.settings.advanced.contains(&fold);
+                    let open = s.ui.settings.advanced.contains(&fold) || revealing.as_ref() == Some(&fold);
                     last.push(advanced_trigger(fold, open, t));
                     if open {
                         last.extend(rows);
@@ -151,7 +152,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
         "projects" => super::projects::view(s, cx, t),
-        "archived" => super::projects::archived(s, t),
+        "archived" => super::projects::archived(s, t).key(super::title_key("Archived threads")),
         "about" => super::about::view(s, t),
         "secrets" => super::secrets::view(s, t),
         "diagnostics" => super::diagnostics::view(s, cx, t),
@@ -181,6 +182,20 @@ fn diagnostics_link(s: &App, t: &T) -> El {
         )],
         t,
     )
+}
+
+/// The `AdvancedSettings` fold on `path` that holds the setting titled `title`.
+pub(super) fn fold_of(path: &str, title: &str) -> Option<String> {
+    let mut section = "";
+    for spec in specs()[path].as_array()? {
+        let name = spec["title"].as_str().unwrap_or("");
+        if name != "Advanced" {
+            section = name;
+        } else if spec["rows"].as_array().into_iter().flatten().any(|row| row["title"] == title) {
+            return Some(format!("{path}/{section}"));
+        }
+    }
+    None
 }
 
 pub(super) fn advanced_trigger(path: String, open: bool, t: &T) -> El {

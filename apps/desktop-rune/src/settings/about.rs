@@ -27,7 +27,8 @@ pub fn view(s: &App, t: &T) -> El {
         &format!("Version {}", env!("CARGO_PKG_VERSION")),
         crate::desktop::NO_UPDATE_FEED,
         c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
-    )];
+    )
+    .key(super::title_key("Version"))];
     // Web keeps this under Connections (`ServerUpdateAction`); here it names the server apart.
     let mut controls = row().gap(8.0).child(
         c::button("Check Server Release", t)

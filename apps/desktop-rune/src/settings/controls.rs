@@ -234,7 +234,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
     let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
-            .key(super::title_key(title))
+            .key(super::title_key(spec["searchTitle"].as_str().unwrap_or(title)))
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );

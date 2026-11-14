@@ -982,6 +982,7 @@
         {
           "key": "defaultModelSelection",
           "title": "Model",
+          "searchTitle": "Default model",
           "description": "Default model for new threads. Projects can override it.",
           "kind": "model",
           "options": []

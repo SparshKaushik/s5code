@@ -610,6 +610,7 @@ pub fn view(s: &App, t: &T) -> El {
                 .child(
                     el().h(28.0).px(16.0).center_y().child(
                         text("Color scheme")
+                            .key(super::title_key("Color scheme"))
                             .font(theme::weight(theme::TEXT_BASE, 600.0))
                             .color(t.c.foreground),
                     ),
@@ -629,6 +630,7 @@ pub fn view(s: &App, t: &T) -> El {
                         .center_y()
                         .child(
                             text("Themes")
+                                .key(super::title_key("Themes"))
                                 .font(theme::weight(theme::TEXT_BASE, 600.0))
                                 .color(t.c.foreground)
                                 .grow(1.0),
