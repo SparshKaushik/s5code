@@ -1,8 +1,9 @@
 //! Prompt links (packages/shared/src/promptLinks.ts): `s5code://new?prompt=…&repo=owner/name`,
 //! or the hosted app's `/new?…`, open a new-thread draft holding the prompt on the repository's
-//! project. Nothing is sent; the person reads the prompt in the composer first. They arrive on
-//! the command line (Linux and Windows hand links to a new process) or through macOS's
-//! `on_open_url`, and wait for the shell before they land.
+//! project (NewThreadLinkView): with no project for it, they offer to clone it; with no
+//! repository, the draft opens in the Scratch project. Nothing is sent; the person reads the
+//! prompt in the composer first. They arrive on the command line (Linux and Windows hand links
+//! to a new process) or through macOS's `on_open_url`, and wait for the shell before they land.
 //!
 //! Web pages the OS hands over (macOS: http links and `.html` files) open in a thread's browser,
 //! as DesktopWebLinkCoordinator's `openInBrowser`.
@@ -33,7 +34,22 @@ pub struct Ui {
     /// A confirmed pairing link is pairing, to report how it went.
     pairing: bool,
     web: Web,
+    landing: Option<Landing>,
 }
+
+/// NewThreadLinkView's states after a link is read and before its draft opens.
+#[derive(Debug, PartialEq)]
+enum Landing {
+    /// "You don't have owner/name": no project has the link's repository.
+    Missing(NewThread),
+    /// `projectClone.start` sent to `env` for the new project `project`.
+    Cloning { request: u64, env: String, project: String, link: NewThread },
+    /// A scratch project is starting for a link without a repository; holds the prompt.
+    Scratch(String),
+}
+
+const CANNOT_CLONE: &str = "This machine cannot clone from a link. Update T3 Code on it, or clone the repository from the command palette.";
+const NO_SCRATCH: &str = "None of your machines can start a thread without a project right now.";
 
 /// Electron's `isWebLink` or `isWebPageFile`: an http(s) URL, or the path of an HTML file.
 #[derive(Debug, PartialEq, Clone)]
@@ -286,6 +302,7 @@ pub fn repository_of(project: &serde_json::Value) -> Option<(String, String)> {
 /// Web's `pairFromLink`: any page can open a pairing link, so the person confirms the backend
 /// before its one-time token is spent.
 pub fn overlays(s: &App, t: &crate::theme::T, layers: &mut Vec<rune::El>) {
+    landing_dialog(s, t, layers);
     let Some((_, origin)) = &s.ui.links.pair else { return };
     let cancel = |s: &mut App| s.ui.links.pair = None;
     crate::kit::Dialog::new("pairing-link", &format!("Add the backend at {origin}?"))
@@ -299,6 +316,142 @@ pub fn overlays(s: &App, t: &crate::theme::T, layers: &mut Vec<rune::El>) {
                 .child(crate::kit::Button::new("Add").on_press(confirm_pairing).build(t)),
         )
         .build(t, layers);
+}
+
+/// NewThreadLinkView's missing-repository page, and its "Opening the link..." while the clone
+/// starts, as a dialog over whatever the window shows.
+fn landing_dialog(s: &App, t: &crate::theme::T, layers: &mut Vec<rune::El>) {
+    use crate::kit::Button;
+    let dialog = match &s.ui.links.landing {
+        Some(Landing::Missing(NewThread { repository: Some((owner, name)), .. })) => {
+            let full = format!("{owner}/{name}");
+            crate::kit::Dialog::new("prompt-link", format!("You don't have {full}"))
+                .description("Clone it to work on it here, or start without a project.")
+                .child(
+                    rune::row()
+                        .w_full()
+                        .gap(8.0)
+                        .justify_end()
+                        .child(Button::new(format!("Clone {full}")).size("sm").on_press(clone_repository).build(t))
+                        .child(Button::new("Use without project").size("sm").variant("outline").on_press(use_without_project).build(t)),
+                )
+        }
+        Some(Landing::Cloning { .. }) => crate::kit::Dialog::new("prompt-link", "Opening the link...")
+            .child(rune::row().child(crate::kit::Spinner::new().size("sm").tone("muted").build(&crate::kit::theme(t)))),
+        _ => return,
+    };
+    dialog.open(true).width(448.0).on_close(|s: &mut App| s.ui.links.landing = None).build(t, layers);
+}
+
+/// `lastActiveEnvironmentId`: where the latest-updated thread lives, else this machine while
+/// it is on.
+fn last_active_environment(s: &App) -> Option<String> {
+    match s.state().threads.iter().max_by_key(|t| data::ts(t, "updatedAt").unwrap_or(i64::MIN)) {
+        Some(thread) => Some(crate::env::of(s, thread)),
+        None => (!s.ui.desktop.local_off).then(|| crate::env::LOCAL.to_owned()),
+    }
+}
+
+/// `startProjectClone`'s input for a link's GitHub repository, cloned under `root`.
+fn clone_payload((owner, name): &(String, String), root: &str, project: &str) -> serde_json::Value {
+    use crate::shell::palette::add_project::{clone_destination, iso_now};
+    serde_json::json!({
+        "projectId": project,
+        "title": name,
+        "createdAt": iso_now(),
+        "remoteUrl": format!("https://github.com/{owner}/{name}.git"),
+        "destinationPath": clone_destination(root, name),
+    })
+}
+
+/// `cloneRepository`: clones the link's repository into the last active machine's new-projects
+/// folder, then opens the draft there.
+fn clone_repository(s: &mut App) {
+    let Some(Landing::Missing(link)) = s.ui.links.landing.take() else { return };
+    let Some(repository) = &link.repository else { return };
+    let env = last_active_environment(s);
+    let root = env
+        .as_deref()
+        .and_then(|key| crate::env::source(s, key))
+        .and_then(|src| src.state().config.as_ref())
+        .and_then(|config| config["newProjectsRoot"].as_str())
+        .filter(|root| !root.is_empty())
+        .map(str::to_owned);
+    let (Some(env), Some(root)) = (env, root) else {
+        return crate::shell::palette::toast(s, "Could not open the link", Some(CANNOT_CLONE));
+    };
+    let project = s5_net::uuid();
+    let payload = clone_payload(repository, &root, &project);
+    match crate::env::net_of(s, &env).map(|net| net.request("projectClone.start", payload)) {
+        Some(request) => s.ui.links.landing = Some(Landing::Cloning { request, env, project, link }),
+        None => crate::shell::palette::toast(s, "Could not open the link", Some(CANNOT_CLONE)),
+    }
+}
+
+fn use_without_project(s: &mut App) {
+    let Some(Landing::Missing(link)) = s.ui.links.landing.take() else { return };
+    start_scratch(s, link.prompt);
+}
+
+/// `openScratchDraft`: a link without a repository drafts in the Scratch project.
+fn start_scratch(s: &mut App, prompt: String) {
+    use crate::shell::palette::actions;
+    if actions::scratch_available(s) {
+        actions::new_without_project(s);
+    }
+    if actions::scratch_pending(s) {
+        s.ui.links.landing = Some(Landing::Scratch(prompt));
+    } else {
+        crate::shell::palette::toast(s, "Could not open the link", Some(NO_SCRATCH));
+    }
+}
+
+/// Folds in the clone reply, or places the prompt once the scratch project has opened.
+fn poll_landing(s: &mut App) -> bool {
+    use crate::shell::palette::actions;
+    match s.ui.links.landing.take() {
+        Some(Landing::Cloning { request, env, project, link }) => {
+            let mut reply = crate::env::net_of(s, &env).and_then(|net| net.take_reply(request));
+            if reply.is_none() {
+                reply = s.src.net().and_then(|net| net.take_reply(request));
+            }
+            match reply {
+                None => {
+                    s.ui.links.landing = Some(Landing::Cloning { request, env, project, link });
+                    false
+                }
+                Some(Err(e)) => {
+                    let message = crate::shell::palette::error_message(&e, "An error occurred.");
+                    crate::shell::palette::toast(s, "Clone failed", Some(&message));
+                    s.ui.links.landing = Some(Landing::Missing(link));
+                    true
+                }
+                Some(Ok(_)) => {
+                    crate::env::adopt(s, &project, &env);
+                    crate::shell::sidebar::go(s, Route::Home { project_id: Some(project) });
+                    crate::chat::composer::append_to_draft(s, &link.prompt);
+                    true
+                }
+            }
+        }
+        Some(Landing::Scratch(prompt)) if actions::scratch_pending(s) => {
+            s.ui.links.landing = Some(Landing::Scratch(prompt));
+            false
+        }
+        // The scratch flow reports its own failure.
+        Some(Landing::Scratch(prompt)) => {
+            let landed = matches!(&s.route, Route::Home { project_id: Some(id) }
+                if crate::chat::composer::project_by_id(s, id).is_some_and(|p| actions::is_scratch_project(s, p)));
+            if landed {
+                crate::chat::composer::append_to_draft(s, &prompt);
+            }
+            true
+        }
+        other => {
+            s.ui.links.landing = other;
+            false
+        }
+    }
 }
 
 fn confirm_pairing(s: &mut App) {
@@ -412,30 +565,35 @@ fn show_web(s: &mut App, page: WebPage) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let paired = poll_pairing(s) | poll_web(s);
+    let paired = poll_pairing(s) | poll_web(s) | poll_landing(s);
     if s.ui.links.pending.is_none() || !s.state().shell_ready {
         return paired;
     }
     match s.ui.links.pending.take().expect("checked above") {
         Err(message) => crate::shell::palette::toast(s, "Could not open the link", Some(&message)),
-        Ok(link) => {
-            let project_id = match &link.repository {
-                Some(repo) => match project_for(s, repo) {
-                    Some(id) => Some(id),
-                    None => {
-                        let message = format!("Add {}/{} as a project, then open the link again.", repo.0, repo.1);
-                        crate::shell::palette::toast(s, &format!("You don't have {}", repo.1), Some(&message));
-                        return true;
-                    }
-                },
-                None => None,
-            };
-            s.navigate(Route::Home { project_id });
-            crate::chat::composer::append_to_draft(s, &link.prompt);
-        }
+        Ok(link) => match link.repository.as_ref().map(|repo| project_for(s, repo)) {
+            None => start_scratch(s, link.prompt),
+            Some(None) => s.ui.links.landing = Some(Landing::Missing(link)),
+            Some(Some(id)) => {
+                s.navigate(Route::Home { project_id: Some(id) });
+                crate::chat::composer::append_to_draft(s, &link.prompt);
+            }
+        },
     }
     true
 }
+
+/// A prompt link for a repository no project has, over the "New thread" draft.
+fn scene_missing_repository(s: &mut App) {
+    crate::scene_clock(s);
+    if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "New thread").map(|t| data::s(t, "id").to_owned()) {
+        s.navigate(Route::Thread(id));
+    }
+    let repository = Some(("acme".to_owned(), "widgets".to_owned()));
+    s.ui.links.landing = Some(Landing::Missing(NewThread { prompt: "Fix the flaky tests".into(), repository }));
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] = &[("link-missing-repository", scene_missing_repository)];
 
 #[cfg(test)]
 mod tests {
@@ -493,6 +651,44 @@ mod tests {
         assert_eq!(pairing_link("https://pair?pairingUrl=https://box"), None);
         assert!(is_app_link("s5code://pair?pairingUrl=https://box") && is_app_link("s5code://new?prompt=hi") && !is_app_link("s5code://other"));
         assert!(parse("--check-server").is_none());
+    }
+
+    #[test]
+    fn a_link_to_a_missing_repository_offers_the_clone() {
+        let mut s = App::new();
+        let mut state = crate::data::empty_state();
+        state.shell_ready = true;
+        s.src = crate::data::Source::Fixture(state);
+        s.ui.links.pending = parse("s5code://new?prompt=hi&repo=acme/app");
+        assert!(poll(&mut s));
+        let repository = ("acme".to_string(), "app".to_string());
+        assert_eq!(s.ui.links.landing, Some(Landing::Missing(NewThread { prompt: "hi".into(), repository: Some(repository.clone()) })));
+        clone_repository(&mut s);
+        assert_eq!(s.ui.links.landing, None, "a machine without newProjectsRoot cannot clone from a link");
+        let payload = clone_payload(&repository, "~/code", "p1");
+        assert_eq!(
+            [&payload["projectId"], &payload["title"], &payload["remoteUrl"], &payload["destinationPath"]].map(|v| v.as_str().unwrap_or_default()),
+            ["p1", "app", "https://github.com/acme/app.git", "~/code/app"]
+        );
+        s.ui.links.pending = parse("s5code://new?prompt=hi");
+        assert!(poll(&mut s));
+        assert_eq!(s.ui.links.landing, None, "without a Scratch project the link fails instead of drafting elsewhere");
+    }
+
+    #[test]
+    fn links_clone_where_the_latest_thread_lives() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        assert_eq!(last_active_environment(&s).as_deref(), Some(crate::env::LOCAL));
+        s.ui.desktop.local_off = true;
+        assert_eq!(last_active_environment(&s), None, "with this machine off there is no primary environment");
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.threads = vec![
+                serde_json::json!({"id": "t1", "updatedAt": "2026-01-01T00:00:00.000Z"}),
+                serde_json::json!({"id": "t2", "updatedAt": "2026-02-01T00:00:00.000Z", "_environment": "box"}),
+            ];
+        }
+        assert_eq!(last_active_environment(&s).as_deref(), Some("box"));
     }
 
     #[test]

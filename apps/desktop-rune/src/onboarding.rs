@@ -9,9 +9,11 @@ use rune::{El, Tx, col, el, row, text};
 use s5_net::Conn;
 
 use crate::data::Source;
-use crate::theme::{self, T, layout};
+use crate::theme::{self, AlphaMul, T, layout};
 use crate::{App, Route, icons, kit};
 
+/// branding.ts's `APP_DISPLAY_NAME`, as the window title has it.
+const APP_DISPLAY_NAME: &str = "S5 Code";
 /// FirstRunGate's FIRST_RUN_DECISION_TIMEOUT_MS.
 const STALL: Duration = Duration::from_secs(4);
 
@@ -107,25 +109,33 @@ pub fn recovery_view(recovery: Recovery, t: &T) -> El {
 /// The draft route with nothing to draft in: the shell is in and every project is archived or gone.
 pub fn shows_hero(s: &App) -> bool {
     let st = s.state();
-    matches!(s.frame_route(), Route::Home { .. }) && st.shell_ready && !st.projects.iter().any(|p| p["archivedAt"].is_null())
+    matches!(s.frame_route(), Route::Home { .. }) && st.shell_ready && all_bootstrapped(s) && !st.projects.iter().any(|p| p["archivedAt"].is_null())
+}
+
+/// `allEnvironmentShellsBootstrapped`: every environment has its shell or has stopped trying; a
+/// pending one cannot prove the workspace is empty.
+fn all_bootstrapped(s: &App) -> bool {
+    crate::env::keys(s).iter().all(|key| crate::env::source(s, key).is_none_or(|src| src.state().shell_ready || matches!(src.state().conn, Conn::Closed(_))))
+}
+
+/// `HostedEmptyState`: this computer's environment is off and no other is saved, so `/` has
+/// nowhere to draft (the web renders it for a hosted-static gate with no environments).
+pub fn computer_off(s: &App) -> bool {
+    s.ui.desktop.local_off && crate::env::keys(s).is_empty()
 }
 
 pub fn hero(s: &App, t: &T) -> El {
-    let off = s.ui.desktop.local_off && s.ui.env.active == crate::env::LOCAL;
-    let scratch = !off && crate::shell::palette::actions::scratch_available(s);
-    let mut buttons = row().pt(24.0).gap(8.0).justify_center().child(if off {
-        // `HostedEmptyState` with the local environment off.
-        kit::Button::new("Open Environments")
-            .size("sm")
-            .on_press(|s: &mut App| s.navigate(Route::Settings("connections".into())))
-            .build(t)
-    } else {
+    if computer_off(s) {
+        return hosted_empty_state(t);
+    }
+    let scratch = crate::shell::palette::actions::scratch_available(s);
+    let mut buttons = row().pt(24.0).gap(8.0).justify_center().child(
         kit::Button::new("Add project")
             .size("sm")
             .icon(&icons::PLUS)
             .on_press(|s: &mut App| crate::shell::palette::open_add_project(s))
-            .build(t)
-    });
+            .build(t),
+    );
     if scratch {
         buttons = buttons.child(
             kit::Button::new("Start without a project")
@@ -136,11 +146,8 @@ pub fn hero(s: &App, t: &T) -> El {
                 .build(t),
         );
     }
-    let (title, description) = match (off, scratch) {
-        (true, _) => ("This computer is off", "Turn it back on, or connect a different computer."),
-        (false, true) => ("What should we work on?", "Add a project, or start without one."),
-        (false, false) => ("What should we work on?", "Add a project to start your first thread."),
-    };
+    let title = "What should we work on?";
+    let description = if scratch { "Add a project, or start without one." } else { "Add a project to start your first thread." };
     // Empty size="hero": the title is text-3xl at desktop widths, the description text-sm, mt-1.
     let header = col()
         .w_full()
@@ -165,6 +172,44 @@ pub fn hero(s: &App, t: &T) -> El {
         .child(col().key("no-projects-hero").w_full().grow(1.0).min_h(0.0).padding(48.0).center().child(header))
 }
 
+/// `HostedEmptyState` with the local environment off: a default-size `Empty` under a header
+/// naming the app.
+fn hosted_empty_state(t: &T) -> El {
+    let header = row()
+        .key("hosted-empty-header")
+        .w_full()
+        .h(layout::TOPBAR_H)
+        .px(20.0)
+        .center_y()
+        .window_drag()
+        .child(text(APP_DISPLAY_NAME).font(theme::SM_MEDIUM).color(t.c.muted_foreground.alpha_mul(0.6)));
+    let empty = col()
+        .max_w(384.0)
+        .items_center()
+        .child(text("This computer is off").font(theme::weight(theme::TEXT_XL, theme::SEMIBOLD)).color(t.c.foreground))
+        .child(text("Turn it back on, or connect a different computer.").font(theme::TEXT_SM).color(t.c.muted_foreground).mt(4.0))
+        .child(
+            row().pt(24.0).child(
+                kit::Button::new("Open Environments")
+                    .size("sm")
+                    .on_press(|s: &mut App| s.navigate(Route::Settings("connections".into())))
+                    .build(t),
+            ),
+        );
+    col()
+        .key("main")
+        .role("main")
+        .label("Home")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .h_full()
+        .fill(t.c.background)
+        .child(header)
+        .child(el().w_full().h(1.0).fill(t.c.border))
+        .child(col().key("hosted-empty-state").w_full().grow(1.0).min_h(0.0).padding(48.0).center().child(empty))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +230,26 @@ mod tests {
             state.projects.push(json!({"id": "p2", "archivedAt": null}));
         }
         assert!(!shows_hero(&s));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.projects.pop();
+        }
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: String::new() });
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(crate::data::empty_state()));
+        assert!(!shows_hero(&s), "a connecting environment may still bring projects");
+        if let Some(crate::data::Source::Fixture(state)) = crate::env::source_mut(&mut s, "box") {
+            state.conn = Conn::Closed("refused".into());
+        }
+        assert!(shows_hero(&s), "an environment that gave up connecting does not hold the hero back");
+    }
+
+    #[test]
+    fn the_computer_is_off_only_while_no_other_environment_is_saved() {
+        let mut s = App::new();
+        assert!(!computer_off(&s));
+        s.ui.desktop.local_off = true;
+        assert!(computer_off(&s));
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: String::new() });
+        assert!(!computer_off(&s), "a saved environment drafts there, as web's IndexDraftLanding");
     }
 
     #[test]
