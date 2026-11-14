@@ -109,6 +109,31 @@ impl Session {
         }
     }
 
+    /// A new viewport size. The grid reflows only once it settles, with the PTY: a size that
+    /// comes straight back (a thread shown again, a panel re-laying out) never reflows the screen,
+    /// since a round trip through a narrower grid can leave the cursor off the prompt.
+    fn fit_to(&mut self, cols: usize, rows: usize) {
+        if self.fit == Some((cols, rows)) {
+            return;
+        }
+        self.fit = Some((cols, rows));
+        // Recorded sessions keep the grid they were captured at.
+        if self.payload.is_some() {
+            self.notify_at = Some(Instant::now() + RESIZE_SETTLE);
+        }
+    }
+
+    /// Once the size settles the grid reflows to it, and the PTY hears it unless it has it.
+    fn settle(&mut self, now: Instant) -> Option<(usize, usize)> {
+        let at = self.notify_at?;
+        if now < at {
+            return None;
+        }
+        self.notify_at = None;
+        self.apply_grid();
+        self.fit.filter(|fit| Some(*fit) != self.grid)
+    }
+
     /// The PTY hears the fit once it settles, unless it already has it.
     fn schedule_notify(&mut self) {
         self.notify_at = (self.fit.is_some() && self.fit != self.grid).then(|| Instant::now() + RESIZE_SETTLE);
@@ -404,18 +429,7 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
     };
-    if session.fit == Some((cols, rows)) {
-        return;
-    }
-    session.fit = Some((cols, rows));
-    // Recorded sessions keep the grid they were captured at.
-    if session.payload.is_none() {
-        return;
-    }
-    // A narrower grid reflows now; the shell only hears settled sizes so a drag doesn't reprint
-    // its prompt.
-    session.apply_grid();
-    session.schedule_notify();
+    session.fit_to(cols, rows);
 }
 
 pub fn palette(t: &T) -> Palette {
@@ -539,13 +553,14 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         if let Some(at) = session.notify_at {
             let now = Instant::now();
-            if now >= at {
-                session.notify_at = None;
-                if let Some((cols, rows)) = session.fit {
+            if now < at {
+                tx.wake_after(at - now);
+            } else {
+                let size = session.vt.size();
+                if let Some((cols, rows)) = session.settle(now) {
                     notify.push((session.thread.clone(), session.id.clone(), cols, rows));
                 }
-            } else {
-                tx.wake_after(at - now);
+                changed |= session.vt.size() != size;
             }
         }
     }
@@ -1154,6 +1169,11 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
     grid.child(input)
         .on_layout(move |s: &mut App, r| {
             let m = metrics(s);
+            // A viewport with no room for a cell is hidden or still being laid out (FitAddon
+            // proposes nothing then).
+            if r[2] < 2. * PADDING + m.cell_w || r[3] < 2. * PADDING + m.cell_h {
+                return;
+            }
             let cols = ((r[2] - 2. * PADDING) / m.cell_w).floor().clamp(2., 1000.) as usize;
             let rows = ((r[3] - 2. * PADDING) / m.cell_h).floor().clamp(1., 500.) as usize;
             resize(s, &t4, &i4, cols, rows);
@@ -1518,6 +1538,60 @@ mod tests {
         apply(&mut session, &failed);
         assert!(session.vt.text().ends_with("[terminal] Terminal attach failed"));
         assert_eq!(session.vt.text().matches("Terminal attach failed").count(), 1);
+    }
+
+    const PROMPT_SCREEN: &str = "root@modal:~/projects/demo# echo first-key-ok\r\nfirst-key-ok\r\nroot@modal:~/projects/demo# ";
+
+    #[test]
+    fn a_viewport_laid_out_again_leaves_the_screen_alone() {
+        let mut session = Session::new("t", "term-1");
+        session.payload = Some(json!({"threadId":"t","terminalId":"term-1","cwd":"/p"}));
+        apply(&mut session, &json!({"type":"snapshot","snapshot":{"history":PROMPT_SCREEN,"cols":80,"rows":24,"sequence":1}}));
+        session.fit_to(80, 24);
+        assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), None, "the PTY already has this size");
+        let before = session.vt.cursor_point();
+        assert_eq!(before, (28, 2));
+        // Showing the thread again lays the viewport out at another size for a frame.
+        for cols in [2, 20, 27, 28, 40] {
+            session.fit_to(cols, 24);
+            session.fit_to(80, 24);
+            assert_eq!((session.vt.size(), session.vt.cursor_point()), ((80, 24), before), "a {cols}-column frame");
+            assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), None, "nothing for the PTY to hear");
+            assert_eq!(session.vt.cursor_point(), before);
+        }
+        // A size that holds reflows the grid and reaches the PTY together.
+        session.fit_to(60, 20);
+        assert_eq!(session.vt.size(), (80, 24));
+        assert_eq!(session.settle(Instant::now()), None, "not settled yet");
+        assert_eq!(session.settle(Instant::now() + RESIZE_SETTLE), Some((60, 20)));
+        assert_eq!(session.vt.size(), (60, 20));
+    }
+
+    #[test]
+    fn zz_diagnose_round_trip_reflow() {
+        let mut moved = vec![];
+        for cols in [2usize, 5, 10, 13, 14, 15, 20, 27, 28, 29, 30, 40, 45, 46, 60, 79] {
+            let mut vt = Vt::new(80, 24);
+            vt.feed(PROMPT_SCREEN);
+            let before = vt.cursor_point();
+            vt.resize(cols, 24);
+            let mid = vt.cursor_point();
+            vt.resize(80, 24);
+            if vt.cursor_point() != before {
+                moved.push((cols, mid, vt.cursor_point()));
+            }
+        }
+        for rows in [1usize, 2, 3] {
+            let mut vt = Vt::new(80, 24);
+            vt.feed(PROMPT_SCREEN);
+            let before = vt.cursor_point();
+            vt.resize(80, rows);
+            vt.resize(80, 24);
+            if vt.cursor_point() != before {
+                moved.push((1000 + rows, before, vt.cursor_point()));
+            }
+        }
+        panic!("DIAG round trips that moved the cursor from (28, 2): {moved:?}");
     }
 
     #[test]

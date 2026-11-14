@@ -1016,6 +1016,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("details-previous-worktree", |s| {
         (crate::shell::SCENES[0].1)(s);
+        // The shell's "home" scene is a fixture thread; the previous worktree is a draft's choice.
+        s.navigate(Route::Home { project_id: None });
         let project = crate::chat::home::draft_project(s).map(|p| data::s(p, "id").to_string()).unwrap_or_default();
         if let data::Source::Fixture(state) = &mut s.src
             && let Some(thread) = state.threads.iter_mut().find(|v| v["projectId"] == project.as_str())
