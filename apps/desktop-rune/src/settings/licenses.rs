@@ -50,7 +50,7 @@ fn decode_entry(value: &Value, index: usize) -> Result<Entry, String> {
     let field = |key: &str| object.get(key).unwrap_or(&NULL);
     let shape = (|| {
         let bundles = strings(field("bundles"))??;
-        let kind = field("kind").as_str().filter(|k| matches!(*k, "custom" | "package"))?;
+        let kind = field("kind").as_str().filter(|k| matches!(*k, "crate" | "custom" | "package"))?;
         Some(Entry {
             kind: kind.to_owned(),
             license: field("license").as_str()?.to_owned(),
@@ -125,11 +125,29 @@ fn bundles(bundles: &[String]) -> String {
         "device-tools" => "Device tools",
         "ios" => "iOS",
         "mobile" => "Mobile",
+        "native" => "Native app",
         "server" => "Server",
         "web" => "Web",
         _ => "",
     };
     bundles.iter().map(|b| if label(b).is_empty() { b.clone() } else { label(b).to_owned() }).collect::<Vec<_>>().join(", ")
+}
+
+/// The native app's own Rust crates, collected at build time by `tools/crate_notices.py` (empty
+/// when the build ran without it).
+fn native() -> &'static [Entry] {
+    static NATIVE: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
+    NATIVE.get_or_init(|| {
+        let manifest = serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/crate-notices.json"))).unwrap_or(Value::Null);
+        decode(&manifest).unwrap_or_default()
+    })
+}
+
+/// The environment's notices with the native crates folded in, ordered by name.
+fn with_native(mut entries: Vec<Entry>, native: &[Entry]) -> Vec<Entry> {
+    entries.extend(native.iter().cloned());
+    entries.sort_by_cached_key(|e| (e.name.to_lowercase(), e.version.clone()));
+    entries
 }
 
 fn fetch(base: &str) -> Outcome {
@@ -174,7 +192,7 @@ pub fn poll(s: &mut App) -> bool {
     }
     let Some(done) = ui.pending.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take()) else { return false };
     ui.pending = None;
-    ui.result = Some(done);
+    ui.result = Some(done.map(|entries| with_native(entries, native())));
     true
 }
 
@@ -286,25 +304,26 @@ fn notice_row(entry: &Entry, open: bool, t: &T) -> El {
 
 pub fn view(s: &App, t: &T) -> El {
     let ui = &s.ui.settings.licenses;
+    let list = |entries: &[Entry]| {
+        let filtered = filter(entries, &ui.query.text);
+        let action = header_action(s, filtered.len(), entries.len(), t);
+        let body = if filtered.is_empty() {
+            col().w_full().px(16.0).py(32.0).center().child(
+                text("No licenses match that search.").font(theme::TEXT_SM).color(t.c.muted_foreground),
+            )
+        } else {
+            let mut list = col().w_full();
+            for entry in filtered {
+                list = list.child(notice_row(entry, ui.open.as_deref() == Some(key(entry).as_str()), t));
+            }
+            list
+        };
+        (body, Some(action))
+    };
     let (body, action) = match &ui.result {
-        Some(Ok(entries)) => {
-            let filtered = filter(entries, &ui.query.text);
-            let action = header_action(s, filtered.len(), entries.len(), t);
-            let body = if filtered.is_empty() {
-                col().w_full().px(16.0).py(32.0).center().child(
-                    text("No licenses match that search.").font(theme::TEXT_SM).color(t.c.muted_foreground),
-                )
-            } else {
-                let mut list = col().w_full();
-                for entry in filtered {
-                    list = list.child(notice_row(entry, ui.open.as_deref() == Some(key(entry).as_str()), t));
-                }
-                list
-            };
-            (body, Some(action))
-        }
-        Some(Err(message)) => (
-            col()
+        Some(Ok(entries)) => list(entries.as_slice()),
+        Some(Err(message)) => {
+            let unavailable = col()
                 .w_full()
                 .px(16.0)
                 .py(20.0)
@@ -316,9 +335,15 @@ pub fn view(s: &App, t: &T) -> El {
                         .child(text("Open-source notices are unavailable").font(theme::SM_MEDIUM).color(t.c.foreground))
                         .child(text(message.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground.alpha_mul(0.8)).wrap()),
                 )
-                .child(Button::new("Try again").variant("outline").size("xs").build(t).on_press(start)),
-            None,
-        ),
+                .child(Button::new("Try again").variant("outline").size("xs").build(t).on_press(start));
+            // The native crates ship inside the app, so they stay listed when the server's can't load.
+            if native().is_empty() {
+                (unavailable, None)
+            } else {
+                let (rows, action) = list(native());
+                (col().w_full().child(unavailable).child(rows), action)
+            }
+        }
         None => (
             row().w_full().px(16.0).py(20.0).child(text("Loading open-source notices…").font(theme::TEXT_SM).color(t.c.muted_foreground)),
             None,
@@ -367,6 +392,7 @@ pub fn scene(s: &mut App, search: Option<&str>) {
     let entries = decode(&manifest).unwrap();
     let ui = &mut s.ui.settings.licenses;
     ui.open = Some(key(&entries[0]));
+    let entries = with_native(entries, native());
     ui.result = Some(Ok(entries));
     if let Some(query) = search {
         ui.search_open = true;
@@ -418,5 +444,21 @@ mod tests {
     #[test]
     fn bundle_labels_match_web() {
         assert_eq!(bundles(&["web".into(), "device-tools".into(), "ios".into(), "other".into()]), "Web, Device tools, iOS, other");
+        assert_eq!(bundles(&["native".into()]), "Native app");
+    }
+
+    #[test]
+    fn native_crates_join_the_environments_notices_in_name_order() {
+        let mut crate_entry = entry("Serde", Some("1.0.0"));
+        crate_entry["kind"] = json!("crate");
+        crate_entry["bundles"] = json!(["native"]);
+        let native = decode(&json!({"schemaVersion": 1, "entries": [crate_entry, entry("zstd", None)]})).unwrap();
+        let server = decode(&json!({"schemaVersion": 1, "entries": [entry("effect", None), entry("vite", None)]})).unwrap();
+        let names = with_native(server, &native).into_iter().map(|e| e.name).collect::<Vec<_>>();
+        assert_eq!(names, ["effect", "Serde", "vite", "zstd"]);
+        assert_eq!(filter(&with_native(vec![], &native), "native")[0].kind, "crate");
+        // The build's own manifest decodes (it is empty when built without the generator).
+        let embedded: Value = serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/crate-notices.json"))).unwrap();
+        assert_eq!(native().len(), decode(&embedded).unwrap().len());
     }
 }
