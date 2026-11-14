@@ -85,6 +85,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if matches!(s.frame_route(), Route::Settings(_)) {
         return main;
     }
+    if let Route::Thread(id) = s.frame_route()
+        && crate::not_found::missing_thread(s, id)
+    {
+        return main.child(crate::not_found::no_active_thread(t));
+    }
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let shown = details::shown(s, w, h);
     let lane = details::lane(w, h, shown != details::Shown::Inline);

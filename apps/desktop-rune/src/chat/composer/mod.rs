@@ -434,7 +434,7 @@ fn rewinding(s: &App) -> bool {
 }
 
 fn send(s: &mut App, alternate: bool) {
-    if rewinding(s) {
+    if rewinding(s) || crate::add_to_machine::send_block(s).is_some() {
         return;
     }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
@@ -1051,7 +1051,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::add_to_machine::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !s.ui.chat.composer.stash.open);
     match (docked, badge) {
@@ -1206,7 +1206,7 @@ fn primary_action(s: &App, t: &T) -> El {
     if let Some(action) = plan::action(s, t, typed) {
         return action;
     }
-    let sendable = !rewinding(s) && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = !rewinding(s) && crate::add_to_machine::send_block(s).is_none() && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable {
         return stop_button(t);
     }
@@ -1250,6 +1250,8 @@ fn send_button(s: &App, t: &T, sendable: bool) -> El {
         b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(help).on_press_tx(|s: &mut App, tx| send(s, tx.mods().cmd));
     } else if rewinding(s) {
         b = b.help("Rewinding conversation");
+    } else if let Some(reason) = crate::add_to_machine::send_block(s) {
+        b = b.help(reason);
     }
     b
 }

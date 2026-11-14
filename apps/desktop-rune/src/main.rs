@@ -13,6 +13,7 @@ mod host;
 mod icons;
 mod kit;
 mod links;
+mod not_found;
 mod notify;
 mod onboarding;
 mod pages;
@@ -241,7 +242,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, not_found::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 

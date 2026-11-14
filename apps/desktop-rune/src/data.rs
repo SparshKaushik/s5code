@@ -26,6 +26,13 @@ impl Source {
             Source::Fixture(_) => None,
         }
     }
+
+    pub fn net_ref(&self) -> Option<&Net> {
+        match self {
+            Source::Live(net) => Some(net),
+            Source::Fixture(_) => None,
+        }
+    }
 }
 
 pub fn empty_state() -> State {

@@ -78,6 +78,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     s.ui.shell.details_fits.set(cx.layout_with("chat-body", |r| chat::details::lane(r[2].round(), r[3].round(), false).card).unwrap_or(true));
     let sidebar = sidebar::view(s, cx, t, &mut overlays);
     let main = match s.frame_route() {
+        _ if crate::not_found::unknown_page(&s.route) => crate::not_found::page_not_found(t),
         Route::PullRequests => pages::pull_requests::view(s, cx, t, &mut overlays),
         // Usage opened with nothing to return to sits over an empty main column.
         Route::Usage => rune::col().key("main").grow(1.0).h_full().fill(t.c.background),
@@ -90,7 +91,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }
-    if matches!(s.route, Route::Settings(_)) {
+    if matches!(s.route, Route::Settings(_)) && !crate::not_found::unknown_page(&s.route) {
         // The web mounts settings as a route modal over the inert previous frame.
         body = body.inert();
         overlays.clear();

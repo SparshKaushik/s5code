@@ -59,7 +59,7 @@ pub const fn sp(n: f32) -> f32 {
 /// `-apple-system, BlinkMacSystemFont, "Inter Variable", ...` resolves.
 pub const SANS: &str = if cfg!(target_os = "macos") { "System Font" } else { "Inter" };
 
-const fn ts(size: f32, line_height: f32, weight: f32) -> TextStyle {
+pub(crate) const fn ts(size: f32, line_height: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).lh(line_height)
 }
 
