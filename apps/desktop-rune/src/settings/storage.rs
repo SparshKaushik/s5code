@@ -48,7 +48,7 @@ fn environment_label(s: &App) -> String {
         .to_owned()
 }
 
-fn project_scope(s: &App) -> bool {
+pub(super) fn project_scope(s: &App) -> bool {
     s.ui.settings.project.is_some()
 }
 
