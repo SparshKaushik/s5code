@@ -150,7 +150,9 @@ impl Net {
                 }
                 Incoming::Item(route, item) => {
                     if let Route::Resource(method, _) = &route {
-                        if method == "terminal.attach" || method == "subscribeTerminalMetadata" {
+                        // Ordered events: terminal output bursts, and preview sessions that
+                        // open and close between two polls.
+                        if method == "terminal.attach" || method == "subscribeTerminalMetadata" || method == "subscribePreviewEvents" {
                             self.resource_events.entry(route.clone()).or_default().push(item.clone());
                         }
                         if method == "subscribeAuthAccess" {
