@@ -93,6 +93,13 @@ fn exportable(e: &Saved) -> bool {
     s5_net::url::Url::parse(&e.base).is_ok_and(|u| !matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")))
 }
 
+fn rows<'a>(inner: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
+    if !inner[key].is_array() {
+        inner[key] = json!([]);
+    }
+    inner[key].as_array_mut().expect("made an array above")
+}
+
 /// Mirrors Rune's bearer list into the catalog: each saved one upserted, each one removed
 /// since the last save dropped.
 fn merge(inner: &mut Value, old: &[Saved], new: &[Saved]) {
@@ -110,12 +117,6 @@ fn merge(inner: &mut Value, old: &[Saved], new: &[Saved]) {
         let Some((http, ws)) = endpoints(&e.base) else { continue };
         let existing = list(inner, "targets").find(|t| t["_tag"] == "BearerConnectionTarget" && t["environmentId"] == e.id.as_str()).and_then(|t| t["connectionId"].as_str()).map(str::to_owned);
         let id = existing.unwrap_or_else(|| format!("bearer:{}:{}", e.id, http.trim_end_matches('/')));
-        let rows = |inner: &mut Value, key: &str| -> &mut Vec<Value> {
-            if !inner[key].is_array() {
-                inner[key] = json!([]);
-            }
-            inner[key].as_array_mut().expect("made an array above")
-        };
         let targets = rows(inner, "targets");
         match targets.iter_mut().find(|t| t["connectionId"] == id.as_str()) {
             Some(t) => t["label"] = json!(e.label),
