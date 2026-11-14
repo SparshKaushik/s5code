@@ -501,9 +501,8 @@ pub fn scoped_commit(u: &Ui) -> Option<String> {
     list(u.activity.as_ref(), "commits").iter().any(|c| field(c, "oid") == oid).then(|| oid.to_string())
 }
 
-/// The Code tab's toolbar: the diff scope menu (All commits, or one commit, newest first) and
-/// the file count.
-pub fn scope_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
+/// The Code tab's diff scope menu: All commits, or one commit, newest first.
+pub fn scope_menu(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     let u = &s.ui.pages.detail;
     let mut commits: Vec<&Value> = list(u.activity.as_ref(), "commits").iter().collect();
     if commits.is_empty() {
@@ -548,11 +547,7 @@ pub fn scope_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     if commits.len() > shown {
         menu = menu.item(MenuItem::new(format!("Show more ({} left)", commits.len() - shown)).on_select(move |s: &mut App| s.ui.pages.detail.scope_commits = shown + COMMIT_PAGE));
     }
-    let mut bar = row().key("pr-code-toolbar").w_full().h(40.0).px(16.0).gap(12.0).center_y().child(menu.build(&kit::theme(t), overlays));
-    if let Some(n) = u.files.as_ref().map(Vec::len) {
-        bar = bar.child(text(format!("{n} {}", if n == 1 { "file" } else { "files" })).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
-    }
-    Some(col().w_full().shrink().child(bar).child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))))
+    Some(menu.build(&kit::theme(t), overlays))
 }
 
 #[cfg(test)]

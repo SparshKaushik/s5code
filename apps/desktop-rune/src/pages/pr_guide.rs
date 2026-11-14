@@ -28,6 +28,8 @@ const INTRO: &str = "A guide is a tour of the change: stops through the code in 
 
 #[derive(Default)]
 pub struct Ui {
+    /// The run key of the pull request this state reads.
+    open: String,
     /// The open pull request's `PullRequestReviewGuideResult`.
     pub data: Option<Value>,
     pub error: Option<String>,
@@ -84,12 +86,16 @@ enum Settle {
 }
 
 fn ui(s: &mut App) -> &mut Ui {
-    &mut s.ui.pages.detail.guide
+    &mut s.ui.pages.guide
 }
 
-/// A new pull request keeps the watched runs and every guide's progress.
-pub fn carry(u: &mut Ui) -> Ui {
-    Ui { watches: std::mem::take(&mut u.watches), progress: std::mem::take(&mut u.progress), ..Ui::default() }
+/// Another pull request starts its guide over, keeping the watched runs and every guide's progress.
+fn sync(s: &mut App) {
+    let key = s.ui.pages.detail.entry.as_ref().map(|e| run_key(s, e)).unwrap_or_default();
+    let u = ui(s);
+    if u.open != key {
+        *u = Ui { open: key, watches: std::mem::take(&mut u.watches), progress: std::mem::take(&mut u.progress), ..Ui::default() };
+    }
 }
 
 fn list<'a>(v: &'a Value, key: &str) -> &'a [Value] {
@@ -317,7 +323,10 @@ fn file_rows(f: &FileDiff) -> Vec<DiffRow<'_>> {
 /// excerptRows: the rows numbered `start..=end` on one side, widened over the lines a change
 /// replaced (new side) or replaced them with (old side).
 fn excerpt_rows<'a>(rows: &[DiffRow<'a>], old_side: bool, start: u32, end: u32) -> Vec<DiffRow<'a>> {
-    let within = |r: &DiffRow<'a>| if old_side { r.old } else { r.new }.is_some_and(|n| n >= start && n <= end);
+    let within = |r: &DiffRow<'a>| {
+        let line = if old_side { r.old } else { r.new };
+        line.is_some_and(|n| n >= start && n <= end)
+    };
     let Some(mut first) = rows.iter().position(|r| within(r)) else { return Vec::new() };
     let mut last = rows.iter().rposition(|r| within(r)).unwrap_or(first);
     if !old_side && rows[first].kind == LineKind::Added {
@@ -375,6 +384,7 @@ fn stop_context(d: &Value, stop: &Value, index: usize) -> Value {
 // ---- requests ---------------------------------------------------------------------------
 
 pub fn poll(s: &mut App) -> bool {
+    sync(s);
     let now = crate::data::now_ms();
     let mut changed = take_open(s, now) | poll_watches(s, now);
     if matches!(s.frame_route(), Route::PullRequests) && s.ui.pages.pull_requests.selected.is_some() && available(s) {
@@ -389,7 +399,7 @@ pub fn poll(s: &mut App) -> bool {
 /// The open pull request's guide read, its write, and its diff pages.
 fn take_open(s: &mut App, now: i64) -> bool {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
-    let g = &s.ui.pages.detail.guide;
+    let g = &s.ui.pages.guide;
     let (pending, writing, diff) = (g.pending, g.writing, g.diff.pending);
     if pending.is_none() && writing.is_none() && diff.is_none() {
         return false;
@@ -491,7 +501,7 @@ fn poll_watches(s: &mut App, now: i64) -> bool {
 }
 
 fn want_guide(s: &mut App) -> bool {
-    let g = &s.ui.pages.detail.guide;
+    let g = &s.ui.pages.guide;
     if g.data.is_some() || g.error.is_some() || g.pending.is_some() {
         return false;
     }
@@ -511,14 +521,14 @@ fn want_guide(s: &mut App) -> bool {
 fn current(s: &App) -> Option<(String, usize)> {
     let u = &s.ui.pages.detail;
     let entry = u.entry.as_ref()?;
-    let guide = u.guide.data.as_ref().map(|d| &d["guide"]).filter(|g| g.is_object())?;
+    let guide = s.ui.pages.guide.data.as_ref().map(|d| &d["guide"]).filter(|g| g.is_object())?;
     Some((format!("{}:{}", run_key(s, entry), field(guide, "headSha")), list(guide, "stops").len()))
 }
 
 fn want_diff(s: &mut App) -> bool {
     let Some((key, count)) = current(s) else { return false };
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
-    let g = &s.ui.pages.detail.guide;
+    let g = &s.ui.pages.guide;
     let stops = g.data.as_ref().map_or(&[][..], |d| list(&d["guide"], "stops"));
     let at = g.progress.get(&key).map_or(0, |p| p.position).min(count.saturating_sub(1));
     let wanted: Vec<String> = stops.get(at).map(stop_paths).unwrap_or_default().into_iter().map(str::to_string).collect();
@@ -555,12 +565,13 @@ fn want_diff(s: &mut App) -> bool {
 fn write(s: &mut App) {
     let u = &s.ui.pages.detail;
     let Some(entry) = u.entry.clone() else { return };
-    if shown(u.guide.data.as_ref(), u.guide.writing.is_some()).running {
+    let g = &s.ui.pages.guide;
+    if shown(g.data.as_ref(), g.writing.is_some()).running {
         return;
     }
     let title = u.detail.as_ref().map(|d| field(d, "title").to_string());
     let key = run_key(s, &entry);
-    let watch = new_watch(key.clone(), entry.clone(), title, s.ui.pages.detail.guide.data.as_ref(), crate::data::now_ms(), false);
+    let watch = new_watch(key.clone(), entry.clone(), title, s.ui.pages.guide.data.as_ref(), crate::data::now_ms(), false);
     if !ui(s).watches.iter().any(|w| w.key == key) {
         ui(s).watches.push(watch);
     }
@@ -645,7 +656,7 @@ fn step(s: &mut App, delta: isize, tx: &mut Tx) {
 fn ask(s: &mut App, index: usize, question: String) {
     let u = &s.ui.pages.detail;
     let Some(d) = u.detail.clone() else { return };
-    let Some(stop) = u.guide.data.as_ref().and_then(|g| list(&g["guide"], "stops").get(index)).cloned() else { return };
+    let Some(stop) = s.ui.pages.guide.data.as_ref().and_then(|g| list(&g["guide"], "stops").get(index)).cloned() else { return };
     let (_, chip) = super::pr_detail::handoff_task(&d, false);
     super::pr_detail::handoff(s, bounded(&question), Some(chip));
     crate::chat::composer::add_context(s, stop_context(&d, &stop, index));
@@ -693,9 +704,8 @@ fn prose(t: &T, src: &str, ink: Color, font: rune::TextStyle) -> El {
 
 /// PullRequestGuideTab.
 pub fn view(s: &App, t: &T) -> El {
-    let u = &s.ui.pages.detail;
-    let g = &u.guide;
-    let Some(entry) = &u.entry else { return col() };
+    let g = &s.ui.pages.guide;
+    let Some(entry) = &s.ui.pages.detail.entry else { return col() };
     let v = shown(g.data.as_ref(), g.writing.is_some());
     let can = can_write(s, entry);
     match v.guide {
@@ -735,7 +745,7 @@ fn empty(s: &App, t: &T, v: &Shown, error: Option<&str>, can: bool) -> El {
 
 /// FailureDetails: the run's diagnostics behind "Technical details".
 fn details(s: &App, t: &T, detail: &str) -> El {
-    let open = s.ui.pages.detail.guide.details_open;
+    let open = s.ui.pages.guide.details_open;
     let toggle = row()
         .key("pr-guide-details")
         .gap(4.0)
@@ -778,7 +788,7 @@ fn banner(s: &App, t: &T, v: &Shown, can: bool) -> Option<El> {
 
 /// GuideTour: the stop list beside the stop on a wide panel, folded under "Stop N of M" otherwise.
 fn tour(s: &App, t: &T, entry: &Value, guide: &Value, banner: Option<El>) -> El {
-    let g = &s.ui.pages.detail.guide;
+    let g = &s.ui.pages.guide;
     let stops = list(guide, "stops");
     let key = format!("{}:{}", run_key(s, entry), field(guide, "headSha"));
     let none = HashSet::new();
@@ -866,7 +876,7 @@ fn step_button(t: &T, label: &str, glyph: &'static rune::Icon, delta: isize, off
 
 /// GuideStop.
 fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, seen: &HashSet<usize>, wide: bool) -> El {
-    let g = &s.ui.pages.detail.guide;
+    let g = &s.ui.pages.guide;
     let count = stops.len();
     let counter = format!("Stop {} of {}", position + 1, count);
     let lead = if wide {
@@ -931,7 +941,7 @@ fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, see
 
 /// GuideExcerpt: the excerpt's lines from the change, its notes' markers under the lines.
 fn excerpt_view(s: &App, t: &T, excerpt: &Value, markers: &[(u64, Vec<(String, String)>)]) -> El {
-    let d = &s.ui.pages.detail.guide.diff;
+    let d = &s.ui.pages.guide.diff;
     let path = field(excerpt, "path").to_string();
     let old = field(excerpt, "side") == "old";
     let (start, end) = (excerpt["start"].as_u64().unwrap_or(0) as u32, excerpt["end"].as_u64().unwrap_or(0) as u32);
@@ -1036,8 +1046,8 @@ fn notes_view(t: &T, notes: &[(String, &Value)]) -> El {
 
 /// The stop's files without an excerpt, each opening to its diff.
 fn other_files(s: &App, t: &T, files: &[&Value], only: bool) -> El {
-    let d = &s.ui.pages.detail.guide.diff;
-    let open_files = &s.ui.pages.detail.guide.open_files;
+    let d = &s.ui.pages.guide.diff;
+    let open_files = &s.ui.pages.guide.open_files;
     let stat = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
     let mut card = col().w_full().radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).clip_rounded(radius::LG);
     for (n, f) in files.iter().enumerate() {
@@ -1152,6 +1162,7 @@ pub fn scene(s: &mut App, state: &str) {
         st.config.get_or_insert_with(|| json!({}))["settings"]["reviewGuidesEnabled"] = json!(true);
     }
     super::open_detail(s, TAB, |_| {});
+    sync(s);
     let recorded = super::fixture("pull-request-guide.json").unwrap_or(Value::Null);
     let head = recorded["currentHeadSha"].clone();
     ui(s).data = Some(match state {
@@ -1316,7 +1327,7 @@ index 9c1e2f0..a41d7b2 100644
             "excerpts": [{"path": "usage.rs", "side": "new", "start": 210, "end": 211}, {"path": "usage.rs", "side": "old", "start": 210, "end": 210}]
         });
         let record = stop_context(&d, &stop, 1);
-        assert_eq!(record["contextId"], "review-comment_pull-request-guide-stop-2481-1");
+        assert_eq!(record["contextId"], crate::chat::composer::chips::context_id("review-comment", "pull-request-guide-stop:2481:1"));
         assert_eq!((record["filePath"].as_str(), record["sectionTitle"].as_str(), record["rangeLabel"].as_str()), (Some("Guide stop 2"), Some("PR #2481 review guide"), Some("Hour labels")));
         assert_eq!(
             record["text"],

@@ -220,7 +220,7 @@ pub fn toggled(value: &[String], name: &str, on: bool) -> Vec<String> {
 }
 
 /// pullRequestLabelColor: a six-digit hex, with or without its `#`.
-fn label_hex(color: Option<&str>) -> Option<String> {
+pub(super) fn label_hex(color: Option<&str>) -> Option<String> {
     let color = color?.trim();
     let hex = color.strip_prefix('#').unwrap_or(color);
     (hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| format!("#{hex}"))

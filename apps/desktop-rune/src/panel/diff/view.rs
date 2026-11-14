@@ -87,7 +87,7 @@ pub struct Look {
     find_match: Color,
     find_focus: Color,
     syntax: SyntaxTheme,
-    version: u64,
+    pub(crate) version: u64,
     pub host: Host,
     /// The gutter offers a comment on its line.
     pub comments: bool,

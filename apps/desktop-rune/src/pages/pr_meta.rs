@@ -40,7 +40,7 @@ pub enum Write {
     Label { name: String, applied: bool },
     Reviewer { login: String, requested: bool },
     Update(String),
-    Maintainer { value: bool, previous: Option<Choice> },
+    Maintainer { previous: Option<Choice> },
     Stack(&'static str),
 }
 
@@ -255,7 +255,7 @@ struct Spec {
     truncated: &'static str,
 }
 
-const LABELS: Spec = Spec {
+static LABELS: Spec = Spec {
     kind: "labels",
     glyph: &i::TAG,
     label: "Change labels",
@@ -267,7 +267,7 @@ const LABELS: Spec = Spec {
     truncated: "This repository has more labels than are listed here. Apply the rest on the host.",
 };
 
-const REVIEWERS: Spec = Spec {
+static REVIEWERS: Spec = Spec {
     kind: "reviewers",
     glyph: &i::USER_PLUS,
     label: "Request a review",
@@ -414,7 +414,7 @@ fn search(t: &T, u: &Ui, placeholder: &'static str, busy: bool) -> El {
 
 /// PullRequestPeopleGhost.
 fn people_ghost(t: &T) -> El {
-    let mut rows = col().w_full().p_ghost();
+    let mut rows = col().w_full().px(4.0).py(4.0).gap(4.0);
     for width in [96.0, 128.0, 80.0, 112.0] {
         rows = rows.child(
             row()
@@ -427,16 +427,6 @@ fn people_ghost(t: &T) -> El {
         );
     }
     rows.role("status").label("Loading people")
-}
-
-trait GhostPad {
-    fn p_ghost(self) -> Self;
-}
-
-impl GhostPad for El {
-    fn p_ghost(self) -> Self {
-        self.px(4.0).py(4.0).gap(4.0)
-    }
 }
 
 /// One candidate: a label's dot, name and description, or a reviewer's avatar and login, ticked
@@ -663,7 +653,7 @@ pub fn stack_payload(entry: &Value, stack: &Value, plan: &StackPlan, action: &st
     let merge = action == "merge";
     let target = if merge { stack["layers"].get(plan.position.checked_sub(1)?)? } else { stack["layers"].as_array()?.last()? };
     target["headSha"].as_str().filter(|h| !h.is_empty())?;
-    let heads: Vec<Value> = if merge { &plan.merging } else { &plan.unmerged }
+    let heads: Vec<Value> = (if merge { &plan.merging } else { &plan.unmerged })
         .iter()
         .filter(|l| l["headSha"].as_str().is_some_and(|h| !h.is_empty()))
         .map(|l| json!({"number": l["number"], "headSha": l["headSha"]}))
@@ -910,7 +900,7 @@ fn save_maintainer(s: &mut App, value: bool) {
     let previous = meta(s).maintainer.replace(Choice { key: super::pull_requests::key(&entry), observed, value });
     let mut payload = reference(&entry);
     payload["maintainerCanModify"] = json!(value);
-    submit(s, "pullRequests.update", payload, Write::Maintainer { value, previous });
+    submit(s, "pullRequests.update", payload, Write::Maintainer { previous });
 }
 
 /// "Allow edits from maintainers" and its separator, for an open fork pull request the viewer

@@ -847,7 +847,7 @@ fn toggle_stack(s: &mut App, e: &Value) {
 }
 
 /// resolvePullRequestState for a stack layer: its glyph, tone and label.
-fn layer_state(t: &T, layer: &Value) -> (&'static rune::Icon, Color, &'static str) {
+pub(super) fn layer_state(t: &T, layer: &Value) -> (&'static rune::Icon, Color, &'static str) {
     match field(layer, "state") {
         "merged" => (&i::GIT_MERGE, if t.dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }, "Merged"),
         "closed" => (&i::GIT_PULL_REQUEST_CLOSED, if t.dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }, "Closed"),
@@ -1009,7 +1009,7 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
 }
 
 /// PullRequestStackLayers: the layers top first, then the base, scrolling past 320 points.
-fn stack_layers(t: &T, e: &Value, stack: &Value) -> El {
+pub(super) fn stack_layers(t: &T, e: &Value, stack: &Value) -> El {
     let mut list = col().w_full().max_h(320.0).items_stretch().scroll(ScrollSpec { stick_bottom: false });
     for layer in stack["layers"].as_array().into_iter().flatten().rev() {
         list = list.child(layer_row(t, e, layer));

@@ -18,9 +18,8 @@ use crate::kit::{self, Menu, MenuItem, Placement, ToggleGroup};
 use crate::theme::{self, AlphaMul, T, layout, radius, tw};
 use crate::{App, Route};
 
-/// Diff lines drawn per file before the rest points at the host.
-const FILE_LINES: usize = 400;
-const TABS: [&str; 3] = ["Summary", "Timeline", "Code"];
+/// By tab id; `pr_guide::tab_order` gives the order shown.
+const TABS: [&str; 4] = ["Summary", "Timeline", "Code", "Guide"];
 
 #[derive(Default)]
 pub struct Ui {
@@ -44,6 +43,7 @@ pub struct Ui {
     pub description_closed: bool,
     pub comments_closed: bool,
     pub oldest_first: bool,
+    /// Files the Code tab opens once its diff is read (openFileInCode).
     pub expanded: HashSet<String>,
     /// The commit the Code tab reads alone (selectedCodeCommitOid).
     pub commit: Option<String>,
@@ -67,6 +67,7 @@ pub struct Ui {
     /// A copyable value reading "Copied" until the given time.
     pub copied: Option<(&'static str, i64)>,
     pub(super) live: super::pull_requests::Live,
+    pub meta: super::pr_meta::Ui,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -158,6 +159,7 @@ pub fn poll(s: &mut App) -> bool {
                 Ok(d) => {
                     u.files = Some(rune_kit::diff::parse(d["patch"].as_str().unwrap_or("")));
                     u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
+                    s.ui.pages.code.fresh = true;
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),
             }
@@ -182,7 +184,7 @@ pub fn poll(s: &mut App) -> bool {
         load_diff(s);
         changed = true;
     }
-    changed
+    super::pr_code::poll(s) | changed
 }
 
 fn message(e: &Value, fallback: &str) -> String {
@@ -265,6 +267,7 @@ fn load_diff(s: &mut App) {
             let recording = super::fixture("pull-request-detail.json").unwrap_or(Value::Null);
             let diff = commit.map_or(&recording["diff"], |oid| &recording["diff"]["commits"][oid.as_str()]);
             ui(s).files = Some(rune_kit::diff::parse(diff["patch"].as_str().unwrap_or("")));
+            s.ui.pages.code.fresh = true;
         }
         None => ui(s).diff_error = Some("Not connected.".into()),
     }
@@ -339,6 +342,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    if super::pr_guide::on_key(s, e, tx) {
+        return true;
+    }
     // The open panel's `pullRequest.copyNumber`.
     if s.ui.pages.pull_requests.selected.is_none() || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
         return false;
@@ -367,7 +373,7 @@ pub(super) fn allowed_methods(d: &Value) -> Vec<String> {
 }
 
 /// selectedMergeMethod: this pull request's pick, the project's default, then the last one used.
-fn merge_method(s: &App, d: &Value) -> String {
+pub(super) fn merge_method(s: &App, d: &Value) -> String {
     let project = super::pr_actions::project_merge_method(crate::settings::server_settings(s), field(d, "projectId"));
     let last = s.client_settings.values.get(super::pr_actions::LAST_MERGE_METHOD).and_then(Value::as_str);
     super::pr_actions::resolve_merge_method(d, s.ui.pages.detail.merge_method.as_deref(), project, last)
@@ -506,7 +512,7 @@ fn resolve_text(d: &Value) -> String {
 }
 
 /// Opens the project's new-thread draft holding `text`, and the PR chip when there is one.
-fn handoff(s: &mut App, text: String, chip: Option<Value>) {
+pub(super) fn handoff(s: &mut App, text: String, chip: Option<Value>) {
     let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
     ui(s).menu = false;
     let route = Route::Home { project_id: project };
@@ -589,15 +595,13 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         _ => {}
     }
     let d = u.detail.as_ref().unwrap_or(entry);
-    panel = panel.child(header_body(s, t, d)).child(rule(t)).child(tab_bar(s, t, d)).child(rule(t));
-    if u.tab == 2
-        && let Some(bar) = super::pr_conversation::scope_bar(s, t, overlays)
-    {
-        panel = panel.child(bar);
+    panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d)).child(rule(t));
+    if u.tab == 2 {
+        return panel.child(code(s, t, overlays));
     }
     let content = match u.tab {
         1 => timeline(s, t),
-        2 => code(s, t),
+        super::pr_guide::TAB if super::pr_guide::available(s) => super::pr_guide::view(s, t),
         _ => summary(s, t, d, overlays),
     };
     let key = format!("pr-detail-scroll-{}", u.tab);
@@ -636,8 +640,12 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
     if loaded {
         let gate = super::pr_actions::stack_gate(s, d);
         let p = primary(d, gate.owns);
+        actions = actions.children(super::pr_meta::linked_threads(s, t, overlays));
         if gate.failed {
             actions = actions.child(kit::Button::new("Retry stack lookup").variant("ghost").size("xs").on_press(super::pr_actions::want_stack).build(t));
+        }
+        for control in super::pr_meta::stack_menu(s, t, d, overlays) {
+            actions = actions.child(control);
         }
         for control in primary_action(s, t, d, p, gate) {
             actions = actions.child(control);
@@ -754,9 +762,11 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
             ui(s).menu = false;
             reload(s);
         }))
-        .item(MenuItem::new("Ask a question").icon(&i::MESSAGE_CIRCLE_QUESTION_MARK).on_select(move |s: &mut App| handoff(s, ask.0.clone(), Some(ask.1.clone()))))
-        .item(MenuItem::new("Explain this PR").icon(&i::SPARKLES).on_select(move |s: &mut App| handoff(s, explain.0.clone(), Some(explain.1.clone()))))
+        .row(super::pr_meta::ask_row(t, d, move |s: &mut App| handoff(s, ask.0.clone(), Some(ask.1.clone()))))
+        .row(super::pr_meta::explain_row(t, d, move |s: &mut App| handoff(s, explain.0.clone(), Some(explain.1.clone()))))
+        .item(super::pr_meta::fix_findings_item())
         .separator();
+    menu = super::pr_meta::maintainer_entries(s, t, d, menu);
     if open {
         let draft = d["isDraft"] == true;
         if shows.draft_toggle {
@@ -865,7 +875,7 @@ fn delete_branch_dialog(t: &T, d: &Value, overlays: &mut Vec<El>) {
 }
 
 /// Title, author and checkout, then the branches and the change size.
-fn header_body(s: &App, t: &T, d: &Value) -> El {
+fn header_body(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let author = &d["author"];
     let login = author["login"].as_str().unwrap_or("ghost").to_string();
     let mut meta = row()
@@ -898,7 +908,7 @@ fn header_body(s: &App, t: &T, d: &Value) -> El {
                 .grow(1.0)
                 .shrink()
                 .min_w(0.0)
-                .child(text(field(d, "baseBranch").to_string()).font(branch).color(ink).truncate().shrink())
+                .child(super::pr_meta::base_branch(s, t, d, branch, ink, overlays))
                 .child(icon(&i::ARROW_LEFT, 14.0).color(ink.alpha_mul(0.6)))
                 .child(copyable(s, t, "branch", field(d, "headBranch").to_string(), (format!("Copy {} branch", super::pr_row::term(d)), "Branch name copied"), branch, ink)),
         )
@@ -952,9 +962,12 @@ fn copyable(s: &App, t: &T, key: &'static str, value: String, (copy_label, copie
 fn tab_bar(s: &App, t: &T, d: &Value) -> El {
     let u = &s.ui.pages.detail;
     let k = kit::theme(t);
-    let tabs = ToggleGroup::new(&TABS, &[u.tab])
-        .on_pick(|s: &mut App, n: usize, _: &mut Tx| {
-            ui(s).tab = n;
+    let order = super::pr_guide::tab_order(s);
+    let labels: Vec<&str> = order.iter().map(|&n| TABS[n]).collect();
+    let at = order.iter().position(|&n| n == u.tab).unwrap_or(0);
+    let tabs = ToggleGroup::new(&labels[..], &[at])
+        .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
+            ui(s).tab = order[n];
         })
         .build(&k);
     let mut bar = row().w_full().px(16.0).py(8.0).gap(8.0).center_y().child(tabs).child(spacer());
@@ -1091,8 +1104,10 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         }
         r
     };
+    let reviewers_el = row().gap(6.0).center_y().child(reviewers_el).children(super::pr_meta::reviewer_picker(s, t, d, overlays));
     let mut meta = col().w_full().px(16.0).py(8.0).child(meta_row(t, &i::USERS, "Reviewers", reviewers_el));
     if !labels.is_empty() || d["capabilities"]["labels"] == true {
+        let labels_el = row().gap(4.0).center_y().child(labels_el).children(super::pr_meta::label_picker(s, t, d, overlays));
         meta = meta.child(meta_row(t, &i::TAG, "Labels", labels_el));
     }
     let mut out = col().w_full().pb(48.0).child(meta).child(rule(t));
@@ -1415,116 +1430,33 @@ pub(super) fn scope_commit(s: &mut App, oid: Option<String>) {
 
 // ---- code -------------------------------------------------------------------------------
 
-fn file_counts(f: &FileDiff) -> (usize, usize) {
+pub(super) fn file_counts(f: &FileDiff) -> (usize, usize) {
     let lines = f.hunks.iter().flat_map(|h| &h.lines);
     let add = lines.clone().filter(|l| l.kind == LineKind::Added).count();
     (add, lines.filter(|l| l.kind == LineKind::Removed).count())
 }
 
-fn code(s: &App, t: &T) -> El {
+/// PullRequestCodeTab: the toolbar over the diff, which scrolls on its own.
+fn code(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
     let note = |m: String| col().w_full().padding(16.0).child(text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
-    let Some(files) = &u.files else {
-        return match &u.diff_error {
-            Some(e) => diff_unavailable(s, t, e),
-            None => note("Loading changes…".into()),
-        };
+    let term = u.entry.as_ref().map_or("pull request", super::pr_row::term);
+    let body = match (&u.files, &u.diff_error) {
+        (None, Some(e)) => diff_unavailable(s, t, e),
+        (None, None) => note(format!("Loading {term} diff...")),
+        (Some(files), _) if files.is_empty() => note(match conv::scoped_commit(u) {
+            Some(_) => "This commit has no file changes.".into(),
+            None => format!("This {term} has no file changes."),
+        }),
+        (Some(_), _) => {
+            let mut out = col().grow(1.0).min_h(0.0).w_full();
+            if u.diff_truncated {
+                out = out.child(text(format!("This diff is too large to show in full. {} for the rest.", on_host(s))).font(theme::TEXT_XS).color(t.c.warning_foreground).wrap().px(16.0).py(8.0));
+            }
+            out.child(super::pr_code::view(s, t))
+        }
     };
-    if files.is_empty() {
-        return note("No changes to show.".into());
-    }
-    let mut out = col().w_full().px(16.0).pt(12.0).pb(48.0).gap(8.0);
-    if u.diff_truncated {
-        out = out.child(text(format!("This diff is too large to show in full. {} for the rest.", on_host(s))).font(theme::TEXT_XS).color(t.c.warning_foreground).wrap());
-    }
-    for f in files {
-        out = out.child(file_view(s, t, f));
-    }
-    out
-}
-
-fn file_view(s: &App, t: &T, f: &FileDiff) -> El {
-    let path = f.path().to_string();
-    let open = s.ui.pages.detail.expanded.contains(&path);
-    let (add, del) = file_counts(f);
-    let stat = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
-    let toggle = path.clone();
-    let mut label = path.clone();
-    if let Some(old) = f.old_path.as_deref().filter(|o| *o != path) {
-        label = format!("{old} → {path}");
-    }
-    let head = row()
-        .key(format!("pr-file-{path}"))
-        .w_full()
-        .h(32.0)
-        .px(8.0)
-        .gap(6.0)
-        .center_y()
-        .fill(t.c.muted.alpha_mul(0.25))
-        .hover(t.c.accent.alpha_mul(0.6))
-        .cursor(Cursor::Pointer)
-        .role("button")
-        .label(path.clone())
-        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground).rotate(if open { 90f32.to_radians() } else { 0.0 }))
-        .child(text(label).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).truncate().shrink().min_w(0.0))
-        .child(spacer())
-        .child(text(format!("+{add}")).font(stat).color(t.c.diff_addition_foreground))
-        .child(text(format!("-{del}")).font(stat).color(t.c.diff_deletion_foreground))
-        .on_press(move |s: &mut App| {
-            let e = &mut ui(s).expanded;
-            if !e.remove(&toggle) {
-                e.insert(toggle.clone());
-            }
-        });
-    let mut card = col().w_full().radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).clip_rounded(radius::LG).child(head);
-    if open {
-        card = card.child(diff_lines(t, f, &on_host(s)));
-    }
-    card
-}
-
-fn diff_lines(t: &T, f: &FileDiff, open_label: &str) -> El {
-    let mono = theme::mono(theme::TEXT_XS).lh(20.0);
-    let num = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
-    let mut out = col().w_full();
-    let mut shown = 0;
-    let total: usize = f.hunks.iter().map(|h| h.lines.len()).sum();
-    for h in &f.hunks {
-        if shown >= FILE_LINES {
-            break;
-        }
-        out = out.child(
-            row().w_full().h(24.0).px(8.0).center_y().fill(t.c.info_foreground.alpha_mul(0.06)).child(
-                text(format!("@@ -{},{} +{},{} @@", h.old_start, h.old_count, h.new_start, h.new_count)).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground),
-            ),
-        );
-        for l in &h.lines {
-            if shown >= FILE_LINES {
-                break;
-            }
-            shown += 1;
-            let (bg, mark, ink) = match l.kind {
-                LineKind::Added => (t.c.diff_addition_foreground.alpha_mul(0.1), "+", t.c.diff_addition_foreground),
-                LineKind::Removed => (t.c.diff_deletion_foreground.alpha_mul(0.1), "-", t.c.diff_deletion_foreground),
-                LineKind::Context => (Color::TRANSPARENT, " ", t.c.muted_foreground),
-            };
-            let number = |n: Option<u32>| row().w(40.0).shrink().justify_end().pr(8.0).child(text(n.map(|n| n.to_string()).unwrap_or_default()).font(num).color(t.c.muted_foreground.alpha_mul(0.7)));
-            out = out.child(
-                row()
-                    .w_full()
-                    .min_h(20.0)
-                    .fill(bg)
-                    .child(number(l.old))
-                    .child(number(l.new))
-                    .child(row().w(16.0).shrink().child(text(mark).font(mono).color(ink)))
-                    .child(text(l.text.replace('\t', "    ")).font(mono).color(t.c.foreground).wrap().grow(1.0).shrink().min_w(0.0).pr(8.0)),
-            );
-        }
-    }
-    if total > shown {
-        out = out.child(row().w_full().h(28.0).px(12.0).center_y().child(text(format!("{} more lines. {} to read the rest.", total - shown, open_label)).font(theme::TEXT_XS).color(t.c.muted_foreground)));
-    }
-    out
+    col().key("pr-code").grow(1.0).min_h(0.0).w_full().child(super::pr_code::toolbar(s, t, overlays)).child(rule(t)).child(body)
 }
 
 // ---- states -----------------------------------------------------------------------------

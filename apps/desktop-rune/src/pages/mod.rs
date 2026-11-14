@@ -8,6 +8,8 @@ pub mod pr_conversation;
 pub mod pr_detail;
 pub mod pr_edit;
 pub mod pr_filters;
+pub mod pr_meta;
+pub mod pr_guide;
 pub mod pr_row;
 pub mod pr_tabs;
 pub mod pull_requests;
@@ -28,6 +30,8 @@ pub struct Ui {
     pub detail: pr_detail::Ui,
     /// The Code tab's diff, kept across pull requests like web's mounted tab.
     pub code: pr_code::Ui,
+    /// The Guide tab, its watched runs and tour progress kept across pull requests.
+    pub guide: pr_guide::Ui,
     pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
@@ -35,7 +39,7 @@ pub struct Ui {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
+    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -59,7 +63,8 @@ fn want_avatars(s: &mut App) {
         .chain(list(activity, "comments").map(|c| &c["author"]))
         .chain(list(activity, "reviewThreads").flat_map(|t| t["comments"].as_array().into_iter().flatten()).map(|c| &c["author"]))
         .chain(entries.iter().map(|e| &e["author"]))
-        .chain(pr_filters::hosted_actors(&pages.pull_requests.picker));
+        .chain(pr_filters::hosted_actors(&pages.pull_requests.picker))
+        .chain(pr_meta::actors(&pages.detail.meta));
     pages.avatars.want(avatars::urls(actors), waker);
 }
 
@@ -339,9 +344,24 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("pull-requests-detail", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
+    ("pull-requests-detail-guide-empty", |s| pr_guide::scene(s, "empty")),
+    ("pull-requests-detail-guide-ready", |s| pr_guide::scene(s, "ready")),
+    ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
     ("pull-requests-detail-code", |s| {
         open_detail(s, 2, |_| {});
-        s.ui.pages.detail.expanded.insert("apps/desktop-rune/src/pages/usage.rs".into());
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
+    }),
+    ("pull-requests-detail-code-tree", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "tree");
+    }),
+    ("pull-requests-detail-code-split", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "split");
+    }),
+    ("pull-requests-detail-code-line-comment", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "line-comment");
     }),
     ("pull-requests-detail-checks", |s| {
         open_detail(s, 0, |_| {});
@@ -395,9 +415,29 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 1, |_| {});
         pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
         pr_detail::poll(s);
-        s.ui.pages.detail.expanded.insert("apps/desktop-rune/src/pages/usage.rs".into());
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
     }),
     ("pull-requests-detail-menu", |s| open_detail(s, 0, |u| u.menu = true)),
+    ("pull-requests-detail-label-picker", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "labels");
+    }),
+    ("pull-requests-detail-reviewer-picker", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "reviewers");
+    }),
+    ("pull-requests-detail-out-of-date", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "out-of-date");
+    }),
+    ("pull-requests-detail-linked-threads", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "linked");
+    }),
+    ("pull-requests-detail-stack-menu", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "stack");
+    }),
     ("pull-requests-detail-merged", |s| {
         open_detail(s, 0, |_| {});
         if let Some(d) = &mut s.ui.pages.detail.detail {
