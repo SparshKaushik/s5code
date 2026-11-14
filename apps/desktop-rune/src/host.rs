@@ -34,6 +34,9 @@ pub struct StartupFailure {
 }
 
 const FIRST_PORT: u16 = 3773;
+/// Electron's trace log rotation: 10 MB, 10 files.
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_MAX_FILES: u32 = 10;
 const READINESS_PATH: &str = "/.well-known/t3/environment";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -168,6 +171,22 @@ fn free_port() -> Option<u16> {
     (FIRST_PORT..u16::MAX).find(|p| port_free(*p))
 }
 
+/// Electron's `T3CODE_PORT` (`Config.Port`): the backend's port as given, with no scan.
+fn configured_port(value: Option<&str>) -> Option<u16> {
+    value?.trim().parse::<u16>().ok().filter(|p| *p != 0)
+}
+
+/// Electron's `makeRotatingLogFileWriter` shift: `<log>.N` drops, each `.n` moves to `.n+1`,
+/// and the log becomes `.1`.
+fn rotate_log(path: &Path, max_files: u32) {
+    let numbered = |n: u32| PathBuf::from(format!("{}.{n}", path.display()));
+    let _ = std::fs::remove_file(numbered(max_files));
+    for n in (1..max_files).rev() {
+        let _ = std::fs::rename(numbered(n), numbered(n + 1));
+    }
+    let _ = std::fs::rename(path, numbered(1));
+}
+
 fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: impl Fn()) {
     let send = |e: Event| {
         let _ = tx.send(e);
@@ -176,8 +195,10 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
     let home = t3_home();
     let log_path = home.join("userdata/logs/desktop-rune-server.log");
     let _ = std::fs::create_dir_all(log_path.parent().unwrap());
-    // One launch per log: restarts append, the next launch starts over.
-    let _ = File::create(&log_path);
+    // A launch starts a new log and keeps the last ones, as Electron's rotating log files;
+    // restarts append until the log passes the size cap.
+    rotate_log(&log_path, LOG_MAX_FILES);
+    let configured = configured_port(std::env::var("T3CODE_PORT").ok().as_deref());
     // Reused across restarts so the server re-seeds the same grant and existing sessions resume.
     let credential = format!("{}{}", s5_net::uuid(), s5_net::uuid()).replace('-', "");
     let mut port: Option<u16> = None;
@@ -186,7 +207,10 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
     let mut announced: Option<u16> = None;
     let mut attempt = 0u32;
     while !sup.stopping.load(Ordering::SeqCst) {
-        let reuse = port.filter(|p| port_free(*p));
+        if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+            rotate_log(&log_path, LOG_MAX_FILES);
+        }
+        let reuse = configured.or(port.filter(|p| port_free(*p)));
         let Some(p) = reuse.or_else(free_port) else {
             return send(Event::Failed("No free port for the S5 Code server.".into()));
         };
@@ -206,6 +230,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "shellEnvironmentPrepared": prepared,
             "desktopBrowserFd": BROWSER_EVENTS_FD,
             "desktopBrowserControlFd": BROWSER_CONTROL_FD,
+            "desktopTelemetryFd": TELEMETRY_FD,
         });
         let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
         let child = match spawn(&binary, &log_path, &bootstrap.to_string(), env) {
@@ -351,6 +376,8 @@ const DESKTOP_BACKEND_ENV_NAMES: &[&str] = &[
 /// Electron shell's backend manager hands them over (`DesktopBrowserChannel`).
 const BROWSER_EVENTS_FD: i32 = 6;
 const BROWSER_CONTROL_FD: i32 = 7;
+/// The server reads host power snapshots here (`desktop::telemetry`).
+const TELEMETRY_FD: i32 = 4;
 
 fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, String)]) -> std::io::Result<Child> {
     use std::os::fd::AsRawFd;
@@ -358,7 +385,12 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
     let out = File::options().create(true).append(true).open(log_path)?;
     let (events, server_events) = std::os::unix::net::UnixStream::pair()?;
     let (commands, server_commands) = std::os::unix::net::UnixStream::pair()?;
-    let fds = [(server_events.as_raw_fd(), BROWSER_EVENTS_FD), (server_commands.as_raw_fd(), BROWSER_CONTROL_FD)];
+    let (server_telemetry, telemetry) = std::io::pipe()?;
+    let fds = [
+        (server_events.as_raw_fd(), BROWSER_EVENTS_FD),
+        (server_commands.as_raw_fd(), BROWSER_CONTROL_FD),
+        (server_telemetry.as_raw_fd(), TELEMETRY_FD),
+    ];
     let mut command = Command::new(binary);
     for name in DESKTOP_BACKEND_ENV_NAMES {
         command.env_remove(name);
@@ -369,7 +401,7 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
         command.pre_exec(move || {
             // Copies above both targets first, so placing one never closes the other's source;
             // the copies and their targets lose close-on-exec.
-            let mut high = [0; 2];
+            let mut high = [0; 3];
             for (i, (fd, _)) in fds.iter().enumerate() {
                 high[i] = fcntl(*fd, F_DUPFD, 10);
                 if high[i] < 0 {
@@ -385,7 +417,8 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
         });
     }
     let mut child = command.spawn()?;
-    drop((server_events, server_commands));
+    drop((server_events, server_commands, server_telemetry));
+    crate::desktop::telemetry::publish(telemetry);
     crate::panel::agent::connect(events, commands);
     // One JSON line; the server reads fd 0 once and the pipe closes on drop.
     let mut stdin = child.stdin.take().unwrap();
@@ -504,6 +537,29 @@ pub fn check() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t3code_port_picks_the_port_as_electron_reads_it() {
+        assert_eq!(configured_port(Some(" 4888 ")), Some(4888));
+        for bad in [None, Some(""), Some("0"), Some("65536"), Some("abc"), Some("-1")] {
+            assert_eq!(configured_port(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn launches_rotate_the_server_log_and_keep_ten() {
+        let dir = std::env::temp_dir().join(format!("rune-log-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("server.log");
+        for run in 0..12 {
+            std::fs::write(&log, format!("run {run}")).unwrap();
+            rotate_log(&log, 3);
+        }
+        assert!(!log.exists());
+        let kept: Vec<String> = (1..=4).map(|n| std::fs::read_to_string(dir.join(format!("server.log.{n}"))).unwrap_or_default()).collect();
+        assert_eq!(kept, ["run 11", "run 10", "run 9", ""]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_server_restart_took_counts_as_exited() {

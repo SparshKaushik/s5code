@@ -210,6 +210,11 @@ pub fn new_without_project(s: &mut App) {
     }
 }
 
+/// A scratch thread is still starting.
+pub fn scratch_pending(s: &App) -> bool {
+    s.ui.shell.palette.act.scratch.is_some()
+}
+
 pub fn triage(s: &mut App) {
     if s.ui.shell.palette.act.triage.is_some() {
         return;
