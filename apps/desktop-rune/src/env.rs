@@ -175,7 +175,7 @@ pub fn start(s: &mut App) {
     let file = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let saved = file.as_ref().map(decode).unwrap_or_default();
     let off = file.as_ref().map(decode_off).unwrap_or_default();
-    s.ui.env.alternates = file.as_ref().map(decode_alternates).unwrap_or_default();
+    s.ui.env.alternates.extend(file.as_ref().map(decode_alternates).unwrap_or_default());
     for env in saved.iter().filter(|e| !off.contains(&e.id)) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));

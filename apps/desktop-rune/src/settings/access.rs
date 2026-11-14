@@ -1019,6 +1019,8 @@ mod tests {
 
 /// Scene: a pairing link this window just created, its QR share panel open.
 pub(super) fn scene_share(s: &mut App) {
+    // Without the page, the first poll resets this state as a page change.
+    s.ui.settings.connections.page = Some("access".into());
     let state = &mut s.ui.settings.connections.access;
     state.scene = Some(json!({"payload": {
         "pairingLinks": [{"id": "link-1", "label": "Phone", "scopes": ["orchestration:read", "orchestration:operate"]}],

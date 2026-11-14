@@ -1525,13 +1525,15 @@ pub(super) fn scene(s: &mut App, open: &str) {
         bearer: String::new(),
     });
     env::park(s, "env-box", crate::data::Source::Fixture(crate::data::fixture_state()));
+    // What's saved before the dialog opened; anything new since closes it as added.
+    let before = s.ui.env.saved.clone();
     let ui = &mut s.ui.settings.connections;
     // Without the page, the first poll resets the overlays as a page change.
     ui.page = Some("connections".into());
     match open {
-        "add-remote" => ui.adding = Some(Vec::new()),
+        "add-remote" => ui.adding = Some(before),
         "add-ssh" => {
-            ui.adding = Some(Vec::new());
+            ui.adding = Some(before);
             ui.ssh = true;
         }
         "env-menu" => {
@@ -1605,6 +1607,22 @@ mod tests {
         assert_eq!(mcp_client_scopes("read-only"), ["orchestration:read"]);
         assert_eq!(mcp_client_scopes("auto"), ["orchestration:read", "orchestration:operate"]);
         assert_eq!(mcp_client_scopes("full-access").len(), 4);
+    }
+
+    #[test]
+    fn overlay_scenes_survive_the_first_poll() {
+        let run = |name: &str| {
+            let mut s = App::new();
+            let scene = crate::settings::SCENES.iter().find(|(n, _)| *n == name).unwrap().1;
+            scene(&mut s);
+            poll(&mut s);
+            s
+        };
+        assert!(run("settings-connections-add-remote").ui.settings.connections.adding.is_some(), "the scene's saved environment is not a new one");
+        let s = run("settings-connections-route-remove");
+        assert_eq!(env::routes(&s, "env-box").len(), 3);
+        assert_eq!(s.ui.settings.connections.route_remove, Some(("env-box".into(), 1)));
+        assert_eq!(run("settings-access-share").ui.settings.connections.page.as_deref(), Some("access"));
     }
 
     #[test]

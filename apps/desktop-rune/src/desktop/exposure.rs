@@ -89,6 +89,9 @@ pub struct Endpoint {
 
 impl State {
     pub(super) fn load(&mut self) {
+        if self.scene {
+            return;
+        }
         let settings = settings();
         // What the server runs with: a policy without remote clients holds both off.
         let remote = super::policy::current().allows_remote();
