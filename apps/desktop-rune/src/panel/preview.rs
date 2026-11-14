@@ -82,11 +82,13 @@ struct Tab {
     /// The environment whose server renders this tab, for a tab opened on another machine's
     /// thread: its session opens with the first page, and the server's frames show it.
     remote: Option<String>,
+    /// The stream's dialog last put on screen, so an answered one isn't shown again.
+    stream_dialog: Option<(String, String, String)>,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None }
     }
 }
 
@@ -808,6 +810,7 @@ fn shown(app: &App) -> Option<TabId> {
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let synced = sync_sessions(app);
     let synced = sync_streams(app) || synced;
+    let synced = stream_events(app, tx) || synced;
     let wait = cursor_wake(app);
     if let Some(wait) = wait {
         tx.wake_after(wait + Duration::from_millis(16));
@@ -1061,6 +1064,7 @@ fn sync_streams(app: &mut App) -> bool {
     let mut changed = false;
     let mut gone = vec![];
     let mut sized = vec![];
+    let mut dialogs = vec![];
     {
         let mut shared = ui.browser.shared.lock().unwrap();
         for (id, tab) in &ui.tabs {
@@ -1070,6 +1074,9 @@ fn sync_streams(app: &mut App) -> bool {
             if state.ended && state.error.is_none() {
                 gone.push(*id);
                 continue;
+            }
+            if state.dialog != tab.stream_dialog {
+                dialogs.push((*id, state.dialog.clone()));
             }
             let status = stream_status(&tab.snapshot, &state);
             if shared.tabs.get(id) != Some(&status) {
@@ -1090,6 +1097,24 @@ fn sync_streams(app: &mut App) -> bool {
             d.preset = PRESETS.iter().position(|p| (p.1, p.2) == (w, h));
         }
     }
+    // The page's alert, confirm or prompt shows as a local one does, answered through the stream.
+    for (tab, dialog) in dialogs {
+        let ui = &mut app.ui.panel.browser;
+        if let Some(t) = ui.tabs.get_mut(&tab) {
+            t.stream_dialog = dialog.clone();
+        }
+        match dialog {
+            Some((kind, message, default)) => {
+                let mut input = TextEdit::new(default.as_str());
+                input.focused = kind == "prompt";
+                input.set_selection(0, input.text.len());
+                ui.dialog = Some(Dialog { tab, kind, message, input });
+            }
+            None if ui.dialog.as_ref().is_some_and(|d| d.tab == tab) => ui.dialog = None,
+            None => {}
+        }
+        changed = true;
+    }
     for tab in gone {
         if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
             t.session = None;
@@ -1099,6 +1124,52 @@ fn sync_streams(app: &mut App) -> bool {
         changed = true;
     }
     changed
+}
+
+/// What a server tab's page asked of this viewer: copied text, a download, a file picker.
+fn stream_events(app: &mut App, tx: &mut Tx) -> bool {
+    use super::stream::Event;
+    let events: Vec<(TabId, Vec<Event>)> = app.ui.panel.browser.tabs.iter().filter_map(|(id, t)| Some((*id, t.stream.as_ref()?.take_events()))).filter(|(_, e)| !e.is_empty()).collect();
+    let changed = !events.is_empty();
+    for (tab, event) in events.into_iter().flat_map(|(tab, events)| events.into_iter().map(move |e| (tab, e))) {
+        match event {
+            Event::Clipboard(text) => tx.copy(text),
+            // As a person's download in a local tab: saved to Downloads and shown in its folder.
+            Event::Saved(Ok(path)) => {
+                if let Err(e) = reveal(&path) {
+                    crate::shell::palette::toast(app, "Unable to show the download", Some(&e));
+                }
+            }
+            Event::Saved(Err(e)) => crate::shell::palette::toast(app, "Unable to save the download", Some(&e)),
+            // The native dialog picks one file; cancelling it cancels the page's picker.
+            Event::FileChooser { id, multiple, accept } => {
+                let title = if multiple { "Choose files to upload" } else { "Choose a file to upload" };
+                let mut options = rune::FileDialogOptions { title: title.into(), ..Default::default() };
+                let exts = accept_extensions(&accept);
+                if !exts.is_empty() {
+                    let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+                    options = options.filter("Accepted files", exts.as_slice());
+                }
+                tx.open_file(options, move |s: &mut App, picked: rune::FileDialogResult, _| {
+                    let files = match picked {
+                        Ok(Some(path)) => vec![std::path::PathBuf::from(path)],
+                        _ => vec![],
+                    };
+                    if let Some(stream) = s.ui.panel.browser.tabs.get(&tab).and_then(|t| t.stream.as_ref()) {
+                        stream.upload(&id, files);
+                    }
+                });
+            }
+            Event::FileChooserClosed(_) => {}
+            Event::Failed(title, e) => crate::shell::palette::toast(app, &title, Some(&e)),
+        }
+    }
+    changed
+}
+
+/// The file extensions an `<input accept>` names; MIME types like `image/*` don't narrow it.
+fn accept_extensions(accept: &str) -> Vec<String> {
+    accept.split(',').filter_map(|a| a.trim().strip_prefix('.')).filter(|e| !e.is_empty()).map(str::to_ascii_lowercase).collect()
 }
 
 /// A server session as a tab showing the server's frames.
@@ -2334,11 +2405,33 @@ fn pip_gesture(s: &mut App, d: &rune::Drag, dir: (i8, i8), aspect: f32) {
 fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
     let ui = &app.ui.panel.browser;
     let stream = ui.tabs.get(&tab)?.stream.as_ref()?;
-    if !stream.state().painted {
+    let state = stream.state();
+    if let Some((need, command)) = state.host_setup {
+        return Some(host_setup(t, need, command));
+    }
+    if !state.painted {
         return Some(col().grow(1.).min_h(0.).w_full().center().child(text("Connecting to the server's browser…").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
     let (w, h, scale) = stream_box(ui, tab);
     Some(col().grow(1.).min_h(0.).w_full().center().child(page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale))))
+}
+
+/// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
+/// command runs there.
+fn host_setup(t: &T, need: String, command: Option<String>) -> El {
+    let mut notice = col().max_w(420.).gap(10.).padding(16.).child(text("The server can't open this page yet").font(theme::SM_MEDIUM).color(t.c.foreground)).child(text(need).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap());
+    if let Some(command) = command {
+        let copied = command.clone();
+        notice = notice
+            .child(text("Run this on the server's machine, then reopen the tab:").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap())
+            .child(row().w_full().gap(8.).center_y().padding(8.).radius(6.).fill(t.c.muted).child(text(command).font(theme::TEXT_XS).color(t.c.foreground).grow(1.).wrap().selectable(true)).child(
+                kit::Button::new("Copy").variant("outline").size("xs").on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                    tx.copy(copied.clone());
+                    crate::shell::palette::toast_copied(s, tx, "Copy command");
+                }).build(t),
+            ));
+    }
+    col().key("browser-host-setup").grow(1.).min_h(0.).w_full().center().child(notice)
 }
 
 /// The tab's appearance: a server tab's from its session.
@@ -3252,6 +3345,12 @@ mod tests {
         // While the server still probes the script's URL, its own address opens.
         let probing = json!({ "servers": response["servers"], "configuredUrlProbing": true });
         assert_eq!(previewable(&probing, &["http://localhost:8080/admin".into()])[0].0, "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn a_file_inputs_accept_list_filters_the_picker() {
+        assert_eq!(accept_extensions(".PNG, .jpg,image/*,"), vec!["png", "jpg"]);
+        assert!(accept_extensions("image/*").is_empty());
     }
 
     #[test]

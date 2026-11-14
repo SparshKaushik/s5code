@@ -29,29 +29,81 @@ pub struct State {
     /// `agent`, `you`, `another-viewer` or `unclaimed`, once the server says.
     pub controller: Option<String>,
     pub pointer: Option<Pointer>,
-    /// The session ended, or the server can't run its browser (`error` says why).
+    /// The session ended; `error` says why when it wasn't closed.
     pub ended: bool,
     pub error: Option<String>,
+    /// The page's open `alert`, `confirm` or `prompt`: its type, message and default answer.
+    pub dialog: Option<(String, String, String)>,
+    /// The server's machine can't run its browser yet: why, and the command that fixes it.
+    pub host_setup: Option<(String, Option<String>)>,
+}
+
+/// What the stream hands the panel once: things it acts on rather than draws.
+#[derive(Debug, PartialEq)]
+pub enum Event {
+    /// The page copied text.
+    Clipboard(String),
+    /// A download the page started, saved to the Downloads folder.
+    Saved(Result<std::path::PathBuf, String>),
+    /// The page opened a file picker; its files go back with `Stream::upload`.
+    FileChooser { id: String, multiple: bool, accept: String },
+    /// The page closed its picker before it was answered.
+    FileChooserClosed(String),
+    Failed(String, String),
 }
 
 pub struct Stream {
     tx: Sender<String>,
     state: Arc<Mutex<State>>,
+    inbox: Arc<Mutex<Vec<Event>>>,
     pressed: AtomicBool,
+    base: String,
+    bearer: String,
+    query: String,
+    waker: rune::Waker,
+}
+
+/// The worker's side: where it connects and what it reports into.
+struct Ctx {
+    base: String,
+    bearer: String,
+    query: String,
+    pixels: Pixels,
+    state: Arc<Mutex<State>>,
+    inbox: Arc<Mutex<Vec<Event>>>,
+    waker: rune::Waker,
 }
 
 impl Stream {
     pub fn open(base: String, bearer: String, key: &Key, pixels: Pixels, waker: rune::Waker) -> Stream {
         let (tx, rx) = channel();
         let state = Arc::new(Mutex::new(State::default()));
+        let inbox = Arc::new(Mutex::new(vec![]));
         let query = url_query(key);
-        let shared = state.clone();
-        std::thread::spawn(move || run(base, bearer, query, pixels, shared, rx, waker));
-        Stream { tx, state, pressed: AtomicBool::new(false) }
+        let ctx = Ctx { base: base.clone(), bearer: bearer.clone(), query: query.clone(), pixels, state: state.clone(), inbox: inbox.clone(), waker: waker.clone() };
+        std::thread::spawn(move || run(ctx, rx));
+        Stream { tx, state, inbox, pressed: AtomicBool::new(false), base, bearer, query, waker }
     }
 
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
+    }
+
+    pub fn take_events(&self) -> Vec<Event> {
+        std::mem::take(&mut *self.inbox.lock().unwrap())
+    }
+
+    /// Answers the page's file picker with these files; none cancels it.
+    pub fn upload(&self, chooser: &str, files: Vec<std::path::PathBuf>) {
+        let (base, bearer, inbox, waker) = (self.base.clone(), self.bearer.clone(), self.inbox.clone(), self.waker.clone());
+        let query = format!("{}&chooser={}", session_query(&self.query), encode(chooser));
+        std::thread::spawn(move || {
+            let result = multipart(&files).and_then(|(boundary, body)| s5_net::api_post(&base, &bearer, "/api/preview-stream/upload", &query, &format!("multipart/form-data; boundary={boundary}"), &body));
+            if let Err(e) = result {
+                inbox.lock().unwrap().push(Event::Failed("Unable to upload the file".into(), e));
+                waker();
+            }
+        });
     }
 
     /// Web's client gate: page input only while this viewer has control.
@@ -85,6 +137,30 @@ impl Stream {
         }
         self.pressed.store(pressed, Ordering::Relaxed);
     }
+}
+
+fn encode(value: &str) -> String {
+    s5_net::url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// The session's own query, without the frame cap only the socket takes.
+fn session_query(query: &str) -> String {
+    query.split('&').filter(|p| p.starts_with("threadId=") || p.starts_with("tabId=")).collect::<Vec<_>>().join("&")
+}
+
+/// A `multipart/form-data` body with each file as a `file` part, as web's FormData.
+fn multipart(files: &[std::path::PathBuf]) -> Result<(String, Vec<u8>), String> {
+    let boundary = format!("s5-{}", s5_net::uuid().replace('-', ""));
+    let mut body = Vec::new();
+    for path in files {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let name = path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().replace(['"', '\r', '\n'], "_"));
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok((boundary, body))
 }
 
 fn url_query(key: &Key) -> String {
@@ -136,10 +212,38 @@ fn inputs(cmd: &Cmd, scale: f32, pressed: &mut bool) -> Vec<Value> {
     }
 }
 
+/// What a message asks of the worker beyond the state: an event for the panel, or a download
+/// to fetch (its id and file name).
+#[derive(Debug, PartialEq)]
+enum Inbound {
+    Event(Event),
+    Download(String, String),
+}
+
 /// A JSON message from the stream; whether it changed what the panel shows.
-fn apply(state: &mut State, message: &str) -> bool {
+fn apply(state: &mut State, message: &str, out: &mut Vec<Inbound>) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(message) else { return false };
     match v["type"].as_str() {
+        Some("clipboard") => {
+            let Some(text) = v["text"].as_str() else { return false };
+            out.push(Inbound::Event(Event::Clipboard(text.to_owned())));
+            return false;
+        }
+        Some("download") => {
+            let (Some(id), Some(name)) = (v["id"].as_str(), v["fileName"].as_str()) else { return false };
+            out.push(Inbound::Download(id.to_owned(), name.to_owned()));
+            return false;
+        }
+        Some("fileChooser") => {
+            let Some(id) = v["id"].as_str() else { return false };
+            out.push(Inbound::Event(Event::FileChooser { id: id.to_owned(), multiple: v["multiple"] == true, accept: v["accept"].as_str().unwrap_or_default().to_owned() }));
+            return false;
+        }
+        Some("fileChooserClosed") => {
+            let Some(id) = v["id"].as_str() else { return false };
+            out.push(Inbound::Event(Event::FileChooserClosed(id.to_owned())));
+            return false;
+        }
         Some("viewport") => {
             let (Some(w), Some(h)) = (v["width"].as_f64(), v["height"].as_f64()) else { return false };
             state.viewport = Some((w.round() as u32, h.round() as u32));
@@ -152,6 +256,8 @@ fn apply(state: &mut State, message: &str) -> bool {
             let Some(controller) = v["controller"].as_str() else { return false };
             state.can_operate = v["canOperate"] == true;
             state.controller = Some(controller.to_owned());
+            let d = &v["dialog"];
+            state.dialog = d["type"].as_str().map(|kind| (kind.to_owned(), d["message"].as_str().unwrap_or_default().to_owned(), d["defaultValue"].as_str().unwrap_or_default().to_owned()));
         }
         _ => return false,
     }
@@ -160,41 +266,47 @@ fn apply(state: &mut State, message: &str) -> bool {
 
 enum End {
     Stopped,
-    Ended(Option<String>),
+    Ended,
+    HostSetup(String, Option<String>),
     Reconnect,
     Lost,
 }
 
-fn run(base: String, bearer: String, query: String, pixels: Pixels, state: Arc<Mutex<State>>, rx: Receiver<String>, waker: rune::Waker) {
+fn run(ctx: Ctx, rx: Receiver<String>) {
     let mut failures = 0u32;
     let mut resize: Option<String> = None;
     loop {
-        let end = match s5_net::api_socket(&base, &bearer, "/api/preview-stream/ws", &query, Duration::from_millis(15)) {
+        let end = match s5_net::api_socket(&ctx.base, &ctx.bearer, "/api/preview-stream/ws", &ctx.query, Duration::from_millis(15)) {
             Ok(mut socket) => {
                 failures = 0;
-                update(&state, &waker, |s| {
+                update(&ctx.state, &ctx.waker, |s| {
                     s.connected = true;
                     s.error = None;
                 });
-                let end = pump(&mut socket, &pixels, &state, &rx, &waker, &mut resize);
-                update(&state, &waker, |s| {
+                let end = pump(&mut socket, &ctx, &rx, &mut resize);
+                update(&ctx.state, &ctx.waker, |s| {
                     s.connected = false;
                     s.controller = None;
+                    s.dialog = None;
                 });
                 end
             }
             Err(e) => {
-                update(&state, &waker, |s| s.error = Some(e));
+                update(&ctx.state, &ctx.waker, |s| s.error = Some(e));
                 End::Lost
             }
         };
         match end {
             End::Stopped => return,
-            End::Ended(error) => {
-                update(&state, &waker, |s| {
+            End::Ended => {
+                update(&ctx.state, &ctx.waker, |s| {
                     s.ended = true;
-                    s.error = error;
+                    s.error = None;
                 });
+                return;
+            }
+            End::HostSetup(need, command) => {
+                update(&ctx.state, &ctx.waker, |s| s.host_setup = Some((need, command)));
                 return;
             }
             End::Reconnect => {}
@@ -221,9 +333,27 @@ fn update(state: &Mutex<State>, waker: &rune::Waker, f: impl FnOnce(&mut State))
     waker();
 }
 
+/// Saves a download the page started into the Downloads folder, as Electron saves a person's.
+fn download(ctx: &Ctx, id: &str, name: String) {
+    let (base, bearer, inbox, waker) = (ctx.base.clone(), ctx.bearer.clone(), ctx.inbox.clone(), ctx.waker.clone());
+    let query = format!("{}&id={}", session_query(&ctx.query), encode(id));
+    std::thread::spawn(move || {
+        let saved = s5_net::api_get(&base, &bearer, "/api/preview-stream/download", &query, 4 << 30).and_then(|bytes| {
+            let dir = super::browser::downloads_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let path = super::browser::unique_path(&dir, &name).ok_or("The Downloads folder has too many copies of this file.")?;
+            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+            Ok(path)
+        });
+        inbox.lock().unwrap().push(Event::Saved(saved));
+        waker();
+    });
+}
+
 type Socket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 
-fn pump(socket: &mut Socket, pixels: &Pixels, state: &Mutex<State>, rx: &Receiver<String>, waker: &rune::Waker, resize: &mut Option<String>) -> End {
+fn pump(socket: &mut Socket, ctx: &Ctx, rx: &Receiver<String>, resize: &mut Option<String>) -> End {
+    let (pixels, state, waker) = (&ctx.pixels, &ctx.state, &ctx.waker);
     if let Some(r) = resize.clone() {
         let _ = socket.send(Message::Text(r));
     }
@@ -260,14 +390,26 @@ fn pump(socket: &mut Socket, pixels: &Pixels, state: &Mutex<State>, rx: &Receive
                 }
             }
             Ok(Message::Text(text)) => {
-                if apply(&mut state.lock().unwrap(), &text) {
+                let mut out = vec![];
+                let changed = apply(&mut state.lock().unwrap(), &text, &mut out);
+                let events = !out.is_empty();
+                for inbound in out {
+                    match inbound {
+                        Inbound::Event(event) => ctx.inbox.lock().unwrap().push(event),
+                        Inbound::Download(id, name) => download(ctx, &id, name),
+                    }
+                }
+                if changed || events {
                     waker();
                 }
             }
             Ok(Message::Close(frame)) => {
                 return match frame.as_ref().map(|f| (u16::from(f.code), f.reason.to_string())) {
-                    Some((TAB_GONE, _)) => End::Ended(None),
-                    Some((HOST_SETUP, reason)) => End::Ended(Some(host_setup(&reason))),
+                    Some((TAB_GONE, _)) => End::Ended,
+                    Some((HOST_SETUP, reason)) => {
+                        let (need, command) = host_setup(&reason);
+                        End::HostSetup(need, command)
+                    }
                     Some((RECONNECT, _)) => End::Reconnect,
                     _ => End::Lost,
                 };
@@ -279,14 +421,12 @@ fn pump(socket: &mut Socket, pixels: &Pixels, state: &Mutex<State>, rx: &Receive
     }
 }
 
-/// `PreviewStreamHostSetup`: what the server's machine needs before it can run its browser.
-fn host_setup(reason: &str) -> String {
+/// `PreviewStreamHostSetup`: what the server's machine needs before it can run its browser, and
+/// the command that installs it.
+fn host_setup(reason: &str) -> (String, Option<String>) {
     let setup: Value = serde_json::from_str(reason).unwrap_or_default();
     let need = if setup["need"] == "sandbox" { "a Chrome sandbox" } else { "Chrome's system libraries" };
-    match setup["command"].as_str() {
-        Some(command) => format!("The server needs {need}. Run on that machine: {command}"),
-        None => format!("The server needs {need}."),
-    }
+    (format!("The server's machine needs {need} before it can show this page."), setup["command"].as_str().map(str::to_owned))
 }
 
 #[cfg(test)]
@@ -318,20 +458,55 @@ mod tests {
     #[test]
     fn stream_messages_update_the_viewer() {
         let mut state = State::default();
-        assert!(apply(&mut state, r#"{"type":"viewport","width":390,"height":844}"#));
+        let mut out = vec![];
+        assert!(apply(&mut state, r#"{"type":"viewport","width":390,"height":844}"#, &mut out));
         assert_eq!(state.viewport, Some((390, 844)));
-        assert!(apply(&mut state, r#"{"type":"control","canOperate":true,"controller":"agent","generation":2,"dialog":null}"#));
-        assert_eq!((state.can_operate, state.controller.as_deref()), (true, Some("agent")));
-        assert!(apply(&mut state, r#"{"type":"pointer","phase":"click","x":12,"y":30,"sequence":7}"#));
+        assert!(apply(&mut state, r#"{"type":"control","canOperate":true,"controller":"agent","generation":2,"dialog":null}"#, &mut out));
+        assert_eq!((state.can_operate, state.controller.as_deref(), state.dialog.clone()), (true, Some("agent"), None));
+        assert!(apply(&mut state, r#"{"type":"control","canOperate":true,"controller":"you","generation":3,"dialog":{"type":"prompt","message":"Name?","defaultValue":"Ada"}}"#, &mut out));
+        assert_eq!(state.dialog, Some(("prompt".into(), "Name?".into(), "Ada".into())));
+        assert!(apply(&mut state, r#"{"type":"pointer","phase":"click","x":12,"y":30,"sequence":7}"#, &mut out));
         let pointer = state.pointer.clone().unwrap();
         assert_eq!((pointer.click, pointer.x, pointer.y, pointer.sequence), (true, 12., 30., 7));
-        assert!(!apply(&mut state, r#"{"type":"clipboard","text":"x"}"#));
-        assert!(!apply(&mut state, "not json"));
-        assert_eq!(host_setup(r#"{"need":"libraries","command":"npx playwright install-deps"}"#), "The server needs Chrome's system libraries. Run on that machine: npx playwright install-deps");
+        assert!(!apply(&mut state, "not json", &mut out));
+        assert!(out.is_empty());
+
+        assert!(!apply(&mut state, r#"{"type":"clipboard","text":"copied"}"#, &mut out));
+        assert!(!apply(&mut state, r#"{"type":"download","id":"d1","fileName":"report.csv","sizeBytes":12}"#, &mut out));
+        assert!(!apply(&mut state, r#"{"type":"fileChooser","id":"c1","multiple":true,"accept":"image/*"}"#, &mut out));
+        assert!(!apply(&mut state, r#"{"type":"fileChooserClosed","id":"c1"}"#, &mut out));
+        assert_eq!(
+            out,
+            vec![
+                Inbound::Event(Event::Clipboard("copied".into())),
+                Inbound::Download("d1".into(), "report.csv".into()),
+                Inbound::Event(Event::FileChooser { id: "c1".into(), multiple: true, accept: "image/*".into() }),
+                Inbound::Event(Event::FileChooserClosed("c1".into())),
+            ]
+        );
+        assert_eq!(host_setup(r#"{"need":"libraries","command":"npx playwright install-deps"}"#).1.as_deref(), Some("npx playwright install-deps"));
+        assert!(host_setup(r#"{"need":"sandbox"}"#).0.contains("sandbox"));
     }
 
     #[test]
     fn the_stream_url_names_the_session_and_frame_cap() {
-        assert_eq!(url_query(&("thread 1".into(), "tab-2".into())), "threadId=thread+1&tabId=tab-2&maxWidth=2560&maxHeight=1600");
+        let query = url_query(&("thread 1".into(), "tab-2".into()));
+        assert_eq!(query, "threadId=thread+1&tabId=tab-2&maxWidth=2560&maxHeight=1600");
+        assert_eq!(session_query(&query), "threadId=thread+1&tabId=tab-2");
+    }
+
+    #[test]
+    fn an_upload_sends_each_file_as_a_file_part() {
+        let dir = std::env::temp_dir().join(format!("s5-upload-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a\"b.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let (boundary, body) = multipart(&[file]).unwrap();
+        let body = String::from_utf8(body).unwrap();
+        assert_eq!(body, format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a_b.txt\"\r\nContent-Type: application/octet-stream\r\n\r\nhello\r\n--{boundary}--\r\n"));
+        // No files cancels the page's picker.
+        let (boundary, empty) = multipart(&[]).unwrap();
+        assert_eq!(empty, format!("--{boundary}--\r\n").into_bytes());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

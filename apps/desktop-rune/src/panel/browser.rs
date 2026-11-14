@@ -1375,7 +1375,7 @@ fn downloads_staging() -> String {
     crate::host::t3_home().join("userdata").join("browser-downloads").display().to_string()
 }
 
-fn downloads_dir() -> PathBuf {
+pub(super) fn downloads_dir() -> PathBuf {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let configured = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok().and_then(|text| {
         let line = text.lines().find(|l| l.starts_with("XDG_DOWNLOAD_DIR="))?;
@@ -1386,7 +1386,7 @@ fn downloads_dir() -> PathBuf {
 }
 
 /// The first free name in `dir`: `name`, then `name (1).ext` up to 99, as Electron's copy.
-fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+pub(super) fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     let name = std::path::Path::new(name).file_name().map_or_else(|| "download".into(), |n| n.to_string_lossy().into_owned());
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),

@@ -450,6 +450,55 @@ pub fn api_socket(
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(5))).map_err(|e| e.to_string())?;
     Ok(socket)
 }
+fn api_url(base: &str, path: &str, query: &str) -> Result<url::Url, String> {
+    if !path.starts_with("/api/") {
+        return Err("Unsupported API path".into());
+    }
+    let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    url.set_path(path);
+    url.set_query(Some(query).filter(|q| !q.is_empty()));
+    url.set_fragment(None);
+    Ok(url)
+}
+fn api_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, response) => response
+            .into_string()
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("HTTP {code}")),
+        error => error.to_string(),
+    }
+}
+/// The body of a GET on one of the server's `/api` routes as this client, at most `limit` bytes.
+pub fn api_get(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .build()
+        .get(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .call()
+        .map_err(api_error)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+/// A POST of `body` to one of the server's `/api` routes as this client.
+pub fn api_post(base: &str, bearer: &str, path: &str, query: &str, content_type: &str, body: &[u8]) -> Result<(), String> {
+    let url = api_url(base, path, query)?;
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .post(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .set("Content-Type", content_type)
+        .send_bytes(body)
+        .map(|_| ())
+        .map_err(api_error)
+}
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
     if !relative_url.starts_with("/api/attachments/upload/") {
