@@ -81,10 +81,20 @@ pub fn can(s: &App, scope: &str) -> bool {
 /// it fails. Fixtures have no server and grant everything.
 pub fn can_on(s: &App, key: &str, scope: &str) -> bool {
     match crate::env::source(s, key) {
-        Some(crate::data::Source::Fixture(_)) => true,
+        Some(crate::data::Source::Fixture(_)) => fixture_session(s, key).is_none_or(|session| grants(session, scope)),
         Some(crate::data::Source::Live(_)) => reply_on(s, key).and_then(|r| r.as_ref().ok()).is_some_and(|session| grants(session, scope)),
         None => false,
     }
+}
+
+/// A session a scene or test stood in for a fixture environment; fixtures grant all without one.
+fn fixture_session<'a>(s: &'a App, key: &str) -> Option<&'a Value> {
+    reply_on(s, key)?.as_ref().ok()
+}
+
+/// Stands `session` in for the environment `key`'s answer (scenes and tests with a fixture).
+pub fn set_session(s: &mut App, key: &str, session: Value) {
+    s.ui.settings.session.by_env.entry(key.to_owned()).or_default().reply = Some(Ok(session));
 }
 
 /// Web `resolveFilesystemReadAccess`, for any scope: `None` while the session check runs, else
@@ -92,7 +102,10 @@ pub fn can_on(s: &App, key: &str, scope: &str) -> bool {
 pub fn access_on(s: &App, key: &str, scope: &str) -> Option<Result<(), Option<String>>> {
     const OFFLINE: &str = "This environment is not connected.";
     match crate::env::source(s, key) {
-        Some(crate::data::Source::Fixture(_)) => Some(Ok(())),
+        Some(crate::data::Source::Fixture(_)) => Some(match fixture_session(s, key) {
+            Some(session) if !grants(session, scope) => Err(None),
+            _ => Ok(()),
+        }),
         Some(crate::data::Source::Live(_)) => match reply_on(s, key) {
             Some(Ok(session)) => Some(if grants(session, scope) { Ok(()) } else { Err(None) }),
             Some(Err(cause)) => Some(Err(Some(crate::shell::palette::error_message(cause, OFFLINE)))),
