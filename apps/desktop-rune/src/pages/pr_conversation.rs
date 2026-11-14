@@ -661,7 +661,7 @@ fn thread_row(s: &App, t: &T, e: &Event<'_>, item: &Item<'_>, card: Card) -> El 
 
 /// PullRequestMoreReplies' text: how many replies the host held back, when it says.
 pub fn more_replies_label(more: usize, has_more: bool) -> Option<String> {
-    has_more.then(|| if more > 0 { format!("{} more", counted(more, "reply", "replies")) } else { "More replies".into() })
+    has_more.then(|| if more > 0 { format!("{} more {}", crate::chat::details::thousands(more as u64), if more == 1 { "reply" } else { "replies" }) } else { "More replies".into() })
 }
 
 /// PullRequestMoreReplies: the replies the host held back, and where to read them.
