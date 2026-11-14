@@ -457,5 +457,25 @@ mod tests {
 
         th.worktree = None;
         assert_eq!(labels(&entries(&s, &model, &th, Some(Sub::Copy)))[0], "Path", "FAILED: Copy keeps Path without one, as web toasts");
+
+        th.title_regenerating = true;
+        let shown = entries(&s, &model, &th, None);
+        let regen = shown.iter().find_map(|e| match e { MenuEntry::Item(i) if i.label_text() == "Regenerating…" => Some(i), _ => None });
+        assert!(regen.is_some_and(|i| i.is_disabled()), "FAILED: a regenerating title shows a disabled Regenerating…: {:?}", labels(&shown));
+
+        let config = state(&mut s).config.take();
+        let shown = labels(&entries(&s, &model, &th, None));
+        for gated in ["Pin thread", "Unpin thread", "Settle thread", "Un-settle thread", "Snooze", "Wake thread", "Regenerating…", "Regenerate title"] {
+            assert!(!shown.iter().any(|l| l == gated), "FAILED: {gated} waits for the server config: {shown:?}");
+        }
+        state(&mut s).config = config;
+
+        // A session without `orchestration:operate` keeps the menu but disables what changes threads.
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        let shown = entries(&s, &model, &th, None);
+        let disabled = |label: &str| shown.iter().any(|e| matches!(e, MenuEntry::Item(i) if i.label_text().starts_with(label) && i.is_disabled()));
+        for label in ["Rename", "Archive", "Delete"] {
+            assert!(disabled(label), "FAILED: {label} needs operate: {:?}", labels(&shown));
+        }
     }
 }

@@ -1651,6 +1651,36 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_command_toasts_web_s_title_and_rolls_back_its_drop() {
+        assert_eq!(failure_title("thread.metadata.update", &json!({"regenerateTitle": true})), Some("Failed to regenerate thread title"));
+        assert_eq!(failure_title("thread.metadata.update", &json!({"title": "x"})), Some("Failed to rename thread"));
+        assert_eq!(failure_title("thread.pin.reorder", &json!({})), Some("Failed to reorder pinned threads"));
+        assert_eq!(failure_title("thread.mark-unread", &json!({})), None, "FAILED: web toasts nothing for mark unread");
+
+        let mut s = App::new();
+        for id in ["a", "b", "c"] {
+            patch(&mut s, id, |p| p.pinned = Some(true));
+        }
+        let done = Inflight { request: 1, thread: "a".into(), title: "Failed to pin thread", rollback: vec!["a".into(), "b".into()] };
+        failed(&mut s, &done, &json!({"message": "denied"}));
+        let ui = &s.ui.shell.sidebar;
+        assert!(!ui.patches.contains_key("a") && !ui.patches.contains_key("b"), "FAILED: the dropped group returns to the server's order");
+        assert!(ui.patches.contains_key("c"), "FAILED: an unrelated patch stays");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Failed to pin thread"));
+    }
+
+    #[test]
+    fn a_session_without_operate_blocks_thread_actions_with_web_s_toast() {
+        let mut s = App::new();
+        let id = Model::build(&s).threads[0].id.clone();
+        assert!(check_operations(&mut s, &[id.clone()]), "FAILED: no session answer yet lets the server decide");
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        assert!(!can_operate_id(&s, &id));
+        assert!(!check_operations(&mut s, &[id]), "FAILED: a read-only session cannot change threads");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Thread action unavailable"));
+    }
+
+    #[test]
     fn bulk_unpin_asks_for_each_thread_in_turn() {
         let mut s = App::new();
         s.client_settings.values.insert("confirmThreadUnpin".into(), json!(true));

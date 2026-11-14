@@ -78,6 +78,11 @@ const SESSION_STALE_MS: i64 = 5 * 60_000;
 
 /// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
 /// leaves it to the server; a failed read denies, as web's guards do.
+#[cfg(test)]
+pub(crate) fn set_session(s: &mut App, session: Option<Result<Value, ()>>) {
+    s.ui.chat.details.session = session;
+}
+
 pub fn grants(s: &App, scope: &str) -> bool {
     match &s.ui.chat.details.session {
         Some(Ok(session)) => crate::settings::session_grants(session, scope),
