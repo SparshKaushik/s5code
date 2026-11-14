@@ -12,7 +12,7 @@ mod background;
 mod balance;
 pub mod client;
 mod connection_diagnosis;
-mod connections;
+pub(crate) mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;

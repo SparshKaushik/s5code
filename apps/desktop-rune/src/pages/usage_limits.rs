@@ -53,7 +53,7 @@ fn env_net<'a>(s: &'a mut App, environment: &str) -> Option<&'a mut s5_net::Net>
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     if let Some((id, key, environment)) = s.ui.pages.usage.limits.redeeming.clone()
-        && let Some(reply) = env_net(s, &environment).and_then(|n| n.take_reply(id))
+        && let Some(reply) = super::pull_requests::take(s, &environment, id)
     {
         let u = ui(s);
         u.redeeming = None;
@@ -62,7 +62,7 @@ pub fn poll(s: &mut App) -> bool {
     }
     let now = s.now_ms;
     for (environment, id) in std::mem::take(&mut ui(s).refreshing) {
-        if env_net(s, &environment).is_none_or(|n| n.take_reply(id).is_some()) {
+        if env_net(s, &environment).is_none() || super::pull_requests::take(s, &environment, id).is_some() {
             ui(s).refresh_after.insert(environment, now + 5 * 60_000);
             changed = true;
         } else {
@@ -1453,6 +1453,19 @@ pub(super) fn environments_scene(s: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parked_environment_s_redeem_answer_lands_after_the_drain_hands_it_on() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::offline());
+        crate::env::park(&mut s, "lab", crate::data::Source::Live(s5_net::Net::offline()));
+        let id = env_net(&mut s, "lab").map(|n| n.request("server.redeemProviderUsageReset", json!({}))).unwrap();
+        ui(&mut s).redeeming = Some((id, "codex".into(), "lab".into()));
+        crate::env::drain(&mut s);
+        poll(&mut s);
+        assert_eq!(s.ui.pages.usage.limits.redeeming, None);
+        assert!(s.ui.pages.usage.limits.status.contains_key("codex"));
+    }
 
     const NOW: &str = "2026-11-06T10:30:00.000Z";
 
