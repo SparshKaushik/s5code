@@ -90,8 +90,10 @@ pub struct Endpoint {
 impl State {
     pub(super) fn load(&mut self) {
         let settings = settings();
-        self.network = settings.get::<String>(KEY).as_deref() == Some(NETWORK);
-        self.serve = settings.get::<bool>(SERVE_KEY) == Some(true);
+        // What the server runs with: a policy without remote clients holds both off.
+        let remote = super::policy::current().allows_remote();
+        self.network = remote && settings.get::<String>(KEY).as_deref() == Some(NETWORK);
+        self.serve = remote && settings.get::<bool>(SERVE_KEY) == Some(true);
         self.serve_port = serve_port(settings.get::<u64>(SERVE_PORT_KEY));
         self.host = self.network.then(lan_address).flatten();
         self.default_key = super::prefs().get(DEFAULT_ENDPOINT_KEY);
@@ -111,14 +113,17 @@ fn serve_port(value: Option<u64>) -> u16 {
 }
 
 /// What the bundled server binds on its next start.
+/// A policy without remote clients holds it on loopback whatever the saved choice.
 pub fn bind_host() -> &'static str {
-    if settings().get::<String>(KEY).as_deref() == Some(NETWORK) { "0.0.0.0" } else { "127.0.0.1" }
+    let network = settings().get::<String>(KEY).as_deref() == Some(NETWORK);
+    if network && super::policy::current().allows_remote() { "0.0.0.0" } else { "127.0.0.1" }
 }
 
 /// The Serve settings the bundled server starts with.
 pub fn tailscale_serve() -> (bool, u16) {
     let settings = settings();
-    (settings.get::<bool>(SERVE_KEY) == Some(true), serve_port(settings.get::<u64>(SERVE_PORT_KEY)))
+    let serve = settings.get::<bool>(SERVE_KEY) == Some(true) && super::policy::current().allows_remote();
+    (serve, serve_port(settings.get::<u64>(SERVE_PORT_KEY)))
 }
 
 /// Electron's `resolveLanAdvertisedHost`: `T3CODE_DESKTOP_LAN_HOST` when set, else the default
@@ -631,6 +636,10 @@ fn set(s: &mut App, network: bool) {
     let ui = &mut s.ui.desktop.exposure;
     ui.pending = None;
     ui.error = None;
+    if network && let Some(note) = super::policy::current().exposure_note() {
+        ui.error = Some(note);
+        return;
+    }
     let host = lan_address();
     if network && host.is_none() {
         let on = port.map_or_else(String::new, |p| format!(" on port {p}"));
@@ -656,6 +665,10 @@ fn set_serve(s: &mut App, enabled: bool, port: Option<u16>) {
     let ui = &mut s.ui.desktop.exposure;
     ui.serve_dialog = None;
     ui.error = None;
+    if enabled && let Some(note) = super::policy::current().exposure_note() {
+        ui.error = Some(note);
+        return;
+    }
     let port = port.unwrap_or(ui.serve_port);
     if ui.serve == enabled && ui.serve_port == port && (!enabled || ui.tailscale.as_ref().is_some_and(|ts| ts.serving)) {
         return;
