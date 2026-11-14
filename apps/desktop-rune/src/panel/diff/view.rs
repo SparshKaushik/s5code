@@ -194,7 +194,7 @@ fn row_key(s: &App, i: usize) -> Cow<'_, str> {
 }
 
 /// The scrolling diff, filling the height it is given.
-pub fn build(s: &App, look: Rc<Look>) -> El {
+pub fn build(s: &App, look: Rc<Look>, footer: Option<El>) -> El {
     let st = st(s);
     let wrap = st.wraps();
     if !wrap && let Some(r) = rune::memo::layout("panel-diff-view/scroll") {
@@ -211,7 +211,7 @@ pub fn build(s: &App, look: Rc<Look>) -> El {
         .on_visible_rows(|s: &mut App, rows| st_mut(s).set_visible_rows(rows));
     let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
-    let mut root = col().key("panel-diff-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list));
+    let mut root = col().key("panel-diff-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }

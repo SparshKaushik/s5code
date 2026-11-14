@@ -457,11 +457,19 @@ impl Ui {
         if let Some(v) = entry(&self.surfaces, self.active, open).filter(|_| !self.stash_key.is_empty()) {
             threads.insert(self.stash_key.clone(), v);
         }
-        json!({"version": 1, "byThreadKey": threads})
+        let mut saved = json!({"version": 1, "byThreadKey": threads});
+        // Web keeps this in `t3code:diff-file-tree-width`; it outlives a restart for every thread.
+        if let Some(w) = self.diff.tree_w {
+            saved["diffFileTreeWidth"] = json!(w);
+        }
+        saved
     }
 
     /// Fills the stash, so the first switch to a thread brings its saved panel back.
     fn restore(&mut self, v: &Value) {
+        if let Some(w) = v["diffFileTreeWidth"].as_f64() {
+            self.diff.tree_w = Some(w as f32);
+        }
         for (key, entry) in v["byThreadKey"].as_object().into_iter().flatten() {
             if key.is_empty() || *key == self.stash_key || self.stash.contains_key(key) {
                 continue;
@@ -1226,9 +1234,11 @@ mod tests {
         assert!(!switch_thread(&mut app));
 
         // A restart brings each thread's surfaces back, less its browser tabs.
+        app.ui.panel.diff.tree_w = Some(300.0);
         let saved = app.ui.panel.to_json(app.ui.shell.panel_open);
         let mut restarted = App::new();
         restarted.ui.panel.restore(&saved);
+        assert_eq!(restarted.ui.panel.diff.tree_w, Some(300.0), "the Changes tree keeps its width");
         restarted.ui.panel.restore(&json!({"byThreadKey": {"bad": {"surfaces": ["browser:1", 7]}, "dupes": {"surfaces": ["diff", "files", "diff"], "activeSurfaceId": "terminal"}}}));
         restarted.navigate(Route::Thread(ids[0].clone()));
         assert!(switch_thread(&mut restarted));

@@ -84,6 +84,24 @@ pub fn grants(s: &App, scope: &str) -> bool {
     }
 }
 
+/// useEnvironmentPermission's three states: checking until the session answers (the recorded
+/// scenes never ask), then allowed or not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Access {
+    Pending,
+    Granted,
+    Denied,
+}
+
+pub fn access(s: &App, scope: &str) -> Access {
+    match &s.ui.chat.details.session {
+        Some(Ok(session)) if crate::settings::session_grants(session, scope) => Access::Granted,
+        Some(_) => Access::Denied,
+        None if matches!(s.src, data::Source::Live(_)) => Access::Pending,
+        None => Access::Granted,
+    }
+}
+
 fn poll_session(s: &mut App) -> bool {
     let Some(net) = s.src.net() else { return false };
     let ui = &mut s.ui.chat.details;
@@ -1330,7 +1348,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftRun, Item, Pending, Ref, Shown, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
+    use super::{Access, DraftRun, Item, Pending, Ref, Shown, access, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
     use serde_json::{Value, json};
     use crate::{App, Route, data};
 
@@ -1415,6 +1433,11 @@ mod tests {
         assert!(grants(&s, "source-control:write") && !branch_denied(&mut s));
         s.ui.chat.details.session = Some(Err(()));
         assert!(!grants(&s, "filesystem:read"));
+        assert_eq!(access(&s, "filesystem:read"), Access::Denied);
+        s.ui.chat.details.session = Some(Ok(json!({"authenticated": true, "scopes": ["filesystem:read"]})));
+        assert_eq!(access(&s, "filesystem:read"), Access::Granted);
+        s.ui.chat.details.session = None;
+        assert_eq!(access(&s, "filesystem:read"), Access::Granted, "the recorded scenes never ask");
     }
 
     #[test]

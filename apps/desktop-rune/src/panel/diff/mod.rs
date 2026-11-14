@@ -136,10 +136,12 @@ pub struct Ui {
     hide_tests: bool,
     tree_open: bool,
     /// The Changes tree's dragged width; until dragged it takes 40% of the panel.
-    tree_w: Option<f32>,
+    pub(super) tree_w: Option<f32>,
     folded_dirs: HashSet<String>,
     /// Per-file patches requested when the whole patch passed the server's size limit.
-    file_pending: Vec<(u64, Scope)>,
+    file_pending: Vec<(u64, Scope, FileStat)>,
+    /// Files whose own patch failed, until retried (`fileStates`' error).
+    failed_files: Vec<FileStat>,
     /// The server's line counts by path, which hold even for a file it cut short.
     counts: HashMap<String, (usize, usize)>,
     /// Files the server still cut short on their own.
@@ -192,6 +194,7 @@ impl Default for Ui {
             tree_w: None,
             folded_dirs: HashSet::new(),
             file_pending: vec![],
+            failed_files: vec![],
             counts: HashMap::new(),
             partial: HashSet::new(),
             reveal: None,
@@ -380,6 +383,7 @@ pub fn load(app: &mut App) {
     };
     app.ui.panel.diff.seen = signature(app, &scope);
     app.ui.panel.diff.file_pending.clear();
+    app.ui.panel.diff.failed_files.clear();
     if matches!(scope, Scope::Branch) && app.ui.panel.diff.refs_cwd != cwd {
         load_refs(app, &cwd);
     }
@@ -650,31 +654,15 @@ pub fn poll(app: &mut App) -> bool {
         fetch_files(app, &scope, missing);
         return true;
     }
-    for (id, scope) in app.ui.panel.diff.file_pending.clone() {
+    for (id, scope, stat) in app.ui.panel.diff.file_pending.clone() {
         let Some(reply) = take(app, id) else { continue };
         let ui = &mut app.ui.panel.diff;
-        ui.file_pending.retain(|(v, _)| *v != id);
+        ui.file_pending.retain(|(v, ..)| *v != id);
         changed = true;
         if scope != ui.scope {
             continue;
         }
-        match reply {
-            Ok(v) => {
-                let src = git_source(&v, &scope);
-                for file in rune_kit::diff::parse(src["diff"].as_str().unwrap_or("")) {
-                    if src["truncated"].as_bool().unwrap_or(false) {
-                        ui.partial.insert(file.path().to_string());
-                    }
-                    ui.files.retain(|f| f.path() != file.path());
-                    ui.files.push(file);
-                }
-                ui.files.sort_by(|a, b| a.path().cmp(b.path()));
-            }
-            Err(_) => {
-                ui.source.truncated = true;
-                ui.source.failed = true;
-            }
-        }
+        file_answered(ui, &scope, stat, reply);
         apply(app);
     }
     for (id, scope, path, h, how) in app.ui.panel.diff.contents_pending.clone() {
@@ -842,6 +830,41 @@ fn incomplete(files: &[FileDiff], meta: &[FileStat]) -> Vec<FileStat> {
         .collect()
 }
 
+/// One file's own patch: in among the others, or kept aside with its retry.
+fn file_answered(ui: &mut Ui, scope: &Scope, stat: FileStat, reply: Result<Value, Value>) {
+    match reply {
+        Ok(v) => {
+            let src = git_source(&v, scope);
+            for file in rune_kit::diff::parse(src["diff"].as_str().unwrap_or("")) {
+                if src["truncated"].as_bool().unwrap_or(false) {
+                    ui.partial.insert(file.path().to_string());
+                }
+                ui.files.retain(|f| f.path() != file.path());
+                ui.files.push(file);
+            }
+            ui.files.sort_by(|a, b| a.path().cmp(b.path()));
+            ui.failed_files.retain(|f| f.path != stat.path);
+            ui.source.failed = !ui.failed_files.is_empty();
+        }
+        Err(_) => {
+            ui.source.truncated = true;
+            ui.source.failed = true;
+            if !ui.failed_files.iter().any(|f| f.path == stat.path) {
+                ui.failed_files.push(stat);
+            }
+        }
+    }
+}
+
+/// DiffFileStatus' "Retry loading diff": asks for that file's patch again.
+fn retry_file(app: &mut App, path: &str) {
+    let ui = &mut app.ui.panel.diff;
+    let Some(n) = ui.failed_files.iter().position(|f| f.path == path) else { return };
+    let stat = ui.failed_files.remove(n);
+    let scope = ui.scope.clone();
+    fetch_files(app, &scope, vec![stat]);
+}
+
 /// Asks for each file's own patch, as web's lazy per-file loads do (`input.file`).
 fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
     let Some((_, cwd)) = super::diff_context(app) else { return };
@@ -852,7 +875,7 @@ fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
         for f in files {
             let mut req = preview_request(&cwd, scope, base.as_deref(), ignore_ws);
             req["file"] = json!({ "path": f.path, "previousPath": f.previous, "sourceKind": source_kind(scope) });
-            ids.push((net.request("review.getDiffPreview", req), scope.clone()));
+            ids.push((net.request("review.getDiffPreview", req), scope.clone(), f));
         }
     }
     app.ui.panel.diff.file_pending.extend(ids);
@@ -1510,8 +1533,12 @@ fn body(app: &App, t: &T) -> El {
         return super::notice(t, "No completed turns yet.");
     }
     let git = matches!(ui.scope, Scope::Unstaged | Scope::Commit(_) | Scope::Branch);
-    if git && !crate::chat::details::grants(app, "filesystem:read") {
-        return super::notice(t, "This connection cannot read local diffs.");
+    if git {
+        match crate::chat::details::access(app, "filesystem:read") {
+            crate::chat::details::Access::Pending => return super::notice(t, "Checking file access..."),
+            crate::chat::details::Access::Denied => return super::notice(t, "This connection cannot read local diffs."),
+            crate::chat::details::Access::Granted => {}
+        }
     }
     if let Some(error) = &ui.error {
         return col().grow(1.0).min_h(0.0).center().px(20.0).child(text(error.clone()).font(theme::TEXT_2XS).color(t.c.error.alpha_mul(0.8)).wrap());
@@ -1526,7 +1553,7 @@ fn body(app: &App, t: &T) -> El {
         };
         return super::notice(t, label);
     }
-    if ui.state.files().is_empty() && !ui.file_pending.is_empty() {
+    if ui.state.files().is_empty() && !ui.file_pending.is_empty() && ui.failed_files.is_empty() {
         return super::notice(t, "Loading changes...");
     }
     if ui.state.files().is_empty() && !ui.source.content.is_empty() {
@@ -1537,7 +1564,7 @@ fn body(app: &App, t: &T) -> El {
     {
         return banners(app, t).child(raw_patch(app, t, reason, patch));
     }
-    if ui.state.files().is_empty() {
+    if ui.state.files().is_empty() && ui.failed_files.is_empty() {
         return banners(app, t).child(super::notice(t, empty_note(&ui.source)));
     }
     diff_body(app, t)
@@ -1605,10 +1632,65 @@ fn raw_patch(app: &App, t: &T, reason: &str, patch: &str) -> El {
         .scroll(ScrollSpec { stick_bottom: false })
 }
 
+/// Under the files: each file whose patch failed with its retry (DiffFileStatus), then the
+/// files still loading (DiffFileLoadingBoundary).
+fn file_loads(app: &App, t: &T) -> Option<El> {
+    let ui = &app.ui.panel.diff;
+    let loading = ui.file_pending.iter().filter(|(_, scope, _)| *scope == ui.scope).count();
+    if loading == 0 && ui.failed_files.is_empty() {
+        return None;
+    }
+    let muted = t.c.muted_foreground;
+    let rule = || el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.4));
+    let mut out = col().key("diff-file-loads").w_full();
+    for f in &ui.failed_files {
+        let path = f.path.clone();
+        let retry = el()
+            .key("retry")
+            .size(20.0, 20.0)
+            .center()
+            .radius(4.0)
+            .cursor(Cursor::Pointer)
+            .hover(t.c.accent)
+            .role("button")
+            .label("Retry loading diff")
+            .help("Retry loading diff")
+            .child(icon(&icons::ROTATE_CW, 12.0).color(muted))
+            .on_press(move |s: &mut App| retry_file(s, &path));
+        let mut header = row()
+            .key(format!("diff-failed-{}", f.path))
+            .w_full()
+            .h(36.0)
+            .pl(32.0)
+            .pr(12.0)
+            .gap(6.0)
+            .items_center()
+            .child(text(f.path.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).truncate_head().min_w(0.0).shrink())
+            .child(retry)
+            .child(el().grow(1.0));
+        if f.additions > 0 {
+            header = header.child(text(format!("+{}", f.additions)).font(theme::mono(theme::TEXT_2XS)).color(t.c.diff_addition_foreground));
+        }
+        if f.deletions > 0 {
+            header = header.child(text(format!("-{}", f.deletions)).font(theme::mono(theme::TEXT_2XS)).color(t.c.diff_deletion_foreground));
+        }
+        out = out.child(header).child(rule());
+    }
+    if loading > 0 {
+        let mut boundary = col().key("diff-loading-boundary").w_full().role("status").label("Loading diff…");
+        for n in 0..loading.min(4) {
+            let skeleton = row().key(format!("skeleton-{n}")).w_full().h(36.0).pl(32.0).pr(12.0).gap(8.0).items_center().a11y_hidden().child(el().w(160.0).h(10.0).radius(3.0).fill(t.c.muted.alpha_mul(0.8)));
+            boundary = boundary.child(skeleton).child(rule());
+        }
+        out = out.child(boundary);
+    }
+    Some(out)
+}
+
 fn diff_body(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.diff;
     let look = Rc::new(view::Look::new(t));
-    let mut main = row().grow(1.0).min_h(0.0).w_full().items_stretch().child(view::build(app, look));
+    let mut main = row().grow(1.0).min_h(0.0).w_full().items_stretch().child(view::build(app, look, file_loads(app, t)));
     if ui.tree_open && !ui.state.files().is_empty() {
         let handle = el()
             .key("panel-diff-tree-resize")
@@ -1665,7 +1747,10 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
     let now = data::now_ms();
     let mut commit_entries: Vec<MenuEntry> = vec![];
     let note = |label: String| MenuEntry::item(MenuItem::new(label).disabled(true));
+    let access = crate::chat::details::access(app, "filesystem:read");
     match &ui.commits {
+        Some(Ok(_)) | None if access == crate::chat::details::Access::Pending => commit_entries.push(note("Checking file access...".into())),
+        Some(Ok(_)) | None if access == crate::chat::details::Access::Denied => commit_entries.push(note("This connection cannot read local diffs.".into())),
         None => commit_entries.push(note("Loading commits...".into())),
         Some(Err(e)) => commit_entries.push(note(e.clone())),
         Some(Ok((commits, truncated))) => {
@@ -1852,6 +1937,21 @@ mod tests {
         source.failed = true;
         assert!(incomplete_note(&source).contains("Untracked changes could not be loaded. Refresh to retry."));
         assert_eq!(empty_note(&Source::default()), "No net changes in this selection.");
+    }
+
+    #[test]
+    fn a_files_failed_patch_waits_for_its_retry_then_joins_the_others() {
+        let mut ui = Ui::default();
+        let scope = Scope::Unstaged;
+        let stat = FileStat { path: "big.ts".into(), previous: None, additions: 4, deletions: 1 };
+        file_answered(&mut ui, &scope, stat.clone(), Err(json!("timed out")));
+        file_answered(&mut ui, &scope, stat.clone(), Err(json!("timed out")));
+        assert_eq!(ui.failed_files, vec![stat.clone()], "one retry per file");
+        assert!(ui.source.failed);
+        let patch = "diff --git a/big.ts b/big.ts\n--- a/big.ts\n+++ b/big.ts\n@@ -1 +1 @@\n-x\n+y\n";
+        file_answered(&mut ui, &scope, stat, Ok(json!({"sources": [{"kind": "working-tree", "diff": patch}]})));
+        assert!(ui.failed_files.is_empty() && !ui.source.failed);
+        assert_eq!(ui.files.iter().map(FileDiff::path).collect::<Vec<_>>(), ["big.ts"]);
     }
 
     #[test]
