@@ -1,7 +1,7 @@
 //! Web Settings › Sharing & access (`ConnectionsSettings` view "access").
 
 use super::about::about_row;
-use super::connections::{desktop_settings, dot, info_row, machine_icon, machine_kind, reason, take, KINDS};
+use super::connections::{dot, info_row, machine_icon, machine_kind, reason, take, KINDS};
 use super::{controls as c, http, update};
 use crate::kit::{self, Menu, MenuEntry, MenuItem, Placement};
 use crate::theme::{self, AlphaMul, T};
@@ -52,13 +52,6 @@ const STANDARD: [&str; 16] = [
 
 #[derive(Default)]
 pub struct State {
-    network: bool,
-    tailscale_serve: bool,
-    /// The second `s.now_ms` last read the exposure prefs at.
-    prefs_read: i64,
-    /// `GET /api/auth/session`.
-    session: Option<Result<Value, Value>>,
-    session_pending: Option<u64>,
     menu: bool,
     icon_menu: bool,
     permissions: bool,
@@ -74,34 +67,13 @@ pub struct State {
     newest: Option<String>,
 }
 
-pub(super) fn load(s: &mut App) {
-    let id = s.src.net().map(|net| net.http_request("GET", "/api/auth/session", json!({})));
-    s.ui.settings.connections.access.session_pending = id;
-    read_prefs(s);
-}
-
-fn read_prefs(s: &mut App) {
-    let prefs = desktop_settings();
-    let state = &mut s.ui.settings.connections.access;
-    state.prefs_read = s.now_ms / 1000;
-    state.network = prefs.get::<String>("serverExposureMode").as_deref() == Some("network-accessible");
-    state.tailscale_serve = prefs.get::<bool>("tailscaleServeEnabled") == Some(true);
-}
-
 pub(super) fn poll(s: &mut App) -> bool {
     if !matches!(&s.route, crate::Route::Settings(p) if p == "access") {
         return false;
     }
     let mut changed = false;
     let state = &s.ui.settings.connections.access;
-    let (session, creating, revoking) = (state.session_pending, state.creating, state.revoking);
-    let stale = state.prefs_read != s.now_ms / 1000;
-    if let Some(reply) = take(s, session) {
-        let state = &mut s.ui.settings.connections.access;
-        state.session_pending = None;
-        state.session = Some(reply);
-        changed = true;
-    }
+    let (creating, revoking) = (state.creating, state.revoking);
     if let Some(reply) = take(s, creating) {
         let state = &mut s.ui.settings.connections.access;
         state.creating = None;
@@ -125,12 +97,6 @@ pub(super) fn poll(s: &mut App) -> bool {
             s.ui.settings.error = Some(reason(&error));
         }
         changed = true;
-    }
-    if stale {
-        let before = (s.ui.settings.connections.access.network, s.ui.settings.connections.access.tailscale_serve);
-        read_prefs(s);
-        let state = &s.ui.settings.connections.access;
-        changed |= before != (state.network, state.tailscale_serve);
     }
     changed
 }
@@ -223,15 +189,6 @@ fn unavailable(connected: bool, failed: bool, rejected: bool) -> &'static str {
         "Could not verify your permissions. Retrying automatically."
     } else {
         "Checking permissions…"
-    }
-}
-
-/// Web `missingTailscaleEndpointDescription`; Rune never probes Tailscale, so no endpoint is known.
-fn tailscale_description(network: bool, serve: bool) -> &'static str {
-    if !network && !serve {
-        "Turn on Network access to detect Tailscale."
-    } else {
-        "Start Tailscale to set up HTTPS access through MagicDNS."
     }
 }
 
@@ -337,7 +294,7 @@ fn permissions(s: &App, t: &T) -> El {
         return details;
     }
     let connected = matches!(s.state().conn, s5_net::Conn::Open);
-    let session = state.session.as_ref();
+    let session = super::permissions::reply(s);
     details = details.child(match session {
         Some(Ok(session)) if connected && session["authenticated"] == true => {
             let mut list = col().w_full().gap(8.0);
@@ -630,7 +587,7 @@ fn set_scopes(s: &mut App, scopes: &[&'static str]) {
 
 fn create(s: &mut App) {
     let state = &s.ui.settings.connections.access;
-    let scopes = selected(&state.scopes, &delegatable(state.session.as_ref()));
+    let scopes = selected(&state.scopes, &delegatable(super::permissions::reply(s)));
     if state.creating.is_some() || scopes.is_empty() {
         return;
     }
@@ -652,7 +609,7 @@ fn create_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         return;
     }
     let creating = state.creating.is_some();
-    let delegatable = delegatable(state.session.as_ref());
+    let delegatable = delegatable(super::permissions::reply(s));
     let chosen = selected(&state.scopes, &delegatable);
     let k = kit::theme(t);
     let mut options = col().w_full();
@@ -892,11 +849,9 @@ mod tests {
     }
 
     #[test]
-    fn icon_and_tailscale_copy() {
+    fn icon_setting_and_permissions_copy() {
         assert_eq!(icon_setting("laptop", "laptop"), Value::Null);
         assert_eq!(icon_setting("cloud", "server"), json!("cloud"));
-        assert_eq!(tailscale_description(false, false), "Turn on Network access to detect Tailscale.");
-        assert_eq!(tailscale_description(true, false), "Start Tailscale to set up HTTPS access through MagicDNS.");
         assert_eq!(unavailable(true, true, false), "Could not verify your permissions. Retrying automatically.");
     }
 }

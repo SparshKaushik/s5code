@@ -30,6 +30,11 @@ pub fn poll(s: &mut App) -> bool {
     true
 }
 
+/// The last answer to the session request, failed or not.
+pub fn reply(s: &App) -> Option<&Result<Value, Value>> {
+    s.ui.settings.session.reply.as_ref()
+}
+
 /// The session as the server last answered it.
 pub fn session(s: &App) -> Option<&Value> {
     s.ui.settings.session.reply.as_ref()?.as_ref().ok()

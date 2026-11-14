@@ -557,7 +557,11 @@ pub fn poll(s: &mut App) -> bool {
                         .and_then(|c| c["environment"]["label"].as_str())
                         .unwrap_or("this environment")
                         .to_owned();
-                    s.ui.settings.error = Some(failure_message(&method, &environment, &error));
+                    let message = failure_message(&method, &environment, &error);
+                    match message.strip_prefix("Setting not saved. ") {
+                        Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
+                        None => s.ui.settings.error = Some(message),
+                    }
                 }
             }
             changed = true;
