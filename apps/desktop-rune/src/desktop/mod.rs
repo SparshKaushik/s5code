@@ -102,7 +102,7 @@ impl Ui {
         1.2f32.powf(self.zoom_level)
     }
 
-    fn set_zoom_level(&mut self, level: f32) {
+    pub(crate) fn set_zoom_level(&mut self, level: f32) {
         self.zoom_level = level;
         ZOOM.with(|z| z.set(self.zoom_factor()));
     }

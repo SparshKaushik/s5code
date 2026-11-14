@@ -4,7 +4,7 @@ pub mod chip;
 mod changed;
 pub mod error_banner;
 pub mod find;
-mod markdown;
+pub(crate) mod markdown;
 
 mod language_icons;
 pub mod plan;

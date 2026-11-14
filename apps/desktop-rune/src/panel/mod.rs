@@ -5,6 +5,7 @@ mod closed;
 mod diff;
 pub mod drawer;
 mod favicon;
+mod file_preview;
 mod files;
 mod history;
 pub mod popout;
@@ -778,12 +779,29 @@ fn picker(app: &App, t: &T) -> El {
         .pb(52.)
         .child(list)
 }
+/// `RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY`: at this width or less the panel is a sheet.
+const SHEET_BELOW: f32 = 980.;
+
+/// RightPanelSheet's width for a window `viewport` wide, or None when the panel sits inline:
+/// `min(42vw, 28rem)` at least 20rem, and `min(88vw, 24rem)` at 760 or less.
+fn sheet_width(viewport: f32) -> Option<f32> {
+    if viewport > SHEET_BELOW {
+        None
+    } else if viewport <= 760. {
+        Some((viewport * 0.88).min(384.))
+    } else {
+        Some((viewport * 0.42).min(448.).max(320.))
+    }
+}
+
+fn close_panel(s: &mut App) {
+    s.ui.shell.panel_open = false;
+}
+
 pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
-    let width = app
-        .ui
-        .panel
-        .width
-        .min(cx.layout_with("shell", |r| r[2] * 0.7).unwrap_or(1000.));
+    let viewport = cx.layout_with("shell", |r| r[2]);
+    let sheet = viewport.and_then(sheet_width);
+    let width = sheet.unwrap_or_else(|| app.ui.panel.width.min(viewport.map_or(1000., |w| w * 0.7)));
     // Web's RightPanelTabs: 24pt tabs whose surface icon turns into the close button on hover.
     let mut tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y().role("tablist");
     for &surface in &app.ui.panel.surfaces {
@@ -878,7 +896,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().grow(1.))
         .child(
             action(t, "Close right panel", &icons::PANEL_RIGHT)
-                .on_press(|s: &mut App| s.ui.shell.panel_open = false)
+                .on_press(close_panel)
                 .build(t),
         );
     let content = match app.ui.panel.active {
@@ -892,25 +910,25 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         // The app zoom magnifies the page too; Chrome renders at the pixels it ends up on.
         Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale * app.ui.desktop.zoom_factor()),
     };
-    row()
+    let edge = el().w(1.).h_full().fill(t.c.border);
+    let edge = if sheet.is_some() {
+        edge
+    } else {
+        edge.cursor(rune::Cursor::ResizeColumn).on_drag(|s: &mut App, d, _| {
+            if d.phase == Phase::Down {
+                d.data = s.ui.panel.width;
+            }
+            if !d.cancelled() {
+                s.ui.panel.width = (d.data - d.dx).clamp(320., 1100.);
+            }
+        })
+    };
+    let panel = row()
         .key("right-panel")
         .w(width)
         .h_full()
         .fill(t.c.background)
-        .child(
-            el().w(1.)
-                .h_full()
-                .fill(t.c.border)
-                .cursor(rune::Cursor::ResizeColumn)
-                .on_drag(|s: &mut App, d, _| {
-                    if d.phase == Phase::Down {
-                        d.data = s.ui.panel.width;
-                    }
-                    if !d.cancelled() {
-                        s.ui.panel.width = (d.data - d.dx).clamp(320., 1100.);
-                    }
-                }),
-        )
+        .child(edge)
         .child(
             col()
                 .grow(1.)
@@ -919,6 +937,22 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .child(tabs)
                 .child(el().h(1.).w_full().fill(t.c.border))
                 .child(content),
+        );
+    if sheet.is_none() {
+        return panel;
+    }
+    // RightPanelSheet: over the whole window from the right, behind a scrim; a press outside or
+    // Escape closes it, as web's Sheet does.
+    el().key("right-panel-sheet")
+        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        .child(kit::motion::scrim(t))
+        .child(
+            panel
+                .role("dialog")
+                .label("Right panel")
+                .pin(None, Some(0.), Some(0.), Some(0.))
+                .shadow(16., 48., rune::Color::BLACK.alpha(0.24))
+                .modal(true, close_panel),
         )
 }
 fn scene(app: &mut App, surface: Option<Surface>) {
@@ -947,6 +981,24 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-files", |s| {
         scene(s, Some(Surface::Files));
         files::fixture(s);
+    }),
+    // A 1440-point window at 173% zoom is 833 points wide: under web's 980 breakpoint.
+    ("panel-sheet", |s| {
+        scene(s, Some(Surface::Files));
+        files::fixture(s);
+        s.ui.desktop.set_zoom_level(3.0);
+    }),
+    ("panel-file-markdown", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "README.md", include_str!("../../../../README.md"), true);
+    }),
+    ("panel-file-table", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "data/models.csv", "provider,model,context,notes\nClaude,Opus 5.5,1000000,\"Default for \"\"hard\"\" turns\"\nClaude,Haiku 5.5,200000,Cheap replays\nCodex,Luna,400000,\nCursor,Auto,128000,\"Multi\nline\"\n", true);
+    }),
+    ("panel-file-no-preview", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "docs/spec.pdf", "", false);
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1154,6 +1206,23 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
         menu = menu.item(kit::MenuItem::new(title).icon(glyph).shortcut(key).disabled(true));
     }
     menu.overlay(&kit::theme(t), out);
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_becomes_a_sheet_at_webs_breakpoint() {
+        let near = |viewport: f32, want: f32| sheet_width(viewport).is_some_and(|w| (w - want).abs() < 0.01);
+        assert_eq!(sheet_width(1280.), None);
+        assert_eq!(sheet_width(981.), None);
+        assert!(near(980., 411.6));
+        assert!(near(800., 336.));
+        assert!(near(761., 320.), "never narrower than 20rem above 760");
+        assert!(near(760., 384.));
+        assert!(near(400., 352.));
+    }
 }
 
 #[cfg(test)]
