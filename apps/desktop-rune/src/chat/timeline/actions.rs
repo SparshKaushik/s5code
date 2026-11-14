@@ -13,6 +13,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 const FAILED: &str = "Failed to revert thread state.";
 const CHANGED: &str = "The thread has changed. Select a message to rewind again.";
 const TIMEOUT_MS: i64 = 120_000;
+/// waitForThreadShell's default before a fork reports that it never arrived.
+const FORK_SHELL_MS: i64 = 5_000;
+const FORK_LOST: &str = "The fork was created, but its thread data did not reach this client. Reconnect and try opening it from the sidebar.";
 /// PROVIDER_SEND_TURN_MAX_ATTACHMENTS.
 const MAX_ATTACHMENTS: usize = 100;
 const BOOTSTRAP_PROMPT: &str =
@@ -73,6 +76,8 @@ pub struct State {
     rewinds: HashMap<String, Pending>,
     /// In-flight forks, by RPC: the source thread and the thread to open once it lands.
     forks: HashMap<u64, (String, String)>,
+    /// Accepted forks waiting for their thread to reach this client: source, target, since.
+    landing: Vec<(String, String, i64)>,
     /// A failed revert or fork, by thread.
     errors: HashMap<String, String>,
 }
@@ -241,7 +246,7 @@ pub fn assistant(app: &App, thread: &str, item: &Value, t: &T) -> El {
     let run = s(item, "runId");
     if !run.is_empty() && !streaming && item["visibility"] != "inherited" {
         let (thread, run) = (thread.to_owned(), run.to_owned());
-        let busy = !app.ui.chat.timeline.actions.forks.is_empty();
+        let busy = !app.ui.chat.timeline.actions.forks.is_empty() || !app.ui.chat.timeline.actions.landing.is_empty();
         let fork = ghost(t, format!("fork-from-{}", s(item, "id")), &icons::GIT_FORK, "Fork from this response");
         out = out.child(if busy { fork.opacity(0.64) } else { fork.on_press(move |app: &mut App| fork_from(app, &thread, &run)) });
     }
@@ -536,22 +541,46 @@ pub fn poll(app: &mut App) -> bool {
     }
     let Some(net) = app.src.net() else { return changed };
     let state = &mut app.ui.chat.timeline.actions;
-    let mut opened = None;
+    let now = crate::data::now_ms();
     state.forks.retain(|rpc, (source, target)| {
         let Some(reply) = net.take_reply(*rpc) else { return true };
         changed = true;
         match reply {
-            Ok(_) => opened = Some(std::mem::take(target)),
+            Ok(_) => state.landing.push((std::mem::take(source), std::mem::take(target), now)),
             Err(e) => {
                 state.errors.insert(source.clone(), failure(&e, "Failed to fork this response."));
             }
         }
         false
     });
+    let mut opened = None;
+    let landing = std::mem::take(&mut app.ui.chat.timeline.actions.landing);
+    for (source, target, since) in landing {
+        match fork_landed(&app.state().threads, &target, since, now) {
+            None => app.ui.chat.timeline.actions.landing.push((source, target, since)),
+            Some(Ok(())) => opened = Some(target),
+            Some(Err(message)) => {
+                app.ui.chat.timeline.actions.errors.insert(source, message.into());
+                changed = true;
+            }
+        }
+    }
     if let Some(target) = opened {
         crate::shell::sidebar::open_thread(app, &target);
+        changed = true;
     }
     changed
+}
+
+/// waitForThreadShell: the fork opens once its thread is here, and gives up after five seconds.
+fn fork_landed(threads: &[Value], target: &str, since: i64, now: i64) -> Option<Result<(), &'static str>> {
+    if threads.iter().any(|t| s(t, "id") == target) {
+        Some(Ok(()))
+    } else if now - since >= FORK_SHELL_MS {
+        Some(Err(FORK_LOST))
+    } else {
+        None
+    }
 }
 
 /// "Edit from here?" (RevertConfirmHost), over its thread.
@@ -749,6 +778,14 @@ pub fn proactive_changes(projection: &Value, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fork_opens_once_its_thread_lands_or_reports_it_never_did() {
+        let threads = [json!({"id": "source"}), json!({"id": "fork"})];
+        assert_eq!(fork_landed(&threads, "fork", 0, 100), Some(Ok(())));
+        assert_eq!(fork_landed(&threads[..1], "fork", 0, FORK_SHELL_MS - 1), None);
+        assert_eq!(fork_landed(&threads[..1], "fork", 0, FORK_SHELL_MS), Some(Err(FORK_LOST)));
+    }
 
     #[test]
     fn timestamps_name_the_day_only_when_it_is_not_today() {
