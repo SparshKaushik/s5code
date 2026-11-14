@@ -573,8 +573,20 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
         Key::Command(c) => c.to_string(),
         Key::Text(v) => v.clone(),
         Key::Function(n) => format!("f{n}"),
+        Key::Enter => "enter".into(),
+        Key::Tab => "tab".into(),
+        Key::Escape => "escape".into(),
+        Key::Backspace => "backspace".into(),
+        Key::Delete => "delete".into(),
+        Key::Up => "arrowup".into(),
+        Key::Down => "arrowdown".into(),
+        Key::Left => "arrowleft".into(),
+        Key::Right => "arrowright".into(),
         _ => String::new(),
     };
+    if key.is_empty() {
+        return None;
+    }
     bindings
         .iter()
         .rev()
@@ -616,6 +628,7 @@ fn when_context(app: &App, name: &str) -> bool {
         "previewOpen" => app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))),
         "previewFocus" => app.ui.panel.browser.focused,
         "usagePageOpen" => matches!(app.route, crate::Route::Usage),
+        "modelPickerOpen" => app.ui.chat.composer.picker.open,
         _ => false,
     }
 }

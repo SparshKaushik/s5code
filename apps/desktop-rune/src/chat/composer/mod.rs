@@ -950,6 +950,9 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
     if !matches!(s.frame_route(), Route::Thread(_) | Route::Home { .. }) || crate::panel::terminal_active(s) || ctx(s).project.is_none() {
         return false;
     }
+    if picker::step_provider(s, e) {
+        return true;
+    }
     if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
         picker::toggle(s);
         return true;

@@ -120,7 +120,39 @@ fn pick(s: &mut App, instance: String, slug: String) {
     close(s);
 }
 
+/// `modelPicker.nextProvider` / `previousProvider` (adjacentModelPickerProvider): step the rail
+/// over favourites then each ready provider, wrapping, and clear the search.
+pub fn step_provider(s: &mut App, e: &KeyEvent) -> bool {
+    if !s.ui.chat.composer.picker.open {
+        return false;
+    }
+    let direction: isize = if crate::panel::shortcut(s, e, "modelPicker.nextProvider") {
+        1
+    } else if crate::panel::shortcut(s, e, "modelPicker.previousProvider") {
+        -1
+    } else {
+        return false;
+    };
+    let mut entries = vec![FAVORITES.to_string()];
+    entries.extend(rail_providers(s).into_iter().filter(|p| data::s(p, "status") == "ready").map(|p| data::s(p, "instanceId").to_string()));
+    let len = entries.len() as isize;
+    let next = match entries.iter().position(|r| *r == rail(s)) {
+        Some(i) => (i as isize + direction).rem_euclid(len),
+        None if direction == 1 => 0,
+        None => len - 1,
+    };
+    let p = &mut s.ui.chat.composer.picker;
+    p.rail = Some(entries[next as usize].clone());
+    p.active = None;
+    p.query = TextEdit::new("");
+    p.query.focused = true;
+    true
+}
+
 fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
+    if step_provider(s, e) {
+        return true;
+    }
     let list = rows(s);
     let p = &mut s.ui.chat.composer.picker;
     match &e.key {
@@ -414,4 +446,56 @@ pub(super) fn runtime_menu(t: &T, mode: &str, key: &str, anchor: &str, align: Al
         menu = menu.child(item);
     }
     menu
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::{Key, KeyEvent};
+    use serde_json::json;
+
+    use crate::{App, Route, data};
+
+    fn chord(key: Key) -> KeyEvent {
+        let mut e = KeyEvent::from(key);
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        e
+    }
+
+    #[test]
+    fn the_provider_chords_step_the_rail_and_wrap() {
+        let mut s = App::new();
+        let id = s.state().threads.iter().find(|t| !data::s(t, "projectId").is_empty()).map(|t| data::s(t, "id").to_owned()).unwrap();
+        if let data::Source::Fixture(state) = &mut s.src {
+            let open = json!({"type": "identifier", "name": "modelPickerOpen"});
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([
+                {"command": "modelPicker.previousProvider", "shortcut": {"key": "arrowup", "modKey": true, "shiftKey": true}, "whenAst": open},
+                {"command": "modelPicker.nextProvider", "shortcut": {"key": "arrowdown", "modKey": true, "shiftKey": true}, "whenAst": open},
+            ]);
+        }
+        s.navigate(Route::Thread(id));
+        let ready: Vec<String> =
+            super::rail_providers(&s).into_iter().filter(|p| data::s(p, "status") == "ready").map(|p| data::s(p, "instanceId").to_owned()).collect();
+        assert!(!ready.is_empty(), "FAILED: the fixture has a ready provider");
+        let (down, up) = (chord(Key::Down), chord(Key::Up));
+        assert!(!super::step_provider(&mut s, &down), "FAILED: a closed picker lets the chord through");
+        super::toggle(&mut s);
+        s.ui.chat.composer.picker.rail = Some(super::FAVORITES.into());
+        s.ui.chat.composer.picker.query.replace_text("opus");
+        s.ui.chat.composer.picker.active = Some(2);
+        assert!(crate::chat::composer::shortcut(&mut s, &down), "FAILED: the window chord reaches the picker");
+        let p = &s.ui.chat.composer.picker;
+        assert_eq!(p.rail.as_deref(), Some(ready[0].as_str()), "FAILED: next steps off favourites to the first provider");
+        assert!(p.query.text.is_empty() && p.active.is_none(), "FAILED: stepping clears the search and the highlight");
+        for _ in 1..ready.len() {
+            assert!(super::step_provider(&mut s, &down));
+        }
+        assert!(super::step_provider(&mut s, &down));
+        assert_eq!(super::rail(&s), super::FAVORITES, "FAILED: next wraps back to favourites");
+        assert!(super::step_provider(&mut s, &up));
+        assert_eq!(super::rail(&s), *ready.last().unwrap(), "FAILED: previous wraps to the last provider");
+        assert!(super::on_key(&mut s, &up, &mut rune::Tx::default()), "FAILED: the focused search box takes the chord too");
+        assert!(s.ui.chat.composer.picker.open, "FAILED: the picker stays open");
+    }
 }
