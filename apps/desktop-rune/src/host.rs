@@ -348,14 +348,8 @@ fn exited(child: &mut Option<Child>) -> Option<Option<std::process::ExitStatus>>
 }
 
 /// The login shell's environment for the server, as Electron installs it before the backend starts.
-#[cfg(unix)]
 fn shell_env() -> (&'static [(String, String)], bool) {
     crate::desktop::shell_path::server_env()
-}
-
-#[cfg(not(unix))]
-fn shell_env() -> (&'static [(String, String)], bool) {
-    (&[], false)
 }
 
 /// Electron's `DESKTOP_BACKEND_ENV_NAMES`: the bootstrap envelope, not the app's environment,

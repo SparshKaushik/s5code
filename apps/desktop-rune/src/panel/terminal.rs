@@ -976,7 +976,7 @@ fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool) {
 }
 
 /// A web link in the preview when Settings send links there, else the system browser.
-pub(super) fn open_web(app: &mut App, tx: &mut Tx, url: &str, force_browser: bool) {
+pub(crate) fn open_web(app: &mut App, tx: &mut Tx, url: &str, force_browser: bool) {
     if in_preview(&app.client_settings.values, url, force_browser) && super::context(app).is_some() {
         super::open_preview(app, url);
     } else if let Err(e) = tx.open_url(url) {
