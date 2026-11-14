@@ -986,7 +986,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-sheet", |s| {
         scene(s, Some(Surface::Files));
         files::fixture(s);
-        s.ui.desktop.set_zoom_level(3.0);
+        s.ui.desktop.scene_zoom(3.0);
     }),
     ("panel-file-markdown", |s| {
         scene(s, Some(Surface::Files));

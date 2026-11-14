@@ -256,7 +256,7 @@ pub fn table(parsed: &Table, t: &T) -> El {
     }
     let cell_w = |c: usize| -> f32 {
         let longest = parsed.rows.iter().take(200).filter_map(|r| r.get(c)).map(|v| v.chars().count()).max().unwrap_or(0);
-        (longest as f32 * 7. + 24.).clamp(64., 320.)
+        (longest as f32 * 8. + 32.).clamp(64., 320.)
     };
     let widths: Vec<f32> = (0..columns).map(cell_w).collect();
     let mut grid = col();

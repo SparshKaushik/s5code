@@ -102,9 +102,14 @@ impl Ui {
         1.2f32.powf(self.zoom_level)
     }
 
-    pub(crate) fn set_zoom_level(&mut self, level: f32) {
+    fn set_zoom_level(&mut self, level: f32) {
         self.zoom_level = level;
         ZOOM.with(|z| z.set(self.zoom_factor()));
+    }
+    /// A scene's zoom, which the saved preference must not replace on the first poll.
+    pub(crate) fn scene_zoom(&mut self, level: f32) {
+        self.prefs_loaded = true;
+        self.set_zoom_level(level);
     }
 }
 
