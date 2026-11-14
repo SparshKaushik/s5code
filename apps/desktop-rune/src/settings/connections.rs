@@ -54,7 +54,7 @@ static MAC_STUDIO: Icon = Icon {
 
 #[derive(Default)]
 pub struct Ui {
-    page: Option<String>,
+    pub(super) page: Option<String>,
     local_disabled: bool,
     local_confirm: bool,
     local_error: Option<String>,
