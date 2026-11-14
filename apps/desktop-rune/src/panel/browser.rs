@@ -42,8 +42,8 @@ pub enum Cmd {
     /// Element picking: Chrome highlights what the pointer is over, a click picks it.
     Pick(TabId, bool),
     DevTools(TabId),
-    /// `prefers-color-scheme`: "" follows Chrome's default.
-    ColorScheme(&'static str),
+    /// A tab's `prefers-color-scheme`: "" follows Chrome's default.
+    ColorScheme(TabId, &'static str),
     Mouse { kind: &'static str, x: f32, y: f32, clicks: u32 },
     Wheel { x: f32, y: f32, dx: f32, dy: f32 },
     Text(String),
@@ -318,6 +318,7 @@ struct Tab {
     error: Option<String>,
     /// The new-document script that keeps a muted tab's next pages muted.
     mute_script: Option<String>,
+    scheme: &'static str,
 }
 
 struct Worker {
@@ -332,7 +333,6 @@ struct Worker {
     viewport: (f32, f32, f32),
     /// The device scale Chrome started with.
     scale: f32,
-    scheme: &'static str,
     pressed: bool,
     /// A hover lookup is in flight; the latest pointer position waits for it.
     hovering: bool,
@@ -379,7 +379,6 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         shown: None,
         viewport: (0., 0., 1.),
         scale,
-        scheme: "",
         pressed: false,
         hovering: false,
         hover_next: None,
@@ -619,10 +618,11 @@ impl Worker {
                 let url = target.ok_or_else(|| "The page has not opened yet.".to_string()).map(|target| devtools_url(&self.host, &target));
                 self.event(Event::DevTools(url));
             }
-            Cmd::ColorScheme(scheme) => {
-                self.scheme = scheme;
-                let tabs: Vec<TabId> = self.tabs.keys().copied().collect();
-                for tab in tabs {
+            Cmd::ColorScheme(tab, scheme) => {
+                let Some(t) = self.tabs.get_mut(&tab) else { return };
+                t.scheme = scheme;
+                // Before the page attaches, its attach applies the scheme.
+                if t.session.is_some() {
                     self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }), None);
                 }
             }
@@ -1022,8 +1022,9 @@ impl Worker {
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
                 self.metrics(tab);
-                if !self.scheme.is_empty() {
-                    self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": self.scheme }] }), None);
+                let scheme = self.tabs.get(&tab).map_or("", |t| t.scheme);
+                if !scheme.is_empty() {
+                    self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }), None);
                 }
                 for (method, params, reply) in queue {
                     self.send(Some(&session), method, params, reply);
