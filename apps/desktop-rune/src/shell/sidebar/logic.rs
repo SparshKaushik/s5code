@@ -112,8 +112,7 @@ pub fn pr_badge(v: &Value) -> Option<PrBadge> {
     } else {
         "closed"
     };
-    let stack_id = |l: &Value| l["stack"]["id"].as_str().map(str::to_owned);
-    if visible.len() > 1 && stack_id(visible[0]).is_some() && visible.iter().all(|l| stack_id(*l) == stack_id(visible[0])) {
+    if visible.len() > 1 && crate::panel::pull_requests::single_chain(&visible) {
         return Some(PrBadge { state: aggregate, stack: true, text: visible.len().to_string(), url: None, opens_list: true });
     }
     // `resolveThreadCurrentPullRequestLink`: the only open link, else the latest one.
@@ -1123,6 +1122,9 @@ mod tests {
         assert_eq!((two.state, two.text.as_str(), two.url.as_deref()), ("open", "+2", Some("https://x/pull/8")));
         let stack = pr_badge(&json!({ "pullRequests": [link(1, "closed", Some("s")), link(2, "merged", Some("s"))] })).unwrap();
         assert_eq!((stack.state, stack.stack, stack.text.as_str()), ("closed", true, "2"));
+        let chained = |n: u64, head: &str, base: &str| json!({ "number": n, "host": "h", "repository": "r", "source": "agent", "linkedAt": "2026-01-01T00:00:00Z", "snapshot": { "state": "open", "isDraft": false, "headBranch": head, "baseBranch": base }, "stack": null });
+        let derived = pr_badge(&json!({ "pullRequests": [chained(1, "a", "main"), chained(2, "b", "a")] })).unwrap();
+        assert_eq!((derived.stack, derived.text.as_str()), (true, "2"), "a base-branch chain is a stack too");
         let dismissed = json!({ "pullRequests": [{ "source": "stack-dismissed", "number": 3 }] });
         assert_eq!(pr_badge(&dismissed), None);
         let branch = pr_badge(&json!({ "branchPullRequest": { "number": 9, "url": "u" } })).unwrap();

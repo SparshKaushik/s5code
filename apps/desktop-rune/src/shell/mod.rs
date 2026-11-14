@@ -88,7 +88,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     // Everything under the frame is content: switching or loading a thread lands at once.
     let mut body = crate::kit::motion::content(row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main));
     if s.ui.shell.panel_open {
-        body = body.child(panel::view(s, cx, t));
+        body = body.child(panel::view(s, cx, t, &mut overlays));
     }
     if matches!(s.route, Route::Settings(_)) {
         // The web mounts settings as a route modal over the inert previous frame.

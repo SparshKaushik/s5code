@@ -9,6 +9,7 @@ pub enum View {
     Files(String),
     Diff,
     Browser(String),
+    PullRequests,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -32,6 +33,7 @@ fn encode(entries: &[Closed]) -> Value {
         .map(|c| match &c.view {
             View::Files(path) => json!({"thread": c.thread, "kind": "files", "path": path}),
             View::Diff => json!({"thread": c.thread, "kind": "diff"}),
+            View::PullRequests => json!({"thread": c.thread, "kind": "pull-requests"}),
             View::Browser(url) => json!({"thread": c.thread, "kind": "browser", "url": url}),
         })
         .collect();
@@ -49,6 +51,7 @@ fn decode(v: &Value) -> Vec<Closed> {
             let view = match row["kind"].as_str()? {
                 "files" => View::Files(row["path"].as_str()?.to_owned()),
                 "diff" => View::Diff,
+                "pull-requests" => View::PullRequests,
                 "browser" => View::Browser(row["url"].as_str()?.to_owned()),
                 _ => return None,
             };
@@ -149,7 +152,7 @@ mod tests {
 
     #[test]
     fn saved_views_read_back_and_unknown_rows_drop() {
-        let entries = vec![closed("a", View::Files("src/lib.rs".into())), closed("b", View::Diff), closed("c", View::Browser("http://localhost:5173/".into()))];
+        let entries = vec![closed("a", View::Files("src/lib.rs".into())), closed("b", View::Diff), closed("c", View::Browser("http://localhost:5173/".into())), closed("d", View::PullRequests)];
         assert_eq!(decode(&encode(&entries)), entries);
         let saved = json!({"entries": [
             {"thread": "a", "kind": "terminal"},

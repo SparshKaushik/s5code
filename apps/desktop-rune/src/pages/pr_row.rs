@@ -151,7 +151,7 @@ fn recorded(kind: Kind) -> Value {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) {
+    if !matches!(s.frame_route(), Route::PullRequests) && !crate::panel::showing_pull_requests(s) {
         return false;
     }
     let now = s.now_ms;
@@ -207,7 +207,7 @@ pub fn poll(s: &mut App) -> bool {
 
 /// Tracks Shift held alone; true when the rows' quick actions appear or go.
 pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
-    if !matches!(e.key, Key::Modifier { .. }) || !matches!(s.route, Route::PullRequests) {
+    if !matches!(e.key, Key::Modifier { .. }) || !(matches!(s.route, Route::PullRequests) || crate::panel::showing_pull_requests(s)) {
         return false;
     }
     let speed = e.mods.shift && !e.mods.cmd && !e.mods.ctrl && !e.mods.alt;

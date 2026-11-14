@@ -1867,7 +1867,7 @@ fn success(t: &T) -> Color {
 }
 
 /// `Intl.NumberFormat` in English: 1234 is "1,234".
-fn grouped(n: i64) -> String {
+pub(crate) fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (k, c) in digits.chars().enumerate() {
@@ -1896,9 +1896,8 @@ fn matched_elsewhere(e: &Value, query: &str) -> bool {
     !query.is_empty() && score(e, query) <= 10
 }
 
-fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> El {
-    let url = field(e, "url").to_string();
-    let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
+/// PullRequestRowGlyph: the state glyph, badged when an open pull request conflicts.
+pub(crate) fn state_mark(t: &T, e: &Value) -> El {
     let (glyph, ink) = state_glyph(t, e);
     let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink)).label(state_label(e)).help(state_label(e));
     if conflicting(e) && open(e) && !e["isDraft"].as_bool().unwrap_or(false) {
@@ -1917,6 +1916,24 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
                 .child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
         );
     }
+    mark
+}
+
+/// PullRequestReviewDecisionGlyph.
+pub(crate) fn review_mark(t: &T, decision: &str) -> Option<El> {
+    let (glyph, ink, tip): (&'static rune::Icon, Color, &str) = match decision {
+        "approved" => (&i::USER_CHECK, success(t), "Approved"),
+        "changes-requested" => (&i::USER_ROUND_X, if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) }, "Changes requested"),
+        "review-required" => (&i::USER_ROUND, t.c.muted_foreground.alpha_mul(0.6), "Awaiting review"),
+        _ => return None,
+    };
+    Some(el().label(tip).help(tip).child(icon(glyph, 14.0).color(ink)))
+}
+
+fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> El {
+    let url = field(e, "url").to_string();
+    let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
+    let mark = state_mark(t, e);
     let mono = theme::mono(theme::TEXT_XS).features("'tnum' 1");
     let mut line1 = row()
         .w_full()
@@ -1932,15 +1949,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
     let mut signals = row().gap(4.0).center_y().shrink().children(super::pr_row::checks(s, t, e, overlays));
-    let review = match field(e, "reviewDecision") {
-        "approved" => Some((&i::USER_CHECK, success(t), "Approved")),
-        "changes-requested" => Some((&i::USER_ROUND_X, if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) }, "Changes requested")),
-        "review-required" => Some((&i::USER_ROUND, t.c.muted_foreground.alpha_mul(0.6), "Awaiting review")),
-        _ => None,
-    };
-    if let Some((glyph, ink, tip)) = review {
-        signals = signals.child(el().label(tip).help(tip).child(icon(glyph, 14.0).color(ink)));
-    }
+    signals = signals.children(review_mark(t, field(e, "reviewDecision")));
     line1 = line1.child(signals).child(spacer()).children(super::pr_row::stack(s, t, e, overlays));
     let (add, del) = (e["additions"].as_i64().unwrap_or(0), e["deletions"].as_i64().unwrap_or(0));
     if add > 0 || del > 0 {
