@@ -691,7 +691,7 @@ fn send_signal(s: &mut App, key: &str) {
     let payload = s
         .ui
         .settings
-        .telemetry
+        .resource_telemetry
         .signals
         .iter()
         .find(|sig| sig.key == key && sig.request.is_none())
