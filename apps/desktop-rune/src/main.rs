@@ -269,6 +269,10 @@ fn main() {
     panel::popout::register(&mut app);
     notify::set_window(app.handle());
     instance.serve(app.handle());
+    #[cfg(unix)]
+    desktop::activation::serve(app.handle());
+    #[cfg(unix)]
+    desktop::signals::install(app.handle());
     app.run();
     panel::browser::shutdown();
     host::shutdown();
