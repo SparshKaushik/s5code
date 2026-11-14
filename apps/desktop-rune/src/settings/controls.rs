@@ -152,8 +152,11 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         .size("sm")
         .align_end()
         .open(true)
-        .on_choose(move |s: &mut App, label: &str, _: &mut rune::Tx| {
+        .on_choose(move |s: &mut App, label: &str, tx: &mut rune::Tx| {
             if let Some((v, _)) = choices.iter().find(|(_, l)| l == label) {
+                if owned == super::fonts::ZOOM_KEY {
+                    tx.instant();
+                }
                 update(s, &owned, v.clone());
             }
             s.ui.settings.open_select = None;
@@ -247,13 +250,16 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 .variant("ghost-muted")
                 .size("icon-micro")
                 .icon(&icons::UNDO_2)
-                .on_press(move |s: &mut App| {
+                .build(t)
+                .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
                     super::scope::reset(s, &owned);
                     if let Some(size) = &size_key {
+                        if size == super::fonts::ZOOM_KEY {
+                            tx.instant();
+                        }
                         super::scope::reset(s, size);
                     }
-                })
-                .build(t),
+                }),
         );
     }
     let mut copy = col()
