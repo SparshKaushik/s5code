@@ -12,8 +12,12 @@ use crate::data::Source;
 use crate::theme::{self, AlphaMul, T, layout};
 use crate::{App, Route, icons, kit};
 
-/// branding.ts's `APP_DISPLAY_NAME`, as the window title has it.
-const APP_DISPLAY_NAME: &str = "S5 Code";
+/// branding.ts's `APP_DISPLAY_NAME` as the desktop app injects it: `S5 Code (Beta)`, or
+/// `(Nightly)` on a nightly or preview build. The sidebar's "T3 Code" wordmark differs on web too.
+fn app_display_name() -> String {
+    let stage = if crate::settings::about::release_channel(env!("CARGO_PKG_VERSION")) != "stable" { "Nightly" } else { "Beta" };
+    format!("S5 Code ({stage})")
+}
 /// FirstRunGate's FIRST_RUN_DECISION_TIMEOUT_MS.
 const STALL: Duration = Duration::from_secs(4);
 
@@ -33,8 +37,7 @@ pub enum Recovery {
     Failed(String),
     /// The bundled server keeps exiting before it is ready: Electron's startup recovery.
     Failing(crate::host::StartupFailure),
-    /// Still no shell after the timeout. The host restarts the server and Net reconnects on
-    /// their own, so there is nothing to reload, only to wait for.
+    /// Still no shell after the timeout (FirstRunGate's "Still connecting").
     Stalled,
 }
 
@@ -80,29 +83,30 @@ fn retry(s: &mut App) {
     }
 }
 
+/// FirstRunRecovery's Reload: where the web reloads the page, the local connection starts over
+/// and the gate waits again.
+fn reload(s: &mut App) {
+    if let (Some((url, token)), Some(waker)) = (s.ui.desktop.server.clone(), s.ui.panel.waker.clone()) {
+        *crate::env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
+    }
+    s.ui.onboarding = Ui::default();
+}
+
 /// `FirstRunRecovery`, over the whole window as the web's gate renders it instead of the app.
 pub fn recovery_view(recovery: Recovery, t: &T) -> El {
     let page = col().key("first-run-recovery").role("main").w_full().h_full().fill(t.c.background).child(el().w_full().h(layout::TOPBAR_H).window_drag());
-    let (title, description, action) = match &recovery {
+    let (title, description, button, action): (&str, &str, &str, fn(&mut App)) = match &recovery {
         Recovery::Pending => return page,
         Recovery::Failing(failure) => return crate::desktop::recovery::view(failure, t),
-        Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), true),
-        Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", false),
+        Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), "Retry", retry),
+        Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", "Reload", reload),
     };
-    let mut body = col()
+    let body = col()
         .max_w(384.0)
         .items_center()
         .child(text(title).font(theme::weight(theme::TEXT_LG, theme::SEMIBOLD)).color(t.c.foreground))
-        .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).mt(8.0));
-    body = if action {
-        body.child(
-            row().pt(20.0).child(
-                kit::Button::new("Retry").size("sm").variant("outline").icon(&icons::REFRESH_CW).on_press(retry).build(t),
-            ),
-        )
-    } else {
-        body.child(row().pt(20.0).child(kit::Spinner::new().size("sm").tone("muted").build(&kit::theme(t))))
-    };
+        .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).mt(8.0))
+        .child(row().pt(20.0).child(kit::Button::new(button).size("sm").variant("outline").icon(&icons::REFRESH_CW).on_press(action).build(t)));
     page.child(col().w_full().grow(1.0).min_h(0.0).px(24.0).center().child(body))
 }
 
@@ -182,7 +186,7 @@ fn hosted_empty_state(t: &T) -> El {
         .px(20.0)
         .center_y()
         .window_drag()
-        .child(text(APP_DISPLAY_NAME).font(theme::SM_MEDIUM).color(t.c.muted_foreground.alpha_mul(0.6)));
+        .child(text(app_display_name()).font(theme::SM_MEDIUM).color(t.c.muted_foreground.alpha_mul(0.6)));
     let empty = col()
         .max_w(384.0)
         .items_center()
@@ -259,6 +263,9 @@ mod tests {
         assert_eq!(recovery(&s), Some(Recovery::Pending), "a starting server is not a failure yet");
         s.ui.onboarding.stalled = true;
         assert_eq!(recovery(&s), Some(Recovery::Stalled));
+        reload(&mut s);
+        assert_eq!(recovery(&s), Some(Recovery::Pending), "Reload waits for the shell again");
+        s.ui.onboarding.stalled = true;
         if let crate::data::Source::Fixture(state) = &mut s.src {
             state.conn = Conn::Closed("No free port for the S5 Code server.".into());
         }

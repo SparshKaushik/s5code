@@ -1,4 +1,4 @@
-mod about;
+pub(crate) mod about;
 mod access;
 pub(crate) use access::grants as session_grants;
 mod accent;
