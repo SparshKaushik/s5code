@@ -89,6 +89,9 @@ pub struct Endpoint {
 
 impl State {
     pub(super) fn load(&mut self) {
+        if self.scene {
+            return;
+        }
         let settings = settings();
         // What the server runs with: a policy without remote clients holds both off.
         let remote = super::policy::current().allows_remote();
@@ -331,7 +334,7 @@ impl Endpoint {
 
 /// The endpoints a pairing link can be shared through: web's `endpointCopyOptions` source.
 pub fn share_endpoints(s: &App) -> Vec<Endpoint> {
-    if !crate::host::managed() {
+    if !crate::host::managed() && !s.ui.desktop.exposure.scene {
         return Vec::new();
     }
     let network = s.ui.desktop.exposure.network;
@@ -376,7 +379,7 @@ pub fn scene(s: &mut App) {
 /// Where pairing links point: web's `defaultDesktopAdvertisedEndpoint`. None while this window
 /// doesn't run the bundled server.
 pub fn pairing_endpoint(s: &App) -> Option<Endpoint> {
-    if !crate::host::managed() {
+    if !crate::host::managed() && !s.ui.desktop.exposure.scene {
         return None;
     }
     let v = view(s);

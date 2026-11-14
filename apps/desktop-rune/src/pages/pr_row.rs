@@ -258,34 +258,7 @@ fn quick_actions(e: &Value, host: &[String]) -> Vec<&'static str> {
     for_state.iter().copied().filter(|a| host.iter().any(|h| h == a)).collect()
 }
 
-/// legacyParents: the scope an older credential holds in place of a newer one.
-fn legacy_parent(scope: &str) -> Option<&'static str> {
-    match scope {
-        "filesystem:read" | "diagnostics:read" => Some("orchestration:read"),
-        "settings:write" | "providers:manage" | "environment:maintain" | "preview:operate" | "source-control:write" | "filesystem:write" => Some("orchestration:operate"),
-        "terminal:read" => Some("terminal:operate"),
-        _ => None,
-    }
-}
-
-/// sessionGrantsScope: the session's permissions when it lists them, else its scopes, where a
-/// legacy credential's parent scope still grants the newer one.
-pub(super) fn grants(session: &Value, scope: &str) -> bool {
-    let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|v| v == scope));
-    if session["authenticated"] != true {
-        return false;
-    }
-    if session.get("permissions").is_some_and(|p| !p.is_null()) {
-        return has(&session["permissions"], scope);
-    }
-    if has(&session["scopes"], scope) {
-        return true;
-    }
-    if session["auth"].get("serverUpdateScope").is_some() {
-        return false;
-    }
-    legacy_parent(scope).is_some_and(|parent| has(&session["scopes"], parent))
-}
+pub(super) use crate::settings::session_grants as grants;
 
 /// runAction's permissionAtom: whether this connection may act on pull requests. Unknown until the
 /// session answers; the recorded scenes may.
