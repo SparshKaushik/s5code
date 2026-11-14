@@ -263,3 +263,51 @@ fn pull_request_key(link: &Value) -> (String, String, u64) {
         .to_lowercase();
     (host, repository, link["number"].as_u64().unwrap_or(0))
 }
+
+fn projected_key(row: &Value) -> String {
+    format!("{}:{}", row["sourceThreadId"].as_str().unwrap_or(""), row["sourceItemId"].as_str().unwrap_or(""))
+}
+
+/// `mergeOlderHistoryIntoProjection` without deferred work: an older page's rows lead the window,
+/// rows already held win, and local items join `turnItems` so later events can update them.
+pub(crate) fn merge_older(p: &mut Value, older: &[Value]) {
+    if p.is_null() || older.is_empty() {
+        return;
+    }
+    let thread = p["thread"]["id"].clone();
+    let current: std::collections::HashMap<String, Value> =
+        rows(p, "visibleTurnItems").iter().map(|r| (projected_key(r), r.clone())).collect();
+    let mut page_keys = std::collections::HashSet::new();
+    let mut page = Vec::new();
+    let mut added = Vec::new();
+    for page_row in older {
+        let key = projected_key(page_row);
+        if page_keys.contains(&key) {
+            continue;
+        }
+        let local = page_row["visibility"] == "local" || page_row["sourceThreadId"] == thread;
+        let mut row = current.get(&key).cloned().unwrap_or_else(|| page_row.clone());
+        if !current.contains_key(&key) && local {
+            let held = rows(p, "turnItems").iter().find(|i| i["id"] == row["sourceItemId"]).cloned();
+            if let Some(held) = held {
+                // A held item that is not in the window was hidden on purpose.
+                if held["type"] != "run_interrupt_request" || !visible(p, &held) {
+                    continue;
+                }
+                row["item"] = held;
+            } else if !added.iter().any(|i: &Value| i["id"] == row["sourceItemId"]) {
+                added.push(row["item"].clone());
+            }
+        }
+        page_keys.insert(key);
+        page.push(row);
+    }
+    if page.is_empty() {
+        return;
+    }
+    let rest = rows(p, "visibleTurnItems").iter().filter(|r| !page_keys.contains(&projected_key(r))).cloned();
+    let mut visible_rows: Vec<Value> = page.into_iter().chain(rest).collect();
+    renumber(&mut visible_rows);
+    p["visibleTurnItems"] = json!(visible_rows);
+    list(p, "turnItems").extend(added);
+}

@@ -56,7 +56,8 @@ fn answer(item: &Value, thread: &str, secret: Option<&str>) -> Option<Value> {
 
 /// secretRequestFailureMessage: only known server errors pass through, so a decoding error can
 /// never echo the typed value.
-fn failure_message(error: &Value) -> String {
+fn failure_message(cause: &Value) -> String {
+    let error = super::link::failure(cause);
     let message = s(error, "message").trim();
     if matches!(s(error, "_tag"), "SecretRequestError" | "EnvironmentAuthorizationError") && !message.is_empty() {
         message.to_owned()
@@ -197,8 +198,9 @@ mod tests {
 
     #[test]
     fn only_known_errors_reach_the_card() {
-        assert_eq!(failure_message(&json!({"_tag": "SecretRequestError", "message": "This secret request was already answered."})), "This secret request was already answered.");
-        assert_eq!(failure_message(&json!({"_tag": "ParseError", "message": "Expected string, got \"whsec_1\""})), "Could not answer the request. Try again.");
+        let fail = |error: serde_json::Value| json!([{"_tag": "Fail", "error": error}]);
+        assert_eq!(failure_message(&fail(json!({"_tag": "SecretRequestError", "message": "This secret request was already answered."}))), "This secret request was already answered.");
+        assert_eq!(failure_message(&fail(json!({"_tag": "ParseError", "message": "Expected string, got \"whsec_1\""}))), "Could not answer the request. Try again.");
     }
 
     #[test]

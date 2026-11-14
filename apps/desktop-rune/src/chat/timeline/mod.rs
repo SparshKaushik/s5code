@@ -20,6 +20,7 @@ mod child_approvals;
 mod link;
 mod worktree_setup;
 mod inspector;
+mod history;
 mod md_links;
 mod work;
 
@@ -42,6 +43,7 @@ pub struct Ui {
     banners: banners::State,
     worktree: worktree_setup::State,
     inspector: inspector::State,
+    history: history::State,
     md_links: md_links::State,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
@@ -203,7 +205,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let id = s(item, "id").to_owned();
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
     if kind == "assistant_message" {
-        return markdown::view(app, s(item, "text"), &id, t);
+        // The same inset as a top-level assistant row.
+        return col().w_full().px(4.0).child(markdown::view(app, s(item, "text"), &id, t));
     }
     if kind == "compaction" {
         let active = matches!(s(item, "status"), "pending" | "running" | "waiting");
@@ -515,7 +518,7 @@ fn send(app: &mut App, request: &str, command: Value) {
 pub fn poll(app: &mut App) -> bool {
     let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
         | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | worktree_setup::poll(app)
-        | inspector::poll(app) | md_links::poll(app);
+        | inspector::poll(app) | md_links::poll(app) | history::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -659,6 +662,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         // The composer floats over the list's bottom. Scroll extent counts the stack's own
         // padding but not the viewport's, so the clearance lives here.
         .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banners::stack_h(cx));
+    if let Some(control) = history::view(app, thread_id, t) {
+        stack = stack.child(col().key("timeline-row-history").w_full().child(control));
+    }
     for (index, r) in rows.into_iter().enumerate() {
         let marks = marks.next().flatten();
         let steer = if let Row::User(item) = &r { work::steer(item) } else { None };

@@ -378,3 +378,45 @@ fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
             .is_empty()
     );
 }
+
+#[test]
+fn bounded_snapshot_pages_in_earlier_history() {
+    let row = |id: &str, ordinal: i32| json!({"visibility":"local","sourceThreadId":"t","sourceItemId":id,"position":0,"item":item(id, ordinal)});
+    let mut s = State::default();
+    s.thread_views.insert("t".into(), ThreadView::default());
+    let mut p = projection();
+    p["turnItems"] = json!([item("c", 3), item("hidden", 0)]);
+    p["visibleTurnItems"] = json!([row("c", 3)]);
+    s.fold(Route::Thread("t".into()), json!({"kind":"snapshot","snapshotSequence":5,"projection":p,"historyCursor":"k1","hasMoreHistory":true}));
+    assert_eq!(s.thread_views["t"].history_cursor.as_deref(), Some("k1"));
+    assert!(s.thread_views["t"].has_more_history);
+
+    let mut held = row("c", 3);
+    held["item"]["output"] = json!("stale page copy");
+    let page = json!({"snapshotSequence":5,"items":[row("hidden", 0), row("a", 1), row("b", 2), row("a", 1), held],"nextCursor":"k2","hasMoreHistory":true});
+    // A reply for a cursor the view moved past changes nothing.
+    s.merge_history("t", "k0", &page);
+    assert_eq!(s.thread_views["t"].projection["visibleTurnItems"].as_array().unwrap().len(), 1);
+
+    s.merge_history("t", "k1", &page);
+    let view = &s.thread_views["t"];
+    let ids: Vec<_> = view.projection["visibleTurnItems"].as_array().unwrap().iter().map(|r| r["sourceItemId"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["a", "b", "c"]);
+    let positions: Vec<_> = view.projection["visibleTurnItems"].as_array().unwrap().iter().map(|r| r["position"].as_u64().unwrap()).collect();
+    assert_eq!(positions, [0, 1, 2]);
+    assert_eq!(view.projection["visibleTurnItems"][2]["item"]["output"], "done");
+    let held_ids: Vec<_> = view.projection["turnItems"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert_eq!(held_ids, ["c", "hidden", "a", "b"]);
+    assert_eq!(view.history_cursor.as_deref(), Some("k2"));
+
+    // Later events update a paged-in item in place.
+    let mut p = view.projection.clone();
+    let mut update = item("a", 1);
+    update["output"] = json!("edited");
+    event(&mut p, "turn-item.updated", update);
+    assert_eq!(p["visibleTurnItems"][0]["item"]["output"], "edited");
+
+    s.merge_history("t", "k2", &json!({"snapshotSequence":5,"items":[],"nextCursor":null,"hasMoreHistory":false}));
+    assert!(!s.thread_views["t"].has_more_history);
+    assert_eq!(s.thread_views["t"].history_cursor, None);
+}

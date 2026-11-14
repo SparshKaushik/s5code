@@ -80,7 +80,7 @@ pub fn poll(app: &mut App) -> bool {
         let result = match reply {
             Ok(v) if v["item"].is_object() => Ok(v["item"].clone()),
             Ok(_) => Err("the item is no longer available".to_owned()),
-            Err(e) => Err(Some(s(&e, "message")).filter(|m| !m.is_empty()).map_or_else(|| e.to_string(), str::to_owned)),
+            Err(e) => Err(Some(s(super::link::failure(&e), "message")).filter(|m| !m.is_empty()).map_or_else(|| e.to_string(), str::to_owned)),
         };
         state.loaded.insert(std::mem::take(id), (std::mem::take(revision), result));
         false

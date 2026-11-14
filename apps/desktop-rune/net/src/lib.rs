@@ -27,6 +27,9 @@ pub struct ThreadView {
     pub projection: Value,
     pub synchronized: bool,
     pub sequence: u64,
+    /// A bounded snapshot's opaque cursor for the page before its window.
+    pub history_cursor: Option<String>,
+    pub has_more_history: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +295,38 @@ impl Net {
         });
         id
     }
+    /// Fetches the history page before a bounded thread's window; `merge_history` applies the reply.
+    pub fn load_earlier(&mut self, thread_id: &str) -> Option<(u64, String)> {
+        let cursor = self.state.thread_views.get(thread_id)?.history_cursor.clone()?;
+        let id = next_id();
+        let mut url = url::Url::parse(&self.base_url).ok()?;
+        url.path_segments_mut().ok()?.clear().extend(["api", "orchestration", "threads", thread_id, "history"]);
+        url.query_pairs_mut().clear().append_pair("cursor", &cursor);
+        url.set_fragment(None);
+        let bearer = self.bearer.clone();
+        let tx = self.incoming_tx.clone();
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let response = ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .get(url.as_str())
+                .set("Authorization", &format!("Bearer {bearer}"))
+                .set("x-t3-orchestration-protocol", "2")
+                .call();
+            let result = match response {
+                Ok(response) => response.into_json::<Value>().map_err(|e| json!({"message":e.to_string()})),
+                Err(ureq::Error::Status(code, response)) => Err(response
+                    .into_json::<Value>()
+                    .unwrap_or_else(|_| json!({"message":format!("HTTP {code}")}))),
+                Err(error) => Err(json!({"message":error.to_string()})),
+            };
+            let _ = tx.send(Incoming::Reply(id, result));
+            wake();
+        });
+        Some((id, cursor))
+    }
     /// POSTs a file's bytes to an `attachments.createUploadUrl` URL, on the RPC reply channel.
     pub fn upload_file(&mut self, relative_url: &str, path: &std::path::Path, mime: &str) -> u64 {
         let id = next_id();
@@ -458,6 +493,17 @@ fn fold_access(state: &mut Value, event: Value) {
 }
 
 impl State {
+    /// Prepends an `OrchestrationV2ThreadHistoryPage` fetched with `cursor`. A page for a cursor the
+    /// view has moved past (a newer snapshot or page) is dropped.
+    pub fn merge_history(&mut self, thread_id: &str, cursor: &str, page: &Value) {
+        let Some(view) = self.thread_views.get_mut(thread_id) else { return };
+        if view.history_cursor.as_deref() != Some(cursor) {
+            return;
+        }
+        projection::merge_older(&mut view.projection, projection::rows(page, "items"));
+        view.history_cursor = page["nextCursor"].as_str().map(str::to_owned);
+        view.has_more_history = page["hasMoreHistory"] == true;
+    }
     fn fold(&mut self, route: Route, item: Value) {
         match route {
             Route::Resource(..) => {}
@@ -564,6 +610,8 @@ impl State {
                         view.projection = item["projection"].clone();
                         view.sequence = item["snapshotSequence"].as_u64().unwrap_or(0);
                         view.synchronized = false;
+                        view.history_cursor = item["historyCursor"].as_str().map(str::to_owned);
+                        view.has_more_history = item["hasMoreHistory"] == true;
                     }
                     "synchronized" => view.synchronized = true,
                     "event" => {

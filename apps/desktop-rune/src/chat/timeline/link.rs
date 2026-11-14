@@ -36,6 +36,15 @@ pub struct State {
     /// `peerLinks.list` in flight, then the environments this one links to already.
     listing: Option<u64>,
     linked: HashSet<String>,
+    /// Server URL -> whether this client's session may answer (`access:write`, the
+    /// `peerLinks.answerRequest` guard); then the `GET /api/auth/session` in flight.
+    can_answer: HashMap<String, bool>,
+    session: Option<(u64, String)>,
+}
+
+/// The guard's verdict for a session; a failed lookup leaves answering to the server.
+fn answer_allowed(session: &Result<Value, Value>) -> bool {
+    session.as_ref().map_or(true, |session| crate::settings::session_grants(session, "access:write"))
 }
 
 /// A machine this window knows (LinkableMachine).
@@ -249,7 +258,8 @@ fn link_input(item: &Value, thread: &str, target: &Target, address: &str, access
     Some(input(item, thread, answer))
 }
 
-fn failure(cause: &Value) -> &Value {
+/// An RPC failure's cause (`[{_tag: "Fail", error}]`) as its typed error.
+pub(super) fn failure(cause: &Value) -> &Value {
     cause.as_array().and_then(|c| c.iter().find(|r| s(r, "_tag") == "Fail")).map_or(cause, |r| &r["error"])
 }
 
@@ -390,9 +400,25 @@ pub fn poll(app: &mut App) -> bool {
         crate::Route::Thread(id) => id.clone(),
         _ => String::new(),
     };
+    let asks = app.state().thread_views.get(&thread).is_some_and(|v| {
+        array(&v.projection, "visibleTurnItems").iter().any(|r| s(&r["item"], "type") == "link_request" && settled(&r["item"], &thread).is_none())
+    });
     let Some(net) = app.src.net() else { return false };
     let ui = &mut app.ui.chat.timeline.links;
     let mut changed = false;
+    let base = net.base_url().to_owned();
+    if asks && ui.session.is_none() && !ui.can_answer.contains_key(&base) {
+        ui.session = Some((net.http_request("GET", "/api/auth/session", json!({})), base));
+    }
+    if let Some((request, base)) = ui.session.take() {
+        match net.take_reply(request) {
+            Some(reply) => {
+                changed = true;
+                ui.can_answer.insert(base, answer_allowed(&reply));
+            }
+            None => ui.session = Some((request, base)),
+        }
+    }
     if let Some(request) = ui.listing
         && let Some(reply) = net.take_reply(request)
     {
@@ -592,8 +618,16 @@ pub fn view(app: &App, item: &Value, thread: &str, t: &T) -> El {
     if ui.open.as_deref() == Some(id.as_str()) {
         return card.child(form_view(app, item, thread, busy, t));
     }
+    let errors = ui.errors.get(&id).map(|error| text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+    let allowed = match &app.src {
+        crate::data::Source::Live(net) => ui.can_answer.get(net.base_url()).copied().unwrap_or(true),
+        crate::data::Source::Fixture(_) => true,
+    };
+    if !allowed {
+        return card.children(errors);
+    }
     let (decline_item, decline_thread, open_item) = (item.clone(), thread.to_owned(), item.clone());
-    card.children(ui.errors.get(&id).map(|error| text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap())).child(
+    card.children(errors).child(
         row()
             .w_full()
             .gap(8.0)
@@ -625,6 +659,15 @@ mod tests {
 
     fn machine(id: &str, label: &str) -> Machine {
         Machine { key: id.into(), id: id.into(), label: label.into(), urls: vec![format!("https://{id}.ts.net")], connected: true, linked: false }
+    }
+
+    #[test]
+    fn only_sessions_that_manage_access_answer() {
+        let session = |scopes: Value| -> Result<Value, Value> { Ok(json!({"authenticated": true, "scopes": scopes})) };
+        assert!(answer_allowed(&session(json!(["orchestration:read", "access:write"]))));
+        assert!(!answer_allowed(&session(json!(["orchestration:read", "orchestration:operate"]))));
+        assert!(!answer_allowed(&Ok(json!({"authenticated": false}))));
+        assert!(answer_allowed(&Err(json!({"message": "HTTP 500"}))));
     }
 
     #[test]

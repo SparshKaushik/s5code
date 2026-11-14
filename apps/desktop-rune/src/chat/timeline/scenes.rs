@@ -221,6 +221,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-link-chips", link_chips),
     ("timeline-user-markdown", user_markdown),
     ("timeline-steer", steer),
+    ("timeline-load-earlier", load_earlier),
+    ("timeline-load-earlier-error", load_earlier_error),
+    ("timeline-answered-questions", answered_questions),
 ];
 
 /// Appends `value` to the route thread's projection `list`, creating the list when missing.
@@ -301,7 +304,7 @@ fn child_approval(app: &mut App) {
         state.threads.push(serde_json::json!({"id": "scene-child", "title": "Migrate the billing schema", "projectId": project,
             "status": "running", "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"},
             "pendingRuntimeRequest": {"kind": "command"}}));
-        state.thread_views.insert("scene-child".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0 });
+        state.thread_views.insert("scene-child".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
     }
 }
 /// A setup script printing while the agent waits to start.
@@ -311,7 +314,7 @@ fn worktree_setup(app: &mut App) {
     app.now_ms = crate::data::iso_ms("2026-03-10T12:00:42Z").unwrap_or(app.now_ms);
     let snapshot = serde_json::json!({"threadId": id, "sequence": 7, "phase": "running", "startedAt": "2026-03-10T12:00:00Z",
         "branch": "t3/billing-schema", "baseRef": "origin/main", "worktreePath": "/home/dev/.t3/worktrees/app/billing-schema",
-        "setupScript": {"name": "Install dependencies", "command": "pnpm install --frozen-lockfile"},
+        "setupScript": {"name": "Install dependencies", "command": "pnpm install --frozen-lockfile", "terminalId": "setup-1"},
         "stages": [
             {"id": "fetch", "status": "done", "startedAt": "2026-03-10T12:00:00Z", "endedAt": "2026-03-10T12:00:03Z"},
             {"id": "checkout", "status": "done", "startedAt": "2026-03-10T12:00:03Z", "endedAt": "2026-03-10T12:00:09Z"},
@@ -458,4 +461,28 @@ fn steer(app: &mut App) {
         serde_json::json!({"id": "scene-steer-reply", "type": "assistant_message", "status": "completed", "text": "Got it: no docs, same test names.", "createdAt": "2026-01-01T00:00:02Z"}),
         user("scene-steer-c", "promoted_queued_to_steer", "Then run the suite once more."),
     ]);
+}
+
+/// A bounded window with older turns on the server.
+fn load_earlier(app: &mut App) {
+    pending(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        v.history_cursor = Some("scene-cursor".into());
+        v.has_more_history = true;
+    }
+}
+fn load_earlier_error(app: &mut App) {
+    load_earlier(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    app.ui.chat.timeline.history.errors.insert(id, "The history cursor is no longer valid.".into());
+}
+fn answered_questions(app: &mut App) {
+    pending(app);
+    push_visible(app, vec![serde_json::json!({"id": "scene-answered", "type": "user_input_request", "status": "completed", "createdAt": "2026-01-01T00:00:00Z",
+        "questionAnswer": {"requestId": "r", "questionTextById": {"q1": "Strict schemas or UI flexibility?", "q2": "Which runtime should the probe target?"},
+            "answers": {"q1": ["UI flexibility"], "q2": "Node 24"}}})]);
+    app.ui.chat.timeline.expanded.insert("scene-answered".into());
 }

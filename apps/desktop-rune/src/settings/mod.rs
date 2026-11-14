@@ -1,5 +1,6 @@
 mod about;
 mod access;
+pub(crate) use access::grants as session_grants;
 mod accent;
 mod acp_icons;
 mod add_provider;

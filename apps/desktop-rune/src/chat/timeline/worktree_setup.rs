@@ -67,6 +67,12 @@ fn visible(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
     }
 }
 
+/// The setup script's server terminal, once its stage has started.
+fn setup_terminal(snapshot: &Value) -> Option<&str> {
+    let started = array(snapshot, "stages").iter().any(|st| s(st, "id") == "setup-script" && s(st, "status") != "pending");
+    Some(s(&snapshot["setupScript"], "terminalId")).filter(|id| started && !id.is_empty())
+}
+
 /// The setup script's last lines, while it fails or prints.
 fn tail(snapshot: &Value) -> Option<(Vec<String>, bool)> {
     let stage = array(snapshot, "stages").iter().find(|st| s(st, "id") == "setup-script")?;
@@ -309,6 +315,17 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
             })
             .build(t),
     );
+    if let Some(id) = setup_terminal(snapshot) {
+        let id = id.to_owned();
+        actions = actions.child(
+            Button::new("Open terminal")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::TERMINAL)
+                .on_press(move |app: &mut App| crate::panel::drawer::show(app, &id))
+                .build(t),
+        );
+    }
     if running {
         let cancel_thread = thread.to_owned();
         actions = actions.child(
@@ -368,6 +385,19 @@ mod tests {
         let failed = snapshot("done", json!([{"id": "setup-script", "status": "failed", "tail": ["boom"]}]));
         assert_eq!(tail(&failed), Some((vec![String::new(), String::new(), String::new(), "boom".into()], true)));
         assert_eq!(tail(&snapshot("running", json!([{"id": "setup-script", "status": "running", "tail": []}]))), None);
+    }
+
+    #[test]
+    fn the_setup_terminal_opens_once_its_stage_starts() {
+        let with = |status: &str| {
+            let mut v = snapshot("running", json!([{"id": "setup-script", "status": status}]));
+            v["setupScript"] = json!({"name": "setup", "terminalId": "setup-1"});
+            v
+        };
+        assert_eq!(setup_terminal(&with("pending")), None);
+        assert_eq!(setup_terminal(&with("running")), Some("setup-1"));
+        assert_eq!(setup_terminal(&with("failed")), Some("setup-1"));
+        assert_eq!(setup_terminal(&snapshot("running", json!([{"id": "setup-script", "status": "running"}]))), None);
     }
 
     #[test]
