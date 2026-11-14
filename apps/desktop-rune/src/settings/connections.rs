@@ -1706,7 +1706,7 @@ pub(super) fn scene(s: &mut App, open: &str) {
         "failing" => {
             ui.diagnosis_open.push("env-box".into());
             ui.permissions_open.push("env-box".into());
-            if let Some((_, crate::data::Source::Fixture(state))) = s.ui.env.parked.iter_mut().find(|(k, _)| k == "env-box") {
+            if let Some(crate::data::Source::Fixture(state)) = env::source_mut(s, "env-box") {
                 state.conn = s5_net::Conn::Closed("HTTP error: 502 Bad Gateway".into());
             }
         }
