@@ -589,6 +589,15 @@ pub fn view(s: &App, t: &T) -> El {
                                         edit(s, template.clone(), editor_dark)
                                     })
                                     .build(t)
+                            }))
+                            .children(is_custom(s, &id).then(|| {
+                                let target = id.clone();
+                                crate::kit::Button::new(format!("Remove {}", item["label"].as_str().unwrap_or("")))
+                                    .variant("ghost-destructive")
+                                    .size("icon-xs")
+                                    .icon(&crate::icons::TRASH_2)
+                                    .on_press(move |s: &mut App| s.ui.settings.theme_remove = Some(target.clone()))
+                                    .build(t)
                             })),
                     ),
             );
@@ -610,6 +619,7 @@ pub fn view(s: &App, t: &T) -> El {
                 .child(
                     el().h(28.0).px(16.0).center_y().child(
                         text("Color scheme")
+                            .key(super::title_key("Color scheme"))
                             .font(theme::weight(theme::TEXT_BASE, 600.0))
                             .color(t.c.foreground),
                     ),
@@ -629,6 +639,7 @@ pub fn view(s: &App, t: &T) -> El {
                         .center_y()
                         .child(
                             text("Themes")
+                                .key(super::title_key("Themes"))
                                 .font(theme::weight(theme::TEXT_BASE, 600.0))
                                 .color(t.c.foreground)
                                 .grow(1.0),
@@ -655,6 +666,64 @@ pub fn view(s: &App, t: &T) -> El {
                 .child(cards),
         )
 }
+fn custom_themes(s: &App) -> Vec<Value> {
+    s.client_settings.values.get("customThemes").and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+fn is_custom(s: &App, id: &str) -> bool {
+    custom_themes(s).iter().any(|v| v["id"] == id)
+}
+
+/// Web's `handleConfirmRemoveTheme`: a half that used the theme falls back to the default.
+fn remove_theme(s: &mut App, id: &str) {
+    let mut library = custom_themes(s);
+    library.retain(|t| t["id"] != id);
+    for key in ["themeLight", "themeDark"] {
+        if s.client_settings.values.get(key).is_some_and(|v| *v == id) {
+            super::update(s, key, json!("t3-code"));
+        }
+    }
+    super::update(s, "customThemes", json!(library));
+}
+
+/// Web's theme removal `AlertDialog` for a single theme.
+pub fn remove_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some(id) = &s.ui.settings.theme_remove else { return };
+    let Some(theme) = custom_themes(s).into_iter().find(|v| v["id"] == *id.as_str()) else { return };
+    let id = id.clone();
+    let cancel = |s: &mut App| s.ui.settings.theme_remove = None;
+    crate::kit::Dialog::new("theme-remove", format!("Remove “{}”?", theme["label"].as_str().unwrap_or("")))
+        .alert()
+        .open(true)
+        .description("You can bring it back anytime by importing its JSON file.")
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .justify_end()
+                .child(crate::kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t))
+                .child(
+                    crate::kit::Button::new("Remove theme")
+                        .variant("destructive")
+                        .on_press(move |s: &mut App| {
+                            remove_theme(s, &id);
+                            s.ui.settings.theme_remove = None;
+                        })
+                        .build(t),
+                ),
+        )
+        .on_close(cancel)
+        .build(t, layers);
+}
+
+pub fn scene_remove(s: &mut App) {
+    let mut theme = builtins().get(1).cloned().unwrap_or_else(|| builtins()[0].clone());
+    theme["id"] = json!("custom-scene");
+    theme["label"] = json!("Midnight copy");
+    s.client_settings.values.insert("customThemes".into(), json!([theme]));
+    s.ui.settings.theme_remove = Some("custom-scene".into());
+}
+
 pub fn edit(s: &mut App, mut template: Value, dark: bool) {
     if builtins().iter().any(|t| t["id"] == template["id"]) {
         template["id"] = json!(format!("custom-{}", s5_net::uuid()));
@@ -674,6 +743,16 @@ pub fn edit(s: &mut App, mut template: Value, dark: bool) {
         .flatten()
         .filter_map(|(k, v)| Some((k.clone(), rune::TextEdit::new(v.as_str()?))))
         .collect();
+}
+/// `toggleThemeEditorForTheme`: closes an open editor, else opens one seeded from the theme
+/// the current appearance uses.
+pub fn toggle_editor(s: &mut App, dark: bool) {
+    if s.ui.settings.theme_editor.take().is_some() {
+        return;
+    }
+    let id = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(Value::as_str).unwrap_or("t3-code").to_string();
+    let theme = library(s).into_iter().find(|v| v["id"] == id.as_str()).unwrap_or_else(|| builtins()[0].clone());
+    edit(s, theme, dark);
 }
 pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
     if s.ui.settings.theme_editor.is_none() {
@@ -786,20 +865,7 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
             crate::kit::Button::new("Delete theme")
                 .variant("destructive-outline")
                 .on_press(move |s: &mut App| {
-                    let mut library = s
-                        .client_settings
-                        .values
-                        .get("customThemes")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    library.retain(|t| t["id"] != id);
-                    for key in ["themeLight", "themeDark"] {
-                        if s.client_settings.values.get(key).is_some_and(|v| *v == id) {
-                            super::update(s, key, json!("t3-code"));
-                        }
-                    }
-                    super::update(s, "customThemes", json!(library));
+                    remove_theme(s, &id);
                     s.ui.settings.theme_editor = None;
                 })
                 .build(t),

@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use super::{draft_run, draft_run_mut, draft_worktree, radio_row};
 use crate::chat::composer;
 use crate::shell::palette;
-use crate::shell::sidebar::folders::Grouping;
 use crate::theme::T;
 use crate::{App, Route, data, env, icons};
 
@@ -33,20 +32,12 @@ pub struct State {
     inflight: Vec<(u64, String)>,
 }
 
-/// `(environment, project)` for each machine holding the draft's logical project
-/// (`useLogicalProjectEnvironments`).
+/// `(environment, project)` for each machine holding the draft's project (shell's `hosts`).
 fn holders(s: &App) -> Vec<(String, String)> {
-    let Some(active) = composer::ctx(s).project else { return Vec::new() };
-    let grouping = Grouping::read(s);
-    let logical = grouping.key(active);
-    let mut out: Vec<(String, String)> = Vec::new();
-    for project in &s.state().projects {
-        let key = env::of(s, project);
-        if !out.iter().any(|(k, _)| *k == key) && grouping.key(project) == logical {
-            out.push((key, data::s(project, "id").to_string()));
-        }
-    }
-    out
+    super::hosts(s)
+        .into_iter()
+        .filter_map(|id| s.state().projects.iter().find(|p| data::s(p, "id") == id).map(|p| (env::of(s, p), id)))
+        .collect()
 }
 
 fn current(s: &App) -> Option<String> {
@@ -165,20 +156,10 @@ pub fn auto_label(s: &App) -> Option<&'static str> {
     Some(if failed { "Auto balance unavailable" } else { "Auto balance" })
 }
 
-/// Moves the draft, with its text and run context, to the balancer's machine.
+/// Moves the draft to the balancer's machine with shell's "Run on" move.
 fn balance_to(s: &mut App, key: &str) {
     let Some((_, project)) = holders(s).into_iter().find(|(k, _)| k == key) else { return };
-    let from = composer::draft_key(s, s.frame_route());
-    let to = composer::home_key(&project);
-    if from != to {
-        if let Some(draft) = s.ui.chat.composer.drafts.remove(&from) {
-            s.ui.chat.composer.drafts.insert(to.clone(), draft);
-        }
-        if let Some(run) = s.ui.chat.details.drafts.remove(&from) {
-            s.ui.chat.details.drafts.insert(to, run);
-        }
-        s.navigate(Route::Home { project_id: Some(project) });
-    }
+    super::move_draft(s, &project);
     let run = draft_run_mut(s);
     run.selection = Selection::Auto;
     run.balanced = Some(key.to_owned());

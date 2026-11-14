@@ -174,6 +174,22 @@ fn with_override(settings: &Value, field: &str, next: Value) -> Value {
     })
 }
 
+/// The shared policy's preset value for `field`, in seconds: what a reset goes back to.
+pub(super) fn preset_seconds(settings: &Value, field: &str) -> i64 {
+    let resolved = resolve_server(settings);
+    DURATIONS.iter().position(|d| *d == field).map_or(0, |i| preset(resolved.profile).durations[i] / 1000)
+}
+
+/// `backgroundActivityOverrideSettings` with `field: undefined`: every other value stays pinned
+/// while `field` falls back to the shared policy's preset.
+pub(super) fn clear_override(s: &mut App, field: &str) {
+    let mut next = with_override(server_settings(s), field, Value::Null);
+    if let Some(overrides) = next["overrides"].as_object_mut() {
+        overrides.remove(field);
+    }
+    update(s, "backgroundActivity", next);
+}
+
 fn is_default(activity: &Value) -> bool {
     activity.is_null()
         || (activity["schemaVersion"].as_i64().unwrap_or(1) == 1

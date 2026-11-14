@@ -348,8 +348,8 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if super::pr_guide::on_key(s, e, tx) {
         return true;
     }
-    // The open panel's `pullRequest.copyNumber`.
-    if s.ui.pages.pull_requests.selected.is_none() || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
+    // The open panel's `pullRequest.copyNumber`; the palette keeps the keys while open.
+    if s.ui.shell.palette.open || s.ui.pages.pull_requests.selected.is_none() || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
         return false;
     }
     let Some(entry) = ui(s).entry.clone() else { return false };
@@ -1648,6 +1648,28 @@ mod tests {
         assert_eq!(checks_freshness(Some(&json!({"state": "open", "updatedAt": "2026-11-14T11:00:00Z"})), &d), (Some("passing"), false), "a row without a rollup defers to the detail");
         let waiting = json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checks": [{"name": "deploy", "status": "action-required"}]});
         assert_eq!(checks_freshness(Some(&entry("2026-11-14T11:00:00Z", json!("passing"))), &waiting), (Some("pending"), false), "the list can omit workflows awaiting approval");
+    }
+
+    #[test]
+    fn the_copy_number_chord_copies_the_open_pr_once_per_press() {
+        let mut s = App::new();
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([{"command": "pullRequest.copyNumber", "shortcut": {"key": "k", "modKey": true, "shiftKey": true}}]);
+        }
+        let mut chord = rune::KeyEvent::from(rune::Key::Command('k'));
+        chord.mods.cmd = true;
+        chord.mods.ctrl = !cfg!(target_os = "macos");
+        chord.mods.shift = true;
+        s.navigate(Route::PullRequests);
+        assert!(!on_key(&mut s, &chord, &mut Tx::default()), "FAILED: no PR open, nothing to copy");
+        let entry = recorded()["detail"].clone();
+        s.ui.pages.pull_requests.selected = Some(field(&entry, "url").to_owned());
+        s.ui.pages.detail.entry = Some(entry);
+        s.ui.shell.palette.open = true;
+        assert!(!on_key(&mut s, &chord, &mut Tx::default()), "FAILED: the palette keeps the keys");
+        s.ui.shell.palette.open = false;
+        assert!(on_key(&mut s, &chord, &mut Tx::default()), "FAILED: the chord copies the number");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("PR number copied"));
     }
 
     #[test]

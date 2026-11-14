@@ -909,7 +909,7 @@ pub fn view(s: &App, t: &T) -> Vec<El> {
             .color(t.c.muted_foreground)
             .px(16.0)
             .py(12.0);
-        return vec![c::section_with_actions("Version Control", vec![rescan(pending, t)], vec![body], t)];
+        return vec![c::section_with_actions("Version Control", vec![rescan(pending, t)], vec![body], t).key(super::title_key("Source control"))];
     };
     let rows = |key: &str| -> Vec<El> {
         result[key].as_array().into_iter().flatten().map(|item| item_row(s, item, t)).collect()
@@ -918,7 +918,7 @@ pub fn view(s: &App, t: &T) -> Vec<El> {
     let mut out = Vec::new();
     let has_vcs = !vcs.is_empty();
     if has_vcs {
-        out.push(c::section_with_actions("Version Control", vec![rescan(pending, t)], vcs, t));
+        out.push(c::section_with_actions("Version Control", vec![rescan(pending, t)], vcs, t).key(super::title_key("Source control")));
     }
     if !hosts.is_empty() {
         let actions = if has_vcs { vec![] } else { vec![rescan(pending, t)] };

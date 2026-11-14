@@ -409,7 +409,7 @@ fn copy(t: &T, key: &str, title: &str, reset: Option<El>, description: El, note:
         .grow(1.0)
         .min_w(0.0)
         .gap(4.0)
-        .child(row().gap(6.0).center_y().child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground)).children(reset))
+        .child(row().gap(6.0).center_y().child(text(title.to_owned()).key(super::title_key(title)).font(theme::SM_MEDIUM).color(t.c.foreground)).children(reset))
         .child(description)
         .children(note.map(|note| text(note.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground)))
 }

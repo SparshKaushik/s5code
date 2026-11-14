@@ -104,6 +104,8 @@ pub struct Ui {
     pub delete: Option<String>,
     /// Archive, unpin and bulk-delete confirmations (`dialogs.confirm`).
     pub confirm: Option<Confirm>,
+    /// Questions waiting behind `confirm`, asked one at a time as web's dialog host queues them.
+    pub confirm_queue: Vec<Confirm>,
     /// The open "Share with guest" dialog.
     pub guest: Option<share::Guest>,
     /// A pending `projects.createFromThread` and the thread's title for its toast.
@@ -367,7 +369,7 @@ impl Model {
             },
             now: s.now_ms,
             working_shelf,
-            updates: providers.iter().filter(|p| p["versionAdvisory"]["status"] == "behind_latest").count(),
+            updates: update_count(providers),
         }
     }
 
@@ -701,6 +703,49 @@ pub fn request_unpin(s: &mut App, id: &str) {
     }
 }
 
+/// Providers a click can update, one per driver (`collectProviderUpdateCandidates` filtered by
+/// `canOneClickUpdateProviderCandidate`).
+fn update_count(providers: &[Value]) -> usize {
+    let mut drivers: Vec<&str> = providers
+        .iter()
+        .filter(|p| {
+            let advisory = &p["versionAdvisory"];
+            let latest = &p["compatibilityAdvisory"]["latestVersionStatus"];
+            p["enabled"] != false
+                && latest != "broken"
+                && latest != "unsupported"
+                && advisory["status"] == "behind_latest"
+                && advisory["canUpdate"] == true
+                && !advisory["updateCommand"].is_null()
+        })
+        .map(|p| crate::data::s(p, "driver"))
+        .collect();
+    drivers.sort_unstable();
+    drivers.dedup();
+    drivers.len()
+}
+
+/// "Unpin (n)": web unpins each through `attemptUnpin`, so each asks in turn.
+pub fn request_unpin_many(s: &mut App, ids: Vec<String>) {
+    if !client_flag(s, "confirmThreadUnpin") {
+        for id in &ids {
+            unpin(s, id);
+        }
+        return;
+    }
+    let mut queue: Vec<Confirm> = ids.into_iter().map(Confirm::Unpin).collect();
+    if s.ui.shell.sidebar.confirm.is_none() && !queue.is_empty() {
+        s.ui.shell.sidebar.confirm = Some(queue.remove(0));
+    }
+    s.ui.shell.sidebar.confirm_queue.extend(queue);
+}
+
+/// Closes the open question and asks the next queued one.
+fn next_confirm(s: &mut App) {
+    let queue = &mut s.ui.shell.sidebar.confirm_queue;
+    s.ui.shell.sidebar.confirm = (!queue.is_empty()).then(|| queue.remove(0));
+}
+
 /// "Delete (n)": asks first when `confirmThreadDelete` is on.
 pub fn request_delete_many(s: &mut App, ids: Vec<String>) {
     if client_flag(s, "confirmThreadDelete") {
@@ -864,11 +909,11 @@ fn confirm_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
             true,
         ),
     };
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| s.ui.shell.sidebar.confirm = None).build(t);
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(next_confirm).build(t);
     let confirm_button = crate::kit::Button::new(label)
         .variant(if destructive { "destructive" } else { "default" })
         .on_press(move |s: &mut App| {
-            s.ui.shell.sidebar.confirm = None;
+            next_confirm(s);
             match &confirm {
                 Confirm::Archive(id) => archive(s, id),
                 Confirm::Unpin(id) => unpin(s, id),
@@ -882,7 +927,7 @@ fn confirm_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
     }
     dialog
         .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm_button))
-        .on_close(|s: &mut App| s.ui.shell.sidebar.confirm = None)
+        .on_close(next_confirm)
         .build(t, overlays);
 }
 
@@ -1464,5 +1509,37 @@ mod tests {
         press(&mut rt, Key::Right);
         assert!(rt.state.ui.shell.sidebar.folders.expanded(&group), "Right on a folded folder opens it");
         assert_eq!(focused(&rt), header, "opening keeps focus on the folder");
+    }
+
+    #[test]
+    fn bulk_unpin_asks_for_each_thread_in_turn() {
+        let mut s = App::new();
+        s.client_settings.values.insert("confirmThreadUnpin".into(), json!(true));
+        request_unpin_many(&mut s, vec!["a".into(), "b".into()]);
+        assert_eq!(s.ui.shell.sidebar.confirm, Some(Confirm::Unpin("a".into())), "FAILED: the first unpin asks");
+        next_confirm(&mut s);
+        assert_eq!(s.ui.shell.sidebar.confirm, Some(Confirm::Unpin("b".into())), "FAILED: answering asks the next");
+        next_confirm(&mut s);
+        assert_eq!(s.ui.shell.sidebar.confirm, None);
+    }
+
+    #[test]
+    fn the_update_button_counts_providers_a_click_can_update_once_per_driver() {
+        let provider = |driver: &str, extra: Value| {
+            let mut p = json!({"driver": driver, "enabled": true, "versionAdvisory": {"status": "behind_latest", "canUpdate": true, "updateCommand": "npm i -g x"}});
+            for (k, v) in extra.as_object().unwrap() {
+                p[k] = v.clone();
+            }
+            p
+        };
+        let providers = vec![
+            provider("codex", json!({})),
+            provider("codex", json!({})),
+            provider("claude", json!({"versionAdvisory": {"status": "behind_latest", "canUpdate": false, "updateCommand": null}})),
+            provider("cursor", json!({"enabled": false})),
+            provider("grok", json!({"compatibilityAdvisory": {"latestVersionStatus": "broken"}})),
+            provider("kiro", json!({"versionAdvisory": {"status": "current"}})),
+        ];
+        assert_eq!(update_count(&providers), 1, "FAILED: only codex can be updated, once");
     }
 }

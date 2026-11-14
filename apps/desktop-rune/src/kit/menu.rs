@@ -40,6 +40,10 @@ pub struct MenuItem {
     acts: Acts,
 }
 impl MenuItem {
+    #[cfg(test)]
+    pub fn label_text(&self) -> &str {
+        &self.label
+    }
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
