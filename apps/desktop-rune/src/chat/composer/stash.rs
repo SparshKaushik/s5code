@@ -317,11 +317,14 @@ mod tests {
         let mut s = App::new();
         on_thread(&mut s);
         let record = super::super::chips::terminal("t", "Terminal 1", 2, 2, "ls");
+        let file = std::env::temp_dir().join(format!("s5-stash-{}.txt", s5_net::uuid()));
+        std::fs::write(&file, "a").unwrap();
+        let path = file.to_string_lossy().into_owned();
         let d = draft_mut(&mut s);
         d.edit.insert("see ");
         d.edit.insert_pill(super::super::chips::pill_id(&record), "Terminal 1 line 2");
         d.contexts.push(record.clone());
-        d.attachments.push("/tmp/a.txt".into());
+        d.attachments.push(path.clone());
         d.runtime_mode = Some("approval-required".into());
         stash(&mut s);
         let d = draft(&s).unwrap();
@@ -334,9 +337,10 @@ mod tests {
         let d = draft(&s).unwrap();
         assert_eq!(d.edit.text, "now\n\nsee Terminal 1 line 2");
         assert_eq!(d.edit.pills().map(|(r, _)| r).collect::<Vec<_>>(), [9..26]);
-        assert_eq!(d.attachments, ["/tmp/a.txt"]);
+        assert_eq!(d.attachments, [path]);
         assert_eq!(d.contexts, [record]);
         assert!(s.ui.chat.composer.stash.entries.is_empty());
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]
