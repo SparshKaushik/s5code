@@ -1,6 +1,7 @@
 //! Web `ProviderAuthenticationSection`: the "Account" row that signs a provider instance in,
-//! on the provider page and in Add provider's sign-in step. Starts use the server's own
-//! callback, so a local server catches the redirect and a remote one takes the pasted URL.
+//! on the provider page and in Add provider's sign-in step. Starts ask for the client's
+//! callback, as the desktop app does: Rune catches ChatGPT's redirect (`codex_callback`), and
+//! the pasted URL stays as the fallback.
 use super::request;
 use crate::theme::{self, T};
 use crate::{App, icons, kit};
@@ -185,7 +186,9 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
                     if consent {
                         respond(s, &open_id, &open_state, json!({"type": "browser", "action": "accept"}));
                     }
-                    open_url(s, &open_url_);
+                    if !super::codex_callback::sign_in(s, &open_id, &open_state["flowId"], &open_url_) {
+                        open_url(s, &open_url_);
+                    }
                 })
                 .build(t),
         );
@@ -214,7 +217,10 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
             kit::Button::new("Cancel")
                 .variant("ghost")
                 .size("sm")
-                .on_press(move |s: &mut App| request(s, "provider.auth.cancel", json!({"instanceId": cancel_id, "flowId": flow})))
+                .on_press(move |s: &mut App| {
+                    super::codex_callback::cancel(&cancel_id);
+                    request(s, "provider.auth.cancel", json!({"instanceId": cancel_id, "flowId": flow}));
+                })
                 .build(t)
                 .label("Cancel sign-in"),
         );
@@ -227,7 +233,7 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
                 .size("sm")
                 .disabled(disabled)
                 .on_press(move |s: &mut App| {
-                    let mut input = json!({"instanceId": start_id});
+                    let mut input = json!({"instanceId": start_id, "callbackMode": "client"});
                     if let Some(method) = s.ui.settings.auth.method.get(&start_id).filter(|m| known.contains(*m)) {
                         input["methodId"] = json!(method);
                     }

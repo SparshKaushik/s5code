@@ -11,6 +11,11 @@ pub fn button(label: &str, t: &T) -> El {
         .build(t)
 }
 
+/// `on_press` when `allowed`; otherwise dimmed like a disabled kit button and unreachable.
+pub fn press_if(control: El, allowed: bool, f: impl Fn(&mut App) + 'static) -> El {
+    if allowed { control.on_press(f) } else { control.disabled(true).inert().opacity(0.64) }
+}
+
 pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
     let current = value(s, key);
     let on = if key == "sidebarProjectGroupingMode" {
@@ -135,14 +140,23 @@ pub fn select(
 /// The open select's list, anchored to the trigger `select` mounted.
 pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width: f32, layer: &mut Vec<El>) {
     let (owned, choices) = (key.to_owned(), options.to_vec());
-    let _trigger = crate::kit::Select::new(format!("setting-{key}"), &labels(options))
+    let mut select = crate::kit::Select::new(format!("setting-{key}"), &labels(options));
+    if key == "defaultRuntimeMode" {
+        for (_, label, description, glyph) in crate::chat::composer::RUNTIME_MODES {
+            select = select.option_detail(label, glyph, description);
+        }
+    }
+    let _trigger = select
         .current(Some(&current_label(s, key, options)))
         .width(width)
         .size("sm")
         .align_end()
         .open(true)
-        .on_choose(move |s: &mut App, label: &str, _: &mut rune::Tx| {
+        .on_choose(move |s: &mut App, label: &str, tx: &mut rune::Tx| {
             if let Some((v, _)) = choices.iter().find(|(_, l)| l == label) {
+                if owned == super::fonts::ZOOM_KEY {
+                    tx.instant();
+                }
                 update(s, &owned, v.clone());
             }
             s.ui.settings.open_select = None;
@@ -181,6 +195,18 @@ fn follow_up_description(send_shortcut: Option<&str>, modifier: &str) -> String 
     format!("Queue follow-ups while the agent runs or steer the current run. {flip}")
 }
 
+/// Web `SettingsRow`'s reason a row's control is inert: an administrator's lock, then a
+/// connection that may not write settings, then a project scope over an environment-wide key.
+fn row_lock(s: &App, key: &str) -> Option<String> {
+    let client = s.client_settings.values.contains_key(key) || key == "appearance";
+    if client || key.starts_with("project::") {
+        return None;
+    }
+    let environment_wide = s.ui.settings.project.is_some() && !super::scope::project_key(key);
+    super::permissions::row_lock(s, key)
+        .or_else(|| environment_wide.then(|| "Environment-wide setting. Select an environment to change it.".to_owned()))
+}
+
 pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
@@ -215,7 +241,8 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     // Separate fonts switch; a font row resets its family and size together.
     let size_key = spec["size"].as_str().filter(|_| spec["kind"] == "font").map(str::to_owned);
     let customized = super::scope::customized(s, key) || size_key.as_deref().is_some_and(|k| super::scope::customized(s, k));
-    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced") && customized {
+    let lock = row_lock(s, key);
+    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced") && customized && lock.is_none() {
         let owned = key.to_owned();
         let size_key = size_key.clone();
         heading = heading.child(
@@ -223,13 +250,16 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 .variant("ghost-muted")
                 .size("icon-micro")
                 .icon(&icons::UNDO_2)
-                .on_press(move |s: &mut App| {
+                .build(t)
+                .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
                     super::scope::reset(s, &owned);
                     if let Some(size) = &size_key {
+                        if size == super::fonts::ZOOM_KEY {
+                            tx.instant();
+                        }
                         super::scope::reset(s, size);
                     }
-                })
-                .build(t),
+                }),
         );
     }
     let mut copy = col()
@@ -316,15 +346,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             )
         })
     });
-    let environment_wide = s.ui.settings.project.is_some()
-        && !key.starts_with("project::")
-        && !s.client_settings.values.contains_key(key)
-        && !super::scope::project_key(key);
-    let ctrl = if environment_wide {
-        ctrl.disabled(true).opacity(0.5)
-    } else {
-        ctrl
-    };
+    let ctrl = super::permissions::gate(key, ctrl, lock);
     if s.ui.settings.project.is_some() && super::scope::project_key(key) {
         copy = copy.child(
             text(if super::scope::customized(s, key) {

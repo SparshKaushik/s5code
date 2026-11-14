@@ -839,7 +839,7 @@ fn upcoming(at: i64, now: i64, zone: Zone, hour12: bool) -> String {
 }
 
 /// redactedPlaceholder: a stable scramble keeping the address's shape.
-fn redacted(value: &str) -> String {
+pub(crate) fn redacted(value: &str) -> String {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
     let mut state = 0x811c9dc5u32 as i32;
     for unit in value.encode_utf16() {

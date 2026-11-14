@@ -7,6 +7,7 @@ mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
+pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
@@ -21,15 +22,21 @@ mod models;
 mod host_logos;
 mod icon_index;
 mod pages;
+pub(crate) mod permissions;
+mod qr;
+pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;
 mod scope;
-mod search;
+pub mod search;
 mod snooze;
 mod source_control;
 mod storage;
 mod browser_profiles;
+mod diagnostics;
+mod licenses;
+mod secrets;
 mod tasks;
 pub(crate) mod themes;
 pub use themes::apply as apply_theme;
@@ -99,6 +106,11 @@ pub struct Ui {
     pub connections: connections::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
+    pub session: permissions::Session,
+    pub secrets: secrets::Ui,
+    pub diagnostics: diagnostics::Ui,
+    pub licenses: licenses::Ui,
+    pub telemetry: telemetry::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -123,7 +135,7 @@ fn apply_patch(settings: &mut Value, patch: &Value) {
     for (key, next) in patch.as_object().into_iter().flatten() {
         if matches!(
             key.as_str(),
-            "providerInstances" | "projectSettingsOverrides"
+            "providerInstances" | "projectSettingsOverrides" | "secretProviders"
         ) {
             if !settings[key].is_object() {
                 settings[key] = json!({});
@@ -474,6 +486,13 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
         }
+        if page.is_some() {
+            permissions::load(s);
+        }
+        // Web loads the notices on each visit, so a failure never sticks.
+        if s.ui.settings.loaded_page.as_deref() == Some(licenses::PATH) {
+            s.ui.settings.licenses = Default::default();
+        }
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
@@ -519,7 +538,11 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s);
+    if matches!(&s.route, Route::Settings(p) if p == "secrets") && !secrets::enabled() && matches!(s.src, crate::data::Source::Live(_)) {
+        s.navigate(Route::Settings("general".into()));
+    }
+    let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && diagnostics::tick(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -553,7 +576,11 @@ pub fn poll(s: &mut App) -> bool {
                         .and_then(|c| c["environment"]["label"].as_str())
                         .unwrap_or("this environment")
                         .to_owned();
-                    s.ui.settings.error = Some(failure_message(&method, &environment, &error));
+                    let message = failure_message(&method, &environment, &error);
+                    match message.strip_prefix("Setting not saved. ") {
+                        Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
+                        None => s.ui.settings.error = Some(message),
+                    }
                 }
             }
             changed = true;
@@ -604,6 +631,7 @@ pub const NAV: &[(&str, &[(&str, &str)])] = &[
         &[
             ("connections", "Environments"),
             ("access", "Sharing & access"),
+            ("secrets", "Secrets"),
         ],
     ),
     (
@@ -612,9 +640,16 @@ pub const NAV: &[(&str, &[(&str, &str)])] = &[
             ("maintenance", "Maintenance"),
             ("labs", "Labs"),
             ("about", "About"),
-            ("archived", "Archived threads"),
+            ("archived", "Archive"),
         ],
     ),
+];
+
+/// Pages without a nav entry, titled in the breadcrumb, and the nav entry that links to them
+/// (web `SETTINGS_DETAIL_PAGE_PARENTS`).
+const DETAIL: &[(&str, &str, &str)] = &[
+    ("diagnostics", "Diagnostics", "maintenance"),
+    (licenses::PATH, "Open source licenses", "about"),
 ];
 
 pub fn label(path: &str) -> &str {
@@ -622,7 +657,19 @@ pub fn label(path: &str) -> &str {
         .flat_map(|(_, items)| items.iter())
         .find(|(p, _)| *p == path)
         .map(|(_, l)| *l)
+        .or_else(|| DETAIL.iter().find(|(p, ..)| *p == path).map(|(_, l, _)| *l))
         .unwrap_or(path)
+}
+
+/// The nav entry a page highlights: itself, or the page that links to a detail page.
+fn nav_parent(path: &str) -> &str {
+    DETAIL.iter().find(|(p, ..)| *p == path).map(|(.., parent)| *parent).unwrap_or(path)
+}
+
+/// Whether this client has the page: a nav entry (Secrets behind its flag) or a detail page.
+pub fn has_page(path: &str) -> bool {
+    (path != "secrets" || secrets::enabled())
+        && (NAV.iter().any(|(_, items)| items.iter().any(|(p, _)| *p == path)) || DETAIL.iter().any(|(p, ..)| *p == path))
 }
 
 static SNAP_SHOT_ICON: rune::Icon = rune::Icon {
@@ -800,10 +847,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .h(16.0),
             );
         }
-        for (target, title) in *items {
+        for (target, title) in items.iter().filter(|(p, _)| has_page(p)) {
             let icon = nav_icon(target);
             let target = target.to_string();
-            let active = path == target;
+            let active = nav_parent(path) == target;
             group = group.child(
                 row()
                     .key(format!("settings-nav-{target}"))
@@ -883,7 +930,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                         .any(|(key, v)| s.client_settings.values.get(key) != Some(v)),
                 )
                 .build(t)
-                .on_press(|s: &mut App| {
+                .on_press_tx(|s: &mut App, tx: &mut rune::Tx| {
+                    // Restoring the interface size zooms the window; land it at once.
+                    if s.client_settings.values.get(fonts::ZOOM_KEY) != client::ClientSettings::default().values.get(fonts::ZOOM_KEY) {
+                        tx.instant();
+                    }
                     let defaults = client::ClientSettings::default();
                     s.client_settings.values.extend(defaults.values);
                     s.client_settings
@@ -953,6 +1004,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
+    secrets::overlays(s, t, &mut overlays);
+    diagnostics::overlays(s, t, &mut overlays);
     projects::confirm_remove(s, t, &mut overlays);
     project_icon::dialog(s, t, &mut overlays);
     if crate::chat::details::scripts::settings_editor_open(s) {
@@ -969,6 +1022,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     scope::menu(s, t, &mut overlays);
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
+    permissions::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -1031,6 +1085,30 @@ fn scene_from_thread(s: &mut App) {
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("settings-connections-add-remote", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-remote");
+    }),
+    ("settings-connections-add-ssh", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-ssh");
+    }),
+    ("settings-connections-env-menu", |s| {
+        scene(s, "connections");
+        connections::scene(s, "env-menu");
+    }),
+    ("settings-connections-link", |s| {
+        scene(s, "connections");
+        connections::scene(s, "link");
+    }),
+    ("settings-devices-simlock", |s| {
+        scene(s, "devices");
+        devices_editor::open_simlock(s, None);
+    }),
+    ("settings-runtime-mode-open", |s| {
+        scene(s, "threads");
+        s.ui.settings.open_select = Some("defaultRuntimeMode".into());
+    }),
     ("settings-general", |s| scene(s, "general")),
     ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),
@@ -1052,15 +1130,43 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "access");
         crate::desktop::exposure::scene(s);
     }),
-    ("settings-secrets", |s| scene(s, "secrets")),
+    ("settings-secrets", |s| {
+        scene(s, "secrets");
+        secrets::scene(s, false);
+    }),
+    ("settings-secrets-dialog", |s| {
+        scene(s, "secrets");
+        secrets::scene(s, true);
+    }),
+    ("settings-access-share", |s| {
+        scene(s, "access");
+        crate::desktop::exposure::scene(s);
+        access::scene_share(s);
+    }),
+    ("settings-connections-routes", |s| {
+        scene(s, "connections");
+        connections::scene(s, "routes");
+    }),
+    ("settings-connections-route-remove", |s| {
+        scene(s, "connections");
+        connections::scene(s, "route-remove");
+    }),
     ("settings-maintenance", |s| scene(s, "maintenance")),
     ("settings-labs", |s| scene(s, "labs")),
     ("settings-about", |s| scene(s, "about")),
     ("settings-archived", |s| scene(s, "archived")),
     ("settings-storage", |s| scene(s, "storage")),
-    ("settings-diagnostics", |s| scene(s, "diagnostics")),
+    ("settings-diagnostics", |s| {
+        scene(s, "diagnostics");
+        diagnostics::fixture(s);
+    }),
     ("settings-open-source-licenses", |s| {
-        scene(s, "open-source-licenses")
+        scene(s, "open-source-licenses");
+        licenses::scene(s, None);
+    }),
+    ("settings-open-source-licenses-search", |s| {
+        scene(s, "open-source-licenses");
+        licenses::scene(s, Some("mit server"));
     }),
     ("settings-beta", |s| scene(s, "beta")),
     ("settings-integrations", |s| scene(s, "integrations")),
@@ -1324,7 +1430,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         {
             return true;
         }
-        if s.ui.settings.task_editor.take().is_some() {
+        if s.ui.settings.task_editor.take().is_some() || secrets::escape(s) || licenses::escape(s) {
             return true;
         }
         if s.ui.settings.open_select.take().is_some() {

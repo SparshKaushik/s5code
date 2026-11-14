@@ -3,12 +3,17 @@
 //! project. Nothing is sent; the person reads the prompt in the composer first. They arrive on
 //! the command line (Linux and Windows hand links to a new process) or through macOS's
 //! `on_open_url`, and wait for the shell before they land.
+//!
+//! Web pages the OS hands over (macOS: http links and `.html` files) open in a thread's browser,
+//! as DesktopWebLinkCoordinator's `openInBrowser`.
 
+use crate::settings::codex_callback;
 use crate::{App, Route, data};
 
 /// `PROMPT_LINK_MAX_PROMPT_LENGTH`.
 const MAX_PROMPT: usize = 8_000;
-const HOSTED_APP: &str = "https://app.t3.codes";
+/// `DEFAULT_HOSTED_APP_URL` (connectAuth.ts).
+const HOSTED_APP: &str = "https://app.s5code.touchtech.club";
 /// `PROMPT_LINK_REPOSITORY_HOSTS`: git.cafe mirrors GitHub under the same path.
 const REPOSITORY_HOSTS: [&str; 3] = ["github.com", "git.cafe", "staging.git.cafe"];
 
@@ -27,6 +32,26 @@ pub struct Ui {
     paired: Vec<String>,
     /// A confirmed pairing link is pairing, to report how it went.
     pairing: bool,
+    web: Web,
+}
+
+/// Electron's `isWebLink` or `isWebPageFile`: an http(s) URL, or the path of an HTML file.
+#[derive(Debug, PartialEq, Clone)]
+pub enum WebPage {
+    Url(String),
+    File(String),
+}
+
+/// A web page on its way to a browser tab.
+#[derive(Debug, Default)]
+enum Web {
+    #[default]
+    Idle,
+    Pending(WebPage),
+    /// No thread shows a browser, so a scratch thread is starting for it.
+    Scratch(WebPage),
+    /// The file's `assets.createUrl` request; this machine's server serves the page.
+    Asset(u64, String),
 }
 
 /// `HIDDEN_CHARACTERS`: characters that let a model read instructions the person can't see.
@@ -93,9 +118,39 @@ pub fn pairing_link(url: &str) -> Option<String> {
     parsed.query_pairs().find(|(k, _)| k == "pairingUrl").map(|(_, v)| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
-/// Prompt links and pairing links: what a second launch hands to the running app.
+pub fn web_page(url: &str) -> Option<WebPage> {
+    let parsed = s5_net::url::Url::parse(url.trim()).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => Some(WebPage::Url(parsed.to_string())),
+        "file" => {
+            let path = parsed.to_file_path().ok()?.to_str()?.to_owned();
+            is_web_page_file(&path).then_some(WebPage::File(path))
+        }
+        _ => None,
+    }
+}
+
+/// `isWebPageFile`: `/\.x?html?$/i`.
+fn is_web_page_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.rsplit_once('.').is_some_and(|(_, ext)| matches!(ext, "htm" | "html" | "xhtm" | "xhtml"))
+}
+
+/// Prompt, pairing, ChatGPT handoff and sign-in return links: what a second launch hands to
+/// the running app.
 pub fn is_app_link(url: &str) -> bool {
-    parse(url).is_some() || pairing_link(url).is_some()
+    parse(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || resume_route(url).is_some()
+}
+
+/// `resumeProviderAuth`: a sign-in page sending the person back to the app's settings.
+fn resume_route(url: &str) -> Option<Route> {
+    let sanitized = codex_callback::return_url(url)?;
+    let path = sanitized.strip_prefix("s5code://app")?.split(['?', '#']).next().unwrap_or("");
+    Some(match path.strip_prefix("/settings").map(|p| p.trim_start_matches('/')) {
+        Some("") => Route::Settings("general".into()),
+        Some(page) => Route::Settings(page.split('/').next().unwrap_or(page).into()),
+        None => Route::Home { project_id: None },
+    })
 }
 
 /// `promptLinkAppPath` + `parseNewThreadLink` for new-thread links. `None` when `url` is not a
@@ -137,6 +192,14 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
 /// Opens a prompt link from anywhere (a second launch, the OS's URL handler), on the UI thread:
 /// the draft lands now, or once the shell has loaded. False when `url` is no prompt link.
 pub fn open(s: &mut App, url: &str) -> bool {
+    if let Some(handoff) = codex_callback::read_handoff(url) {
+        codex_callback::handoff(s, handoff);
+        return true;
+    }
+    if let Some(route) = resume_route(url) {
+        s.navigate(route);
+        return true;
+    }
     if let Some(pairing_url) = pairing_link(url) {
         // A repeated click would only ask again and then fail on the spent one-time token.
         if s.ui.links.paired.contains(&pairing_url) {
@@ -148,7 +211,12 @@ pub fn open(s: &mut App, url: &str) -> bool {
         }
         return true;
     }
-    let Some(link) = parse(url) else { return false };
+    let Some(link) = parse(url) else {
+        let Some(page) = web_page(url) else { return false };
+        s.ui.links.web = Web::Pending(page);
+        poll_web(s);
+        return true;
+    };
     s.ui.links.pending = Some(link);
     poll(s);
     true
@@ -181,6 +249,37 @@ fn project_for(s: &App, (owner, name): &(String, String)) -> Option<String> {
         })
         .max_by_key(|p| data::ts(p, "updatedAt").unwrap_or(0))
         .map(|p| data::s(p, "id").to_owned())
+}
+
+/// `buildNewThreadLink` through `promptLinkFor`: the hosted app's `/new` link for a draft's prompt,
+/// or `None` for an empty prompt or one past `PROMPT_LINK_MAX_PROMPT_LENGTH`.
+pub fn new_thread_link(prompt: &str, repository: Option<&(String, String)>, provider: Option<&str>, model: Option<&str>) -> Option<String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT {
+        return None;
+    }
+    let mut url = s5_net::url::Url::parse(HOSTED_APP).ok()?.join("/new").ok()?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("prompt", prompt);
+        if let Some((owner, name)) = repository {
+            q.append_pair("repo", &format!("{owner}/{name}"));
+        }
+        if let Some(provider) = provider.filter(|p| !p.is_empty()) {
+            q.append_pair("provider", provider);
+            if let Some(model) = model.filter(|m| !m.is_empty()) {
+                q.append_pair("model", model);
+            }
+        }
+    }
+    Some(url.to_string())
+}
+
+/// `promptLinkRepositoryOf`: a GitHub project's `owner/name`, by its grouping key.
+pub fn repository_of(project: &serde_json::Value) -> Option<(String, String)> {
+    let identity = &project["repositoryIdentity"];
+    let key = identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str())?;
+    repository(key.strip_prefix("github.com/")?)
 }
 
 /// Lands a waiting link once the shell has loaded projects.
@@ -230,8 +329,90 @@ fn poll_pairing(s: &mut App) -> bool {
     true
 }
 
+fn web_failed(s: &mut App, page: &WebPage, description: Option<&str>) {
+    let shown = match page {
+        WebPage::Url(url) | WebPage::File(url) => url,
+    };
+    crate::shell::palette::toast(s, "Could not open the link", Some(description.unwrap_or(shown)));
+}
+
+/// `openInBrowser`: the thread showing a browser takes the page, else a new scratch thread
+/// does. Only this machine's server serves files, so a file needs it active.
+fn poll_web(s: &mut App) -> bool {
+    use crate::shell::palette::actions;
+    match std::mem::take(&mut s.ui.links.web) {
+        Web::Idle => false,
+        Web::Pending(page) if !s.state().shell_ready => {
+            s.ui.links.web = Web::Pending(page);
+            false
+        }
+        Web::Pending(page) => {
+            if matches!(page, WebPage::File(_)) && (s.ui.env.active != crate::env::LOCAL || s.ui.desktop.local_off) {
+                web_failed(s, &page, Some("HTML files open on this machine's environment."));
+            } else if crate::panel::showing_browser(s) {
+                show_web(s, page);
+            } else if actions::scratch_available(s) {
+                actions::new_without_project(s);
+                s.ui.links.web = Web::Scratch(page);
+            } else {
+                web_failed(s, &page, None);
+            }
+            true
+        }
+        Web::Scratch(page) if actions::scratch_pending(s) => {
+            s.ui.links.web = Web::Scratch(page);
+            false
+        }
+        // The scratch flow reports its own failure.
+        Web::Scratch(page) => {
+            if matches!(s.route, Route::Home { project_id: Some(_) }) {
+                show_web(s, page);
+            }
+            true
+        }
+        Web::Asset(request, path) => {
+            let Some(net) = s.src.net() else {
+                s.ui.links.web = Web::Asset(request, path);
+                return false;
+            };
+            let Some(reply) = net.take_reply(request) else {
+                s.ui.links.web = Web::Asset(request, path);
+                return false;
+            };
+            let base = net.base_url().trim_end_matches('/').to_owned();
+            match reply {
+                Ok(v) => crate::panel::open_preview(s, &format!("{base}{}", data::s(&v, "relativeUrl"))),
+                Err(e) => {
+                    let message = crate::shell::palette::error_message(&e, &path);
+                    web_failed(s, &WebPage::File(path), Some(&message));
+                }
+            }
+            true
+        }
+    }
+}
+
+/// An absolute `media-file` is served without looking up its thread (`assetsCreateUrl`), so a
+/// draft passes a fresh id.
+fn show_web(s: &mut App, page: WebPage) {
+    match page {
+        WebPage::Url(url) => crate::panel::open_preview(s, &url),
+        WebPage::File(path) => {
+            let thread = match &s.route {
+                Route::Thread(id) => id.clone(),
+                _ => s5_net::uuid(),
+            };
+            let resource = serde_json::json!({"resource":{"_tag":"media-file","threadId":thread,"path":path}});
+            match s.src.net().map(|net| net.request("assets.createUrl", resource)) {
+                Some(request) => s.ui.links.web = Web::Asset(request, path),
+                None => web_failed(s, &WebPage::File(path), None),
+            }
+        }
+    }
+}
+
 pub fn poll(s: &mut App) -> bool {
-    let paired = poll_pairing(s);
+    let paired = poll_pairing(s) | poll_web(s);
     if s.ui.links.pending.is_none() || !s.state().shell_ready {
         return paired;
     }
@@ -261,11 +442,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sign_in_return_links_resume_in_settings() {
+        assert_eq!(resume_route("s5code://app/settings/providers?instanceId=work"), Some(Route::Settings("providers".into())));
+        assert_eq!(resume_route("s5code://app/settings"), Some(Route::Settings("general".into())));
+        assert_eq!(resume_route("s5code://app/welcome#agents:env-1"), Some(Route::Home { project_id: None }));
+        for other in ["t3code://app/settings", "s5code://app/threads/1", "https://app.t3.codes/settings", "s5code://new?prompt=x"] {
+            assert_eq!(resume_route(other), None, "{other}");
+        }
+        assert!(is_app_link("s5code://app/settings/providers"));
+    }
+
+    #[test]
+    fn web_pages_follow_electrons_link_and_file_rules() {
+        assert_eq!(web_page("https://example.com/a?b=1"), Some(WebPage::Url("https://example.com/a?b=1".into())));
+        assert_eq!(web_page("http://localhost:3000"), Some(WebPage::Url("http://localhost:3000/".into())));
+        assert_eq!(web_page("file:///home/a%20b/Index.HTML"), Some(WebPage::File("/home/a b/Index.HTML".into())));
+        for page in ["file:///x/page.htm", "file:///x/page.xhtml", "file:///x/page.xhtm"] {
+            assert!(matches!(web_page(page), Some(WebPage::File(_))), "{page}");
+        }
+        for other in ["file:///x/notes.md", "file:///x.html/notes", "file:///x/html", "mailto:a@b.c", "s5code://new?prompt=x", "ftp://a/b.html"] {
+            assert_eq!(web_page(other), None, "{other}");
+        }
+    }
+
+    #[test]
     fn prompt_links_parse_like_the_web() {
         let ok = |url: &str| parse(url).expect("a prompt link").expect("valid");
         let link = ok("t3code://new?prompt=Fix%20the%20tests&repo=pingdotgg/t3code");
         assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())) });
-        assert_eq!(ok("https://app.t3.codes/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
+        assert_eq!(ok("https://app.s5code.touchtech.club/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
         assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
         assert_eq!(ok("s5code-dev://new?prompt=hi").prompt, "hi");
@@ -278,6 +483,7 @@ mod tests {
         assert_eq!(err("t3code://new?prompt=x&repo=not%20a%20repo"), "This link names a repository T3 Code cannot read.");
         assert!(err(&format!("t3code://new?prompt={}", "x".repeat(8_001))).contains("longer than 8,000"));
         assert!(parse("https://example.com/new?prompt=x").is_none());
+        assert!(parse("https://app.t3.codes/new?prompt=x").is_none(), "upstream's hosted app is not this fork's");
         assert!(parse("t3code://pair?pairingUrl=x").is_none());
         // `readPairingAppLink`.
         assert_eq!(pairing_link("s5code://pair?pairingUrl=https%3A%2F%2Fbox.example%2Fpair%23token%3Dabc").as_deref(), Some("https://box.example/pair#token=abc"));
@@ -287,5 +493,21 @@ mod tests {
         assert_eq!(pairing_link("https://pair?pairingUrl=https://box"), None);
         assert!(is_app_link("s5code://pair?pairingUrl=https://box") && is_app_link("s5code://new?prompt=hi") && !is_app_link("s5code://other"));
         assert!(parse("--check-server").is_none());
+    }
+
+    #[test]
+    fn built_links_carry_the_prompt_repo_and_model_and_parse_back() {
+        let repo = ("acme".to_string(), "app".to_string());
+        let link = new_thread_link("  Fix the tests & ship  ", Some(&repo), Some("claudeAgent"), Some("claude-haiku-5-5")).unwrap();
+        assert_eq!(link, "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests+%26+ship&repo=acme%2Fapp&provider=claudeAgent&model=claude-haiku-5-5");
+        assert_eq!(parse(&link).unwrap().unwrap(), NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo) });
+        assert_eq!(new_thread_link("hi", None, None, Some("ignored")).unwrap(), "https://app.s5code.touchtech.club/new?prompt=hi");
+        assert_eq!(new_thread_link("   ", None, None, None), None);
+        assert_eq!(new_thread_link(&"x".repeat(8_001), None, None, None), None);
+        let project = |identity: serde_json::Value| serde_json::json!({ "repositoryIdentity": identity });
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "github.com/acme/app"}))), Some(("acme".into(), "app".into())));
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "github.com/fork/app", "origin": {"canonicalKey": "github.com/acme/app"}}))), Some(("acme".into(), "app".into())));
+        assert_eq!(repository_of(&project(serde_json::json!({"canonicalKey": "gitlab.com/acme/app"}))), None);
+        assert_eq!(repository_of(&serde_json::json!({})), None);
     }
 }

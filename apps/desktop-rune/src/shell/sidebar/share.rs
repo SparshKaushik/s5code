@@ -144,3 +144,30 @@ pub fn dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
         .on_close(close)
         .build(t, overlays);
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::can_turn_into_project;
+    use crate::shell::sidebar::logic::Thread;
+    use crate::{App, data};
+
+    #[test]
+    fn only_a_worktree_thread_in_the_scratch_project_turns_into_a_project() {
+        let mut s = App::new();
+        let data::Source::Fixture(state) = &mut s.src else { unreachable!("App::new runs on fixtures") };
+        state.config = Some(json!({"scratchWorkspaceRoot": "/root/.s5code/scratch/", "environment": {"capabilities": {"threadProjectFromScratch": true}}}));
+        state.projects.push(json!({"id": "scratch", "title": "Scratch", "workspaceRoot": "/root/.s5code/scratch"}));
+        state.projects.push(json!({"id": "app", "title": "app", "workspaceRoot": "/src/app"}));
+        let thread = |project: &str, worktree: Option<&str>| Thread::from_shell(&json!({"id": "t", "projectId": project, "title": "Spike", "worktreePath": worktree}));
+        assert!(can_turn_into_project(&s, &thread("scratch", Some("/root/.s5code/worktrees/scratch/spike"))));
+        assert!(!can_turn_into_project(&s, &thread("scratch", None)), "a scratch thread without a worktree has nothing to promote");
+        assert!(!can_turn_into_project(&s, &thread("scratch", Some("  "))));
+        assert!(!can_turn_into_project(&s, &thread("app", Some("/src/app-wt"))), "a real project's thread already has one");
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.as_mut().unwrap()["environment"]["capabilities"]["threadProjectFromScratch"] = json!(false);
+        }
+        assert!(!can_turn_into_project(&s, &thread("scratch", Some("/root/.s5code/worktrees/scratch/spike"))), "an older server can't");
+    }
+}

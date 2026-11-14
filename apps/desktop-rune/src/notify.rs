@@ -94,12 +94,18 @@ struct ThreadToast {
     until: i64,
 }
 
+/// One environment's watch (`WatchedEnvironment`): each keeps its own gate, so an environment that
+/// drops leaves the others notifying.
 #[derive(Default)]
-pub struct Ui {
+struct Watched {
     gate: Gate,
     previous: HashMap<String, Observation>,
-    /// The focused shell's sequence and `env::Ui::merges` last observed: a thread on any environment notifies.
-    sequence: Option<(u64, u64)>,
+    revision: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct Ui {
+    watched: HashMap<String, Watched>,
     /// The native window is in the background (`document.hasFocus()` is false).
     pub background: bool,
     toasts: Vec<ThreadToast>,
@@ -190,33 +196,39 @@ fn observe(s: &mut App, now: i64) -> bool {
     }
     // Notifications off: forget everything, so turning them on starts from the current state.
     if mode == "off" && !in_app(s) {
-        s.ui.notify.previous.clear();
-        s.ui.notify.gate = Gate::default();
-        s.ui.notify.sequence = None;
+        s.ui.notify.watched.clear();
         return false;
     }
-    let st = s.state();
-    let sequence = (st.shell_sequence, s.ui.env.merges);
-    if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(sequence) {
-        return false;
-    }
-    let rows: Vec<_> = st.threads.iter().chain(st.archived.iter()).map(|row| (observe_row(row), row["latestRunStopRequested"] == true)).collect();
+    let keys = crate::env::keys(s);
+    s.ui.notify.watched.retain(|k, _| keys.contains(k));
     let mut presented = vec![];
-    let ui = &mut s.ui.notify;
-    ui.sequence = Some(sequence);
-    let mut next = HashMap::new();
-    for ((thread, status, observation), quiet) in rows {
-        // Subagents and side chats surface on their parent.
-        if thread.hidden {
-            continue;
+    for key in keys {
+        let mut watched = s.ui.notify.watched.remove(&key).unwrap_or_default();
+        // A reconnecting shell keeps its last observations, as the web's `reconnecting` entry does.
+        if let Some(st) = crate::env::source(s, &key).map(|src| src.state())
+            && st.shell_ready
+            && watched.revision != Some(st.shell_revision)
+        {
+            watched.revision = Some(st.shell_revision);
+            let mut next = HashMap::new();
+            // The focused environment also holds the other environments' copied rows; those are theirs.
+            for row in st.threads.iter().chain(st.archived.iter()).filter(|r| r.get(crate::env::TAG).is_none()) {
+                let (thread, status, observation) = observe_row(row);
+                // Subagents and side chats surface on their parent.
+                if thread.hidden {
+                    continue;
+                }
+                let quiet = row["latestRunStopRequested"] == true;
+                if let Some(kind) = watched.gate.observe(&thread.id, watched.previous.get(&thread.id), &observation, thread.archived, quiet) {
+                    presented.push((thread.id.clone(), thread.title.clone(), status, kind));
+                }
+                next.insert(thread.id, observation);
+            }
+            watched.gate.retain(&next.keys().cloned().collect());
+            watched.previous = next;
         }
-        if let Some(kind) = ui.gate.observe(&thread.id, ui.previous.get(&thread.id), &observation, thread.archived, quiet) {
-            presented.push((thread.id.clone(), thread.title.clone(), status, kind));
-        }
-        next.insert(thread.id, observation);
+        s.ui.notify.watched.insert(key, watched);
     }
-    ui.gate.retain(&next.keys().cloned().collect());
-    ui.previous = next;
     let changed = !presented.is_empty();
     for (id, title, status, kind) in presented {
         present(s, &id, title, status, kind, now);
@@ -289,7 +301,8 @@ pub fn overlays(s: &App, t: &T) -> Option<El> {
         return None;
     }
     let k = kit::theme(t);
-    let mut region = col().key("thread-toasts").role("region").label("Notifications").pin(None, Some(32.0 + layout::TOPBAR_H), Some(32.0), None).w(360.0).gap(12.0);
+    // The region only positions; each toast plays the popup fade (rune's default would add 300 ms).
+    let mut region = col().key("thread-toasts").transition(rune::Transition::none()).role("region").label("Notifications").pin(None, Some(32.0 + layout::TOPBAR_H), Some(32.0), None).w(360.0).gap(12.0);
     for toast in toasts.iter().rev().take(3) {
         region = region.child(toast_view(toast, t, &k));
     }
@@ -552,5 +565,90 @@ mod tests {
         assert_eq!(status, Status::Failed);
         assert_eq!(title_for(Kind::Input, status), "Thread failed");
         assert!(!o.settled);
+    }
+
+    /// One replay turn's `thread.updated` rows, as a server streamed them on `orchestration.subscribeShell`.
+    fn turn(id: &str, run: &str, done_at: &str) -> Vec<serde_json::Value> {
+        let row = |status: &str, activity: Option<&str>, done: bool| {
+            json!({
+                "id": id, "projectId": "p", "title": format!("Title {id}"), "lineage": {}, "archivedAt": null,
+                "latestRunId": run, "activeRunId": if done || status == "waiting" { json!(null) } else { json!(run) },
+                "status": status, "activityRunStatus": activity, "latestRunCompletedAt": if done { json!(done_at) } else { json!(null) },
+                "latestRunStopRequested": false, "pendingRuntimeRequest": null, "pendingBackgroundTasks": [],
+                "activeProviderThreadId": "provider-thread:1", "updatedAt": done_at,
+            })
+        };
+        vec![row("starting", Some("starting"), false), row("running", Some("running"), false), row("waiting", Some("waiting"), false), row("completed", None, true)]
+    }
+
+    #[test]
+    fn a_finished_turn_toasts_once_on_every_environment_even_when_the_focused_one_drops() {
+        let mut s = App::new();
+        s.client_settings.values.insert("inAppNotificationsEnabled".into(), json!(true));
+        let mut local = data::empty_state();
+        local.shell_ready = true;
+        s.src = data::Source::Fixture(local);
+        let titles = |s: &App| s.ui.notify.toasts.iter().map(|t| (t.title, t.description.clone())).collect::<Vec<_>>();
+        let here = |s: &mut App, row: &serde_json::Value| {
+            if let data::Source::Fixture(st) = &mut s.src {
+                st.threads.retain(|t| t["id"] != row["id"]);
+                st.threads.push(row.clone());
+                st.shell_revision += 1;
+            }
+            observe(s, 0);
+        };
+
+        for row in turn("t1", "run:1", "2026-11-11T17:56:04.759Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(titles(&s), [("Thread completed", "Title t1".to_string())]);
+        here(&mut s, &turn("t1", "run:1", "2026-11-11T17:56:04.759Z")[3]);
+        assert_eq!(s.ui.notify.toasts.len(), 1, "each completion notifies once");
+
+        // A thread on a parked environment finishing while this machine is focused.
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example".into(), bearer: String::new() });
+        let mut remote = data::empty_state();
+        remote.shell_ready = true;
+        crate::env::park(&mut s, "box", data::Source::Fixture(remote));
+        for row in turn("t2", "run:2", "2026-11-11T17:57:00.000Z") {
+            let Some(data::Source::Fixture(st)) = crate::env::source_mut(&mut s, "box") else { panic!("parked") };
+            st.threads = vec![row];
+            st.shell_revision += 1;
+            crate::env::drain(&mut s);
+            observe(&mut s, 0);
+        }
+        assert_eq!(titles(&s)[1], ("Thread completed", "Title t2".to_string()));
+
+        // The thread on screen never toasts (`present`'s active-thread check).
+        s.route = Route::Thread("t1".into());
+        for row in turn("t1", "run:3", "2026-11-11T17:58:00.000Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(s.ui.notify.toasts.len(), 2);
+
+        // In the background, toasts give way to desktop notifications, which this mode leaves off.
+        s.route = Route::Home { project_id: None };
+        window_focus(&mut s, false);
+        for row in turn("t1", "run:4", "2026-11-11T17:59:00.000Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(s.ui.notify.toasts.len(), 2);
+        assert!(s.ui.notify.pending.is_empty());
+
+        // The focused remote drops; this machine's threads still notify.
+        window_focus(&mut s, true);
+        crate::env::switch(&mut s, "box");
+        if let data::Source::Fixture(st) = &mut s.src {
+            st.shell_ready = false;
+            st.conn = s5_net::Conn::Closed("connection lost".into());
+        }
+        for row in turn("t5", "run:5", "2026-11-11T18:00:00.000Z") {
+            let Some(data::Source::Fixture(st)) = crate::env::source_mut(&mut s, crate::env::LOCAL) else { panic!("parked") };
+            st.threads.retain(|t| t["id"] != row["id"]);
+            st.threads.push(row);
+            st.shell_revision += 1;
+            observe(&mut s, 0);
+        }
+        assert_eq!(titles(&s)[2], ("Thread completed", "Title t5".to_string()));
     }
 }

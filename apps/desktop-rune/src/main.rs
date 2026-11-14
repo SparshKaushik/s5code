@@ -191,6 +191,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);
+    changed |= settings::codex_callback::poll(s);
     changed |= wizard::poll(s);
     changed |= search::poll(s);
     changed |= desktop::poll(s, tx);
@@ -237,7 +238,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 
@@ -271,6 +272,8 @@ fn main() {
     instance.serve(app.handle());
     #[cfg(unix)]
     desktop::activation::serve(app.handle());
+    #[cfg(target_os = "macos")]
+    desktop::macos::handle_open_documents(app.handle());
     #[cfg(unix)]
     desktop::signals::install(app.handle());
     app.run();

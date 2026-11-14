@@ -19,6 +19,10 @@ pub struct Select {
     current: Option<String>,
     display: Option<String>,
     leading: Option<(El, f32)>,
+    details: Vec<(String, &'static rune::Icon, String)>,
+    /// What an option reads as when its value is an id (web `SelectItem` children).
+    names: Vec<(String, String)>,
+    trailing: Vec<(String, El)>,
     disabled_options: Vec<String>,
     placeholder: String,
     label: Option<String>,
@@ -33,6 +37,10 @@ pub struct Select {
     choose: Option<Choose>,
     close: Option<Box<dyn FnOnce(Menu) -> Menu>>,
 }
+fn name_of<'a>(names: &'a [(String, String)], value: &'a str) -> &'a str {
+    names.iter().find(|(v, _)| v == value).map_or(value, |(_, n)| n.as_str())
+}
+
 impl Select {
     pub fn new<S: AsRef<str>>(key: impl Into<String>, options: &[S]) -> Self {
         Self {
@@ -41,6 +49,9 @@ impl Select {
             current: None,
             display: None,
             leading: None,
+            details: vec![],
+            names: vec![],
+            trailing: vec![],
             disabled_options: vec![],
             placeholder: "Select".into(),
             label: None,
@@ -73,6 +84,23 @@ impl Select {
     /// Content before the value, `width` wide, which auto-sized triggers make room for.
     pub fn leading(mut self, value: El, width: f32) -> Self {
         self.leading = Some((value, width));
+        self
+    }
+    /// An option's icon and description line in the popup, which then is at least 256 wide
+    /// (web `SelectItem className="min-w-64"` with a `grid gap-0.5` body).
+    pub fn option_detail(mut self, value: impl Into<String>, glyph: &'static rune::Icon, description: impl Into<String>) -> Self {
+        self.details.push((value.into(), glyph, description.into()));
+        self
+    }
+    /// Shows `value` as `name`, in the popup and the trigger; values stay distinct when names
+    /// repeat.
+    pub fn option_name(mut self, value: impl Into<String>, name: impl Into<String>) -> Self {
+        self.names.push((value.into(), name.into()));
+        self
+    }
+    /// Content at the end of an option's row, such as a badge.
+    pub fn option_trailing(mut self, value: impl Into<String>, content: El) -> Self {
+        self.trailing.push((value.into(), content));
         self
     }
     pub fn placeholder(mut self, value: impl Into<String>) -> Self {
@@ -142,7 +170,7 @@ impl Select {
         self.open = false;
         self.build(k, &mut vec![])
     }
-    pub fn build(self, k: &Kit, layer: &mut Vec<El>) -> El {
+    pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {
         let disabled = self.state == State::Disabled;
         let (height, padding, gap, radius, font) = match self.size.as_str() {
             "compact" => (28., 7., 4., 6., theme::TEXT_XS),
@@ -151,7 +179,8 @@ impl Select {
             "lg" => (36., 11., 8., 8., theme::TEXT_SM),
             _ => (32., 11., 8., 8., theme::TEXT_SM),
         };
-        let name = self.display.as_deref().or(self.current.as_deref()).unwrap_or(&self.placeholder);
+        let name = self.display.as_deref().or(self.current.as_deref().map(|c| name_of(&self.names, c))).unwrap_or(&self.placeholder).to_owned();
+        let name = name.as_str();
         let width = if self.width > 0. {
             self.width
         } else {
@@ -215,8 +244,11 @@ impl Select {
         let fit = if self.open && !disabled {
             self.options
                 .iter()
-                .map(|o| text_width(o, theme::TEXT_SM) + MENU_CHROME)
+                .map(|o| text_width(name_of(&self.names, o), theme::TEXT_SM) + MENU_CHROME)
                 .fold(width, f32::max)
+                .max(if self.details.iter().all(|(.., d)| d.is_empty()) { 0. } else { 256. })
+                // The popup sizes to unwrapped text, so a description must fit on one line.
+                .max(self.details.iter().map(|(_, _, d)| text_width(d, theme::TEXT_XS) + MENU_CHROME + 4.).fold(0., f32::max))
         } else {
             width
         };
@@ -230,10 +262,20 @@ impl Select {
                 Placement::BottomStart
             })
             .open(self.open && !disabled);
-        for option in self.options {
-            let mut item = MenuItem::new(&option)
+        let mut trailing = std::mem::take(&mut self.trailing);
+        for option in std::mem::take(&mut self.options) {
+            let mut item = MenuItem::new(name_of(&self.names, &option))
                 .option(self.current.as_ref() == Some(&option))
                 .disabled(self.disabled_options.contains(&option));
+            if let Some((_, glyph, description)) = self.details.iter().find(|(value, ..)| *value == option) {
+                item = item.icon(*glyph);
+                if !description.is_empty() {
+                    item = item.description(description.clone());
+                }
+            }
+            if let Some(at) = trailing.iter().position(|(value, _)| *value == option) {
+                item = item.trailing(trailing.swap_remove(at).1);
+            }
             if let Some(choose) = &self.choose {
                 let action = choose(&option);
                 // The shared row renderer drops this transformation for disabled rows.

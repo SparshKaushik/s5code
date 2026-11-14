@@ -102,13 +102,15 @@ pub fn thread_items(s: &App) -> Vec<Item> {
         v.fields = keywords(&["triage", "bug", "issue", "report", "broken", "debug", "help", "support"]);
         out.push(v);
     }
-    let Some(thread) = thread(s) else { return out };
-    if config(s)["threadFind"] == true {
+    let current = thread(s);
+    if current.is_some() && config(s)["threadFind"] == true {
         let mut v = item("Find in current thread", "Actions", &icons::TEXT_SEARCH, "", Action::Find);
         v.shortcut = shortcut_label(s, "chat.find");
         v.fields = keywords(&["find", "search", "messages", "plans"]);
         out.push(v);
     }
+    out.extend(prompt_link_items(s));
+    let Some(thread) = current else { return out };
     let pr = current_pull_request(thread);
     let mut copy = item(if pr.is_some() { "Copy PR link" } else { "Copy thread" }, "Actions", &icons::LINK, "", Action::CopyThread);
     copy.description = Some(pr.unwrap_or_else(|| data::s(thread, "title").to_owned()));
@@ -123,6 +125,38 @@ pub fn thread_items(s: &App) -> Vec<Item> {
         show.disabled = visible_pull_requests(thread).is_empty();
         show.fields = keywords(&["pull requests", "linked", "stack", "prs"]);
         out.push(show);
+    }
+    if crate::shell::sidebar::share::can_share_with_guest(s) {
+        let mut share = item("Share with guest", "Actions", &icons::USER_PLUS, "", Action::ShareWithGuest(data::s(thread, "id").to_owned()));
+        share.fields = keywords(&["share", "guest", "invite", "link", "teammate"]);
+        out.push(share);
+    }
+    out
+}
+
+/// `composerPromptLink`: the open draft's prompt as a new-thread link, and for a GitHub project
+/// the same link with its repository and the draft's provider and model.
+fn prompt_link_items(s: &App) -> Vec<Item> {
+    let route = s.frame_route();
+    if !matches!(route, Route::Thread(_) | Route::Home { .. }) {
+        return vec![];
+    }
+    let Some(draft) = s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(s, route)) else { return vec![] };
+    let Some(plain) = crate::links::new_thread_link(&draft.edit.text, None, None, None) else { return vec![] };
+    let mut copy = item("Copy prompt link", "Actions", &icons::LINK, "", Action::CopyPromptLink(plain));
+    copy.fields = keywords(&["copy", "share", "prompt", "link"]);
+    let mut out = vec![copy];
+    let ctx = crate::chat::composer::ctx(s);
+    if let Some(repo) = ctx.project.and_then(crate::links::repository_of) {
+        let thread_model = ctx.thread.map(|t| &t["modelSelection"]).filter(|m| !data::s(m, "instanceId").is_empty()).map(|m| (data::s(m, "instanceId").to_owned(), data::s(m, "model").to_owned()));
+        let selection = draft.model.clone().or(thread_model);
+        let provider = selection.as_ref().and_then(|(instance, _)| crate::chat::composer::provider(s, instance)).map(|p| data::s(p, "driver").to_owned());
+        let model = selection.as_ref().map(|(_, model)| model.as_str());
+        if let Some(link) = crate::links::new_thread_link(&draft.edit.text, Some(&repo), provider.as_deref(), model) {
+            let mut v = item("Copy prompt link with repo and model", "Actions", &icons::LINK, "", Action::CopyPromptLink(link));
+            v.fields = keywords(&["copy", "share", "prompt", "link", "repository", "model"]);
+            out.push(v);
+        }
     }
     out
 }
@@ -174,6 +208,11 @@ pub fn new_without_project(s: &mut App) {
     {
         s.ui.shell.palette.act.scratch = Some(Scratch::Request(net.request("projects.ensureScratch", json!({}))));
     }
+}
+
+/// A scratch thread is still starting.
+pub fn scratch_pending(s: &App) -> bool {
+    s.ui.shell.palette.act.scratch.is_some()
 }
 
 pub fn triage(s: &mut App) {

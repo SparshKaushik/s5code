@@ -585,6 +585,20 @@
               "Custom"
             ]
           ]
+        },
+        {
+          "key": "browserCustomSearchUrl",
+          "title": "Custom search URL",
+          "description": "Use %s where the search terms go.",
+          "kind": "input",
+          "options": [],
+          "width": 256,
+          "size": "sm",
+          "placeholder": "https://example.com/search?q=%s",
+          "when": [
+            "browserSearchEngine",
+            "custom"
+          ]
         }
       ]
     },
@@ -836,7 +850,7 @@
       "rows": [
         {
           "key": "worktreeSubmodules",
-          "title": "Worktree submodules",
+          "title": "Submodules",
           "description": "How new worktrees populate git submodules. Projects and their t3.json can override it.",
           "kind": "select",
           "options": [
@@ -887,7 +901,23 @@
           "options": [],
           "width": 232,
           "size": "default",
-          "placeholder": "No prefix"
+          "placeholder": "No prefix",
+          "when": [
+            "branchNamingMode",
+            "static"
+          ]
+        },
+        {
+          "key": "branchNameInstructions",
+          "title": "Branch naming instructions",
+          "description": "Appended to the naming prompt. The model returns the complete branch name; no prefix or suffix is added.",
+          "kind": "textarea",
+          "options": [],
+          "placeholder": "Use julius/ followed by the issue ID and a short description.",
+          "when": [
+            "branchNamingMode",
+            "custom"
+          ]
         }
       ]
     }

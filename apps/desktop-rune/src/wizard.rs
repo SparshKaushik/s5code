@@ -534,8 +534,16 @@ fn connect(s: &App, t: &T) -> El {
         let active = s.ui.env.active == key;
         let mut line = card(t)
             .child(icon(&icons::MONITOR, 16.).color(t.c.muted_foreground))
-            .child(text(crate::env::label(s, &key)).font(theme::SM_MEDIUM).color(t.c.foreground).grow(1.).shrink().min_w(0.).truncate())
-            .child(text(crate::env::status(s, &key)).font(theme::TEXT_XS).color(t.c.muted_foreground));
+            .child(
+                col()
+                    .grow(1.)
+                    .shrink()
+                    .min_w(0.)
+                    .gap(2.)
+                    .child(text(crate::env::label(s, &key)).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
+                    .children(crate::env::base_url(s, &key).map(|url| text(url).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate())),
+            )
+            .child(text(crate::env::short_status(s, &key)).font(theme::TEXT_XS).color(t.c.muted_foreground).help(crate::env::status(s, &key)));
         if active {
             line = line.child(text("Setting up").font(theme::XS_MEDIUM).color(t.c.success_foreground));
         } else {

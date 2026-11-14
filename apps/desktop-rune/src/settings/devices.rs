@@ -38,6 +38,7 @@ pub struct Fields {
     pub sessions: TextEdit,
     pub session_minutes: TextEdit,
     pub idle_minutes: TextEdit,
+    pub gateway: TextEdit,
 }
 
 #[derive(Default)]
@@ -365,10 +366,8 @@ pub fn poll(s: &mut App) -> bool {
                 "update-hub" => s.ui.settings.devices.update_error = Some(("hub", message)),
                 "update-agent" => s.ui.settings.devices.update_error = Some(("agent", message)),
                 "hub" | "agent" => {
-                    s.ui.settings.error = Some(format!(
-                        "Device settings not saved on all environments. Could not update {}.",
-                        environment_label(s)
-                    ));
+                    let detail = format!("Could not update {}.", environment_label(s));
+                    crate::shell::palette::toast_error(s, "Device settings not saved on all environments", Some(&detail));
                 }
                 _ => {}
             }
@@ -778,7 +777,7 @@ fn source_row(s: &App, t: &T, src: Source, disabled: bool) -> El {
         let key = src.key.clone();
         let menu_open = s.ui.settings.devices.menu.as_deref() == Some(key.as_str());
         let mut actions = row().gap(4.0).center_y();
-        if !src.key.starts_with("simlock:") {
+        {
             let edit = key.clone();
             actions = actions.child(
                 kit::Button::new("Edit")
@@ -858,7 +857,7 @@ fn remove(s: &mut App, key: &str) {
             match update_device_hosts(&hosts, &host, true, &host) {
                 Ok(next) => ("deviceHosts", next),
                 Err(message) => {
-                    s.ui.settings.error = Some(format!("Device host not removed everywhere. {message}"));
+                    crate::shell::palette::toast_error(s, "Device host not removed everywhere", Some(&message));
                     return;
                 }
             }
@@ -900,6 +899,12 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
                 menu = menu.item(MenuItem::new("EAS Simulator").on_select(|s: &mut App| {
                     close_menu(s);
                     editor::open_eas(s, None);
+                }));
+            }
+            if state.is_some_and(|st| st["supportsSimlockHosts"] == true) && server_settings(s)["simlockDeviceHostsEnabled"] == true {
+                menu = menu.item(MenuItem::new("Simlock pool (alpha)").on_select(|s: &mut App| {
+                    close_menu(s);
+                    editor::open_simlock(s, None);
                 }));
             }
             menu.overlay(&k, layers);
