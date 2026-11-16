@@ -245,7 +245,193 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-subagent-group", subagent_group),
     ("timeline-subagent-group-open", subagent_group_open),
     ("timeline-compacting", compacting),
+    ("chat-side-pane", side_pane),
+    ("timeline-work-icons", work_icons),
+    ("timeline-interrupted-meta", interrupted_meta),
+    ("timeline-attempt-nested", attempt_nested),
+    ("timeline-attempt-nested-open", attempt_nested_open),
+    ("timeline-subagent-card", subagent_card),
+    ("details-items-menu", crate::chat::details::items::scene),
+    ("details-items-empty", crate::chat::details::items::scene_empty),
+    ("details-servers", crate::chat::details::servers::scene),
+    ("details-automations", crate::chat::details::automations::scene),
+    ("dialog-native-child-work", crate::chat::details::child_work::scene),
+    ("composer-banner-feedback", composer_banner_feedback),
+    ("composer-banner-fallback", composer_banner_fallback),
+    ("composer-banner-runtime-ceiling", composer_banner_runtime_ceiling),
+    ("composer-banner-stack", composer_banner_stack),
+    ("timeline-now-banners", timeline_now_banners),
+    ("timeline-citations", citations),
+    ("timeline-media-actions", media_actions),
+    ("timeline-video-fallback", video_fallback),
 ];
+
+/// A prompt quoting the showcase's first reply twice, the first quote's popover open.
+fn citations(app: &mut App) {
+    use super::citation::{Citation, href};
+    showcase(app);
+    let Route::Thread(thread) = app.route.clone() else { return };
+    let reply = app.state().thread_views.get(&thread).and_then(|v| {
+        rows::array(&v.projection, "visibleTurnItems").iter().map(|i| &i["item"]).find(|i| crate::data::s(i, "type") == "assistant_message").cloned()
+    });
+    let message = reply.as_ref().map(|i| crate::data::s(i, "messageId").to_owned()).filter(|m| !m.is_empty()).unwrap_or_else(|| "scene-message".into());
+    let quoted = reply.as_ref().map(|i| crate::data::s(i, "text").chars().take(120).collect::<String>()).filter(|q| !q.trim().is_empty()).unwrap_or_else(|| "Group tool calls under one header.".into());
+    let cite = |comment: Option<&str>| Citation {
+        environment_id: "local".into(),
+        thread_id: thread.clone(),
+        message_id: message.clone(),
+        text: quoted.clone(),
+        comment: comment.map(str::to_owned),
+        start: 0,
+        end: quoted.encode_utf16().count() as u64,
+        prefix: String::new(),
+        suffix: String::new(),
+    };
+    let first = href(&cite(None));
+    let text = format!("Compare [Assistant quote]({first}) with the plan.\n\nAnd this: [Assistant quote]({})", href(&cite(Some("Can we keep this but shorter?"))));
+    push_visible(app, vec![serde_json::json!({"id": "scene-citations", "type": "user_message", "text": text, "createdAt": "2026-01-01T00:00:00Z", "attachments": []})]);
+    app.ui.chat.timeline.md_links.citation = Some(("md-block-scene-citations-0-0".into(), first));
+}
+/// A reply with a workspace screenshot, its media actions menu open.
+fn media_actions(app: &mut App) {
+    showcase(app);
+    let root = super::workspace_root(app).unwrap_or_else(|| "/tmp".into());
+    let src = format!("{}/docs/timeline.png", root.trim_end_matches('/'));
+    push_visible(app, vec![serde_json::json!({"id": "scene-media", "type": "assistant_message", "status": "completed",
+        "text": format!("Here is the grouped timeline:\n\n![Grouped timeline]({src})"), "createdAt": "2026-01-01T00:00:00Z"})]);
+    if let Some(key) = super::media::scene_entry(app, "Grouped timeline", &src, false) {
+        app.ui.chat.timeline.assets.media.menu = Some((key, 420.0, 360.0));
+    }
+}
+/// A Markdown video and a sent video that can't play: web's unavailable cards.
+fn video_fallback(app: &mut App) {
+    showcase(app);
+    let src = "https://example.com/media/demo-recording.mp4";
+    push_visible(app, vec![
+        serde_json::json!({"id": "scene-video-sent", "type": "user_message", "text": "Here's the bug on video.", "createdAt": "2026-01-01T00:00:00Z",
+            "attachments": [{"type": "video", "id": "scene-video-attachment", "name": "bug.mov", "mimeType": "video/quicktime", "sizeBytes": 2_400_000}]}),
+        serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
+            "text": format!("Recorded the fix:\n\n![Demo recording]({src})"), "createdAt": "2026-01-01T00:00:01Z"}),
+    ]);
+    app.ui.chat.timeline.assets.failed.insert("scene-video-attachment".into());
+    super::media::scene_entry(app, "Demo recording", src, true);
+}
+
+/// A turn item of `run` that ended at `end` seconds past `at(0)`, with `fields` merged in.
+fn scene_item(run: &str, at: &dyn Fn(u32) -> String, id: &str, kind: &str, end: u32, fields: serde_json::Value) -> serde_json::Value {
+    let mut item = serde_json::json!({"id": id, "type": kind, "runId": run, "status": "completed", "createdAt": at(end.saturating_sub(1)),
+        "completedAt": at(end), "updatedAt": at(end)});
+    for (k, v) in fields.as_object().into_iter().flatten() {
+        item[k] = v.clone();
+    }
+    item
+}
+/// A finished turn with its fold and tool group open: each call behind its own icon and title,
+/// read paths named from the workspace folder, and one thought open under "Thought".
+fn work_icons(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let root = super::workspace_root(app).unwrap_or_else(|| "/repo".to_owned());
+    let at = |s: u32| format!("2026-12-06T00:00:{s:02}.000Z");
+    let run = "scene-icons";
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 994, "status": "completed", "startedAt": at(0), "completedAt": at(30)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| scene_item(run, &at, id, kind, end, fields);
+    push_visible(app, vec![
+        item("scene-icons-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "Why does the upload retry twice?", "attachments": []})),
+        item("scene-icons-think", "reasoning", 2, json!({"text": "**Tracing the retry**\n\nThe client wraps `send` in `retry()` and the transport retries too."})),
+        item("scene-icons-read", "dynamic_tool", 4, json!({"toolName": "Read", "input": {"file_path": format!("{root}/src/upload/client.rs")}})),
+        item("scene-icons-grep", "dynamic_tool", 5, json!({"toolName": "Grep", "input": {"pattern": "fn retry", "path": format!("{root}/src")}})),
+        item("scene-icons-search", "file_search", 6, json!({"title": "Searched for retry(", "pattern": "retry("})),
+        item("scene-icons-web", "web_search", 8, json!({"title": "Searched the web for exponential backoff jitter", "query": "exponential backoff jitter"})),
+        item("scene-icons-mcp", "dynamic_tool", 9, json!({"toolName": "mcp__t3__t3_thread_read", "title": "t3_thread_read", "input": {"threadId": "thread:scene"}})),
+        item("scene-icons-thought", "reasoning", 11, json!({"text": "The transport's retry is the one to drop."})),
+        item("scene-icons-edit", "file_change", 20, json!({"changes": [{"path": format!("{root}/src/upload/transport.rs")}], "fileName": format!("{root}/src/upload/transport.rs")})),
+        item("scene-icons-test", "command_execution", 28, json!({"input": "vp test run src/upload", "exitCode": 0})),
+        item("scene-icons-reply", "assistant_message", 30, json!({"text": "The transport retried on top of the client; I removed the transport's retry."})),
+    ]);
+    app.ui.chat.timeline.expanded.extend(["work:scene-icons", "tools:scene-icons-think", "scene-icons-thought"].map(str::to_owned));
+}
+/// A turn stopped after its reply while its tools still ran: the reply's status, copy, fork and
+/// time sit below that work instead of under the reply.
+fn interrupted_meta(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-07T00:00:{s:02}.000Z");
+    let run = "scene-stopped";
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 993, "status": "interrupted", "startedAt": at(0), "completedAt": at(20)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| scene_item(run, &at, id, kind, end, fields);
+    push_visible(app, vec![
+        item("scene-stopped-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "Find out why the billing test is flaky.", "attachments": []})),
+        item("scene-stopped-reply", "assistant_message", 6, json!({"text": "It races the clock in `expires_at`. I'll rerun it to confirm."})),
+        item("scene-stopped-read", "dynamic_tool", 8, json!({"toolName": "Read", "input": {"path": "src/billing/expiry.rs"}})),
+        item("scene-stopped-test", "command_execution", 18, json!({"input": "vp test run src/billing --repeat 20", "status": "interrupted"})),
+        item("scene-stopped-result", "run_interrupt_result", 20, json!({"message": "Stopped by the user."})),
+    ]);
+}
+/// A finished turn a steer cut off: its first attempt's work nests under "Superseded attempt"
+/// inside the open "Worked for" fold.
+fn attempt_nested(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-08T00:00:{s:02}.000Z");
+    let (run, old, new) = ("scene-nested-run", "scene-nested-old-root", "scene-nested-new-root");
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 992, "status": "completed", "rootNodeId": old, "startedAt": at(0), "completedAt": at(40)})]);
+    push_items(app, "attempts", vec![
+        json!({"id": "scene-nested-1", "runId": run, "attemptOrdinal": 1, "rootNodeId": old, "reason": "initial", "status": "superseded", "completedAt": at(14)}),
+        json!({"id": "scene-nested-2", "runId": run, "attemptOrdinal": 2, "rootNodeId": new, "reason": "steering_restart", "status": "completed", "completedAt": at(40)}),
+    ]);
+    let item = |id: &str, node: &str, kind: &str, end: u32, fields: serde_json::Value| {
+        let mut item = scene_item(run, &at, id, kind, end, fields);
+        item["nodeId"] = json!(node);
+        item
+    };
+    push_visible(app, vec![
+        item("scene-nested-prompt", old, "user_message", 0, json!({"inputIntent": "turn_start", "attachments": [], "text": "Rename the billing tables."})),
+        item("scene-nested-think", old, "reasoning", 2, json!({"text": "**Planning the rename**"})),
+        item("scene-nested-search", old, "command_execution", 4, json!({"input": "rg -l billing_ src/", "exitCode": 0})),
+        item("scene-nested-read", old, "dynamic_tool", 6, json!({"toolName": "Read", "input": {"path": "src/db/schema.rs"}})),
+        item("scene-nested-cut", old, "assistant_message", 9, json!({"status": "interrupted", "text": "I'll start with the schema, then"})),
+        item("scene-nested-steer", new, "user_message", 12, json!({"inputIntent": "steer", "attachments": [], "text": "Keep the old table names as views."})),
+        item("scene-nested-test", new, "command_execution", 30, json!({"input": "vp test run src/db", "exitCode": 0})),
+        item("scene-nested-reply", new, "assistant_message", 40, json!({"text": "Renamed the tables and kept the old names as views."})),
+    ]);
+    app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
+}
+fn attempt_nested_open(app: &mut App) {
+    attempt_nested(app);
+    app.ui.chat.timeline.expanded.insert("attempt-fold:scene-nested-1".into());
+}
+/// Delegated tasks' notices as their tasks' cards: finished, failed and stopped with the time
+/// each came, and one whose task this thread doesn't know, as a plain row.
+fn subagent_card(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let child = other_thread(app);
+    let at = |s: u32| format!("2026-12-09T09:41:{s:02}.000Z");
+    let task = |id: &str, driver: &str, status: &str, title: &str, done: u32, fields: serde_json::Value| {
+        let mut agent = json!({"id": id, "childThreadId": child, "driver": driver, "status": status, "title": title,
+            "startedAt": at(0), "completedAt": at(done), "updatedAt": at(done), "result": null});
+        for (k, v) in fields.as_object().into_iter().flatten() {
+            agent[k] = v.clone();
+        }
+        agent
+    };
+    push_items(app, "subagents", vec![
+        task("scene-task-review", "codex", "completed", "Review the schema diff", 40, json!({"result": "No blocking issues; two naming nits in the views."})),
+        task("scene-task-tests", "claudeAgent", "failed", "Run the migration tests", 50, json!({"result": "3 tests failed in billing_migrations."})),
+        task("scene-task-docs", "opencode", "cancelled", "Check the docs", 30, json!({"progress": "Reading docs/billing.md"})),
+    ]);
+    let notice = |id: &str, outcome: &str, source: serde_json::Value, end: u32, summary: &str| {
+        json!({"id": id, "type": "notification", "status": "completed", "outcome": outcome, "source": source, "summary": summary, "createdAt": at(end)})
+    };
+    let delegated = |task: &str| json!({"kind": "delegated_task", "childThreadId": child, "taskIds": [task]});
+    push_visible(app, vec![
+        notice("scene-notice-review", "completed", delegated("scene-task-review"), 41, "Review the schema diff finished"),
+        notice("scene-notice-tests", "failed", delegated("scene-task-tests"), 51, "Run the migration tests failed"),
+        notice("scene-notice-docs", "cancelled", delegated("scene-task-docs"), 31, "Check the docs stopped"),
+        notice("scene-notice-unknown", "completed", json!({"kind": "subagent", "childThreadId": "scene-unknown-child"}), 55, "Audit finished"),
+    ]);
+}
 
 /// Appends `value` to the route thread's projection `list`, creating the list when missing.
 fn push_items(app: &mut App, list: &str, values: Vec<serde_json::Value>) {
@@ -791,6 +977,21 @@ fn thread_now_stop(app: &mut App) {
         config["environment"]["capabilities"]["threadForceStop"] = true.into();
     }
 }
+/// A side chat open beside the showcase thread it forked from (SideChatPane).
+fn side_pane(app: &mut App) {
+    showcase(app);
+    let Route::Thread(parent) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
+        state.threads.push(serde_json::json!({"id": "scene-side", "title": "Why does the retry back off?", "projectId": project, "status": "idle",
+            "lineage": {"parentThreadId": parent, "sideChat": true}}));
+        if let Some(view) = state.thread_views.get(&parent) {
+            let projection = view.projection.clone();
+            state.thread_views.insert("scene-side".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
+        }
+    }
+    app.ui.chat.side.open.insert(parent, "scene-side".into());
+}
 /// A subagent's header: its parent in the breadcrumb, and the linked environment it came from.
 fn header_subagent(app: &mut App) {
     showcase(app);
@@ -817,4 +1018,92 @@ fn draft_hero_empty(app: &mut App) {
         state.projects.clear();
     }
     draft_hero(app);
+}
+
+fn patch_config(app: &mut App, f: impl FnOnce(&mut serde_json::Value)) {
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(config) = state.config.as_mut()
+    {
+        f(config);
+    }
+}
+fn feedback_sent(app: &mut App) {
+    use crate::chat::composer::banners::FeedbackStatus;
+    let Route::Thread(id) = app.route.clone() else { return };
+    app.ui.chat.banners.feedback.insert(id, vec![("scene-feedback-sent".into(), FeedbackStatus::Sent("019a4c1e-7f2b-7c41-9b3e-5d2a8f6c1e90".into()))]);
+}
+fn managed_ceiling(app: &mut App) {
+    patch_shell(app, serde_json::json!({"runtimeMode": "full-access"}));
+    patch_config(app, |c| c["managedPolicy"] = serde_json::json!({"organization": "Example Corp", "lockedSettings": [], "limits": {"maxRuntimeMode": "auto-accept-edits"}}));
+}
+/// Codex feedback sent, and one that could not be.
+fn composer_banner_feedback(app: &mut App) {
+    use crate::chat::composer::banners::FeedbackStatus;
+    showcase(app);
+    feedback_sent(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    let failed = ("scene-feedback-failed".into(), FeedbackStatus::Failed("The Codex session has no logs to upload yet.".into()));
+    app.ui.chat.banners.feedback.entry(id).or_default().push(failed);
+}
+/// The new-thread draft on the fallback model while the default is out of usage.
+fn composer_banner_fallback(app: &mut App) {
+    draft_hero(app);
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:00Z").unwrap_or(app.now_ms);
+    let default = serde_json::json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"});
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        for project in &mut state.projects {
+            project["defaultModelSelection"] = default.clone();
+        }
+    }
+    patch_config(app, |c| {
+        c["settings"]["defaultModelSelection"] = default.clone();
+        c["settings"]["fallbackModelSelection"] = serde_json::json!({"instanceId": "opencode", "model": "opencode/big-pickle"});
+        for p in c["providers"].as_array_mut().into_iter().flatten() {
+            match crate::data::s(p, "instanceId").to_owned().as_str() {
+                "claudeAgent" => p["usageLimits"] = serde_json::json!({"checkedAt": "2026-03-10T11:59:00Z",
+                    "windows": [{"id": "five_hour", "label": "5-hour", "usedPercent": 100, "resetsAt": "2026-03-10T15:30:00Z"}]}),
+                "opencode" => p["usageLimits"] = serde_json::json!({"checkedAt": "2026-03-10T11:59:00Z", "windows": []}),
+                _ => {}
+            }
+        }
+    });
+}
+/// A thread whose permissions sit above the organization's ceiling.
+fn composer_banner_runtime_ceiling(app: &mut App) {
+    showcase(app);
+    managed_ceiling(app);
+}
+/// Several notices at once: the failed server update first, then feedback, the usage-limit
+/// recovery and the permissions ceiling.
+fn composer_banner_stack(app: &mut App) {
+    usage_limit_banner(app);
+    feedback_sent(app);
+    managed_ceiling(app);
+    use crate::chat::server_update::{Stage, Status, show};
+    let message = "Server update failed: The new server did not start.".to_owned();
+    show(app, Status::Failed { stage: Stage::Downloading, from: "0.0.20".into(), target: "0.0.21".into(), message });
+}
+/// The end of the timeline: two children waiting (each name opens it), two subagents with the
+/// newest progress shown, and the goal.
+fn timeline_now_banners(app: &mut App) {
+    showcase(app);
+    let Route::Thread(parent) = app.route.clone() else { return };
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:00Z").unwrap_or(app.now_ms);
+    patch_shell(app, serde_json::json!({"status": "idle", "activityRunStatus": null, "activeRunId": null,
+        "pendingBackgroundTasks": [
+            {"taskId": "scene-sub-audit", "kind": "subagent", "description": "Audit the billing schema"},
+            {"taskId": "scene-sub-migrate", "kind": "subagent", "description": "Draft the migration"}],
+        "goal": {"status": "active", "objective": "Migrate billing to the new schema", "tokensUsed": 48_200}}));
+    push_items(app, "turnItems", vec![
+        serde_json::json!({"id": "scene-sub-audit", "type": "subagent", "progress": "Reading migrations/0042_billing.sql", "startedAt": "2026-03-10T11:50:00Z", "updatedAt": "2026-03-10T11:58:00Z"}),
+        serde_json::json!({"id": "scene-sub-migrate", "type": "subagent", "progress": "Writing the backfill  for invoices", "startedAt": "2026-03-10T11:52:00Z", "updatedAt": "2026-03-10T11:59:30Z"}),
+    ]);
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
+        state.threads.push(serde_json::json!({"id": "scene-child-approval", "title": "Check the invoice totals", "projectId": project,
+            "status": "running", "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"},
+            "pendingRuntimeRequest": {"kind": "command"}}));
+        state.threads.push(serde_json::json!({"id": "scene-side-chat", "title": "Naming ideas", "projectId": project,
+            "status": "idle", "lineage": {"parentThreadId": parent, "sideChat": true}, "pendingRuntimeRequest": {"kind": "user_input"}}));
+    }
 }

@@ -1,6 +1,7 @@
 //! Links in timeline Markdown (ChatMarkdown, markdownLinks.ts, threadLinks.ts): file paths read
 //! as chips and open in the Files panel (or the editor, outside the workspace), thread links read
-//! as chips and open their thread, and everything else opens in the browser.
+//! as chips and open their thread, assistant quotes read as quote chips that show their source
+//! (AssistantCitationChip), and everything else opens in the browser.
 use crate::data::s;
 use crate::theme::{AlphaMul, T};
 use crate::{App, Route, icons};
@@ -12,12 +13,15 @@ use std::collections::HashMap;
 pub struct State {
     /// `shell.openInEditor` requests and the path each opens.
     pending: Vec<(u64, String)>,
+    /// The quote chip whose popover is open: the block it sits in, and its link.
+    pub citation: Option<(String, String)>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Target {
     File { path: String, line: Option<usize> },
     Thread(String),
+    Citation,
     Web,
 }
 
@@ -37,6 +41,9 @@ const POSIX_ROOTS: [&str; 24] = [
 ];
 
 pub fn classify(href: &str) -> Target {
+    if super::citation::parse_href(href).is_some() {
+        return Target::Citation;
+    }
     if let Some(id) = thread_id(href) {
         return Target::Thread(id);
     }
@@ -169,6 +176,11 @@ pub fn open(app: &mut App, url: &str, tx: &mut Tx) {
             }
         }
         Target::File { path, line } => open_file(app, &path, line),
+        Target::Citation => {
+            if let Some(citation) = super::citation::parse_href(url) {
+                super::citation::go_to_source(app, &citation, tx);
+            }
+        }
         // Web's `resolveLinkTarget`: Settings may send links to the preview; Cmd or Ctrl still opens the system browser.
         Target::Web => {
             let mods = tx.mods();
@@ -246,8 +258,8 @@ pub fn look(t: &T) -> impl Fn(&str) -> Option<(Span, LinkPaint)> + 'static {
 /// A Markdown block holding a file or thread link, drawn as our own text when it is a plain
 /// paragraph or a flat list: each such link becomes a chip (MarkdownFileLink,
 /// MarkdownThreadLink), an icon and padded label that wrap as one. Anything richer stays with
-/// rune_kit's Markdown.
-pub fn inline_block(app: &App, block: &str, t: &T, ink: rune::Color, font: TextStyle, parents: &HashMap<String, String>) -> Option<El> {
+/// rune_kit's Markdown. `key` names the block, which a quote chip's popover anchors to.
+pub fn inline_block(app: &App, block: &str, key: String, t: &T, ink: rune::Color, font: TextStyle, parents: &HashMap<String, String>) -> Option<El> {
     if !links(block).iter().any(|url| classify(url) != Target::Web) {
         return None;
     }
@@ -260,12 +272,12 @@ pub fn inline_block(app: &App, block: &str, t: &T, ink: rune::Color, font: TextS
                 row()
                     .w_full()
                     .child(text(marker).font(font).color(t.c.muted_foreground).w(20.0))
-                    .child(col().grow(1.0).min_w(0.0).child(inline(app, rest, t, ink, font, parents))),
+                    .child(col().grow(1.0).min_w(0.0).child(inline(app, rest, &key, t, ink, font, parents))),
             );
         }
-        return Some(list);
+        return Some(list.key(key));
     }
-    plain(&lines).then(|| inline(app, block, t, ink, font, parents))
+    plain(&lines).then(|| col().key(key.clone()).w_full().child(inline(app, block, &key, t, ink, font, parents)))
 }
 
 /// Every link destination in `src`.
@@ -338,7 +350,7 @@ fn file_label(path: &str, line: Option<usize>, parents: &HashMap<String, String>
     [Some(name), parents.get(&path).cloned(), line.map(|n| format!("L{n}"))].into_iter().flatten().collect::<Vec<_>>().join(" · ")
 }
 
-fn inline(app: &App, src: &str, t: &T, ink: rune::Color, font: TextStyle, parents: &HashMap<String, String>) -> El {
+fn inline(app: &App, src: &str, key: &str, t: &T, ink: rune::Color, font: TextStyle, parents: &HashMap<String, String>) -> El {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let link_ink = t.c.info_foreground;
     let mut shown = String::new();
@@ -383,6 +395,16 @@ fn inline(app: &App, src: &str, t: &T, ink: rune::Color, font: TextStyle, parent
                         continue;
                     }
                     Target::File { path, line } => ("mention", file_label(path, *line, parents)),
+                    Target::Citation => {
+                        let label = super::citation::parse_href(&url).map(|c| super::citation::label(&c)).unwrap_or_default();
+                        spans.retain(|s| (s.start as usize) < start);
+                        shown.truncate(start);
+                        shown.push_str(&label);
+                        let accent = super::citation::accent();
+                        pills.push((start..shown.len(), PillStyle::new().bg(rune::Color::TRANSPARENT).fg(accent).icon(&icons::QUOTE)));
+                        links.push(Link::new(start..shown.len(), url).role("button").hover(LinkPaint::new().underline(accent)));
+                        continue;
+                    }
                     Target::Thread(id) => {
                         let written = shown[start..].trim().to_owned();
                         let title = app.state().threads.iter().find(|r| s(r, "id") == id.as_str()).map(|r| s(r, "title").to_owned()).filter(|t| !t.is_empty());
@@ -409,11 +431,14 @@ fn inline(app: &App, src: &str, t: &T, ink: rune::Color, font: TextStyle, parent
     for link in links {
         out = out.link(link);
     }
-    out.on_link(open_link)
-}
-
-fn open_link(app: &mut App, url: &str, tx: &mut Tx) {
-    open(app, url, tx);
+    let anchor = key.to_owned();
+    out.on_link(move |app: &mut App, url: &str, tx: &mut Tx| {
+        if classify(url) == Target::Citation {
+            app.ui.chat.timeline.md_links.citation = Some((anchor.clone(), url.to_owned()));
+        } else {
+            self::open(app, url, tx);
+        }
+    })
 }
 
 pub fn help(url: &str) -> Option<String> {
@@ -421,7 +446,7 @@ pub fn help(url: &str) -> Option<String> {
         Target::File { path, line: Some(n) } => Some(format!("Open {path}:{n}")),
         Target::File { path, line: None } => Some(format!("Open {path}")),
         Target::Thread(_) => Some("Open thread".into()),
-        Target::Web => None,
+        Target::Citation | Target::Web => None,
     }
 }
 
@@ -465,6 +490,9 @@ mod tests {
         assert_eq!(classify("https://app.s5code.touchtech.club/threads/env-1/thread%3Aabc"), Target::Thread("thread:abc".into()));
         assert_eq!(classify("https://app.t3.codes/threads/env/t1"), Target::Thread("t1".into()));
         assert_eq!(classify("t3-thread://v2/only-env"), Target::Web);
+        let quote = "t3-citation://v1/env/thread-1/msg-1?text=Hello&start=0&end=5&prefix=&suffix=";
+        assert_eq!(classify(quote), Target::Citation);
+        assert_eq!(classify(&quote.replace("end=5", "end=0")), Target::Web);
     }
 
     #[test]

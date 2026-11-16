@@ -47,18 +47,98 @@ fn live<'a>(app: &'a App, item: &'a Value) -> &'a Value {
 }
 
 pub fn view(app: &App, item: &Value, t: &T) -> El {
-    let agent = live(app, item);
-    let state = if s(agent, "status").is_empty() { s(item, "status") } else { s(agent, "status") };
-    let (label, dot) = status(state, t);
-    let settled = matches!(state, "completed" | "failed" | "cancelled" | "interrupted");
+    link(app, live(app, item), item, s(item, "id"), s(item, "childThreadId"), None, t)
+}
+
+/// What a subagent's notice reports in place of the task's live status: the outcome's status
+/// (none for an update), its word, and the notice's time.
+struct Event {
+    status: Option<&'static str>,
+    label: &'static str,
+    time: String,
+}
+
+/// NOTIFICATION_OUTCOME_STATUS and NOTIFICATION_OUTCOME_LABEL; None once the task has run
+/// again since the notice (subagentResumedSince), when its live status says more.
+fn outcome(outcome: &str, agent: &Value, notified: Option<i64>) -> Option<(Option<&'static str>, &'static str)> {
+    let (status, label) = match outcome {
+        "completed" => (Some("completed"), "Finished"),
+        "failed" => (Some("failed"), "Failed"),
+        "cancelled" => (Some("cancelled"), "Stopped"),
+        "updated" => (None, "Updated"),
+        _ => (None, "Finished"),
+    };
+    let resumed = status.is_some()
+        && (matches!(s(agent, "status"), "pending" | "running" | "waiting")
+            || ts(agent, "startedAt").zip(notified).is_some_and(|(started, at)| started > at));
+    (!resumed).then_some((status, label))
+}
+
+/// The task a subagent's or delegated task's notice reports on: by its task ids, else by the
+/// child thread (SubagentNotificationLink).
+fn notified_task<'a>(subagents: &'a [Value], source: &Value) -> Option<&'a Value> {
+    let child = s(source, "childThreadId");
+    let tasks = source["taskIds"].as_array().filter(|_| s(source, "kind") == "delegated_task");
+    subagents.iter().find(|agent| match tasks {
+        Some(ids) => ids.iter().any(|id| id.as_str() == Some(s(agent, "id"))),
+        None => !child.is_empty() && s(agent, "childThreadId") == child,
+    })
+}
+
+/// "9:00 AM", or "09:00" under the 24-hour setting (formatShortTimestamp).
+fn short_time(app: &App, at: i64) -> String {
+    let minutes = crate::data::Zone::Local.wall(at).rem_euclid(86_400_000) / 60_000;
+    let (h, m) = (minutes / 60, minutes % 60);
+    if super::actions::hour12(app) {
+        format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    } else {
+        format!("{h:02}:{m:02}")
+    }
+}
+
+/// SubagentNotificationLink: a subagent's or delegated task's notice as that task's card,
+/// naming the outcome and when it came; None while the task isn't in the projection.
+pub fn notification(app: &App, item: &Value, t: &T) -> Option<El> {
+    let source = &item["source"];
+    let child = s(source, "childThreadId");
+    if child.is_empty() || !matches!(s(source, "kind"), "subagent" | "delegated_task") {
+        return None;
+    }
+    let crate::Route::Thread(thread) = app.frame_route() else { return None };
+    let projection = &app.state().thread_views.get(thread)?.projection;
+    let agent = notified_task(rows::array(projection, "subagents"), source)?;
+    let notified = ts(item, "createdAt");
+    let event = outcome(s(item, "outcome"), agent, notified).map(|(status, label)| Event {
+        status,
+        label,
+        time: notified.map(|at| short_time(app, at)).unwrap_or_default(),
+    });
+    Some(link(app, agent, agent, s(item, "id"), child, event, t))
+}
+
+/// SubagentTimelineLink: `agent` is the task's live record, `item` what the timeline holds,
+/// `id` the timeline item it shows for.
+fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Option<Event>, t: &T) -> El {
+    let live_state = if s(agent, "status").is_empty() { s(item, "status") } else { s(agent, "status") };
+    let state = match &event {
+        Some(event) => event.status,
+        None => Some(live_state),
+    };
+    let label = event.as_ref().map_or_else(|| status(live_state, t).0, |e| e.label);
+    let settled = matches!(state.unwrap_or(live_state), "completed" | "failed" | "cancelled" | "interrupted");
     let pick = |k: &str| [agent, item].into_iter().map(|v| s(v, k).trim()).find(|v| !v.is_empty()).unwrap_or("");
     let (result, progress) = (pick("result"), pick("progress"));
     let raw = if settled { if result.is_empty() { progress } else { result } } else if progress.is_empty() { result } else { progress };
     let detail = (!raw.is_empty() && !raw.to_ascii_lowercase().starts_with("child task ended with status")).then(|| raw.replace('`', "").lines().next().unwrap_or("").to_owned());
-    let failed = state == "failed";
-    let started = ts(agent, "startedAt").or_else(|| ts(item, "startedAt"));
-    let ended = ts(agent, "completedAt").or_else(|| ts(item, "completedAt"));
-    let elapsed = started.map(|from| rows::duration(from, if settled { ended.unwrap_or(from) } else { app.now_ms })).unwrap_or_default();
+    let failed = state == Some("failed");
+    let time = match &event {
+        Some(event) => event.time.clone(),
+        None => {
+            let started = ts(agent, "startedAt").or_else(|| ts(item, "startedAt"));
+            let ended = ts(agent, "completedAt").or_else(|| ts(item, "completedAt"));
+            started.map(|from| rows::duration(from, if settled { ended.unwrap_or(from) } else { app.now_ms })).unwrap_or_default()
+        }
+    };
     let driver = if s(agent, "driver").is_empty() { s(item, "driver") } else { s(agent, "driver") };
     let avatar = el()
         .size(24.0, 24.0)
@@ -66,11 +146,11 @@ pub fn view(app: &App, item: &Value, t: &T) -> El {
         .radius(radius::FULL)
         .fill(t.c.muted.alpha_mul(0.6))
         .child(crate::chat::composer::provider_icon(t, driver, 14.0))
-        .child(el().absolute(17.0, 17.0).size(7.0, 7.0).radius(radius::FULL).fill(dot).border(1.0, t.c.background));
+        .children(state.map(|state| el().absolute(17.0, 17.0).size(7.0, 7.0).radius(radius::FULL).fill(status(state, t).1).border(1.0, t.c.background)));
     let tone = if failed { t.c.destructive } else { t.c.muted_foreground };
     let name = title(if s(item, "title").is_empty() { "Subagent" } else { s(item, "title") });
     let mut body = row()
-        .key(format!("subagent-{}", s(item, "id")))
+        .key(format!("subagent-{id}"))
         .w_full()
         .min_w(0.0)
         .px(8.0)
@@ -88,12 +168,12 @@ pub fn view(app: &App, item: &Value, t: &T) -> El {
                 .child(text(name.clone()).font(theme::weight(theme::TEXT_XS, 500.0)).color(t.c.foreground).truncate())
                 .child(text(detail.clone().unwrap_or_else(|| label.to_owned())).font(theme::TEXT_2XS).color(tone).truncate()),
         );
-    if detail.is_some() && state != "completed" {
+    if detail.is_some() && (event.is_some() || state != Some("completed")) {
         body = body.child(text(label).font(theme::TEXT_XS).color(tone));
     }
-    body = body.child(text(elapsed).font(theme::TEXT_XS).color(t.c.muted_foreground));
-    let child = s(item, "childThreadId").to_owned();
+    body = body.child(text(time).font(theme::TEXT_XS).color(t.c.muted_foreground));
     if !child.is_empty() {
+        let child = child.to_owned();
         body = body
             .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)))
             .role("button")
@@ -238,7 +318,28 @@ pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_summary, title};
+    use super::{notified_task, outcome, status_summary, title};
+    use serde_json::json;
+
+    #[test]
+    fn notices_report_their_task_until_it_runs_again() {
+        let agents = json!([
+            {"id":"t1","childThreadId":"c","status":"completed","startedAt":"1970-01-01T00:00:10Z"},
+            {"id":"t2","childThreadId":"c","status":"failed","startedAt":"1970-01-01T00:00:20Z"}]);
+        let list = agents.as_array().map(Vec::as_slice).unwrap_or_default();
+        let by_child = json!({"kind":"subagent","childThreadId":"c"});
+        let by_task = json!({"kind":"delegated_task","childThreadId":"c","taskIds":["t2"]});
+        assert_eq!(notified_task(list, &by_child).map(|a| a["id"].clone()), Some(json!("t1")));
+        assert_eq!(notified_task(list, &by_task).map(|a| a["id"].clone()), Some(json!("t2")));
+        assert!(notified_task(list, &json!({"kind":"subagent","childThreadId":"other"})).is_none());
+        let agent = &list[0];
+        assert_eq!(outcome("completed", agent, Some(15_000)), Some((Some("completed"), "Finished")));
+        assert_eq!(outcome("cancelled", agent, Some(15_000)), Some((Some("cancelled"), "Stopped")));
+        // Started again after the notice: the live card tells more.
+        assert_eq!(outcome("failed", agent, Some(5_000)), None);
+        assert_eq!(outcome("updated", agent, Some(5_000)), Some((None, "Updated")));
+        assert_eq!(outcome("completed", &json!({"status":"running"}), None), None);
+    }
 
     #[test]
     fn subagent_groups_count_by_status() {

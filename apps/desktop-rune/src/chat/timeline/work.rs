@@ -9,7 +9,7 @@ use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
 use rune::{El, ScrollSpec, col, el, icon, row, text};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// `ToolGroupAction`, for the kinds this client sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,10 +189,7 @@ pub fn entry_icon(item: &Value) -> &'static rune::Icon {
 pub fn thought_line(markdown: &str) -> String {
     let first = markdown.trim_start().lines().next().unwrap_or("").trim_end();
     let heading = first.strip_prefix("**").and_then(|r| r.strip_suffix("**")).filter(|h| !h.is_empty() && !h.contains('*'));
-    let source = heading.unwrap_or(markdown);
-    let joined = source.lines().map(|line| strip_marker(line.trim_start()).unwrap_or(line)).collect::<Vec<_>>().join(" ");
-    let plain = strip_links(&joined).replace("**", "").replace("~~", "").replace('`', "");
-    let text = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = thought_preview(heading.unwrap_or(markdown));
     if heading.is_some() {
         return text;
     }
@@ -210,6 +207,44 @@ pub fn thought_line(markdown: &str) -> String {
         }
     }
     text
+}
+
+/// remarkThoughtPreview: a reasoning block's Markdown flattened to one line of plain text.
+pub fn thought_preview(markdown: &str) -> String {
+    let joined = markdown.lines().map(|line| strip_marker(line.trim_start()).unwrap_or(line)).collect::<Vec<_>>().join(" ");
+    let plain = strip_links(&joined).replace("**", "").replace("~~", "").replace('`', "");
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What an entry's own row says (WorkEntryLogRow previewText): reasoning its flattened text,
+/// or "Thinking"/"Thought" while open or empty; a command its line; an edit its paths; the
+/// rest `workEntryDisplayLabel`.
+pub fn entry_title(item: &Value, root: Option<&str>, expanded: bool) -> String {
+    match s(item, "type") {
+        "reasoning" => {
+            let preview = if expanded { String::new() } else { thought_preview(s(item, "text")) };
+            match preview.is_empty() {
+                true if active(item) => "Thinking".into(),
+                true => "Thought".into(),
+                false => preview,
+            }
+        }
+        "todo_list" => rows::todo_label(item),
+        "command_execution" if !s(item, "input").trim().is_empty() => s(item, "input").trim().to_owned(),
+        "file_change" => {
+            let mut paths: Vec<&str> = array(item, "changes").iter().filter_map(|c| c["path"].as_str()).filter(|p| !p.is_empty()).collect();
+            if paths.is_empty() {
+                paths.extend(item["fileName"].as_str().filter(|p| !p.is_empty()));
+            }
+            paths.dedup();
+            match paths.split_first() {
+                Some((first, [])) => rows::workspace_path(first, root),
+                Some((first, rest)) => format!("{} +{} more", rows::workspace_path(first, root), rest.len()),
+                None => rows::entry_label(item, root),
+            }
+        }
+        _ => rows::entry_label(item, root),
+    }
 }
 
 /// A heading, bullet or numbered-list marker and the space after it.
@@ -405,6 +440,40 @@ pub fn group<'a>(items: &[&'a Value]) -> Vec<Entry<'a>> {
         }
     }
     flush(&mut run, &mut out);
+    out
+}
+
+/// A finished turn's open fold, split where superseded attempts left work: each attempt's items
+/// behind its own fold at the first of them (deriveSupersededAttemptFolds anchors there), the
+/// rest in order.
+pub enum Part<'a> {
+    Plain(Vec<&'a Value>),
+    Attempt(String, Vec<&'a Value>),
+}
+
+pub fn nest<'a>(items: &[&'a Value], attempts: &HashMap<String, String>) -> Vec<Part<'a>> {
+    let mut out: Vec<Part<'a>> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    for &item in items {
+        let Some(attempt) = attempts.get(s(item, "id")) else {
+            match out.last_mut() {
+                Some(Part::Plain(list)) => list.push(item),
+                _ => out.push(Part::Plain(vec![item])),
+            }
+            continue;
+        };
+        match at.get(attempt.as_str()) {
+            Some(&index) => {
+                if let Part::Attempt(_, list) = &mut out[index] {
+                    list.push(item);
+                }
+            }
+            None => {
+                at.insert(attempt.as_str(), out.len());
+                out.push(Part::Attempt(format!("attempt-fold:{attempt}"), vec![item]));
+            }
+        }
+    }
     out
 }
 
@@ -633,6 +702,41 @@ mod tests {
         assert_eq!(live(json!({"type":"reasoning","status":"running","text":""})), "Thinking");
         assert_eq!(live(json!({"type":"file_search","title":"Searched src"})), "Searched src");
         assert_eq!(live_label(&json!({"type":"dynamic_tool","toolName":"Read","input":{"path":"/w/app/a.rs"}}), Some("/w/app")), "Read app/a.rs");
+    }
+
+    #[test]
+    fn entry_rows_show_their_tools_icon_and_title() {
+        let icon = |item: Value| entry_icon(&item).name;
+        assert_eq!(icon(json!({"type":"command_execution","status":"running","input":"vp test"})), "terminal");
+        assert_eq!(icon(json!({"type":"dynamic_tool","toolName":"Read","input":{"path":"a.rs"}})), "eye");
+        assert_eq!(icon(json!({"type":"dynamic_tool","toolName":"Grep","input":{"pattern":"x"}})), "search");
+        assert_eq!(icon(json!({"type":"file_search","pattern":"x"})), "search");
+        assert_eq!(icon(json!({"type":"web_search"})), "globe");
+        assert_eq!(icon(json!({"type":"dynamic_tool","toolName":"mcp__t3__thread_read"})), "wrench");
+        assert_eq!(icon(json!({"type":"reasoning"})), "brain");
+        let title = |item: Value, expanded: bool| entry_title(&item, Some("/w/demo"), expanded);
+        assert_eq!(title(json!({"type":"reasoning","status":"completed","text":"**Plan**\n\n- read `a.rs`"}), false), "Plan read a.rs");
+        assert_eq!(title(json!({"type":"reasoning","status":"completed","text":"Plan"}), true), "Thought");
+        assert_eq!(title(json!({"type":"reasoning","status":"running","text":""}), false), "Thinking");
+        assert_eq!(title(json!({"type":"dynamic_tool","toolName":"Read","input":{"path":"/w/demo/src/a.rs"}}), false), "Read demo/src/a.rs");
+        assert_eq!(title(json!({"type":"file_change","changes":[{"path":"/w/demo/a.rs"},{"path":"/w/demo/b.rs"}]}), false), "demo/a.rs +1 more");
+        assert_eq!(title(json!({"type":"file_change","fileName":"/w/demo/a.rs"}), false), "demo/a.rs");
+        assert_eq!(title(json!({"type":"command_execution","input":" ls -la "}), false), "ls -la");
+    }
+
+    #[test]
+    fn open_folds_nest_superseded_attempts_at_their_first_item() {
+        let items: Vec<Value> = ["a", "b", "c", "d", "e"].iter().map(|id| json!({"id":id})).collect();
+        let refs: Vec<&Value> = items.iter().collect();
+        let attempts: HashMap<String, String> = [("b", "x"), ("d", "x")].iter().map(|(i, a)| (i.to_string(), a.to_string())).collect();
+        let shape: Vec<String> = nest(&refs, &attempts)
+            .into_iter()
+            .map(|part| match part {
+                Part::Plain(list) => list.iter().map(|i| s(i, "id")).collect::<Vec<_>>().join(""),
+                Part::Attempt(id, list) => format!("{id}[{}]", list.iter().map(|i| s(i, "id")).collect::<Vec<_>>().join("")),
+            })
+            .collect();
+        assert_eq!(shape, ["a", "attempt-fold:x[bd]", "ce"]);
     }
 
     #[test]
