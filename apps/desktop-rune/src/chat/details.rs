@@ -1884,6 +1884,7 @@ mod tests {
 
     #[test]
     fn a_ref_in_a_worktree_is_the_projects_own_only_at_its_checkout_root() {
+        use super::{can_change_branch, own_checkout, ref_disabled, set_session};
         assert!(own_checkout("/repo/", "/repo/apps/web", Some("/repo")), "a subfolder project's checkout is the repository root");
         assert!(!own_checkout("/repo/apps/web", "/repo/apps/web", Some("/repo")));
         assert!(!own_checkout("/wt/feature", "/repo", Some("/repo")));
@@ -1899,6 +1900,7 @@ mod tests {
 
     #[test]
     fn open_in_editor_needs_orchestration_access_and_a_route() {
+        use super::{can_open_editor, editor_denied, editor_label, editors, set_session};
         let mut s = App::new();
         assert!(can_open_editor(&s));
         set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:read"]}))));
