@@ -107,6 +107,14 @@ fn next_id() -> u64 {
 }
 impl Net {
     pub fn connect(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn(base_url, token, true, wake)
+    }
+    /// A connection that subscribes to nothing and only carries requests, for a server whose
+    /// orchestration protocol is older than this client's but whose self-update RPCs still answer.
+    pub fn connect_requests_only(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn(base_url, token, false, wake)
+    }
+    fn spawn(base_url: &str, token: &str, subscribe_shell: bool, wake: impl Fn() + Send + Sync + 'static) -> Net {
         let (tx, commands) = mpsc::channel();
         let (incoming, rx) = mpsc::channel();
         let incoming_tx = incoming.clone();
@@ -115,7 +123,7 @@ impl Net {
         let base = base_url.to_owned();
         let worker_token = token.to_owned();
         std::thread::spawn(move || {
-            transport::run(base, worker_token, commands, incoming, move || {
+            transport::run(base, worker_token, subscribe_shell, commands, incoming, move || {
                 worker_wake()
             })
         });
