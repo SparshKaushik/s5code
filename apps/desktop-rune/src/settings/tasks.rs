@@ -33,6 +33,10 @@ pub struct Ui {
     scene: Option<HashMap<String, Vec<Value>>>,
     /// What an edit lands in while no editor is open.
     scratch: TextEdit,
+    /// Web's `taskId` link: the environment and task whose editor opens once the task loads.
+    link: Option<(String, String)>,
+    /// An editor was open at the last poll; closing any editor drops the link, as web's does.
+    had_editor: bool,
 }
 
 struct Pending {
@@ -222,9 +226,21 @@ pub fn poll(s: &mut App) -> bool {
         ui.rotate = None;
         changed = true;
     }
+    if !page && s.ui.settings.tasks.link.is_some() {
+        s.ui.settings.tasks.link = None;
+        changed = true;
+    }
+    if s.ui.settings.models.open.as_deref() == Some(super::models::TASK) && s.ui.settings.tasks.editor.is_none() {
+        super::models::close(s);
+        changed = true;
+    }
+    changed |= follow_link(s);
     let mut wanted: Vec<String> = if page { environments(s).into_iter().filter(|k| connected(s, k)).collect() } else { Vec::new() };
     if let Some(editor) = s.ui.settings.tasks.editor.as_ref().filter(|e| !wanted.contains(&e.env) && connected(s, &e.env)) {
         wanted.push(editor.env.clone());
+    }
+    if let Some((key, _)) = s.ui.settings.tasks.link.as_ref().filter(|(k, _)| page && !wanted.contains(k) && connected(s, k)) {
+        wanted.push(key.clone());
     }
     if wanted != s.ui.settings.tasks.watching {
         let before = std::mem::take(&mut s.ui.settings.tasks.watching);
@@ -251,7 +267,24 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
         landed(s, pending, reply);
     }
-    changed
+    editor::poll(s) || changed
+}
+
+/// Web's link: closing an editor drops it; otherwise the task's editor opens once it loads,
+/// unless one is already open.
+fn follow_link(s: &mut App) -> bool {
+    let ui = &mut s.ui.settings.tasks;
+    let had = std::mem::replace(&mut ui.had_editor, ui.editor.is_some());
+    if had && ui.editor.is_none() && ui.link.take().is_some() {
+        return true;
+    }
+    if ui.editor.is_some() {
+        return false;
+    }
+    let Some((key, task)) = linked_task(s) else { return false };
+    editor::open(s, &key, Some(task));
+    s.ui.settings.tasks.had_editor = true;
+    true
 }
 
 fn landed(s: &mut App, pending: Pending, reply: Result<Value, Value>) {
@@ -295,6 +328,44 @@ fn landed(s: &mut App, pending: Pending, reply: Result<Value, Value>) {
             }
         }
     }
+}
+
+/// Web `/settings/scheduled-tasks?taskId=`: opens the task's editor once it loads, or says the
+/// task is unavailable.
+pub fn open_task(s: &mut App, key: &str, id: &str) {
+    s.ui.settings.tasks.link = Some((key.to_owned(), id.to_owned()));
+    s.ui.settings.tasks.had_editor = false;
+    s.navigate(Route::Settings(PAGE.into()));
+}
+
+/// The settings model picker's providers for `models::TASK`: the editor's environment's.
+pub(super) fn model_providers(s: &App) -> &[Value] {
+    s.ui.settings.tasks.editor.as_ref().and_then(|e| config(s, &e.env)).and_then(|c| c["providers"].as_array()).map_or(&[], |v| v.as_slice())
+}
+
+pub(super) fn model(s: &App) -> Option<(String, String)> {
+    editor::model(s)
+}
+
+pub(super) fn set_model(s: &mut App, instance: &str, model: &str) {
+    editor::set_model(s, instance, model)
+}
+
+/// The link's task once its environment's list holds it, in scope.
+fn linked_task(s: &App) -> Option<(String, Value)> {
+    let (key, id) = s.ui.settings.tasks.link.as_ref()?;
+    let List::Tasks(tasks) = list(s, key) else { return None };
+    Some((key.clone(), tasks.into_iter().find(|t| t["id"] == id.as_str())?))
+}
+
+/// Web's "Task unavailable": the linked environment's tasks loaded without the linked one.
+fn link_missing(s: &App, key: &str, state: &List) -> bool {
+    let Some((env, id)) = &s.ui.settings.tasks.link else { return false };
+    env == key && matches!(state, List::Tasks(tasks) if !tasks.iter().any(|t| t["id"] == id.as_str()))
+}
+
+fn unavailable(t: &T) -> El {
+    info(t, "Task unavailable", Some("This task was deleted or belongs to a different project. Check your project filter.")).role("status")
 }
 
 /// Escape closes the innermost open layer.
@@ -408,6 +479,9 @@ fn environment_list(s: &App, t: &T, envs: &[String]) -> Vec<El> {
         );
         rows.extend(tasks.iter().map(|task| task_row(s, t, key, task)));
     }
+    if states.iter().any(|(key, state)| link_missing(s, key, state)) {
+        rows.push(unavailable(t));
+    }
     if populated == 0 && loaded > 0 {
         rows.push(info(t, "No scheduled tasks", Some("No tasks match this environment and project selection.")));
     }
@@ -437,15 +511,21 @@ fn summaries(s: &App, envs: &[String], states: &[(String, List)], populated: usi
 
 /// Web `ScheduledTaskEnvironmentSection`.
 fn environment_section(s: &App, t: &T, key: &str) -> Vec<El> {
-    match list(s, key) {
-        List::Disconnected => {
-            vec![info(t, "Environment disconnected", Some(&format!("Reconnect {} to view its scheduled tasks.", env::label(s, key))))]
-        }
-        List::Failed(error) => vec![info(t, "Could not load scheduled tasks", Some(&error))],
-        List::Loading => vec![info(t, "Loading scheduled tasks…", None).role("status")],
-        List::Tasks(tasks) if tasks.is_empty() => vec![info(t, "No scheduled tasks", Some("No tasks match this environment and project selection."))],
-        List::Tasks(tasks) => tasks.iter().map(|task| task_row(s, t, key, task)).collect(),
+    let state = list(s, key);
+    let mut rows = Vec::new();
+    if link_missing(s, key, &state) {
+        rows.push(unavailable(t));
     }
+    match state {
+        List::Disconnected => {
+            rows.push(info(t, "Environment disconnected", Some(&format!("Reconnect {} to view its scheduled tasks.", env::label(s, key)))));
+        }
+        List::Failed(error) => rows.push(info(t, "Could not load scheduled tasks", Some(&error))),
+        List::Loading => rows.push(info(t, "Loading scheduled tasks…", None).role("status")),
+        List::Tasks(tasks) if tasks.is_empty() => rows.push(info(t, "No scheduled tasks", Some("No tasks match this environment and project selection."))),
+        List::Tasks(tasks) => rows.extend(tasks.iter().map(|task| task_row(s, t, key, task))),
+    }
+    rows
 }
 
 fn status_variant(status: &str) -> &'static str {
@@ -762,6 +842,30 @@ pub(super) fn scene(s: &mut App, open: &str) {
         "menu" => s.ui.settings.tasks.menu = Some((key, "task-sentry".into())),
         "editor" => editor::open(s, &key, None),
         "webhook" => editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-hook")),
+        "unavailable" => s.ui.settings.tasks.link = Some((key, "task-deleted".into())),
+        "link" => s.ui.settings.tasks.link = Some((key, "task-deps".into())),
+        "base-branch" => {
+            editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-sentry"));
+            let r = |name: &str, extra: Value| {
+                let mut r = json!({"name": name, "isRemote": name.starts_with("origin/"), "current": false, "isDefault": name.ends_with("main")});
+                for (k, v) in extra.as_object().into_iter().flatten() {
+                    r[k] = v.clone();
+                }
+                r
+            };
+            let refs = vec![
+                r("main", json!({"current": true})),
+                r("release/2026-11", json!({})),
+                r("feature/scheduled-digest", json!({"worktreePath": "/tmp/worktrees/digest"})),
+                r("origin/main", json!({})),
+                r("origin/release/2026-11", json!({})),
+            ];
+            editor::scene_refs(s, refs);
+        }
+        "model" => {
+            editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-sentry"));
+            super::models::toggle(s, super::models::TASK);
+        }
         "deliveries" => {
             let now = s.now_ms;
             let delivery = |id: &str, outcome: &str, minutes: i64| {
@@ -837,6 +941,48 @@ mod tests {
         assert!(s.ui.settings.tasks.menu.is_some());
         assert_eq!(list(&s, &s.ui.env.active).ne(&List::Loading), true);
         assert!(run("editor").ui.settings.tasks.editor.is_some());
+        assert!(run("base-branch").ui.settings.tasks.editor.is_some());
+        assert_eq!(run("model").ui.settings.models.open.as_deref(), Some(super::super::models::TASK));
         assert!(run("deliveries").ui.settings.tasks.deliveries.is_some());
+    }
+
+    #[test]
+    fn a_task_link_opens_its_editor_once_and_closing_drops_it() {
+        let mut s = App::new();
+        crate::scene_clock(&mut s);
+        s.route = Route::Settings(PAGE.into());
+        scene(&mut s, "link");
+        poll(&mut s);
+        let opened = s.ui.settings.tasks.editor.as_ref().and_then(|e| e.draft.editing_id.clone());
+        assert_eq!(opened.as_deref(), Some("task-deps"));
+        // Closing the editor drops the link instead of reopening it.
+        s.ui.settings.tasks.editor = None;
+        poll(&mut s);
+        poll(&mut s);
+        assert!(s.ui.settings.tasks.editor.is_none() && s.ui.settings.tasks.link.is_none());
+        // An editor already open keeps its draft when the link's task loads.
+        let key = s.ui.env.active.clone();
+        editor::open(&mut s, &key, None);
+        s.ui.settings.tasks.link = Some((key, "task-deps".into()));
+        poll(&mut s);
+        assert!(s.ui.settings.tasks.editor.as_ref().is_some_and(|e| e.draft.editing_id.is_none()));
+    }
+
+    #[test]
+    fn a_missing_linked_task_is_unavailable_only_once_its_list_loads() {
+        let mut s = App::new();
+        crate::scene_clock(&mut s);
+        s.route = Route::Settings(PAGE.into());
+        scene(&mut s, "unavailable");
+        let key = s.ui.env.active.clone();
+        assert!(link_missing(&s, &key, &list(&s, &key)));
+        assert!(!link_missing(&s, &key, &List::Loading));
+        assert!(!link_missing(&s, "elsewhere", &List::Tasks(vec![])));
+        s.ui.settings.tasks.link = Some((key.clone(), "task-deps".into()));
+        assert!(!link_missing(&s, &key, &list(&s, &key)));
+        // Leaving the page drops the link, as web's search param goes with the route.
+        s.route = Route::Settings("general".into());
+        poll(&mut s);
+        assert!(s.ui.settings.tasks.link.is_none());
     }
 }

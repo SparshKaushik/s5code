@@ -259,9 +259,9 @@ pub fn copy_thread(s: &mut App, tx: &mut Tx) -> bool {
     toast(s, title, Some(&description));
     true
 }
-/// Rune's right panel has no pull-requests surface; opening the panel is the nearest place.
+/// "Show linked pull requests": the right panel's list.
 pub fn show_pull_requests(s: &mut App) {
-    s.ui.shell.panel_open = true;
+    crate::panel::show_pull_requests(s);
 }
 pub fn open_link(s: &mut App, thread: String) {
     let mut input = TextEdit::default();

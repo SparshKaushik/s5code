@@ -44,6 +44,10 @@ impl MenuItem {
     pub fn label_text(&self) -> &str {
         &self.label
     }
+    #[cfg(test)]
+    pub fn is_disabled(&self) -> bool {
+        self.state == State::Disabled
+    }
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),

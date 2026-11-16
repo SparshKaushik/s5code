@@ -42,8 +42,8 @@ pub enum Cmd {
     /// Element picking: Chrome highlights what the pointer is over, a click picks it.
     Pick(TabId, bool),
     DevTools(TabId),
-    /// `prefers-color-scheme`: "" follows Chrome's default.
-    ColorScheme(&'static str),
+    /// A tab's `prefers-color-scheme`: "" follows Chrome's default.
+    ColorScheme(TabId, &'static str),
     Mouse { kind: &'static str, x: f32, y: f32, clicks: u32 },
     Wheel { x: f32, y: f32, dx: f32, dy: f32 },
     Text(String),
@@ -72,6 +72,13 @@ pub enum Cmd {
     Edit(&'static str),
     /// Silences the tab's media, across its navigations, as Electron's `setAudioMuted`.
     Mute(TabId, bool),
+    /// An annotation's marks drawn into the page (`MARKS_JS`), so they scroll with it and show in
+    /// its screenshot: one call on `window.__s5Marks`, such as `region(10, 20, 30, 40)`.
+    Mark(TabId, String),
+    /// Removes the topmost mark under a viewport point, as `Event::Erased` with its index.
+    Erase(TabId, f32, f32),
+    /// The PNG of every mark's union, as `Event::Marked`.
+    CaptureMarks(TabId),
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -132,6 +139,10 @@ pub enum Event {
     Image(Vec<u8>),
     /// A finished download, moved to the Downloads folder, as Electron does for a person's.
     Download(Result<PathBuf, String>),
+    /// The mark `Cmd::Erase` removed, by the order marks were added.
+    Erased(TabId, Option<usize>),
+    /// The annotation's screenshot, cropped to its marks.
+    Marked(TabId, Option<Vec<u8>>),
 }
 
 #[derive(Default)]
@@ -261,6 +272,9 @@ fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), S
 }
 
 enum Reply {
+    Erased(TabId),
+    MarksBounds(TabId),
+    MarksShot(TabId),
     Created(TabId),
     Attached(TabId),
     History(TabId),
@@ -318,6 +332,7 @@ struct Tab {
     error: Option<String>,
     /// The new-document script that keeps a muted tab's next pages muted.
     mute_script: Option<String>,
+    scheme: &'static str,
 }
 
 struct Worker {
@@ -332,7 +347,6 @@ struct Worker {
     viewport: (f32, f32, f32),
     /// The device scale Chrome started with.
     scale: f32,
-    scheme: &'static str,
     pressed: bool,
     /// A hover lookup is in flight; the latest pointer position waits for it.
     hovering: bool,
@@ -379,7 +393,6 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         shown: None,
         viewport: (0., 0., 1.),
         scale,
-        scheme: "",
         pressed: false,
         hovering: false,
         hover_next: None,
@@ -619,10 +632,11 @@ impl Worker {
                 let url = target.ok_or_else(|| "The page has not opened yet.".to_string()).map(|target| devtools_url(&self.host, &target));
                 self.event(Event::DevTools(url));
             }
-            Cmd::ColorScheme(scheme) => {
-                self.scheme = scheme;
-                let tabs: Vec<TabId> = self.tabs.keys().copied().collect();
-                for tab in tabs {
+            Cmd::ColorScheme(tab, scheme) => {
+                let Some(t) = self.tabs.get_mut(&tab) else { return };
+                t.scheme = scheme;
+                // Before the page attaches, its attach applies the scheme.
+                if t.session.is_some() {
                     self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }), None);
                 }
             }
@@ -737,6 +751,15 @@ impl Worker {
                 let Some(tab) = self.shown else { return };
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("document.execCommand('{command}')") }), None);
             }
+            Cmd::Mark(tab, call) => {
+                self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.{call}") }), None);
+            }
+            Cmd::Erase(tab, x, y) => {
+                self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.erase({x}, {y})"), "returnByValue": true }), Some(Reply::Erased(tab)));
+            }
+            Cmd::CaptureMarks(tab) => {
+                self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.bounds()"), "returnByValue": true }), Some(Reply::MarksBounds(tab)));
+            }
             Cmd::Mute(tab, on) => {
                 if self.muted(tab) == on {
                     return;
@@ -809,7 +832,10 @@ impl Worker {
     fn input_scale(&self, tab: TabId) -> f32 {
         let (w, h, _) = self.viewport;
         self.tabs.get(&tab).map_or(1., |t| match t.device {
-            Some(device) => device_box(w, h, device, t.zoom).2,
+            Some(device) => {
+                let (w, h) = device_area(w, h);
+                device_box(w, h, device, t.zoom).2
+            }
             None => t.zoom.max(0.25),
         })
     }
@@ -945,6 +971,18 @@ impl Worker {
                 let audible = p["payload"] == "1";
                 self.update(tab, |s| s.audible = audible);
             }
+            "Fetch.requestPaused" => {
+                let session = v["sessionId"].as_str().unwrap_or_default().to_string();
+                let url = p["request"]["url"].as_str().unwrap_or_default();
+                let ok = p["responseStatusCode"].as_u64().is_some_and(|c| (200..300).contains(&c));
+                if ok && main(&p["frameId"]) && pdf_response(&p["responseHeaders"]) {
+                    let body = base64::engine::general_purpose::STANDARD.encode(pdf_viewer(url));
+                    let headers = json!([{ "name": "Content-Type", "value": "text/html; charset=utf-8" }, { "name": "Cache-Control", "value": "no-store" }]);
+                    self.send(Some(&session), "Fetch.fulfillRequest", json!({ "requestId": p["requestId"], "responseCode": 200, "responseHeaders": headers, "body": body }), None);
+                } else {
+                    self.send(Some(&session), "Fetch.continueRequest", json!({ "requestId": p["requestId"] }), None);
+                }
+            }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.frameStartedLoading" if main(&p["frameId"]) => self.update(tab, |s| s.loading = true),
             "Page.frameStoppedLoading" | "Page.loadEventFired" if method == "Page.loadEventFired" || main(&p["frameId"]) => {
@@ -1021,9 +1059,12 @@ impl Worker {
                 self.send(Some(&session), "Runtime.enable", json!({}), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
+                // Chrome's headless shell has no PDF viewer, so a PDF page arrives as pdf.js.
+                self.send(Some(&session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
                 self.metrics(tab);
-                if !self.scheme.is_empty() {
-                    self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": self.scheme }] }), None);
+                let scheme = self.tabs.get(&tab).map_or("", |t| t.scheme);
+                if !scheme.is_empty() {
+                    self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] }), None);
                 }
                 for (method, params, reply) in queue {
                     self.send(Some(&session), method, params, reply);
@@ -1207,6 +1248,18 @@ impl Worker {
                     self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
                 }
             }
+            Reply::Erased(tab) => {
+                let index = r["result"]["value"].as_u64().map(|i| i as usize);
+                self.event(Event::Erased(tab, index));
+            }
+            Reply::MarksBounds(tab) => match marks_clip(&r["result"]["value"]) {
+                Some(clip) => self.call(tab, "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::MarksShot(tab))),
+                None => self.event(Event::Marked(tab, None)),
+            },
+            Reply::MarksShot(tab) => {
+                let image = r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
+                self.event(Event::Marked(tab, image));
+            }
             Reply::Image => {
                 if let Some(bytes) = r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok()) {
                     self.event(Event::Image(bytes));
@@ -1247,6 +1300,14 @@ fn metrics(w: f32, h: f32, zoom: f32) -> (u32, u32) {
 /// Where an emulated `dw` x `dh` CSS viewport shows in a `w` x `h` page area, as web's
 /// `resolveBrowserViewportLayout`: zoomed, then shrunk to fit but never enlarged. Returns the
 /// box's width and height in points and its points per CSS pixel.
+/// Web's `BROWSER_VIEWPORT_RESIZE_RAIL_SIZE`: rails beside and below a device-size page.
+pub const RAIL: f32 = 10.;
+
+/// The room a device-size page has in the page area, beside its resize rails.
+pub fn device_area(w: f32, h: f32) -> (f32, f32) {
+    ((w - RAIL * 2.).max(1.), (h - RAIL).max(1.))
+}
+
 pub fn device_box(w: f32, h: f32, (dw, dh): (u32, u32), zoom: f32) -> (f32, f32, f32) {
     let zoom = zoom.max(0.25);
     let (rw, rh) = (dw.max(1) as f32 * zoom, dh.max(1) as f32 * zoom);
@@ -1374,7 +1435,7 @@ fn downloads_staging() -> String {
     crate::host::t3_home().join("userdata").join("browser-downloads").display().to_string()
 }
 
-fn downloads_dir() -> PathBuf {
+pub(super) fn downloads_dir() -> PathBuf {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let configured = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok().and_then(|text| {
         let line = text.lines().find(|l| l.starts_with("XDG_DOWNLOAD_DIR="))?;
@@ -1385,7 +1446,7 @@ fn downloads_dir() -> PathBuf {
 }
 
 /// The first free name in `dir`: `name`, then `name (1).ext` up to 99, as Electron's copy.
-fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+pub(super) fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     let name = std::path::Path::new(name).file_name().map_or_else(|| "download".into(), |n| n.to_string_lossy().into_owned());
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
@@ -1418,6 +1479,140 @@ const FAVICON_JS: &str = r#"(() => {
 
 /// Reports whether the top page's media is playing sound and mutes it on `__s5Mute`, as a
 /// headless Chrome has neither a tab audio indicator nor a mute switch.
+/// The screenshot clip around the marks' document-pixel bounds, padded a little as web's crop.
+fn marks_clip(bounds: &Value) -> Option<Value> {
+    let [x, y, w, h] = ["x", "y", "width", "height"].map(|k| bounds[k].as_f64());
+    let (x, y, w, h) = (x?, y?, w?, h?);
+    let pad = 8.;
+    let (left, top) = ((x - pad).max(0.), (y - pad).max(0.));
+    let (w, h) = ((x + w + pad - left).min(4096.), (y + h + pad - top).min(4096.));
+    (w >= 1. && h >= 1.).then(|| json!({ "x": left, "y": top, "width": w, "height": h, "scale": 1 }))
+}
+
+/// The annotation's marks in the page: element boxes, regions and strokes positioned in document
+/// pixels (callers pass viewport points), on a layer that ignores the pointer.
+const MARKS_JS: &str = r##"window.__s5Marks = window.__s5Marks || (() => {
+  const ns = "http://www.w3.org/2000/svg";
+  const color = "#2563eb";
+  let root = null, svg = null, marks = [], active = null;
+  const ensure = () => {
+    if (root && root.isConnected) return;
+    root = document.createElement("div");
+    root.setAttribute("data-s5-annotation", "");
+    root.style.cssText = "position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647";
+    svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", "1");
+    svg.setAttribute("height", "1");
+    svg.style.cssText = "position:absolute;left:0;top:0;overflow:visible";
+    root.append(svg);
+    document.documentElement.append(root);
+  };
+  const box = (r, fill) => {
+    ensure();
+    const node = document.createElement("div");
+    node.style.cssText = `position:absolute;left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px;border:2px solid ${color};border-radius:3px;background:${fill};box-sizing:border-box`;
+    root.append(node);
+    return node;
+  };
+  const rect = (x, y, w, h) => ({ x: x + scrollX, y: y + scrollY, width: w, height: h });
+  const draw = (m) => m.node.setAttribute("d", m.points.map(([x, y], i) => (i ? "L" : "M") + x + " " + y).join(" "));
+  const strokeRect = (points) => {
+    const xs = points.map((p) => p[0]), ys = points.map((p) => p[1]);
+    const [l, t] = [Math.min(...xs) - 2, Math.min(...ys) - 2];
+    return { x: l, y: t, width: Math.max(...xs) + 2 - l, height: Math.max(...ys) + 2 - t };
+  };
+  return {
+    element(x, y, w, h) { const r = rect(x, y, w, h); marks.push({ rect: r, node: box(r, "rgba(37,99,235,0.1)") }); },
+    region(x, y, w, h) { const r = rect(x, y, w, h); marks.push({ rect: r, node: box(r, "rgba(37,99,235,0.06)") }); },
+    begin(x, y) {
+      ensure();
+      const node = document.createElementNS(ns, "path");
+      for (const [k, v] of [["fill", "none"], ["stroke", color], ["stroke-width", "4"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) node.setAttribute(k, v);
+      svg.append(node);
+      active = { points: [[x + scrollX, y + scrollY]], node };
+      draw(active);
+    },
+    point(x, y) { if (!active) return; active.points.push([x + scrollX, y + scrollY]); draw(active); },
+    end() {
+      if (!active) return;
+      if (active.points.length > 1) marks.push({ rect: strokeRect(active.points), node: active.node });
+      else active.node.remove();
+      active = null;
+    },
+    erase(x, y) {
+      const [px, py] = [x + scrollX, y + scrollY];
+      for (let i = marks.length - 1; i >= 0; i--) {
+        const r = marks[i].rect;
+        if (px >= r.x && px <= r.x + r.width && py >= r.y && py <= r.y + r.height) {
+          marks[i].node.remove();
+          marks.splice(i, 1);
+          return i;
+        }
+      }
+      return null;
+    },
+    bounds() {
+      if (!marks.length) return null;
+      const l = Math.min(...marks.map((m) => m.rect.x)), t = Math.min(...marks.map((m) => m.rect.y));
+      const r = Math.max(...marks.map((m) => m.rect.x + m.rect.width)), b = Math.max(...marks.map((m) => m.rect.y + m.rect.height));
+      return { x: l, y: t, width: r - l, height: b - t };
+    },
+    clear() { if (root) root.remove(); root = null; svg = null; marks = []; active = null; },
+  };
+})()"##;
+
+/// Whether a paused response is a PDF, by its `Content-Type`.
+fn pdf_response(headers: &Value) -> bool {
+    headers.as_array().into_iter().flatten().any(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("content-type")) && h["value"].as_str().is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("application/pdf")))
+}
+
+/// The page a PDF shows as, at the PDF's own address: pdf.js draws each page, fetching the
+/// bytes from that address again (same origin, so cookies and signed links still work).
+fn pdf_viewer(url: &str) -> String {
+    let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+    let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
+    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    PDF_VIEWER.replace("{title}", &escape(&name))
+}
+
+const PDF_VIEWER: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
+<style>
+html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
+#pages{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
+canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
+#status{padding:16px;text-align:center}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head><body><div id="status">Loading PDF…</div><div id="pages"></div>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  const lib = window.pdfjsLib;
+  if (!lib) { status.textContent = "The PDF viewer could not load. Check the connection and reload."; return; }
+  lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  try {
+    const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
+    status.remove();
+    const pages = document.getElementById("pages");
+    const ratio = window.devicePixelRatio || 1;
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const css = Math.min(1.5, (innerWidth - 16) / page.getViewport({ scale: 1 }).width);
+      const viewport = page.getViewport({ scale: css * ratio });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.style.width = Math.floor(viewport.width / ratio) + "px";
+      pages.append(canvas);
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    }
+  } catch (error) {
+    status.textContent = "Unable to show this PDF: " + (error && error.message ? error.message : error);
+  }
+})();
+</script></body></html>"#;
+
 const AUDIO_JS: &str = r#"(() => {
   if (window !== top || window.__s5Mute) return;
   const mine = new WeakSet();
@@ -1671,6 +1866,23 @@ mod tests {
         let element = json!({ "rect": { "x": 10., "y": -5., "width": 120., "height": 30. }, "doc": { "x": 10., "y": 395. } });
         assert_eq!(clip(&element), Some(json!({ "x": 10., "y": 395., "width": 120., "height": 30., "scale": 1 })));
         assert_eq!(clip(&json!({ "rect": { "width": 0., "height": 10. }, "doc": { "x": 0., "y": 0. } })), None);
+    }
+
+    #[test]
+    fn an_annotations_screenshot_frames_its_marks() {
+        assert_eq!(marks_clip(&json!({ "x": 20., "y": 4., "width": 100., "height": 50. })), Some(json!({ "x": 12., "y": 0., "width": 116., "height": 62., "scale": 1 })));
+        assert_eq!(marks_clip(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_pdf_page_shows_in_the_viewer_at_its_own_address() {
+        let pdf = json!([{ "name": "content-type", "value": "Application/PDF" }]);
+        assert!(pdf_response(&pdf));
+        assert!(!pdf_response(&json!([{ "name": "Content-Type", "value": "text/html" }])));
+        assert!(!pdf_response(&Value::Null));
+        let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
+        assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
+        assert!(page.contains("getDocument({ url: location.href"));
     }
 
     #[test]

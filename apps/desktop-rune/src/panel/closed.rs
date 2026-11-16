@@ -11,6 +11,7 @@ pub enum View {
     Browser(String),
     /// A side chat closed beside its thread (the web's `side-chat:` tab): the side chat's id.
     SideChat(String),
+    PullRequests,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -34,6 +35,7 @@ fn encode(entries: &[Closed]) -> Value {
         .map(|c| match &c.view {
             View::Files(path) => json!({"thread": c.thread, "kind": "files", "path": path}),
             View::Diff => json!({"thread": c.thread, "kind": "diff"}),
+            View::PullRequests => json!({"thread": c.thread, "kind": "pull-requests"}),
             View::Browser(url) => json!({"thread": c.thread, "kind": "browser", "url": url}),
             View::SideChat(side) => json!({"thread": c.thread, "kind": "side-chat", "threadId": side}),
         })
@@ -52,6 +54,7 @@ fn decode(v: &Value) -> Vec<Closed> {
             let view = match row["kind"].as_str()? {
                 "files" => View::Files(row["path"].as_str()?.to_owned()),
                 "diff" => View::Diff,
+                "pull-requests" => View::PullRequests,
                 "browser" => View::Browser(row["url"].as_str()?.to_owned()),
                 "side-chat" => View::SideChat(row["threadId"].as_str().filter(|t| !t.is_empty())?.to_owned()),
                 _ => return None,
@@ -158,6 +161,7 @@ mod tests {
             closed("b", View::Diff),
             closed("c", View::Browser("http://localhost:5173/".into())),
             closed("d", View::SideChat("side-1".into())),
+            closed("e", View::PullRequests),
         ];
         assert_eq!(decode(&encode(&entries)), entries);
         let saved = json!({"entries": [

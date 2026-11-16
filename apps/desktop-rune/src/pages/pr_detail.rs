@@ -44,6 +44,9 @@ pub struct Ui {
     pub edit: super::pr_edit::Edit,
     pub tab: usize,
     pub checks_open: bool,
+    /// The tab bar's checks popover (PullRequestChecksPopover).
+    pub checks_popover: bool,
+    pub checks_all: bool,
     pub description_closed: bool,
     pub comments_closed: bool,
     pub oldest_first: bool,
@@ -506,6 +509,29 @@ fn checks_state(checks: &[Value]) -> Option<&'static str> {
 }
 
 /// summarizePullRequestChecks, without the workflow-approval split.
+/// PullRequestDetailPanel's rollup: the list's when it is at least as new as the loaded detail,
+/// kept pending by an action-required check the list can omit. Stale when the detail disagrees.
+fn checks_freshness(entry: Option<&Value>, d: &Value) -> (Option<&'static str>, bool) {
+    let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let own = checks_state(checks);
+    let newer = |e: &Value| {
+        let merged = i8::from(field(e, "state") == "merged") - i8::from(field(d, "state") == "merged");
+        merged > 0 || (merged == 0 && field(e, "updatedAt") >= field(d, "updatedAt"))
+    };
+    let latest = match entry.filter(|e| newer(e)).and_then(|e| e.get("checksState")) {
+        Some(Value::Null) => None,
+        Some(Value::String(st)) => ["passing", "failing", "pending"].into_iter().find(|k| k == st).or(own),
+        _ => own,
+    };
+    let state = if latest != Some("failing") && checks.iter().any(|c| field(c, "status") == "action-required") { Some("pending") } else { latest };
+    (state, state != own)
+}
+
+fn freshness(s: &App, d: &Value) -> (Option<&'static str>, bool) {
+    let entry = selected_entry(s).or_else(|| s.ui.pages.detail.entry.clone());
+    checks_freshness(entry.as_ref(), d)
+}
+
 pub(crate) fn checks_summary(checks: &[Value]) -> String {
     let n = checks.len();
     let count = |f: &dyn Fn(&str) -> bool| checks.iter().filter(|c| f(field(c, "status"))).count();
@@ -675,7 +701,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         _ => {}
     }
     let d = u.detail.as_ref().unwrap_or(entry);
-    panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d)).child(rule(t));
+    panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
     if u.tab == 2 {
         return panel.child(code(s, t, overlays)).children(super::pr_edit::composer(s, t, d, overlays));
     }
@@ -1038,7 +1064,7 @@ fn copyable(s: &App, t: &T, key: &'static str, value: String, (copy_label, copie
         })
 }
 
-fn tab_bar(s: &App, t: &T, d: &Value) -> El {
+fn tab_bar(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
     let k = kit::theme(t);
     let order = super::pr_guide::tab_order(s);
@@ -1066,12 +1092,18 @@ fn tab_bar(s: &App, t: &T, d: &Value) -> El {
         }
         0 => {
             let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-            let (glyph, ink) = check_glyph(t, checks_state(checks).map(|c| match c {
-                "failing" => "failure",
-                "pending" => "pending",
-                _ => "success",
-            }));
-            bar = bar.child(row().gap(6.0).center_y().shrink().child(icon(glyph, 14.0).color(ink)).child(text(checks_summary(checks)).font(theme::TEXT_XS).color(t.c.muted_foreground)));
+            let (state, stale) = freshness(s, d);
+            let presented = state.and_then(|st| super::pr_row::checks_state(t, st));
+            let summary = match (stale, presented) {
+                (false, _) => checks_summary(checks),
+                (true, Some((_, _, label))) => label.to_string(),
+                (true, None) => "No checks reported".into(),
+            };
+            let glyph = match presented {
+                Some((glyph, ink, label)) => checks_popover(s, t, (glyph, ink, label), checks, stale, overlays),
+                None => icon(&i::CIRCLE_DOT, 14.0).color(t.c.muted_foreground),
+            };
+            bar = bar.child(row().gap(6.0).center_y().shrink().label(format!("Checks: {summary}")).child(glyph).child(text(summary).font(theme::TEXT_XS).color(t.c.muted_foreground)));
         }
         1 => {
             let a = u.activity.as_ref();
@@ -1083,6 +1115,33 @@ fn tab_bar(s: &App, t: &T, d: &Value) -> El {
         _ => {}
     }
     bar
+}
+
+/// PullRequestChecksPopover: stale details give way to a note instead of disagreeing with the rollup.
+fn checks_popover(s: &App, t: &T, (glyph, ink, label): (&'static rune::Icon, Color, &'static str), checks: &[Value], stale: bool, overlays: &mut Vec<El>) -> El {
+    let u = &s.ui.pages.detail;
+    let trigger = el().cursor(Cursor::Pointer).role("button").label(format!("Checks: {label}")).child(icon(glyph, 14.0).color(ink)).on_press(|s: &mut App| {
+        let u = ui(s);
+        u.checks_popover = !u.checks_popover;
+        u.checks_all = false;
+    });
+    let mut popover = kit::Popover::new("pr-detail-checks")
+        .trigger(trigger)
+        .open(u.checks_popover)
+        .placement(Placement::BottomStart)
+        .width("md")
+        .label(label)
+        .on_close(|s: &mut App| ui(s).checks_popover = false);
+    if u.checks_popover {
+        let muted = |m: String| text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+        popover = popover.child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground));
+        popover = if stale {
+            popover.child(muted("Check details are out of date. Refresh the pull request to update them.".into()))
+        } else {
+            popover.child(muted(checks_summary(checks))).child(super::pr_row::checks_body(t, checks, u.checks_all, |s| ui(s).checks_all ^= true))
+        };
+    }
+    popover.build(&kit::theme(t), overlays)
 }
 
 fn order_toggle(s: &App, t: &T) -> El {
@@ -1198,7 +1257,15 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         super::pr_edit::description(s, t, d, markdown(t, if body.is_empty() { "_No description provided._" } else { &body }))
     }));
     let checks = d["checks"].as_array().cloned().unwrap_or_default();
+    let stale = freshness(s, d).1;
     out = out.child(rule(t)).child(section(t, "checks", "Checks".into(), u.checks_open, |s| ui(s).checks_open = !ui(s).checks_open, None, || {
+        if stale {
+            return row()
+                .gap(8.0)
+                .center_y()
+                .child(text("Check details are out of date.").font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(kit::Button::new("Refresh").variant("ghost").size("xs").on_press(|s: &mut App| load(s)).build(t));
+        }
         if checks.is_empty() {
             return text("No checks reported.").font(theme::TEXT_XS).color(t.c.muted_foreground);
         }
@@ -1681,6 +1748,19 @@ mod tests {
     fn recorded() -> Value {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pull-request-detail.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_newer_list_rollup_marks_the_check_details_out_of_date() {
+        let d = json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checks": [{"name": "ci", "status": "success"}]});
+        let entry = |at: &str, checks: Value| json!({"state": "open", "updatedAt": at, "checksState": checks});
+        assert_eq!(checks_freshness(None, &d), (Some("passing"), false));
+        assert_eq!(checks_freshness(Some(&entry("2026-11-14T10:00:00Z", json!("failing"))), &d), (Some("failing"), true));
+        assert_eq!(checks_freshness(Some(&entry("2026-11-14T09:00:00Z", json!("failing"))), &d), (Some("passing"), false), "an older list row never wins");
+        assert_eq!(checks_freshness(Some(&entry("2026-11-14T11:00:00Z", Value::Null)), &d), (None, true));
+        assert_eq!(checks_freshness(Some(&json!({"state": "open", "updatedAt": "2026-11-14T11:00:00Z"})), &d), (Some("passing"), false), "a row without a rollup defers to the detail");
+        let waiting = json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checks": [{"name": "deploy", "status": "action-required"}]});
+        assert_eq!(checks_freshness(Some(&entry("2026-11-14T11:00:00Z", json!("passing"))), &waiting), (Some("pending"), false), "the list can omit workflows awaiting approval");
     }
 
     #[test]

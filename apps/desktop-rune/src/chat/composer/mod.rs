@@ -7,6 +7,7 @@ mod attachments;
 pub mod banners;
 pub mod chips;
 mod context;
+pub mod fanout;
 mod menu;
 mod picker;
 pub mod provider_icons;
@@ -127,6 +128,7 @@ pub struct Ui {
     target: std::cell::RefCell<Option<String>>,
     /// The side chat whose composer was used last, so the picker and menus open beside it.
     owner: Option<String>,
+    fanout: fanout::State,
 }
 
 /// A dispatched command's draft key, and the draft it sent (`stored_draft`) to put back when it
@@ -940,6 +942,9 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         end_queued_edit(s, false);
         return;
     }
+    if crate::chat::details::run_on::holds_send(s) || fanout::send(s) {
+        return;
+    }
     let mode = mode_for(s, alternate);
     let key = active_key(s);
     let Some(d) = draft(s) else { return };
@@ -1227,12 +1232,15 @@ pub fn poll(s: &mut App) -> bool {
             continue;
         };
         let upload = composer.uploads.remove(i);
-        match stored {
-            Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
-            Err(e) => {
-                let background = upload.launch.as_ref().map(|id| composer.background.contains(id));
-                composer.background.retain(|b| Some(b) != upload.launch.as_ref());
-                failed.push((upload.outgoing, e, background));
+        let messages = std::iter::once((upload.payload, upload.launch, upload.outgoing)).chain(upload.also);
+        for (payload, launch, outgoing) in messages {
+            match &stored {
+                Ok(stored) => deliver(net, composer, payload, launch, stored.clone(), outgoing),
+                Err(e) => {
+                    let background = launch.as_ref().map(|id| composer.background.contains(id));
+                    composer.background.retain(|b| Some(b) != launch.as_ref());
+                    failed.push((outgoing, e.clone(), background));
+                }
             }
         }
         changed = true;
@@ -1247,6 +1255,10 @@ pub fn poll(s: &mut App) -> bool {
         };
         let (request, outgoing) = composer.sends.remove(i);
         let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
+        changed = true;
+        if fanout::settle(&mut composer.fanout, &outgoing.key, reply.as_ref().map(|_| ()), true) {
+            continue;
+        }
         // A background launch stays where the user is.
         let quiet = launch.as_ref().is_some_and(|id| composer.background.contains(id));
         if let Some(id) = &launch {
@@ -1260,8 +1272,11 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     for (outgoing, error, background) in failed {
-        send_failed(s, outgoing, &error, background);
+        if !fanout::settle(&mut s.ui.chat.composer.fanout, &outgoing.key, Err(&error), false) {
+            send_failed(s, outgoing, &error, background);
+        }
     }
+    changed |= fanout::finish(s);
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
     if let Some(id) = opened {
@@ -1285,6 +1300,26 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
         out.insert(key.clone(), stored_draft(d));
     }
     Value::Object(out)
+}
+
+/// `composerDraftHasUserContent`: something typed or attached, not just picked settings.
+pub fn has_user_content(d: &Draft) -> bool {
+    !d.edit.text.trim().is_empty() || !d.attachments.is_empty() || !d.contexts.is_empty()
+}
+
+/// Removes the draft at `key`, returning it as stored so `put_draft` can bring it back.
+pub fn take_draft(s: &mut App, key: &str) -> Option<Value> {
+    s.ui.chat.composer.drafts.remove(key).map(|d| stored_draft(&d))
+}
+
+/// Puts a taken draft back, unless a new one with content was started there since.
+pub fn put_draft(s: &mut App, key: &str, stored: &Value) -> bool {
+    if s.ui.chat.composer.drafts.get(key).is_some_and(has_user_content) {
+        return false;
+    }
+    let Some(draft) = restored(&json!({ "draft": stored })).remove("draft") else { return false };
+    s.ui.chat.composer.drafts.insert(key.to_owned(), draft);
+    true
 }
 
 fn stored_draft(d: &Draft) -> Value {
@@ -1935,23 +1970,27 @@ fn footer(s: &App, t: &T, folded: bool) -> El {
         controls = controls.child(provider_unavailable(s, t));
     } else if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
-        let name = chip_name(s, &instance, &model);
-        controls = controls.child(
-            row()
-                .key(keyed(s, "composer-model-chip"))
-                .h(28.0)
-                .px(9.0)
-                .gap(6.0)
-                .center_y()
-                .radius(theme::layout::CONTROL_RADIUS)
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(model_name(s, &instance, &model))
-                .child(provider_icon(t, &driver, 16.0))
-                .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
-                .children(chip_suffix(s, t))
-                .on_press(act(s, picker::toggle)),
-        );
+        // Several models read "A, B, N more", every name in the tooltip (ProviderModelPicker).
+        let multiple = fanout::chip_label(s);
+        let name = multiple.as_ref().map_or_else(|| chip_name(s, &instance, &model), |(shown, _)| shown.clone());
+        let mut chip = row()
+            .key(keyed(s, "composer-model-chip"))
+            .h(28.0)
+            .px(9.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .label(multiple.as_ref().map_or_else(|| model_name(s, &instance, &model), |(_, all)| all.clone()))
+            .child(provider_icon(t, &driver, 16.0))
+            .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+            .children(if multiple.is_some() { Vec::new() } else { chip_suffix(s, t) })
+            .on_press(act(s, picker::toggle));
+        if let Some((_, all)) = multiple {
+            chip = chip.help(all);
+        }
+        controls = controls.child(chip);
     }
     if folded {
         controls = controls.child(

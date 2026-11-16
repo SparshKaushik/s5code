@@ -25,6 +25,9 @@ pub struct Ui {
     pub(super) confirm_row: Option<Target>,
     /// Each environment's last failed update, until it is retried (web `ServerUpdateProgress`).
     failed: std::collections::HashMap<String, String>,
+    /// Web `serverEnvironment.hostResources`: each machine's last snapshot and its client receipt time.
+    resources: std::collections::HashMap<String, (Value, i64)>,
+    probing: Vec<(u64, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -236,6 +239,123 @@ fn load_balancing(s: &App, t: &T, keys: &[String], layers: &mut Vec<El>) -> El {
     folded(t, "Load balancing", summary, open, |s| s.ui.settings.connections.machines.balancing_open ^= true, Some(switch), body)
 }
 
+/// Web `HOST_RESOURCES_FRESH_MS` and the query's `staleTimeMs`.
+const FRESH_MS: i64 = 15_000;
+const STALE_MS: i64 = 5_000;
+
+/// Web `chooseLoadBalancedEnvironment`: `(key, snapshot, received at, weight)` per connected
+/// machine hosting the project; the most free CPU and memory, weighted, wins.
+fn choose_balanced(candidates: &[(String, Option<&Value>, i64, f64)], now: i64) -> Option<String> {
+    let mut selected = None;
+    let mut best = 0.0;
+    for (key, resources, received_at, weight) in candidates {
+        let Some(r) = resources else { continue };
+        let (Some(cpu), Some(count), Some(available), Some(total)) =
+            (r["cpuUtilization"].as_f64(), r["cpuCount"].as_f64(), r["availableMemoryBytes"].as_f64(), r["totalMemoryBytes"].as_f64())
+        else {
+            continue;
+        };
+        if !weight.is_finite() || *weight <= 0.0 || now - received_at > FRESH_MS || *received_at > now + 5_000 || cpu >= 0.95 || total <= 0.0 || count <= 0.0 {
+            continue;
+        }
+        let memory = available / total;
+        if memory <= 0.05 {
+            continue;
+        }
+        let score = weight * count * (1.0 - cpu) * memory;
+        if score > best {
+            selected = Some(key.clone());
+            best = score;
+        }
+    }
+    selected
+}
+
+/// The provider filter of web `useDraftEnvironmentRouting`'s candidates.
+fn provider_ready(config: &Value, instance: Option<&str>) -> bool {
+    config["providers"].as_array().into_iter().flatten().any(|p| {
+        instance.is_none_or(|id| p["instanceId"] == id)
+            && p["enabled"] == true
+            && p["installed"] == true
+            && p["status"] != "error"
+            && p["auth"]["status"] != "unauthenticated"
+            && p["availability"] != "unavailable"
+    })
+}
+
+fn collect_resources(s: &mut App) -> bool {
+    let probing = std::mem::take(&mut s.ui.settings.connections.machines.probing);
+    let mut changed = false;
+    for (id, key) in probing {
+        let reply = env::net_of(s, &key).and_then(|net| net.take_reply(id)).or_else(|| s.src.net().and_then(|net| net.take_reply(id)));
+        let Some(reply) = reply else {
+            if env::net_of(s, &key).is_some() {
+                s.ui.settings.connections.machines.probing.push((id, key));
+            }
+            continue;
+        };
+        changed = true;
+        match reply {
+            Ok(snapshot) => {
+                s.ui.settings.connections.machines.resources.insert(key, (snapshot, crate::data::now_ms()));
+            }
+            Err(_) => {
+                s.ui.settings.connections.machines.resources.remove(&key);
+            }
+        }
+    }
+    changed
+}
+
+/// Web `automaticEnvironment` for a new thread in `project_id`: with load balancing on, the
+/// machine (and its member of the project's group) to start the thread on, or `None` to keep the
+/// current one. Stale snapshots are re-requested, so calling it while the draft is open has them
+/// fresh by send (web's "Checking machines…").
+pub(crate) fn pick_environment(s: &mut App, project_id: &str, provider_instance: Option<&str>) -> Option<(String, String)> {
+    collect_resources(s);
+    if super::value(s, "loadBalancingEnabled") != true {
+        return None;
+    }
+    let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+    let group = &groups[*by_project.get(project_id)?];
+    if s.state().projects.iter().any(|p| p["id"] == project_id && p["isScratch"] == true) {
+        return None;
+    }
+    let mut members: Vec<(String, String)> = Vec::new();
+    for member in &group.members {
+        let key = env::owner(s, member);
+        let ready = env::connected(s, &key)
+            && weight(s, &key).unwrap_or(50.0) > 0.0
+            && env::source(s, &key).and_then(|src| src.state().config.as_ref()).is_some_and(|c| provider_ready(c, provider_instance));
+        if ready && !members.iter().any(|(k, _)| *k == key) {
+            members.push((key, member.clone()));
+        }
+    }
+    if members.len() < 2 {
+        return None;
+    }
+    let now = crate::data::now_ms();
+    for (key, _) in &members {
+        let ui = &s.ui.settings.connections.machines;
+        let stale = ui.resources.get(key).is_none_or(|(_, at)| now - at > STALE_MS);
+        if stale && !ui.probing.iter().any(|(_, k)| k == key) {
+            if let Some(id) = env::net_of(s, key).map(|net| net.request("server.getHostResources", json!({}))) {
+                s.ui.settings.connections.machines.probing.push((id, key.clone()));
+            }
+        }
+    }
+    let resources = &s.ui.settings.connections.machines.resources;
+    let candidates: Vec<(String, Option<&Value>, i64, f64)> = members
+        .iter()
+        .map(|(key, _)| {
+            let snapshot = resources.get(key);
+            (key.clone(), snapshot.map(|(v, _)| v), snapshot.map_or(0, |(_, at)| *at), weight(s, key).unwrap_or(50.0))
+        })
+        .collect();
+    let chosen = choose_balanced(&candidates, now)?;
+    members.into_iter().find(|(key, _)| *key == chosen)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Pull request sharing
 
@@ -322,6 +442,85 @@ fn set_permission(s: &mut App, key: &str, permission: &str) {
         Ok(()) => s.ui.settings.connections.machines.grants = Some(next),
         Err(_) => toast_error(s, "Could not save pull request routing permission", None),
     }
+}
+
+fn load_grants(s: &mut App) {
+    if s.ui.settings.connections.machines.grants.is_some() {
+        return;
+    }
+    let file = (!rune::is_headless()).then(|| std::fs::read_to_string(grants_path()).ok()).flatten();
+    let mut grants = file.and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| decode_grants(&v)).unwrap_or_default();
+    let local = env::local_id(s);
+    grants.retain(|g| s.ui.env.saved.iter().any(|e| e.id == g.environment_id) || local.as_deref() == Some(g.environment_id.as_str()));
+    s.ui.settings.connections.machines.grants = Some(grants);
+}
+
+fn enabled(s: &App, key: &str) -> bool {
+    if key == env::LOCAL { !s.ui.desktop.local_off } else { s.ui.env.saved.iter().any(|e| e.id == key) && !s.ui.env.off.iter().any(|k| k == key) }
+}
+
+/// Web `routingAllowed` over each side's permission: a write needs Read and act on both, a read
+/// anything but Off. The permission follows the saved addresses, so a changed SSH target is Off.
+fn allowed(origin: &str, destination: &str, write: bool) -> bool {
+    if write { origin == "read-write" && destination == "read-write" } else { origin != "off" && destination != "off" }
+}
+
+/// Web `isLocal`: a connection to this machine's loopback.
+fn loopback(s: &App, key: &str) -> bool {
+    if key == env::LOCAL {
+        return true;
+    }
+    let routes = env::routes(s, key);
+    let Some(route) = env::route_in_use(s, key).and_then(|i| routes.get(i)).or(routes.first()) else { return false };
+    let authority = route.base.split_once("://").map_or("", |(_, rest)| rest).split('/').next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host.starts_with('[') { host.split_inclusive(']').next().unwrap_or(host) } else { host.split(':').next().unwrap_or(host) };
+    ["localhost", "127.0.0.1", "[::1]"].contains(&host.to_ascii_lowercase().as_str())
+}
+
+/// Web's candidate order: a write tries a local source first, then local alternatives, then a
+/// remote source, then remote ones; a read tries every alternative before the source.
+fn route_order(origin: &str, origin_local: bool, alternatives: &[(String, bool)], write: bool) -> Vec<String> {
+    let pick = |local: bool| alternatives.iter().filter(move |(_, l)| *l == local).map(|(k, _)| k.clone());
+    let source = |when: bool| when.then(|| origin.to_owned());
+    source(write && origin_local)
+        .into_iter()
+        .chain(pick(true))
+        .chain(source(write && !origin_local))
+        .chain(pick(false))
+        .chain(source(!write))
+        .collect()
+}
+
+/// The environments to try a pull request request from `origin` on, in web
+/// `createPullRequestRouter`'s order. Just `[origin]` when no other machine is shared; otherwise
+/// probe `pullRequests.routing` on `origin` first and send the others the routed input with its
+/// `host` and `expectedAccountId`. `checks` is `pullRequests.checks`, which needs the capability.
+pub(crate) fn pull_request_route(s: &mut App, origin: &str, write: bool, checks: bool) -> Vec<String> {
+    load_grants(s);
+    let s = &*s;
+    let grants = s.ui.settings.connections.machines.grants.clone().unwrap_or_default();
+    let permission = |s: &App, key: &str| permission_for(&grants, machine_connection_key(s, key).as_deref()).to_owned();
+    if !enabled(s, origin) {
+        return vec![origin.to_owned()];
+    }
+    let source = permission(s, origin);
+    let alternatives: Vec<(String, bool)> = env::keys(s)
+        .into_iter()
+        .filter(|key| key != origin && enabled(s, key) && env::connected(s, key))
+        .filter(|key| allowed(&source, &permission(s, key), write))
+        .filter(|key| {
+            !checks || env::source(s, key).and_then(|src| src.state().config.as_ref()).is_some_and(|c| c["environment"]["capabilities"]["pullRequestChecks"] == true)
+        })
+        .map(|key| {
+            let local = loopback(s, &key);
+            (key, local)
+        })
+        .collect();
+    if alternatives.is_empty() {
+        return vec![origin.to_owned()];
+    }
+    route_order(origin, loopback(s, origin), &alternatives, write)
 }
 
 fn pull_request_routing(s: &App, t: &T, keys: &[String], layers: &mut Vec<El>) -> El {
@@ -522,14 +721,10 @@ fn start(s: &mut App, targets: Vec<Target>) {
 
 /// Update all's replies toast like web `useServerUpdate`.
 pub(super) fn poll(s: &mut App) -> bool {
-    if s.ui.settings.connections.machines.grants.is_none() && s.ui.settings.connections.page.as_deref() == Some("connections") {
-        let file = (!rune::is_headless()).then(|| std::fs::read_to_string(grants_path()).ok()).flatten();
-        let mut grants = file.and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| decode_grants(&v)).unwrap_or_default();
-        let local = env::local_id(s);
-        grants.retain(|g| s.ui.env.saved.iter().any(|e| e.id == g.environment_id) || local.as_deref() == Some(g.environment_id.as_str()));
-        s.ui.settings.connections.machines.grants = Some(grants);
+    if s.ui.settings.connections.page.as_deref() == Some("connections") {
+        load_grants(s);
     }
-    let mut changed = false;
+    let mut changed = collect_resources(s);
     let updating = std::mem::take(&mut s.ui.settings.connections.machines.updating);
     for (id, target) in updating {
         let reply = env::net_of(s, &target.key).and_then(|net| net.take_reply(id)).or_else(|| s.src.net().and_then(|net| net.take_reply(id)));
@@ -666,6 +861,41 @@ mod tests {
         let grants = granted(grants, "env", a.clone().unwrap(), "off");
         assert!(grants.is_empty(), "Off removes the grant");
         assert_eq!(decode_grants(&encode_grants(&granted(Vec::new(), "env", a.unwrap(), "read-write"))).len(), 1);
+    }
+
+    #[test]
+    fn load_balancing_picks_the_freest_fresh_machine_like_web() {
+        let host = |cpu: Value, count: u64, available: u64| json!({"sampledAt": 0, "cpuUtilization": cpu, "cpuCount": count, "availableMemoryBytes": available, "totalMemoryBytes": 100});
+        let (busy, idle, hot, full, nulled) = (host(json!(0.5), 8, 50), host(json!(0.1), 4, 80), host(json!(0.96), 64, 90), host(json!(0.0), 64, 5), host(Value::Null, 64, 90));
+        let now = 100_000;
+        let pick = |list: &[(&str, &Value, i64, f64)]| {
+            choose_balanced(&list.iter().map(|(k, v, at, w)| (k.to_string(), Some(*v), *at, *w)).collect::<Vec<_>>(), now)
+        };
+        // 50 * 8 * 0.5 * 0.5 = 100 against 50 * 4 * 0.9 * 0.8 = 144.
+        assert_eq!(pick(&[("busy", &busy, now, 50.0), ("idle", &idle, now, 50.0)]).as_deref(), Some("idle"));
+        assert_eq!(pick(&[("busy", &busy, now, 100.0), ("idle", &idle, now, 50.0)]).as_deref(), Some("busy"), "preference weighs in");
+        assert_eq!(pick(&[("busy", &busy, now, 50.0), ("idle", &idle, now, 0.0)]).as_deref(), Some("busy"), "manual only never wins");
+        assert_eq!(pick(&[("busy", &busy, now, 50.0), ("idle", &idle, now - FRESH_MS - 1, 50.0)]).as_deref(), Some("busy"), "stale");
+        assert_eq!(pick(&[("idle", &idle, now + 5_001, 50.0)]), None, "from the future");
+        assert_eq!(pick(&[("hot", &hot, now, 50.0), ("full", &full, now, 50.0), ("nulled", &nulled, now, 50.0)]), None);
+        assert_eq!(choose_balanced(&[("none".into(), None, now, 50.0)], now), None);
+        let provider = json!({"providers": [{"instanceId": "claude", "enabled": true, "installed": true, "status": "ready", "auth": {"status": "authenticated"}}]});
+        assert!(provider_ready(&provider, Some("claude")) && provider_ready(&provider, None));
+        assert!(!provider_ready(&provider, Some("codex")));
+        let signed_out = json!({"providers": [{"instanceId": "claude", "enabled": true, "installed": true, "auth": {"status": "unauthenticated"}}]});
+        assert!(!provider_ready(&signed_out, None));
+    }
+
+    #[test]
+    fn pull_request_routes_follow_web_permissions_and_order() {
+        assert!(allowed("read-write", "read-write", true));
+        assert!(!allowed("read-write", "read", true), "a write needs Read and act on both sides");
+        assert!(allowed("read", "read-write", false));
+        assert!(!allowed("off", "read-write", false));
+        let alternatives = [("lan".to_owned(), false), ("loop".to_owned(), true), ("box".to_owned(), false)];
+        assert_eq!(route_order("src", true, &alternatives, true), ["src", "loop", "lan", "box"]);
+        assert_eq!(route_order("src", false, &alternatives, true), ["loop", "src", "lan", "box"]);
+        assert_eq!(route_order("src", false, &alternatives, false), ["loop", "lan", "box", "src"], "a read tries the source last");
     }
 
     #[test]

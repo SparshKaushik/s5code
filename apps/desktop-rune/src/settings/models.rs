@@ -64,9 +64,16 @@ fn default_model(p: &Value) -> Option<String> {
         .map(|m| data::s(m, "slug").to_owned())
 }
 
+/// The scheduled task editor's model: its environment's providers and its draft, not a setting.
+pub const TASK: &str = "scheduledTaskModel";
+
+fn source<'a>(s: &'a App, key: &str) -> &'a [Value] {
+    if key == TASK { super::tasks::model_providers(s) } else { providers(s) }
+}
+
 /// The providers a key picks from: text generation skips providers that can't generate text.
 fn candidates<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
-    providers(s)
+    source(s, key)
         .iter()
         .filter(|p| !(key == "textGenerationModelSelection" || dedicated(key)) || p["supportsTextGeneration"] != false)
         .collect()
@@ -94,6 +101,9 @@ fn pair(v: &Value) -> Option<(String, String)> {
 /// The selection a key shows: `resolveDefaultProviderModelSelection` over the stored value, or
 /// the automatic project default when nothing is stored.
 pub fn selection(s: &App, key: &str) -> Option<(String, String)> {
+    if key == TASK {
+        return super::tasks::model(s);
+    }
     let entries = candidates(s, key);
     let stored = super::value(s, key);
     if key == "fallbackModelSelection" {
@@ -143,6 +153,9 @@ fn dedicated_control(s: &App, t: &T, key: &str) -> El {
     }
     if on && usable {
         line = line.child(trigger(s, t, key));
+        if let Some(traits) = traits_trigger(s, t, key) {
+            line = line.child(traits);
+        }
     }
     let owned = key.to_owned();
     line.child(
@@ -164,6 +177,272 @@ fn dedicated_control(s: &App, t: &T, key: &str) -> El {
             .build(&crate::kit::theme(t))
             .key(format!("setting-{key}")),
     )
+}
+
+const TRAITS: &str = "traits:";
+
+/// Option ids of a reasoning control (`REASONING_DESCRIPTOR_IDS`), as the composer's own list.
+const REASONING_IDS: [&str; 7] = ["reasoningEffort", "effort", "reasoning", "variant", "reasoning_effort", "thinking_level", "thinking"];
+
+/// `isReasoningSelect`.
+fn is_reasoning_select(d: &Value) -> bool {
+    d["type"] == "select" && (d["role"] == "reasoning" || REASONING_IDS.contains(&data::s(d, "id")))
+}
+
+fn default_id(options: &[Value]) -> Option<String> {
+    options.iter().find(|o| o["isDefault"] == true).and_then(|o| o["id"].as_str()).map(str::to_owned)
+}
+
+fn options_of(d: &Value) -> &[Value] {
+    d["options"].as_array().map_or(&[], Vec::as_slice)
+}
+
+fn injected(d: &Value, id: &str) -> bool {
+    d["promptInjectedValues"].as_array().is_some_and(|v| v.iter().any(|v| v.as_str() == Some(id)))
+}
+
+/// `resolveDescriptorChoiceValue`: a saved pick the select still offers, else its own value.
+fn choice(d: &Value, raw: Option<&str>) -> Option<String> {
+    let options = options_of(d);
+    let fallback = || d["currentValue"].as_str().map(str::to_owned).or_else(|| default_id(options));
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else { return fallback() };
+    if options.is_empty() {
+        return Some(raw.to_owned());
+    }
+    let known = options.iter().any(|o| o["id"].as_str() == Some(raw));
+    if known && injected(d, raw) {
+        return default_id(options);
+    }
+    if known { Some(raw.to_owned()) } else { fallback() }
+}
+
+/// `getProviderOptionDescriptors` over the model's capabilities, without the plan agent unless
+/// plan mode is on (`getProviderModelCapabilities`).
+fn trait_descriptors(caps: &[Value], saved: &[Value], plan: bool) -> Vec<Value> {
+    caps.iter()
+        .filter_map(|d| {
+            let mut d = d.clone();
+            if !plan && d["type"] == "select" && d["id"] == "agent" {
+                let options: Vec<Value> = options_of(&d).iter().filter(|o| o["id"] != "plan").cloned().collect();
+                if options.is_empty() {
+                    return None;
+                }
+                let current = d["currentValue"]
+                    .as_str()
+                    .filter(|c| options.iter().any(|o| o["id"].as_str() == Some(*c)))
+                    .map(str::to_owned)
+                    .or_else(|| default_id(&options))
+                    .or_else(|| options[0]["id"].as_str().map(str::to_owned));
+                d["options"] = Value::Array(options);
+                if let Some(c) = current {
+                    d["currentValue"] = json!(c);
+                }
+            }
+            let raw = saved.iter().find(|o| o["id"] == d["id"]).map(|o| o["value"].clone());
+            if d["type"] == "boolean" {
+                if let Some(v @ Value::Bool(_)) = raw {
+                    d["currentValue"] = v;
+                }
+            } else {
+                match choice(&d, raw.as_ref().and_then(Value::as_str)) {
+                    Some(c) => d["currentValue"] = json!(c),
+                    None => {
+                        if let Some(o) = d.as_object_mut() {
+                            o.remove("currentValue");
+                        }
+                    }
+                }
+            }
+            Some(d)
+        })
+        .collect()
+}
+
+/// `getProviderOptionCurrentValue` without a selection.
+fn current(d: &Value) -> Option<Value> {
+    if d["type"] == "boolean" {
+        return d["currentValue"].is_boolean().then(|| d["currentValue"].clone());
+    }
+    d["currentValue"].as_str().filter(|c| !c.is_empty()).map(str::to_owned).or_else(|| default_id(options_of(d))).map(Value::String)
+}
+
+/// `buildProviderOptionSelectionsFromDescriptors`.
+fn selections(ds: &[Value]) -> Vec<Value> {
+    ds.iter().filter_map(|d| Some(json!({"id": d["id"], "value": current(d)?}))).collect()
+}
+
+/// `getTraitsSectionVisibility(...).hasAnyControls`.
+fn has_controls(ds: &[Value]) -> bool {
+    ds.iter().any(|d| d["type"] == "select" || (d["type"] == "boolean" && matches!(data::s(d, "id"), "thinking" | "fastMode")))
+}
+
+/// `buildTraitsTriggerDisplay(...).label` with no prompt-controlled Ultrathink.
+fn traits_label(driver: &str, ds: &[Value]) -> String {
+    let (mut fallback, mut speed, mut reasoning) = (None::<String>, None::<&str>, None::<usize>);
+    let mut labels: Vec<String> = Vec::new();
+    for d in ds {
+        let id = data::s(d, "id");
+        let boolean = d["type"] == "boolean";
+        if id == "fastMode" && boolean {
+            speed = (d["currentValue"] == true).then_some("Fast");
+            fallback = Some(speed.unwrap_or("Normal").to_owned());
+            continue;
+        }
+        let options = options_of(d);
+        let label_of = |id: &str| options.iter().find(|o| o["id"].as_str() == Some(id)).map(|o| data::s(o, "label").to_owned());
+        let value = current(d).and_then(|v| v.as_str().map(str::to_owned));
+        if driver == "codex" && id == "serviceTier" && !boolean {
+            let value = value.as_deref().unwrap_or("");
+            let tier = |name: &str| options.iter().find(|o| o["label"] == name).map(|o| data::s(o, "id"));
+            let (fast, ultra) = (tier("Fast"), tier("Ultrafast"));
+            if ((fast.is_some() || ultra.is_some()) && value == "default") || fast == Some(value) || ultra == Some(value) {
+                speed = if ultra == Some(value) {
+                    Some("Ultrafast")
+                } else if fast == Some(value) {
+                    Some("Fast")
+                } else {
+                    None
+                };
+                fallback = Some(label_of(value).unwrap_or_else(|| "Normal".into()));
+                continue;
+            }
+        }
+        let label = if boolean {
+            format!("{} {}", data::s(d, "label"), if d["currentValue"] == true { "On" } else { "Off" })
+        } else {
+            value.as_deref().and_then(label_of).unwrap_or_else(|| if id == "variant" { "Unknown".into() } else { String::new() })
+        };
+        if !label.is_empty() {
+            if reasoning.is_none() && is_reasoning_select(d) {
+                reasoning = Some(labels.len());
+            }
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        if let Some(fallback) = fallback {
+            return fallback;
+        }
+    }
+    if let Some(speed) = speed {
+        match reasoning {
+            Some(i) => labels[i] = format!("{} {speed}", labels[i]),
+            None => labels.push(speed.to_owned()),
+        }
+    }
+    labels.join(" · ")
+}
+
+/// The stored dedicated selection's driver and option descriptors, when web's `TraitsPicker`
+/// has anything to show for it.
+fn traits(s: &App, key: &str) -> Option<(String, Vec<Value>)> {
+    let stored = super::value(s, key);
+    let (instance, model) = pair(&stored)?;
+    let p = providers(s).iter().find(|p| p["instanceId"] == instance.as_str())?;
+    let caps = p["models"].as_array()?.iter().find(|m| m["slug"] == model.as_str())?["capabilities"]["optionDescriptors"]
+        .as_array()?
+        .clone();
+    let saved = stored["options"].as_array().cloned().unwrap_or_default();
+    let plan = super::value(s, "planModeEnabled") == true || saved.iter().any(|o| o["id"] == "agent" && o["value"] == "plan");
+    let ds = trait_descriptors(&caps, &saved, plan);
+    has_controls(&ds).then(|| (data::s(p, "driver").to_owned(), ds))
+}
+
+/// `createModelSelection`: options only when there are any.
+fn with_options(instance: &str, model: &str, options: Vec<Value>) -> Value {
+    let mut v = json!({"instanceId": instance, "model": model});
+    if !options.is_empty() {
+        v["options"] = Value::Array(options);
+    }
+    v
+}
+
+fn set_trait(s: &mut App, key: &str, id: &str, value: Value) {
+    let Some((_, mut ds)) = traits(s, key) else { return };
+    let Some((instance, model)) = pair(&super::value(s, key)) else { return };
+    if let Some(d) = ds.iter_mut().find(|d| d["id"] == id) {
+        d["currentValue"] = value;
+    }
+    update(s, key, with_options(&instance, &model, selections(&ds)));
+}
+
+/// Web's `TraitsPicker` beside a dedicated model: a gauge and the current traits.
+fn traits_trigger(s: &App, t: &T, key: &str) -> Option<El> {
+    let (driver, ds) = traits(s, key)?;
+    let label = traits_label(&driver, &ds);
+    let id = format!("{TRAITS}{key}");
+    let open = s.ui.settings.models.open.as_deref() == Some(id.as_str());
+    let mut trigger = row()
+        .key(format!("traits-trigger-{key}"))
+        .h(28.0)
+        .px(8.0)
+        .gap(6.0)
+        .center_y()
+        .min_w(0.0)
+        .radius(theme::layout::CONTROL_RADIUS)
+        .border(1.0, t.c.input)
+        .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
+        .hover(t.c.accent.alpha_mul(0.5))
+        .cursor(Cursor::Pointer)
+        .focusable(true)
+        .role("button")
+        .label(label.clone())
+        .expanded(open)
+        .on_press(move |s: &mut App| {
+            let p = &mut s.ui.settings.models;
+            p.open = if p.open.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+        });
+    if open {
+        trigger = trigger.fill(t.c.accent);
+    }
+    Some(
+        trigger
+            .child(icon(&icons::GAUGE, 16.0).color(t.c.muted_foreground))
+            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink()),
+    )
+}
+
+/// `TraitsMenuContent`: each select's choices, then each switch's On/Off.
+fn traits_menu(s: &App, t: &T, key: &str, layers: &mut Vec<El>) {
+    let Some((_, ds)) = traits(s, key) else { return };
+    let close = |s: &mut App| s.ui.settings.models.open = None;
+    let mut menu = crate::kit::Menu::new(format!("traits-{key}"))
+        .anchor(format!("traits-trigger-{key}"))
+        .placement(rune_kit::Placement::BottomStart)
+        .open(true)
+        .on_close(close);
+    let groups = ds.iter().filter(|d| d["type"] != "boolean").chain(ds.iter().filter(|d| d["type"] == "boolean"));
+    for (n, d) in groups.enumerate() {
+        if n > 0 {
+            menu = menu.separator();
+        }
+        menu = menu.group_label(data::s(d, "label"));
+        let picked = current(d);
+        let choices: Vec<(Value, String, bool, String)> = if d["type"] == "boolean" {
+            [true, false].into_iter().map(|on| (Value::Bool(on), (if on { "On" } else { "Off" }).to_owned(), false, String::new())).collect()
+        } else {
+            options_of(d)
+                .iter()
+                .filter(|o| !injected(d, data::s(o, "id")))
+                .map(|o| (o["id"].clone(), data::s(o, "label").to_owned(), o["isDefault"] == true, data::s(o, "description").to_owned()))
+                .collect()
+        };
+        for (value, label, default, description) in choices {
+            let mut item = crate::kit::MenuItem::new(label).radio(picked.as_ref() == Some(&value));
+            if default {
+                item = item.trailing(crate::kit::badge("Default", "outline", "sm", t));
+            }
+            if !description.is_empty() {
+                item = item.description(description);
+            }
+            let (k, id) = (key.to_owned(), data::s(d, "id").to_owned());
+            menu = menu.item(item.on_select(move |s: &mut App| {
+                close(s);
+                set_trait(s, &k, &id, value.clone());
+            }));
+        }
+    }
+    menu.overlay(&crate::kit::theme(t), layers);
 }
 
 /// `canEnableDedicatedModel`: what the model falls back to comes from a usable provider.
@@ -275,7 +554,7 @@ fn models_for(s: &App, key: &str, rail: &str) -> Vec<(String, String, String)> {
             .collect();
     }
     let hidden = server_settings(s)["providerModelPreferences"][rail]["hiddenModels"].clone();
-    let Some(p) = providers(s).iter().find(|p| p["instanceId"] == rail) else { return Vec::new() };
+    let Some(p) = source(s, key).iter().find(|p| p["instanceId"] == rail) else { return Vec::new() };
     p["models"]
         .as_array()
         .into_iter()
@@ -300,8 +579,11 @@ fn rows(s: &App, key: &str, rail: &str) -> Vec<(String, String, String)> {
 
 fn pick(s: &mut App, key: &str, instance: String, model: String) {
     close(s);
-    if !providers(s).iter().any(|p| p["instanceId"] == instance.as_str() && ready(p)) {
+    if !source(s, key).iter().any(|p| p["instanceId"] == instance.as_str() && ready(p)) {
         return;
+    }
+    if key == TASK {
+        return super::tasks::set_model(s, &instance, &model);
     }
     update(s, key, json!({"instanceId": instance, "model": model}));
 }
@@ -349,6 +631,9 @@ fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
 /// The open picker's popover, anchored under its trigger.
 pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(key) = s.ui.settings.models.open.clone() else { return };
+    if let Some(key) = key.strip_prefix(TRAITS) {
+        return traits_menu(s, t, key, layers);
+    }
     let current = selection(s, &key);
     let rail = shown_rail(s, &key);
     let line = t.c.border.alpha_mul(0.7);
@@ -427,7 +712,7 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
     let searching = !q.text.trim().is_empty();
     let mut body = col().w_full().pl(8.0).pr(1.0).py(6.0).gap(2.0);
     for (n, (instance, slug, name)) in list.iter().enumerate() {
-        let driver = providers(s)
+        let driver = source(s, &key)
             .iter()
             .find(|p| p["instanceId"] == instance.as_str())
             .map(|p| data::s(p, "driver").to_owned())
@@ -470,7 +755,7 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
         .child(header)
         .child(col().w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
     // `ModelPickerProviderNotices`: a provider that isn't ready offers its setup.
-    let setup = providers(s).iter().find(|p| p["instanceId"] == rail.as_str() && !ready(p) && !searching);
+    let setup = source(s, &key).iter().find(|p| p["instanceId"] == rail.as_str() && !ready(p) && !searching);
     if list.is_empty() {
         if let Some(p) = setup {
             let id = data::s(p, "instanceId").to_owned();
@@ -588,5 +873,46 @@ mod tests {
         assert!(can_enable(&entries, Some("codex")));
         assert!(!can_enable(&entries, Some("claude")), "a disabled provider can't back a dedicated model");
         assert!(!can_enable(&entries, None));
+    }
+    #[test]
+    fn traits_apply_saved_options_like_get_provider_option_descriptors() {
+        let caps = vec![
+            json!({"id":"reasoningEffort","label":"Reasoning","type":"select","promptInjectedValues":["ultrathink"],
+                "options":[{"id":"low","label":"Low"},{"id":"high","label":"High","isDefault":true},{"id":"ultrathink","label":"Ultrathink"}]}),
+            json!({"id":"agent","label":"Agent","type":"select","currentValue":"plan","options":[{"id":"build","label":"Build"},{"id":"plan","label":"Plan"}]}),
+            json!({"id":"fastMode","label":"Fast mode","type":"boolean"}),
+        ];
+        let saved = vec![json!({"id":"reasoningEffort","value":"low"}), json!({"id":"fastMode","value":true})];
+        let ds = trait_descriptors(&caps, &saved, false);
+        assert_eq!(ds[0]["currentValue"], "low");
+        assert_eq!(ds[1]["options"].as_array().unwrap().len(), 1, "plan mode off drops the plan agent");
+        assert_eq!(ds[1]["currentValue"], "build");
+        assert_eq!(ds[2]["currentValue"], true);
+        assert_eq!(
+            selections(&ds),
+            vec![json!({"id":"reasoningEffort","value":"low"}), json!({"id":"agent","value":"build"}), json!({"id":"fastMode","value":true})]
+        );
+        // A saved prompt-injected or unknown level falls back to the default choice.
+        assert_eq!(trait_descriptors(&caps, &[json!({"id":"reasoningEffort","value":"ultrathink"})], true)[0]["currentValue"], "high");
+        assert_eq!(trait_descriptors(&caps, &[json!({"id":"reasoningEffort","value":"max"})], true)[0]["currentValue"], "high");
+        assert_eq!(trait_descriptors(&caps, &[], true)[1]["currentValue"], "plan");
+        assert!(has_controls(&ds));
+        assert!(!has_controls(&[json!({"id":"other","type":"boolean"})]));
+        assert_eq!(with_options("codex", "gpt", vec![]), json!({"instanceId":"codex","model":"gpt"}));
+    }
+    #[test]
+    fn traits_label_follows_build_traits_trigger_display() {
+        let effort = json!({"id":"reasoningEffort","label":"Reasoning","type":"select","currentValue":"high",
+            "options":[{"id":"high","label":"High"}]});
+        let fast = |on: bool| json!({"id":"fastMode","label":"Fast mode","type":"boolean","currentValue":on});
+        assert_eq!(traits_label("claude", &[effort.clone(), fast(true)]), "High Fast");
+        assert_eq!(traits_label("claude", &[fast(false)]), "Normal");
+        let thinking = json!({"id":"thinking","label":"Thinking","type":"boolean","currentValue":false});
+        assert_eq!(traits_label("claude", &[effort.clone(), thinking]), "High · Thinking Off");
+        let tier = |v: &str| json!({"id":"serviceTier","label":"Speed","type":"select","currentValue":v,
+            "options":[{"id":"default","label":"Standard"},{"id":"priority","label":"Fast"}]});
+        assert_eq!(traits_label("codex", &[effort.clone(), tier("priority")]), "High Fast");
+        assert_eq!(traits_label("codex", &[tier("default")]), "Standard");
+        assert_eq!(traits_label("claude", &[tier("priority")]), "Fast");
     }
 }

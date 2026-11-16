@@ -15,6 +15,8 @@ pub struct Watch {
     previous: Option<Option<String>>,
     /// The panel as the user left it when the run started.
     baseline: (bool, Option<Surface>),
+    /// The linked pull requests' key at the last look (web's `targetKey`): `None` before it.
+    links: Option<Option<String>>,
 }
 
 const ACTIVE: [&str; 5] = ["preparing", "queued", "starting", "running", "waiting"];
@@ -33,6 +35,12 @@ fn newly_completed<'a>(previous: &Option<Option<String>>, running: Option<&str>,
     let settled = !ACTIVE.contains(&status);
     let seen = previous.as_ref().is_none_or(|p| p.as_deref() == Some(id));
     (running.is_none() && settled && status == "completed" && seen).then_some(id)
+}
+
+/// `shouldOpenProactivePullRequest`: a new set of links, including the first look at a thread.
+/// Rune has no single pull request surface, so the list opens for one link too.
+fn opens_links(seen: Option<&Option<String>>, key: Option<&str>) -> bool {
+    key.is_some() && seen.is_none_or(|seen| seen.as_deref() != key)
 }
 
 /// `resolveProactiveTurnDiffAction`: wait for the checkpoint and the repository status.
@@ -55,9 +63,17 @@ pub fn poll(app: &mut App) -> bool {
     let id = id.clone();
     let panel = (app.ui.shell.panel_open, app.ui.panel.active);
     if app.ui.panel.proactive.thread != id {
-        app.ui.panel.proactive = Watch { thread: id.clone(), previous: None, baseline: panel };
+        app.ui.panel.proactive = Watch { thread: id.clone(), previous: None, baseline: panel, links: None };
     }
-    if crate::settings::value(app, "proactivePanelsEnabled") != true {
+    let enabled = crate::settings::value(app, "proactivePanelsEnabled") == true;
+    let key = super::pull_requests::proactive_key(app);
+    let seen = app.ui.panel.proactive.links.replace(key.clone());
+    if enabled && opens_links(seen.as_ref(), key.as_deref()) && !app.ui.panel.surfaces.contains(&Surface::PullRequests) {
+        super::activate(app, Surface::PullRequests);
+        app.ui.panel.proactive.baseline = (app.ui.shell.panel_open, app.ui.panel.active);
+        return true;
+    }
+    if !enabled {
         return false;
     }
     let Some(view) = app.state().thread_views.get(&id) else { return false };
@@ -82,7 +98,7 @@ pub fn poll(app: &mut App) -> bool {
     }
     let untouched = watch.baseline == panel;
     match (act, checkpoint) {
-        (Action::Open, Some(checkpoint)) if untouched => {
+        (Action::Open, Some(checkpoint)) if untouched && app.ui.panel.active != Some(Surface::PullRequests) => {
             super::open_diff(app, checkpoint);
             app.ui.panel.proactive.baseline = (app.ui.shell.panel_open, app.ui.panel.active);
             true
@@ -93,7 +109,7 @@ pub fn poll(app: &mut App) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, action, newly_completed};
+    use super::{Action, action, newly_completed, opens_links};
     use serde_json::json;
 
     #[test]
@@ -111,5 +127,15 @@ mod tests {
         assert_eq!(action(&p("missing"), "r2", Some(true)), Action::Defer);
         assert_eq!(action(&json!({}), "r2", Some(true)), Action::Defer, "checkpoint not arrived");
         assert_eq!(action(&p("ready"), "r2", Some(false)), Action::Ignore);
+    }
+
+    #[test]
+    fn linked_pull_requests_open_on_the_first_look_and_on_each_new_link() {
+        let (one, two) = (Some("[a]".to_string()), Some("[a,b]".to_string()));
+        assert!(opens_links(None, one.as_deref()), "first look at a thread with links");
+        assert!(!opens_links(Some(&one), one.as_deref()), "the same links again");
+        assert!(opens_links(Some(&one), two.as_deref()), "a link was added");
+        assert!(!opens_links(None, None), "nothing linked");
+        assert!(opens_links(Some(&None), one.as_deref()), "the first link arrives");
     }
 }
