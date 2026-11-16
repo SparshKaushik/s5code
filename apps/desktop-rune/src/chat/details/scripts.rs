@@ -363,6 +363,13 @@ fn open_editor(s: &mut App, script: Option<&Value>) {
     s.ui.chat.details.scripts.editor = Some(e);
 }
 
+/// Scene: the action editor on a connection that can read the project but not change it.
+pub fn scene_locked(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    open_editor(s, Some(&serde_json::json!({"id": "test", "name": "Test", "command": "bun run test", "icon": "test"})));
+    super::set_session(s, Some(Ok(serde_json::json!({"authenticated": true, "scopes": ["orchestration:read", "terminal:operate"]}))));
+}
+
 /// Writes the project's next script list, then its keybinding changes (`persistProjectScripts`).
 fn persist(s: &mut App, next: Vec<Value>, command: String, keybinding: Option<Option<String>>, deleted: Option<String>) {
     let Some(project) = project(s) else { return };

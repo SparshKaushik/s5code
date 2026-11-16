@@ -93,7 +93,6 @@ const SESSION_STALE_MS: i64 = 5 * 60_000;
 
 /// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
 /// leaves it to the server; a failed read denies, as web's guards do.
-#[cfg(test)]
 pub(crate) fn set_session(s: &mut App, session: Option<Result<Value, ()>>) {
     s.ui.chat.details.session = session;
 }
@@ -419,7 +418,12 @@ fn action(t: &T, key: &str, glyph: El, label: &str, color: Color) -> El {
         .child(text(label.to_string()).font(ROW).color(color).truncate().grow(1.0).shrink().min_w(0.0))
 }
 
-fn split(t: &T, key: &str, main: El, label: &str, menu: Menu, enabled: bool) -> El {
+fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
+    split_with(t, key, main, label, menu, true)
+}
+
+/// [`split`] whose chooser is disabled unless `enabled`.
+fn split_with(t: &T, key: &str, main: El, label: &str, menu: Menu, enabled: bool) -> El {
     let chooser = el().key(key.to_string()).size(32.0, 32.0).center().corners([0.0, 8.0, 8.0, 0.0]).label(label.to_string()).help(label.to_string());
     let chooser = if enabled {
         chooser.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle_menu(s, menu))
@@ -1209,7 +1213,7 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
     let preferred = preferred_editor(s);
-    let editor = split(
+    let editor = split_with(
         t,
         "details-editor-menu",
         {
@@ -1588,6 +1592,12 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
             .overlay(&crate::kit::theme(t), &mut out);
     }
     out
+}
+
+/// Scene: the Open in editor chooser, with web's editor names.
+pub fn scene_editor_menu(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    s.ui.chat.details.menu = Some(Menu::Editor);
 }
 
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
