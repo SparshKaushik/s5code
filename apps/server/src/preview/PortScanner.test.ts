@@ -301,7 +301,10 @@ effectIt.effect("skips scheduled scans while no client is in the foreground", ()
   let foreground = true;
   const layer = layerLsofScanner({
     pid: () => 1234,
-    fetch: (() => Promise.resolve(new Response("not found", { status: 404 }))) as typeof fetch,
+    fetch: Object.assign(
+      async (_input: Parameters<typeof fetch>[0]) => new Response("not found", { status: 404 }),
+      { preconnect: () => {} },
+    ),
     stdout: () => {
       lsofRuns += 1;
       return `p1234\ncnode\nn*:${LSOF_TEST_PORT}\n`;
