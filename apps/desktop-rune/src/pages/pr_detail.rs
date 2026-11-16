@@ -79,9 +79,6 @@ pub struct Ui {
     /// `git.preparePullRequestThread` in flight: the request, its mode, and the project the
     /// thread opens in.
     checkout: Option<(u64, &'static str, String)>,
-    /// The Summary bar's checks popover is open, and lists every check.
-    pub checks_popover: bool,
-    pub checks_all: bool,
     /// The detail's error was the host's not-found.
     pub not_found: bool,
     /// A copyable value reading "Copied" until the given time.
