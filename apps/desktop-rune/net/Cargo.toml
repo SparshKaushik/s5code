@@ -12,3 +12,7 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+
+[features]
+# `Net::in_memory`, for the client's tests.
+test-support = []

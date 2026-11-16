@@ -66,6 +66,8 @@ pub struct Draft {
     pub contexts: Vec<Value>,
     /// Other model options picked in this draft (speed, agent, switches), as `{id, value}`.
     pub options: Vec<Value>,
+    /// When the draft began (`DraftSessionState.createdAt`), ms; the sidebar lists newest first.
+    pub created_at: i64,
 }
 
 impl Default for Draft {
@@ -79,6 +81,7 @@ impl Default for Draft {
             effort: None,
             contexts: Vec::new(),
             options: Vec::new(),
+            created_at: data::now_ms(),
         }
     }
 }
@@ -1240,7 +1243,7 @@ fn stored_draft(d: &Draft) -> Value {
     json!({
         "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
         "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
-        "options": d.options,
+        "options": d.options, "createdAt": d.created_at,
     })
 }
 
@@ -1315,6 +1318,8 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
                 options: d["options"].as_array().cloned().unwrap_or_default(),
+                // Drafts stored before timestamps sort as the oldest.
+                created_at: d["createdAt"].as_i64().unwrap_or(0),
             },
         );
     }
@@ -1607,9 +1612,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
+    // On the draft hero web moves its notices below the composer (isDraftHeroState).
+    let hero = matches!(s.frame_route(), Route::Home { .. });
+    let detached = crate::add_to_machine::banner(s, t, true).filter(|_| hero);
     let docked = crate::chat::timeline::composer_requests(s, t)
         .or_else(|| plan::banner(s, t))
-        .or_else(|| crate::add_to_machine::banner(s, t))
+        .or_else(|| crate::add_to_machine::banner(s, t, false).filter(|_| !hero))
         .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
     let docked = usage_limits::banner(s, cx, t).or(docked);
@@ -1624,7 +1632,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         (None, Some(badge)) => stack = stack.child(row().w_full().px(22.0).mb(-17.0).child(spacer()).child(badge)),
         (None, None) => {}
     }
-    stack.child(body)
+    stack.child(body).children(detached.map(|banner| col().w_full().pt(16.0).child(banner)))
 }
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.

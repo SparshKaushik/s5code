@@ -42,6 +42,9 @@ struct Notice {
     until: i64,
     actions: Vec<ToastAction>,
     error: bool,
+    warning: bool,
+    /// Actions shown disabled, by label.
+    disabled: Vec<String>,
     /// Actions reading "Copied!" until their deadline, as web updates a toast after a copy.
     copied: Vec<(String, i64)>,
 }
@@ -61,6 +64,8 @@ enum Action {
     Appearance(&'static str),
     Theme(String),
     PinProject(String, bool),
+    /// A project group's pin, set on every member (`toggleProjectGroupPin`).
+    PinGroup(Vec<String>, bool),
     Restart(String),
     OpenProject(String),
     AddProject,
@@ -86,6 +91,7 @@ enum Action {
     CheckForUpdates,
     OpenFile(String),
     ProjectSettings(String),
+    FocusWorkspace(bool),
     /// A message match: open its thread with find on the matched words.
     FindMessage(String, String),
 }
@@ -168,6 +174,18 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
     let (groups, _) = crate::shell::sidebar::folders::group_of(s);
     let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.archived).collect();
     groups.sort_by_key(|g| !g.pinned);
+    // `buildSidebarProjectPickerEntries`: the preferred project leads the unpinned ones.
+    let preferred_id = current.map(str::to_owned).or_else(|| crate::chat::home::draft_project(s).map(|p| data::s(p, "id").to_owned()));
+    let is_preferred = |g: &crate::shell::sidebar::folders::Group| preferred_id.as_ref().is_some_and(|p| g.members.contains(p));
+    if new_thread
+        && let Some(at) = groups.iter().position(|g| is_preferred(g) && !g.pinned)
+    {
+        let preferred = groups.remove(at);
+        let pinned = groups.iter().filter(|g| g.pinned).count();
+        groups.insert(pinned, preferred);
+    }
+    let scratch_of = |g: &crate::shell::sidebar::folders::Group| by_id(&g.representative).is_some_and(|p| actions::is_scratch_project(s, p));
+    let no_project_at = no_project_index(&groups.iter().map(|g| (scratch_of(g), g.pinned, is_preferred(g))).collect::<Vec<_>>());
     let mut out = vec![];
     for g in groups {
         let Some(representative) = by_id(&g.representative) else { continue };
@@ -198,7 +216,28 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         }
         out.push(row);
     }
+    if new_thread && actions::scratch_available(s) {
+        let mut none = item("No project", "Projects", &icons::MESSAGE_SQUARE_DASHED, &shortcut_label(s, "chat.newWithoutProject"), Action::NewWithoutProject);
+        none.fields = keywords(&["no project", "without project", "none"]);
+        out.insert(no_project_at.min(out.len()), none);
+    }
+    if new_thread && out.is_empty() {
+        out.push(item("Add project", "Projects", &icons::FOLDER_PLUS, "", Action::AddProject));
+    }
     out
+}
+
+/// `newThreadNoProjectIndex` over `(scratch, pinned, preferred)` picker entries: a pinned or
+/// preferred scratch project keeps its place, else "No project" follows the pinned projects.
+fn no_project_index(entries: &[(bool, bool, bool)]) -> usize {
+    let projects: Vec<_> = entries.iter().filter(|e| !e.0).collect();
+    if let Some(at) = entries.iter().position(|e| e.0)
+        && (entries[at].1 || entries[at].2)
+    {
+        return entries[..at].iter().filter(|e| !e.0).count();
+    }
+    let pinned = projects.iter().filter(|e| e.1).count();
+    (pinned + 1).min(projects.len())
 }
 
 fn item(
@@ -217,7 +256,8 @@ fn item(
         subtitle: None,
         description: None,
         disabled: false,
-        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::AddProjectIn(_) | Action::NewProject | Action::Files | Action::ContentSearch) {
+        // Only submenus carry a chevron on web.
+        trailing: if matches!(action, Action::Page(_)) {
             Trailing::Chevron
         } else {
             Trailing::None
@@ -351,8 +391,19 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         until: data::now_ms() + 4000,
         actions,
         error: false,
+        warning: false,
+        disabled: Vec::new(),
         copied: Vec::new(),
     });
+}
+/// A `type: "warning"` toast; `disabled` greys out its actions.
+pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>, disabled: bool) {
+    let labels = if disabled { actions.iter().map(|a| a.0.clone()).collect() } else { Vec::new() };
+    toast_with(s, title, description, actions);
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.warning = true;
+        notice.disabled = labels;
+    }
 }
 #[cfg(test)]
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
@@ -376,8 +427,17 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
         until: i64::MAX,
         actions: Vec::new(),
         error: true,
+        warning: false,
+        disabled: Vec::new(),
         copied: Vec::new(),
     });
+}
+/// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
+pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
+    toast(s, title, description);
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.until = i64::MAX;
+    }
 }
 /// An error toast that times out like a plain one (web's `type: "error"` without `timeout: 0`).
 pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&str>) {
@@ -465,24 +525,33 @@ fn items(s: &App) -> Vec<Item> {
         return rows;
     }
     let ui = &s.ui.shell.palette;
-    if ui.page == "files" {
+    let rows = items_on(s, &ui.page);
+    // `filterCommandPaletteGroups`: a submenu with no match falls back to the root search.
+    if rows.is_empty() && !matches!(ui.page.as_str(), "" | "files") && !ui.query.text.trim().is_empty() {
+        return items_on(s, "");
+    }
+    rows
+}
+fn items_on(s: &App, page: &str) -> Vec<Item> {
+    let ui = &s.ui.shell.palette;
+    if page == "files" {
         return actions::file_items(s);
     }
     let mut out = vec![];
-    if ui.page == "add-project" {
+    if page == "add-project" {
         out = add_project::source_items(s);
     }
-    if ui.page == "add-environment" {
+    if page == "add-environment" {
         out = add_project::environment_items(s);
     }
-    if ui.page == "themes" {
+    if page == "themes" {
         out.extend(theme_items(s));
     }
-    if ui.page == "appearance" {
+    if page == "appearance" {
         out.extend(appearance_items(s));
     }
-    let (actions_only, typed) = actions_filter(ui);
-    if ui.page.is_empty() {
+    let (actions_only, typed) = actions_filter(ui, page);
+    if page.is_empty() {
         let project = match &s.route {
             Route::Thread(id) => s
                 .state()
@@ -510,21 +579,19 @@ fn items(s: &App) -> Vec<Item> {
             row.strong_from = Some("New thread in ".len());
             out.push(row);
         }
-        out.push(item(
-            "New thread in...",
-            "Actions",
-            &icons::SQUARE_PEN,
-            "",
-            Action::Page("projects"),
-        ));
+        if !s.state().projects.is_empty() {
+            out.push(item("New thread in...", "Actions", &icons::SQUARE_PEN, "", Action::Page("projects")));
+        }
         if actions::scratch_available(s) {
-            out.push(item(
+            let mut scratch = item(
                 "New thread without a project",
                 "Actions",
                 &icons::MESSAGE_SQUARE_DASHED,
                 &shortcut_label(s, "chat.newWithoutProject"),
                 Action::NewWithoutProject,
-            ));
+            );
+            scratch.fields = keywords(&["new thread", "no project", "without project", "none", "chat"]);
+            out.push(scratch);
         }
         out.extend(actions::thread_items(s));
         if let Route::Thread(id) = &s.route {
@@ -548,42 +615,44 @@ fn items(s: &App) -> Vec<Item> {
         out.push(editor);
         if crate::pages::pull_requests::supported(s) {
             let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
-            prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
+            // Each source control's change request names and label words, then the verbs.
+            prs.fields = keywords(&[
+                "pull requests", "prs", "pr", "github", "merge requests", "mrs", "mr", "gitlab", "gitcafe", "forgejo", "bitbucket", "azure",
+                "devops", "review", "merge", "branch",
+            ]);
             out.push(prs);
         }
         let mut usage = item("Open usage", "Actions", &icons::CHART_NO_AXES_COLUMN, &shortcut_label(s, "usage.open"), Action::Navigate(Route::Usage));
         usage.fields = keywords(&["usage", "use", "tokens", "cost", "spend", "limits", "stats", "analytics"]);
         out.push(usage);
-        out.push(item(
-            "Open settings",
-            "Actions",
-            &icons::SETTINGS,
-            "",
-            Action::Navigate(Route::Settings("general".into())),
-        ));
-        if let Some(p) = project.and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
-            && actions::can_organize_projects(s)
-        {
-            let pinned = !p["pinnedAt"].is_null();
+        for (forward, title, command) in [(true, "Focus Next Workspace Area", "workspace.focusNext"), (false, "Focus Previous Workspace Area", "workspace.focusPrevious")] {
+            let mut focus = item(title, "Actions", &icons::MONITOR, &shortcut_label(s, command), Action::FocusWorkspace(forward));
+            focus.fields = keywords(&[title, "accessibility", "navigation", "focus", "F6"]);
+            out.push(focus);
+        }
+        let mut settings = item("Open settings", "Actions", &icons::SETTINGS, "", Action::Navigate(Route::Settings("general".into())));
+        settings.fields = keywords(&["settings", "preferences", "configuration", "keybindings"]);
+        out.push(settings);
+        // The current project's group (any group, so an archived project's thread still finds its
+        // own), else the first sidebar group, as the web's contextual project group.
+        let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+        let current = project.and_then(|id| by_project.get(id)).map(|n| &groups[*n]);
+        if let Some(g) = current.filter(|g| crate::shell::sidebar::folders::can_pin(s, &g.members)) {
             let mut pin = item(
-                if pinned { "Unpin project" } else { "Pin project" },
+                if g.pinned { "Unpin project" } else { "Pin project" },
                 "Actions",
-                if pinned { &icons::PIN_OFF } else { &icons::PIN },
+                if g.pinned { &icons::PIN_OFF } else { &icons::PIN },
                 "",
-                Action::PinProject(data::s(p, "id").into(), !pinned),
+                Action::PinGroup(g.members.clone(), !g.pinned),
             );
-            pin.description = Some(data::s(p, "title").into());
+            pin.description = Some(g.label.clone());
             pin.fields = keywords(&["pin", "unpin", "project", "favorite"]);
             out.push(pin);
         }
-        // The current project, else the first, as the web's contextual project group.
-        if let Some(p) = project
-            .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
-            .or_else(|| s.state().projects.first())
-        {
-            let mut settings = item("Project settings", "Actions", &icons::FOLDER, "", Action::ProjectSettings(data::s(p, "id").into()));
-            settings.description = Some(data::s(p, "title").into());
-            settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
+        if let Some(g) = current.or_else(|| groups.first()) {
+            let mut settings = item("Project settings", "Actions", &icons::FOLDER, "", Action::ProjectSettings(g.representative.clone()));
+            settings.description = Some(g.label.clone());
+            settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "model", "workspace", "grouping", "checkout", "remove", "t3.json"]);
             out.push(settings);
         }
         if !actions_only && !typed.trim().is_empty() {
@@ -678,11 +747,11 @@ fn items(s: &App) -> Vec<Item> {
             }
         }
     }
-    if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
-        out.extend(project_items(s, ui.page == "projects"));
+    if page == "projects" || (!typed.trim().is_empty() && page.is_empty()) {
+        out.extend(project_items(s, page == "projects"));
     }
     // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
-    if !typed.trim().is_empty() && ui.page.is_empty() {
+    if !typed.trim().is_empty() && page.is_empty() {
         for setting in crate::settings::search::items().iter().filter(|i| crate::settings::search::shown(s, i)) {
             let page = crate::settings::label(&setting.to);
             let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Setting(setting.to.clone(), setting.title.clone()));
@@ -821,7 +890,7 @@ fn items(s: &App) -> Vec<Item> {
                         .then_with(|| b.pick.0.cmp(&a.pick.0))
                         .then_with(|| (qb * b.usage).total_cmp(&(qa * a.usage)))
                 });
-                let limit = if !ui.page.is_empty() {
+                let limit = if !page.is_empty() {
                     usize::MAX
                 } else if rows.first().is_some_and(|(v, _, _)| v.group == "Threads") {
                     20
@@ -833,7 +902,7 @@ fn items(s: &App) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && ui.page.is_empty() && !actions_only {
+        if ui.message_query == query && page.is_empty() && !actions_only {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -914,9 +983,9 @@ fn searching_messages(ui: &Ui) -> bool {
 }
 
 /// A root query starting with ">" searches actions only, by the text after it.
-fn actions_filter(ui: &Ui) -> (bool, &str) {
+fn actions_filter<'a>(ui: &'a Ui, page: &str) -> (bool, &'a str) {
     match ui.query.text.strip_prefix('>') {
-        Some(rest) if ui.page.is_empty() => (true, rest),
+        Some(rest) if page.is_empty() => (true, rest),
         _ => (false, ui.query.text.as_str()),
     }
 }
@@ -1187,12 +1256,12 @@ pub fn poll(s: &mut App) -> bool {
         match s.src.net().and_then(|net| net.take_reply(restart.pending)) {
             None => s.ui.shell.palette.restart = Some(restart),
             Some(Err(_)) => {
-                toast(s, "Unable to restart agent session", None);
+                toast_error_brief(s, "Unable to run command", Some("An unexpected error occurred."));
                 changed = true;
             }
             Some(Ok(_)) => {
                 if restart.refreshed {
-                    toast(s, "Agent session will restart on your next message", None);
+                    toast(s, "Agent session will restart", Some("Your next message starts a fresh session."));
                     changed = true;
                 } else if let Some(net) = crate::env::net_for(s, &restart.thread) {
                     restart.pending = if let Some(session) = restart.remaining.pop() {
@@ -1448,6 +1517,8 @@ fn one_edit(a: &[char], b: &[char], swap_only: bool) -> bool {
 fn execute(s: &mut App, action: Action, tx: &mut Tx) {
     match action {
         Action::Page(page) => return push_page(s, page, ""),
+        // From the commands, nothing connected goes straight to Connections.
+        Action::AddProject if !add_project::any_connected(s) => crate::shell::sidebar::go(s, Route::Settings("connections".into())),
         Action::AddProject => return add_project::open(s),
         Action::AddProjectIn(key) => return add_project::open_in(s, &key),
         Action::NewProject => return add_project::choose(s, add_project::Source::New),
@@ -1492,7 +1563,9 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                     .find(|v| v["id"] == *id)
                     .map(|v| data::s(v, "updatedAt").to_owned());
                 let query = limit_utf16(&normalize_query(&s.ui.shell.palette.query.text), 200);
-                if let Some(visited) = visited {
+                // Web records a palette open only for a searched pick of another thread.
+                let searched = !query.is_empty() && !query.starts_with('>') && s.route != Route::Thread(id.clone());
+                if let Some(visited) = visited.filter(|_| searched) {
                     if let Some(at) = data::iso_ms(&visited) {
                         s.ui.shell.sidebar.visits.claim_open(id, at);
                     }
@@ -1521,6 +1594,14 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             crate::settings::update(s, "themeDark", serde_json::json!(id));
         }
         Action::PinProject(project, pinned) => actions::pin_project(s, &project, pinned),
+        Action::PinGroup(members, pinned) => {
+            for m in &members {
+                actions::pin_project(s, m, pinned);
+            }
+        }
+        Action::FocusWorkspace(forward) => {
+            crate::shell::workspace::focus(s, forward);
+        }
         Action::OpenProject(project) => {
             let thread = s
                 .state()
@@ -1670,11 +1751,12 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     let rows = items(s);
     let raw = add_project::raw(s);
     match &e.key {
+        // Web closes from any submenu; only the file search returns to the commands.
         Key::Escape => {
-            if s.ui.shell.palette.page.is_empty() {
-                s.ui.shell.palette.open = false;
-            } else {
+            if s.ui.shell.palette.page == "files" {
                 pop_page(s);
+            } else {
+                s.ui.shell.palette.open = false;
             }
         }
         Key::Backspace if s.ui.shell.palette.query.text.is_empty() && !s.ui.shell.palette.page.is_empty() => pop_page(s),
@@ -1726,6 +1808,8 @@ fn placeholder(s: &App) -> String {
             None => "Enter Git clone URL".into(),
             Some(i) => format!("Enter {} repository ({})", add_project::PROVIDERS[i].label, add_project::PROVIDERS[i].hint),
         }
+    } else if add_project::browsing(s) && ui.page.is_empty() {
+        "Enter project path (e.g. ~/projects/my-app)".into()
     } else if add_project::browsing(s) {
         "Enter path (e.g. ~/projects/my-app)".into()
     } else if !ui.page.is_empty() {
@@ -1835,38 +1919,39 @@ fn summary(s: &App, t: &T) -> Option<El> {
     )
 }
 /// What an empty raw view says instead of rows.
-fn empty_text(s: &App) -> Option<String> {
+fn empty_text(s: &App) -> String {
     let ui = &s.ui.shell.palette;
     if ui.page == "files" {
-        return Some(ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into()));
+        return ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into());
     }
     if add_project::repository_step(s) {
         let url = ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none());
-        return Some(if url {
+        return if url {
             "Enter a Git clone URL and press Enter to continue."
         } else {
             "Enter a repository path and press Enter to look it up."
         }
-        .into());
+        .into();
     }
     if add_project::browsing(s) {
         let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
-        return Some(if confirm {
+        return if confirm {
             "Choose a destination path and press Enter to clone."
         } else if add_project::will_create(s) {
             "Press Enter to create this folder and add it as a project."
         } else {
             "No matching commands, projects, or threads."
         }
-        .into());
+        .into();
     }
-    if actions_filter(ui).0 {
-        return Some("No matching actions.".into());
+    if actions_filter(ui, &ui.page).0 {
+        return "No matching actions.".into();
     }
     if searching_messages(ui) {
-        return Some("Searching thread messages…".into());
+        return "Searching thread messages…".into();
     }
-    (ui.page.is_empty() || add_project::page_is_flow(&ui.page)).then(|| "No matching commands, projects, or threads.".into())
+    // `CommandPaletteEmptyState`'s default, in submenus too.
+    "No matching commands, projects, or threads.".into()
 }
 fn note(label: String, t: &T) -> El {
     row().w_full().px(16.).py(12.).child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
@@ -1905,7 +1990,7 @@ fn footer(s: &App, rows: &[Item], t: &T) -> El {
     if !ui.page.is_empty() {
         hints = hints.child(group(footer_key(None, "Backspace", t), "Back"));
     }
-    hints = hints.child(group(footer_key(None, "Esc", t), if ui.page.is_empty() { "Close" } else { "Back" }));
+    hints = hints.child(group(footer_key(None, "Esc", t), "Close"));
     let mut bar = row()
         .w_full()
         .h(41.)
@@ -1917,10 +2002,10 @@ fn footer(s: &App, rows: &[Item], t: &T) -> El {
         .border(1., t.c.contrast_foreground.alpha_mul(0.07))
         .child(hints)
         .child(el().grow(1.));
-    if !rows.is_empty() && searching_messages(ui) && !add_project::browsing(s) {
+    if searching_messages(ui) && !add_project::browsing(s) {
         bar = bar.child(text("Searching messages…").font(theme::TEXT_XS).color(t.c.muted_foreground));
     }
-    if add_project::browsing(s) {
+    if add_project::browsing(s) && add_project::can_pick_locally(s) {
         let manager = if cfg!(target_os = "macos") {
             "Finder"
         } else if cfg!(target_os = "windows") {
@@ -2057,17 +2142,23 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         for (label, primary, run) in &notice.actions {
             let run = run.clone();
             let copied = notice.copied.iter().any(|(l, _)| l == label);
+            let off = notice.disabled.contains(label);
             let button = kit::Button::new(if copied { "Copied!".to_string() } else { label.clone() })
                 .variant(if *primary { "default" } else { "outline" })
                 .size("xs")
-                .disabled(copied)
+                .disabled(copied || off)
                 .build(t);
-            toast = toast.button(*primary, if copied { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
+            toast = toast.button(*primary, if copied || off { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
+        }
+        if notice.warning {
+            toast = toast.lead(icon(&icons::TRIANGLE_ALERT, 16.).color(t.c.warning));
         }
         if notice.error {
-            toast = toast
-                .lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive))
-                .on_close(|s: &mut App| s.ui.shell.palette.notice = None);
+            toast = toast.lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive));
+        }
+        // A toast that never times out needs a way to go.
+        if notice.error || notice.until == i64::MAX {
+            toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }
@@ -2142,14 +2233,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     } else if add_project::browsing(s) && add_project::browse_pending(s) {
         list = list.child(note("Loading folders...".into(), t));
     } else if rows.is_empty() {
-        list = list.child(match empty_text(s) {
-            Some(label) => col()
-                .w_full()
-                .py(40.)
-                .center()
-                .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground)),
-            None => kit::empty("No results found.", "", t),
-        });
+        list = list.child(col().w_full().py(40.).center().child(text(empty_text(s)).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground)));
     }
     let tall = ui.page == "files";
     let list = kit::scroll_area(
@@ -2194,6 +2278,15 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 mod tests {
     use super::*;
     #[test]
+    fn no_project_sits_where_the_web_puts_it() {
+        // (scratch, pinned, preferred), as web's `newThreadNoProjectIndex` cases.
+        let e = |pinned, preferred, scratch| (scratch, pinned, preferred);
+        assert_eq!(no_project_index(&[e(true, false, false), e(true, false, false), e(false, true, false), e(false, false, false)]), 3);
+        assert_eq!(no_project_index(&[e(false, true, false), e(false, false, false), e(false, false, true)]), 1);
+        assert_eq!(no_project_index(&[e(false, true, true), e(false, false, false)]), 0, "FAILED: a current scratch project keeps its place");
+        assert_eq!(no_project_index(&[e(true, false, false), e(true, false, true), e(false, false, false)]), 1);
+    }
+    #[test]
     fn a_project_on_several_machines_is_one_palette_row() {
         let mut s = App::new();
         let mut state = crate::data::empty_state();
@@ -2227,6 +2320,19 @@ mod tests {
         assert!(leave_emptied_page(&mut s));
         assert_eq!(s.ui.shell.palette.page, "add-project");
         assert!(!leave_emptied_page(&mut s), "only the browse page leaves on an empty field");
+    }
+
+    #[test]
+    fn a_submenu_query_with_no_match_searches_the_root_like_the_web() {
+        let mut s = App::new();
+        push_page(&mut s, "appearance", "");
+        set_query(&mut s, "dark");
+        assert!(items(&s).iter().all(|v| v.group != "Actions"), "FAILED: a submenu match stays scoped");
+        set_query(&mut s, "open usage");
+        let titles: Vec<_> = items(&s).into_iter().map(|v| v.title).collect();
+        assert!(titles.iter().any(|t| t == "Open usage"), "FAILED: no appearance matches, so the root search answers: {titles:?}");
+        set_query(&mut s, "");
+        assert!(items(&s).iter().all(|v| v.group != "Actions"), "FAILED: an empty query lists the submenu");
     }
 
     #[test]

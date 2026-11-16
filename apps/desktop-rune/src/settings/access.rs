@@ -62,6 +62,8 @@ pub struct State {
     creating: Option<u64>,
     create_error: Option<String>,
     revoking: Option<u64>,
+    /// The client session a Revoke was pressed on, while its request is pending.
+    revoking_client: Option<String>,
     /// Credentials for links this window created; the server never returns them again.
     credentials: HashMap<String, String>,
     newest: Option<String>,
@@ -98,8 +100,17 @@ pub(super) fn poll(s: &mut App) -> bool {
     }
     if let Some(reply) = take(s, revoking) {
         s.ui.settings.connections.access.revoking = None;
-        if let Err(error) = reply {
-            s.ui.settings.error = Some(reason(&error));
+        match reply {
+            Ok(result) => {
+                let count = result["revokedCount"].as_u64().unwrap_or(0);
+                let title = if count == 1 { "Revoked 1 other client".to_owned() } else { format!("Revoked {count} clients") };
+                crate::shell::palette::toast(s, &title, Some("Other paired clients will need a new pairing link before reconnecting."));
+            }
+            Err(error) => {
+                let message = reason(&error);
+                crate::shell::palette::toast_error_brief(s, "Could not revoke other clients", Some(&message));
+                s.ui.settings.error = Some(message);
+            }
         }
         changed = true;
     }
@@ -456,7 +467,7 @@ fn clients(s: &App, t: &T) -> El {
         return c::card(card, t);
     }
     let mut rows: Vec<El> = links.iter().map(|link| link_row(s, t, link)).collect();
-    rows.extend(sessions.iter().map(|session| client_row(t, session)));
+    rows.extend(sessions.iter().map(|session| client_row(s, t, session)));
     if rows.is_empty() {
         card.push(
             text("No pairing links or client sessions.")
@@ -679,8 +690,10 @@ fn share_panel(t: &T, options: &[crate::desktop::exposure::Endpoint], selected: 
 }
 
 /// Web `ConnectedClientListRow`.
-fn client_row(t: &T, client: &Value) -> El {
+fn client_row(s: &App, t: &T, client: &Value) -> El {
     let id = client["sessionId"].clone();
+    let revoking = s.ui.settings.connections.access.revoking_client.as_deref().is_some_and(|r| Some(r) == id.as_str())
+        && s.ui.settings.pending.values().any(|path| path == REVOKE_CLIENT);
     let current = client["current"] == true;
     let live = current || client["connected"] == true;
     let info = &client["client"];
@@ -707,7 +720,7 @@ fn client_row(t: &T, client: &Value) -> El {
         .min_h(20.0)
         .gap(6.0)
         .center_y()
-        .child(dot(if live { t.c.success } else { t.c.muted_foreground.alpha_mul(0.3) }))
+        .child(dot(if live { t.c.success } else { t.c.muted_foreground.alpha_mul(0.3) }).help(client_status(client, live, crate::data::now_ms())))
         .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground));
     if current {
         heading = heading.child(
@@ -719,32 +732,59 @@ fn client_row(t: &T, client: &Value) -> El {
                 .child(text("This device").font(theme::TEXT_3XS).color(t.c.muted_foreground.alpha_mul(0.8))),
         );
     }
-    let detail = if !bits.is_empty() {
-        bits.join(" · ")
-    } else if live {
-        "Connected".to_owned()
-    } else {
-        "Not connected".to_owned()
-    };
+    // `AccessScopeSummary`: the count, with the scopes on hover.
+    let scopes: Vec<&str> = client["scopes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let scope_count = format!("{} {}", scopes.len(), if scopes.len() == 1 { "scope" } else { "scopes" });
+    let granted = std::iter::once("Granted scopes").chain(scopes.iter().copied()).collect::<Vec<_>>().join("\n");
+    let detail = bits.into_iter().chain([scope_count]).collect::<Vec<_>>().join(" · ");
     let mut entry = row().w_full().px(16.0).py(12.0).gap(12.0).center_y().child(
         col()
             .grow(1.0)
             .min_w(0.0)
             .gap(4.0)
             .child(heading)
-            .child(text(detail).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+            .child(text(detail).font(theme::TEXT_XS).color(t.c.muted_foreground).help(granted)),
     );
     if !current {
         entry = entry.child(
-            kit::Button::new("Revoke")
+            kit::Button::new(if revoking { "Revoking…" } else { "Revoke" })
                 .variant("destructive-outline")
                 .size("xs")
-                .on_press(move |s: &mut App| http(s, "POST", "/api/auth/clients/revoke", json!({"sessionId": id})))
+                .disabled(revoking || !super::permissions::can(s, "access:write"))
+                .on_press(move |s: &mut App| {
+                    s.ui.settings.connections.access.revoking_client = id.as_str().map(str::to_owned);
+                    http(s, "POST", REVOKE_CLIENT, json!({"sessionId": id}));
+                })
                 .build(t),
         );
     }
     entry
 }
+
+/// `ConnectedClientListRow`'s status-dot tooltip.
+fn client_status(client: &Value, live: bool, now: i64) -> String {
+    let last = crate::data::ts(client, "lastConnectedAt");
+    match (live, last) {
+        (true, Some(at)) => format!("Connected for {}", elapsed_label(now - at)),
+        (true, None) => "Connected".into(),
+        (false, Some(at)) => format!("Last connected at {}", super::tasks::draft::medium_short(crate::data::Zone::Local.wall(at))),
+        (false, None) => "Not connected yet.".into(),
+    }
+}
+
+/// `formatElapsedDurationLabel`.
+fn elapsed_label(ms: i64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        _ if seconds < 5 => "just now".into(),
+        _ if seconds < 60 => format!("{seconds}s"),
+        _ if seconds < 3600 => format!("{}m", seconds / 60),
+        _ if seconds < 86_400 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+const REVOKE_CLIENT: &str = "/api/auth/clients/revoke";
 
 fn revoke_others(s: &mut App) {
     if s.ui.settings.connections.access.revoking.is_some() {
@@ -992,6 +1032,19 @@ mod tests {
         ] {
             assert_eq!(expires_in(now + seconds * 1000, now), label, "{seconds}s");
         }
+    }
+
+    #[test]
+    fn client_status_reads_like_web_connected_client_rows() {
+        let now = 1_000_000_000;
+        let at = |ms_ago: i64| json!({"lastConnectedAt": crate::settings::tasks::draft::iso(now - ms_ago)});
+        assert_eq!(client_status(&at(3_000), true, now), "Connected for just now");
+        assert_eq!(client_status(&at(42_000), true, now), "Connected for 42s");
+        assert_eq!(client_status(&at(7_200_000), true, now), "Connected for 2h");
+        assert_eq!(client_status(&at(3 * 86_400_000), true, now), "Connected for 3d");
+        assert_eq!(client_status(&json!({}), true, now), "Connected");
+        assert_eq!(client_status(&json!({}), false, now), "Not connected yet.");
+        assert!(client_status(&at(60_000), false, now).starts_with("Last connected at "));
     }
 
     #[test]

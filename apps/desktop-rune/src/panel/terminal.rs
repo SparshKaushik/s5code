@@ -159,6 +159,11 @@ impl Session {
 
     /// Input sent before the attach snapshot waits for it, or the shell starting up drops it;
     /// a recorded session (no attach) never waits.
+    /// The server answered the attach with a snapshot; writes no longer queue.
+    pub fn attached(&self) -> bool {
+        self.attached
+    }
+
     fn hold(&mut self, data: String) -> Option<String> {
         if self.payload.is_none() || self.attached {
             return Some(data);
@@ -286,12 +291,22 @@ pub struct Launch<'a> {
 
 /// Attaches (opening when missing) the session for a terminal id, once.
 pub fn ensure(app: &mut App, thread: &str, id: &str, at: &Launch) {
+    attach(app, thread, id, attach_payload(thread, id, at));
+}
+
+/// A terminal's session, for views outside the panel (the welcome wizard's setup terminal).
+pub fn session<'a>(app: &'a App, thread: &str, id: &str) -> Option<&'a Session> {
+    app.ui.panel.terminal.get(thread, id)
+}
+
+/// [`ensure`] with a caller-built `terminal.attach` payload, such as one naming a provider
+/// instance (the welcome wizard's sign-in terminal).
+pub fn attach(app: &mut App, thread: &str, id: &str, payload: Value) {
     if app.ui.panel.terminal.get(thread, id).is_some() {
         return;
     }
     app.ui.panel.terminal.gone.retain(|(t, i)| !(t == thread && i == id));
     let mut session = Session::new(thread, id);
-    let payload = attach_payload(thread, id, at);
     if let Some(net) = app.src.net() {
         net.watch_resource("terminal.attach", payload.clone());
         session.payload = Some(payload);
