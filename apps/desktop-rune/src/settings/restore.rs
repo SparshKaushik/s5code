@@ -1,9 +1,7 @@
 //! Web `useSettingsRestore`: Restore device defaults lists what it will reset, then asks first.
 
 use super::{client, scope, update, value};
-use crate::theme::T;
 use crate::{App, Appearance};
-use rune::{El, row};
 use serde_json::{Value, json};
 
 /// Web's `changedSettingLabels` after the theme, in order: each label and the settings it resets.
@@ -123,7 +121,6 @@ pub fn message(labels: &[&str]) -> String {
 }
 
 fn restore(s: &mut App, tx: &mut rune::Tx) {
-    s.ui.settings.restore_confirm = false;
     if dirty(s, super::fonts::ZOOM_KEY) {
         // Restoring the interface size zooms the window; land it at once.
         tx.instant();
@@ -144,41 +141,21 @@ fn restore(s: &mut App, tx: &mut rune::Tx) {
     }
 }
 
-/// The destructive confirmation, as web's `dialogs.confirm` splits its message.
-pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
-    if !s.ui.settings.restore_confirm {
+/// `restoreDefaults`: web's destructive `dialogs.confirm`, only with something to reset.
+pub fn ask(s: &mut App) {
+    let labels = changed_labels(s);
+    if labels.is_empty() {
         return;
     }
-    let labels = changed_labels(s);
-    let cancel = |s: &mut App| s.ui.settings.restore_confirm = false;
-    crate::kit::Dialog::new("restore-defaults", "Restore default settings?")
-        .alert()
-        .width(448.0)
-        .open(true)
-        .description(message(&labels))
-        .child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .justify_end()
-                .child(crate::kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t))
-                .child(
-                    crate::kit::Button::new("Confirm")
-                        .variant("destructive")
-                        .disabled(labels.is_empty())
-                        .build(t)
-                        .on_press_tx(restore),
-                ),
-        )
-        .on_close(cancel)
-        .build(t, layers);
+    let question = format!("Restore default settings?\n{}", message(&labels));
+    crate::shell::confirm::request_with(s, question, true, restore, |_: &mut App| {});
 }
 
 pub fn scene(s: &mut App) {
     s.client_settings.values.insert("chatWidth".into(), json!("wide"));
     s.client_settings.values.insert("diffLayout".into(), json!("split"));
     s.client_settings.values.insert("appearance".into(), json!("dark"));
-    s.ui.settings.restore_confirm = true;
+    ask(s);
 }
 
 #[cfg(test)]

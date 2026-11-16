@@ -96,7 +96,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
             .variant("destructive-outline")
             .size("sm")
             .icon(&crate::icons::TRASH_2)
-            .on_press(move |s: &mut App| s.ui.settings.delete_project = Some(remove.clone()))
+            .on_press(move |s: &mut App| ask_remove(s, &remove.0, &remove.1))
             .build(t),
     );
     page.child(c::section("Checkouts", vec![checkout], t))
@@ -290,46 +290,18 @@ pub fn removal_message(title: &str, root: &str, environment: Option<&str>, threa
     (question, details.join("\n"))
 }
 
-pub fn confirm_remove(s: &App, t: &T, layers: &mut Vec<El>) {
-    let Some((id, title)) = &s.ui.settings.delete_project else {
-        return;
-    };
-    let project = s.state().projects.iter().find(|p| p["id"] == id.as_str());
+/// `removeMembers`: web's destructive `dialogs.confirm` with `planProjectRemoval`'s message.
+fn ask_remove(s: &mut App, id: &str, title: &str) {
+    let project = s.state().projects.iter().find(|p| p["id"] == id);
     let root = project.map(|p| crate::data::s(p, "workspaceRoot")).unwrap_or("");
     let environment = s.state().config.as_ref().and_then(|c| c["environment"]["label"].as_str());
-    let threads = s.state().threads.iter().filter(|thread| thread["projectId"] == id.as_str() && listed(thread)).count();
+    let threads = s.state().threads.iter().filter(|thread| thread["projectId"] == id && listed(thread)).count();
     let (question, details) = removal_message(title, root, environment, threads);
-    let id = id.clone();
-    crate::kit::Dialog::new("remove-project", question)
-        .open(true)
-        .alert()
-        .description(details)
-        .on_close(|s: &mut App| s.ui.settings.delete_project = None)
-        .child(
-            row()
-                .gap(8.0)
-                .child(
-                    crate::kit::Button::new("Cancel")
-                        .variant("outline")
-                        .on_press(|s: &mut App| s.ui.settings.delete_project = None)
-                        .build(t),
-                )
-                .child(
-                    crate::kit::Button::new("Remove project")
-                        .variant("destructive")
-                        .on_press(move |s: &mut App| {
-                            request(
-                                s,
-                                "projects.mutate",
-                                json!({"type":"project.delete","commandId":s5_net::uuid(),"projectId":id,"force":true}),
-                            );
-                            s.ui.settings.delete_project = None;
-                            s.ui.settings.project = None;
-                        })
-                        .build(t),
-                ),
-        )
-        .build(t, layers);
+    let id = id.to_owned();
+    crate::shell::confirm::request(s, format!("{question}\n{details}"), true, move |s: &mut App| {
+        request(s, "projects.mutate", json!({"type":"project.delete","commandId":s5_net::uuid(),"projectId":id,"force":true}));
+        s.ui.settings.project = None;
+    });
 }
 pub fn value(s: &App, id: &str, field: &str) -> Value {
     let Some(project) = s.state().projects.iter().find(|p| p["id"] == id) else {
@@ -502,7 +474,8 @@ fn request_delete(s: &mut App, id: String, title: String) {
     let key = "confirmThreadDelete";
     let confirm = s.client_settings.values.get(key).or_else(|| super::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false);
     if confirm {
-        s.ui.settings.delete_thread = Some((id, title));
+        let question = format!("Delete thread \"{title}\"?\nThis permanently clears conversation history for this thread.");
+        crate::shell::confirm::request(s, question, true, move |s: &mut App| dispatch(s, json!({"type": "thread.delete", "threadId": id}), DELETE));
     } else {
         dispatch(s, json!({"type": "thread.delete", "threadId": id}), DELETE);
     }
@@ -535,42 +508,6 @@ fn dispatch(s: &mut App, command: Value, action: &str) {
         s.ui.settings.pending.insert(id, action.into());
     }
 }
-pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
-    let Some((id, title)) = &s.ui.settings.delete_thread else {
-        return;
-    };
-    let id = id.clone();
-    // Web's destructive `dialogs.confirm` from `confirmAndDeleteThread`.
-    crate::kit::Dialog::new("delete-thread", format!("Delete thread \"{title}\"?"))
-        .open(true)
-        .alert()
-        .width(448.0)
-        .description("This permanently clears conversation history for this thread.")
-        .on_close(|s: &mut App| s.ui.settings.delete_thread = None)
-        .child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .justify_end()
-                .child(
-                    crate::kit::Button::new("Cancel")
-                        .variant("outline")
-                        .on_press(|s: &mut App| s.ui.settings.delete_thread = None)
-                        .build(t),
-                )
-                .child(
-                    crate::kit::Button::new("Delete")
-                        .variant("destructive")
-                        .on_press(move |s: &mut App| {
-                            dispatch(s, json!({"type":"thread.delete","threadId":id}), DELETE);
-                            s.ui.settings.delete_thread = None;
-                        })
-                        .build(t),
-                ),
-        )
-        .build(t, layers);
-}
-
 /// Scenes: the fixture's threads, archived under their projects, with the first one's right-click
 /// menu open when `menu`.
 pub(super) fn scene_archive(s: &mut App, menu: bool) {
@@ -656,11 +593,15 @@ mod tests {
     fn deleting_from_the_archive_asks_only_while_confirm_thread_delete_is_on() {
         let mut s = App::new();
         request_delete(&mut s, "t".into(), "Fix it".into());
-        assert_eq!(s.ui.settings.delete_thread, Some(("t".into(), "Fix it".into())), "on by default");
-        s.ui.settings.delete_thread = None;
+        assert_eq!(
+            crate::shell::confirm::current(&s),
+            Some("Delete thread \"Fix it\"?\nThis permanently clears conversation history for this thread."),
+            "on by default"
+        );
+        crate::shell::confirm::respond(&mut s, false);
         s.client_settings.values.insert("confirmThreadDelete".into(), json!(false));
         request_delete(&mut s, "t".into(), "Fix it".into());
-        assert_eq!(s.ui.settings.delete_thread, None);
+        assert_eq!(crate::shell::confirm::current(&s), None);
     }
 
     #[test]

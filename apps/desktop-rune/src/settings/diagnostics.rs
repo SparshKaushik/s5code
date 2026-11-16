@@ -695,7 +695,7 @@ fn toggle_expanded(s: &mut App, key: &str) {
     }
 }
 
-/// `signalProcess`: a SIGKILL first opens the confirmation (`overlays`); SIGINT goes at once.
+/// `signalProcess`: a SIGKILL asks first; SIGINT goes at once.
 fn begin_signal(s: &mut App, pid: i64, signal: &'static str) {
     if !super::permissions::can(s, ENVIRONMENT_MAINTAIN) {
         return;
@@ -709,7 +709,11 @@ fn begin_signal(s: &mut App, pid: i64, signal: &'static str) {
     ui.signal = Some(Signal { pid, start_time_ms, signal, request: None });
     if signal != "SIGKILL" {
         send_signal(s);
+        return;
     }
+    // Web's destructive `dialogs.confirm`; a cancel clears the signal.
+    let question = format!("Send SIGKILL to process {pid}? This cannot be handled by the process.");
+    crate::shell::confirm::request_with(s, question, true, |s: &mut App, _: &mut rune::Tx| send_signal(s), cancel_signal);
 }
 
 /// The server rejects a pid whose start time no longer matches, so a process that exited
@@ -1553,24 +1557,6 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
         section("Span Logs", logs, "Loading recent logs...", "No warnings or errors found."),
         section("Top Span Names", top, "Loading span names...", "No spans found."),
     ]
-}
-
-/// The SIGKILL confirmation, as web's destructive `dialogs.confirm` splits its message.
-pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
-    let Some(sig) = &s.ui.settings.diagnostics.signal else { return };
-    if sig.signal != "SIGKILL" || sig.request.is_some() {
-        return;
-    }
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(cancel_signal).build(t);
-    let confirm = crate::kit::Button::new("Confirm").variant("destructive").on_press(send_signal).build(t);
-    crate::kit::Dialog::new("diagnostics-sigkill", format!("Send SIGKILL to process {}?", sig.pid))
-        .alert()
-        .width(448.0)
-        .open(true)
-        .description("This cannot be handled by the process.")
-        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
-        .on_close(cancel_signal)
-        .build(t, layers);
 }
 
 // --- Fixture --------------------------------------------------------------------------------

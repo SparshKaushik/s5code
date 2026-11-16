@@ -79,11 +79,8 @@ pub struct Ui {
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
-    pub delete_thread: Option<(String, String)>,
     /// The archived thread whose right-click menu is open: id, title, and where.
     pub archive_menu: Option<(String, String, f32, f32)>,
-    /// The project the Danger section is confirming removal of: id and title.
-    pub delete_project: Option<(String, String)>,
     pub icon_picker: Option<project_icon::Draft>,
     pub accent: Option<accent::Draft>,
     pub provider_picker: bool,
@@ -126,8 +123,6 @@ pub struct Ui {
     pub resource_telemetry: resource_telemetry::Ui,
     pub licenses: licenses::Ui,
     pub telemetry: telemetry::Ui,
-    /// General's Restore device defaults confirmation is open.
-    pub restore_confirm: bool,
     /// The custom theme whose removal is being confirmed.
     pub theme_remove: Option<String>,
     pub thread_details_open: bool,
@@ -981,7 +976,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .icon(&icons::ROTATE_CCW)
                 .disabled(restore::changed_labels(s).is_empty())
                 .build(t)
-                .on_press(|s: &mut App| s.ui.settings.restore_confirm = !restore::changed_labels(s).is_empty()),
+                .on_press(restore::ask),
         );
     }
     header = header.child(
@@ -1052,11 +1047,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::archive_menu(s, t, &mut overlays);
-    projects::confirm_delete(s, t, &mut overlays);
     secrets::overlays(s, t, &mut overlays);
-    diagnostics::overlays(s, t, &mut overlays);
-    resource_telemetry::overlays(s, t, &mut overlays);
-    projects::confirm_remove(s, t, &mut overlays);
     project_icon::dialog(s, t, &mut overlays);
     if crate::chat::details::scripts::settings_editor_open(s) {
         crate::chat::details::scripts::overlays(s, t, &mut overlays);
@@ -1066,7 +1057,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     about::update_dialog(s, t, &mut overlays);
     about::overlays(s, t, &mut overlays);
     checkout_grouping::overlays(s, t, &mut overlays);
-    restore::confirm(s, t, &mut overlays);
     thread_details::overlay(s, t, &mut overlays);
     themes::remove_dialog(s, t, &mut overlays);
     crate::desktop::exposure::confirm(s, t, &mut overlays);
@@ -1582,8 +1572,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             s.ui.settings.theme_import_open = false;
             return true;
         }
-        if std::mem::take(&mut s.ui.settings.restore_confirm)
-            || std::mem::take(&mut s.ui.settings.thread_details_open)
+        if std::mem::take(&mut s.ui.settings.thread_details_open)
             || s.ui.settings.theme_remove.take().is_some()
             || about::escape(s)
         {
@@ -1599,9 +1588,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         }
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
-            || s.ui.settings.delete_thread.take().is_some()
             || s.ui.settings.archive_menu.take().is_some()
-            || s.ui.settings.delete_project.take().is_some()
         {
             return true;
         }
