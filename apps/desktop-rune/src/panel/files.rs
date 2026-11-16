@@ -850,8 +850,8 @@ fn image_view(image: &Image, t: &T) -> El {
     col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
 }
 
-/// `width` is the editor's laid-out width from the last frame, for the wrapped gutter.
-fn editor(ui: &Ui, t: &T, wrap: bool, width: Option<f32>) -> El {
+/// `laid_out` is the editor's width from the last frame, for the wrapped gutter.
+fn editor(ui: &Ui, t: &T, wrap: bool, laid_out: Option<f32>) -> El {
     let lang = ui.selected.rsplit('.').next();
     let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark)
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
@@ -883,7 +883,7 @@ fn editor(ui: &Ui, t: &T, wrap: bool, width: Option<f32>) -> El {
     let code = code.text_highlights(mark);
     if wrap {
         // The editor's right padding is not text.
-        let numbers = match width.map(|w| w - 12.) {
+        let numbers = match laid_out.map(|w| w - 12.) {
             Some(width) if width > cell => wrapped_gutter(ui, font, cell, width),
             _ => ui.numbers.clone(),
         };
