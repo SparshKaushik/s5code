@@ -630,6 +630,15 @@ pub fn poll(s: &mut App) -> bool {
                         changed = true;
                         continue;
                     }
+                    // Web's access handlers toast these as well as showing the error.
+                    let revoke = match method.as_str() {
+                        access::REVOKE_LINK => Some("Could not revoke pairing link"),
+                        access::REVOKE_CLIENT => Some("Could not revoke client access"),
+                        _ => None,
+                    };
+                    if let Some(title) = revoke {
+                        crate::shell::palette::toast_error_brief(s, title, Some(&message));
+                    }
                     match message.strip_prefix("Setting not saved. ") {
                         Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
                         None => s.ui.settings.error = Some(message),
