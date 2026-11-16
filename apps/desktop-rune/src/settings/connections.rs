@@ -90,6 +90,8 @@ pub struct Ui {
     link_mint: Option<(String, u64)>,
     mint_failed: Vec<String>,
     forget: Option<(String, String)>,
+    /// The link a confirmed Forget is unlinking, while `peerLinks.unlink` is pending.
+    forgetting: Option<String>,
     pub(super) access: super::access::State,
     pub(super) machines: super::machines::Ui,
 }
@@ -448,7 +450,7 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
     if let Some((server, _)) = &gap {
         parts.push(server.clone());
     }
-    let mut tip = env::status(s, &saved.id);
+    let mut tip = if off { "Switched off".to_owned() } else { env::status(s, &saved.id) };
     if let Some((server, client)) = &gap {
         tip.push_str(&format!("\nUpdate available: {server} → {client}"));
     }
@@ -931,14 +933,14 @@ fn remove_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     kit::Dialog::new("remove-environment", format!("Remove {label} from this device?"))
         .open(true)
         .alert()
-        .description("This forgets its pairing, credentials, and cached threads here.")
+        .description("This forgets its pairing, credentials, and cached threads here. Switch it off instead to keep it saved.")
         .on_close(close)
         .child(
             row()
                 .gap(8.0)
                 .child(kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
                 .child(
-                    kit::Button::new("Remove")
+                    kit::Button::new("Confirm")
                         .variant("destructive")
                         .on_press(move |s: &mut App| {
                             s.ui.settings.connections.remove = None;
@@ -1131,6 +1133,12 @@ fn ssh_fields(s: &App, t: &T) -> El {
         .single_line();
     let mut host_field = col().w_full().gap(6.0).child(text("SSH host or alias").font(theme::XS_MEDIUM).color(t.c.foreground)).child(host);
     let suggestions = env::ssh::suggestions(s);
+    if s.ui.settings.connections.ssh_suggest && suggestions.is_empty() && env::ssh::has_unsaved(s) {
+        let empty = format!("No hosts match \"{}\".", ui.host.text.trim());
+        host_field = host_field.child(
+            el().w_full().px(12.0).py(8.0).radius(8.0).border(1.0, t.c.border).fill(t.c.popover).child(text(empty).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
+        );
+    }
     if s.ui.settings.connections.ssh_suggest && !suggestions.is_empty() {
         let mut list = col()
             .key("add-environment-ssh-hosts")
@@ -1261,6 +1269,9 @@ fn linked(s: &App, t: &T) -> El {
     let mut rows = Vec::new();
     match s.ui.settings.results.get("peerLinks.list") {
         None => rows.push(info_row(t, "Loading linked environments…", "")),
+        Some(result) if result[super::LOAD_ERROR].is_string() => {
+            rows.push(info_row(t, "Could not load linked environments", result[super::LOAD_ERROR].as_str().unwrap_or_default()));
+        }
         Some(result) => {
             let links: Vec<&Value> = result["links"].as_array().into_iter().flatten().collect();
             if links.is_empty() {
@@ -1329,9 +1340,11 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
                 ),
         )
         .children(super::permissions::allowed(s, "peerLinks.unlink").then(|| {
-            kit::Button::new("Forget")
+            let busy = s.ui.settings.connections.forgetting.as_ref() == Some(&target.0) && s.ui.settings.pending.values().any(|m| m == "peerLinks.unlink");
+            kit::Button::new(if busy { "Forgetting…" } else { "Forget" })
                 .variant("destructive-outline")
                 .size("xs")
+                .disabled(busy)
                 .on_press(move |s: &mut App| s.ui.settings.connections.forget = Some(target.clone()))
                 .build(t)
         }))
@@ -1357,6 +1370,7 @@ fn forget_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                         .variant("destructive")
                         .on_press(move |s: &mut App| {
                             s.ui.settings.connections.forget = None;
+                            s.ui.settings.connections.forgetting = Some(id.clone());
                             request(s, "peerLinks.unlink", json!({"environmentId": id}));
                         })
                         .build(t),
@@ -1541,7 +1555,7 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let field = |label: &str, input: El| {
         col().w_full().gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input)
     };
-    let mut access = col().w_full().gap(8.0).child(text("Access").font(theme::XS_MEDIUM).color(t.c.foreground));
+    let mut access = col().w_full().gap(8.0).child(text("What agents here may do there").font(theme::XS_MEDIUM).color(t.c.foreground));
     for (key, label, description) in ACCESS {
         let selected = key == current;
         access = access.child(
@@ -1574,6 +1588,13 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 }),
         );
     }
+    // LinkAccessPicker's caveat, under every option's own description here.
+    access = access.child(
+        text("An agent never gets more access there than its own mode here. Below full access, it can change only threads this link started, not that machine's own threads, projects or settings.")
+            .font(theme::TEXT_XS)
+            .color(t.c.muted_foreground)
+            .wrap(),
+    );
     let hint = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let mut form = col().w_full().gap(16.0);
     let mut popup = Vec::new();

@@ -360,6 +360,9 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
 }
 
+/// A `results` entry's field holding why its request failed, for sections that show it.
+pub(super) const LOAD_ERROR: &str = "_loadError";
+
 pub fn request(s: &mut App, method: &str, payload: Value) {
     if method == "server.updateSettings" && matches!(s.src, crate::data::Source::Live(_)) {
         let mut current = server_settings(s).clone();
@@ -607,6 +610,19 @@ pub fn poll(s: &mut App) -> bool {
                         .unwrap_or("this environment")
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
+                    // Linked environments show their own failures, as web's section does.
+                    if method == "peerLinks.list" {
+                        let mut failed = json!({});
+                        failed[LOAD_ERROR] = json!(message);
+                        s.ui.settings.results.insert(method, failed);
+                        changed = true;
+                        continue;
+                    }
+                    if method == "peerLinks.unlink" {
+                        crate::shell::palette::toast_error_brief(s, "Could not forget the link", Some(&message));
+                        changed = true;
+                        continue;
+                    }
                     match message.strip_prefix("Setting not saved. ") {
                         Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
                         None => s.ui.settings.error = Some(message),

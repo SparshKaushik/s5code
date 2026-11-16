@@ -237,7 +237,8 @@ fn status_line(s: &App, t: &T) -> Option<El> {
     } else {
         let files = matches.iter().map(|m| data::s(m, "path")).collect::<std::collections::HashSet<_>>().len();
         let plus = if ui.results.truncated { "+" } else { "" };
-        text(format!("{}{plus} results in {files} files", matches.len())).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground)
+        let count = |n: usize| crate::chat::details::thousands(n as u64);
+        text(format!("{}{plus} results in {} files", count(matches.len()), count(files))).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground)
     };
     Some(col().w_full().child(row().w_full().h(35.).px(12.).center_y().child(content)).child(el().w_full().h(1.).fill(t.c.contrast_border)))
 }
