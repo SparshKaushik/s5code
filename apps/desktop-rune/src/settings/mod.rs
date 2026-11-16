@@ -12,7 +12,7 @@ mod background;
 mod balance;
 pub mod client;
 mod connection_diagnosis;
-mod connections;
+pub(crate) mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;
@@ -66,6 +66,8 @@ pub struct Ui {
     pub peer_code: TextEdit,
     pub loaded_page: Option<String>,
     pub active_resources: Vec<(String, Value)>,
+    /// The environment `active_resources` are watched on.
+    pub resources_env: String,
     pub results: HashMap<String, Value>,
     pub form: HashMap<String, Value>,
     pub select_options: Vec<(Value, String)>,
@@ -544,6 +546,17 @@ pub fn poll(s: &mut App) -> bool {
             wanted.push(resource);
         }
     }
+    // Subscriptions live on one environment's connection: a switch drops them there, so the
+    // diff below opens every wanted one on the newly focused environment.
+    if s.ui.settings.resources_env != s.ui.env.active {
+        let old = std::mem::replace(&mut s.ui.settings.resources_env, s.ui.env.active.clone());
+        let stale = std::mem::take(&mut s.ui.settings.active_resources);
+        if let Some(net) = crate::env::net_of(s, &old) {
+            for (method, payload) in stale {
+                net.unwatch_resource(&method, payload);
+            }
+        }
+    }
     if wanted != s.ui.settings.active_resources {
         if let Some(net) = s.src.net() {
             for (method, payload) in &s.ui.settings.active_resources {
@@ -727,7 +740,7 @@ fn nav_icon(path: &str) -> &'static rune::Icon {
 
 /// Web's search results in place of the page list: icon, title, and the page it lives on.
 fn search_results(s: &App, t: &T, query: &str) -> El {
-    let results = search::search(query);
+    let results = search::search(s, query);
     if results.is_empty() {
         return el()
             .w_full()
@@ -806,7 +819,7 @@ fn search_key(s: &mut App, e: &rune::KeyEvent) -> bool {
     if !s.ui.settings.search.focused {
         return false;
     }
-    let results = search::search(&s.ui.settings.search.text);
+    let results = search::search(s, &s.ui.settings.search.text);
     if results.is_empty() {
         return false;
     }
@@ -1767,7 +1780,7 @@ mod reveal_tests {
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
     const UNBUILT: &[&str] = &[];
     /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
-    /// Linked environments behind its Labs flag, and Cursor account usage on macOS hosts.
+    /// Linked environments behind its Labs flag, and Cursor's keychain usage on macOS.
     const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];
 
     #[test]

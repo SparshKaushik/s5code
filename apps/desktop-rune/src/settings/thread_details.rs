@@ -53,11 +53,6 @@ fn current(s: &App) -> Vec<bool> {
     visibility(&value(s, "threadDetailsItems"), value(s, "threadDetailsUsageEnabled") == true)
 }
 
-/// Web `resolveThreadDetailsVisibility` for one item: whether the chat card shows it.
-pub fn shows(s: &App, id: &str) -> bool {
-    ITEMS.iter().position(|(i, ..)| *i == id).is_some_and(|at| current(s)[at])
-}
-
 /// Web `RESET_THREAD_DETAILS_ITEMS`: also clears the retired Labs flag.
 pub fn reset(s: &mut App) {
     update(s, "threadDetailsItems", json!({}));

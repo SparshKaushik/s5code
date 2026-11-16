@@ -42,6 +42,8 @@ pub enum Write {
     Update(String),
     Maintainer { previous: Option<Choice> },
     Stack(&'static str),
+    /// A thread linked to this pull request, or unlinked from it.
+    Link { linked: bool },
 }
 
 /// MaintainerEditsChoice: the saved value, shown until the host's next reading.
@@ -60,7 +62,12 @@ pub struct Ui {
     pub labels: Read,
     pub reviewers: Read,
     pub linked: Read,
+    /// The workspace's default ref, which tells a stacked pull request's base apart.
+    pub refs: Read,
     pub linked_open: bool,
+    /// The thread picker linking this pull request, and its search.
+    pub link_picker: bool,
+    pub link_query: rune::TextEdit,
     pub freshness_open: bool,
     pub stack_open: bool,
     /// The stack action waiting on its confirmation dialog.
@@ -77,6 +84,7 @@ fn read_mut<'a>(u: &'a mut Ui, kind: &str) -> &'a mut Read {
     match kind {
         "labels" => &mut u.labels,
         "reviewers" => &mut u.reviewers,
+        "refs" => &mut u.refs,
         _ => &mut u.linked,
     }
 }
@@ -110,8 +118,8 @@ pub fn poll(s: &mut App) -> bool {
     if !matches!(s.frame_route(), Route::PullRequests) || s.ui.pages.detail.entry.is_none() {
         return false;
     }
-    let mut changed = keep_choice(s) | want_linked(s);
-    for kind in ["labels", "reviewers", "linked"] {
+    let mut changed = keep_choice(s) | want_linked(s) | want_refs(s);
+    for kind in ["labels", "reviewers", "linked", "refs"] {
         let Some((env, id)) = read_mut(meta(s), kind).pending.clone() else { continue };
         let Some(reply) = super::pull_requests::take(s, &env, id) else { continue };
         let r = read_mut(meta(s), kind);
@@ -177,6 +185,39 @@ fn want_linked(s: &mut App) -> bool {
     true
 }
 
+/// The workspace's first refs, read once the pull request has loaded (branchRefsQuery).
+fn want_refs(s: &mut App) -> bool {
+    let u = &s.ui.pages.detail;
+    let Some(d) = &u.detail else { return false };
+    if u.meta.refs.asked {
+        return false;
+    }
+    let root = field(d, "workspaceRoot").to_string();
+    meta(s).refs.asked = true;
+    if !root.is_empty()
+        && let Some(p) = send(s, "vcs.listRefs", json!({"cwd": root, "includeMatchingRemoteRefs": true, "limit": 2}))
+    {
+        meta(s).refs.pending = Some(p);
+    }
+    true
+}
+
+/// isStackedPullRequestBase: the base is not the repository's default branch, a remote default
+/// read without its remote's prefix.
+pub fn stacked_base(base: &str, refs: &[Value]) -> bool {
+    let Some(default) = refs.iter().find(|r| r["isDefault"] == true) else { return false };
+    let name = field(default, "name");
+    if default["isRemote"] != true {
+        return name != base;
+    }
+    let remote = default["remoteName"].as_str().unwrap_or_else(|| name.split('/').next().unwrap_or(""));
+    name.strip_prefix(&format!("{remote}/")).unwrap_or(name) != base
+}
+
+fn stacked(u: &Ui, base: &str) -> bool {
+    u.refs.data.as_ref().is_some_and(|v| stacked_base(base, v["refs"].as_array().map(Vec::as_slice).unwrap_or(&[])))
+}
+
 /// `Could not …` and its hint for a write the host refused.
 pub fn failure(write: &Write, term: &str) -> (String, String) {
     match write {
@@ -194,6 +235,8 @@ pub fn failure(write: &Write, term: &str) -> (String, String) {
             "The host refused the merge. Check that you have write access, that the checks it requires have passed, and that the branch is not conflicting.".into(),
         ),
         Write::Stack(_) => ("Could not rebase the stack".into(), "The host refused the rebase. A rebase stops at the first commit that does not apply cleanly.".into()),
+        Write::Link { linked: true } => (format!("Could not link the {term}"), "Try again.".into()),
+        Write::Link { .. } => (format!("Could not unlink the {term}"), "Try again.".into()),
     }
 }
 
@@ -234,6 +277,14 @@ fn finish(s: &mut App, write: Write, reply: Result<Value, Value>) {
                 Write::Label { .. } => load_candidates(s, "labels"),
                 Write::Reviewer { .. } => load_candidates(s, "reviewers"),
                 Write::Stack(_) => s.ui.pages.pull_requests.requested = None,
+                // The linked threads read again; the pull request itself is unchanged.
+                Write::Link { .. } => {
+                    let u = meta(s);
+                    u.link_picker = false;
+                    u.linked_open = false;
+                    u.linked.asked = false;
+                    return;
+                }
                 _ => {}
             }
             super::pr_detail::refresh(s);
@@ -373,7 +424,8 @@ fn picker(s: &App, t: &T, spec: &'static Spec, allowed: bool, overlays: &mut Vec
 fn picker_entries(s: &App, t: &T, spec: &Spec) -> Vec<MenuEntry> {
     let u = &s.ui.pages.detail.meta;
     let read = if spec.kind == "labels" { &u.labels } else { &u.reviewers };
-    let note = |m: String| MenuEntry::Row(text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().w_full().px(8.0).py(8.0));
+    // A wrapping text measures its height at its border-box width, so padding goes around it.
+    let note = |m: String| MenuEntry::Row(col().grow(1.0).shrink().min_w(0.0).px(8.0).py(8.0).child(text(m).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()));
     let mut out = vec![MenuEntry::Row(search(t, u, spec.search, read.pending.is_some() && read.data.is_some()))];
     let candidates = read.data.as_ref().and_then(|v| v["candidates"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
     let shown = matching(spec.kind, candidates, &u.query.text);
@@ -505,12 +557,15 @@ fn update_branch(s: &mut App, method: &str) {
     submit(s, "pullRequests.runAction", update_payload(&entry, method), Write::Update(method.to_string()));
 }
 
-/// PullRequestBaseBranch: the base branch, warning with a way to update when the pull request
-/// has fallen behind it.
+/// PullRequestBaseBranch: the base branch, layered when the pull request is stacked on another,
+/// warning with a way to update when the pull request has fallen behind it.
 pub fn base_branch(s: &App, t: &T, d: &Value, font: rune::TextStyle, ink: Color, overlays: &mut Vec<El>) -> El {
     let base = field(d, "baseBranch").to_string();
+    let stacked = stacked(&s.ui.pages.detail.meta, &base);
+    let glyph = |tone: Color| stacked.then(|| icon(&i::LAYERS, 12.0).color(tone).role("img").label("Stacked pull request"));
     let Some((behind, methods)) = freshness(d) else {
-        return text(base.clone()).font(font).color(ink).truncate().shrink().help(base);
+        let tip = if stacked { format!("Stacked on {base}") } else { base.clone() };
+        return row().key("pr-base-branch").gap(4.0).center_y().shrink().min_w(0.0).children(glyph(ink)).child(text(base).font(font).color(ink).truncate().shrink().min_w(0.0)).help(tip);
     };
     let summary = freshness_summary(&base, behind);
     let warn = t.c.warning_foreground;
@@ -524,6 +579,7 @@ pub fn base_branch(s: &App, t: &T, d: &Value, font: rune::TextStyle, ink: Color,
         .cursor(Cursor::Pointer)
         .role("button")
         .label(summary.clone())
+        .children(glyph(warn))
         .child(text(base).font(font).color(warn).truncate().shrink().min_w(0.0))
         .child(icon(&i::TRIANGLE_ALERT, 12.0).color(warn))
         .on_press(|s: &mut App| {
@@ -571,9 +627,120 @@ fn open_thread(s: &mut App, id: &str) {
     crate::shell::sidebar::go(s, Route::Thread(id.to_string()));
 }
 
+/// `thread.pull-request.link` (a manual link) or `.unlink` for `thread`, keyed as the linked
+/// threads are read.
+pub fn link_command(entry: &Value, thread: &str, linked: bool) -> Value {
+    let key = linked_input(entry);
+    let kind = if linked { "thread.pull-request.link" } else { "thread.pull-request.unlink" };
+    let mut command = json!({"type": kind, "threadId": thread, "host": key["host"], "repository": key["repository"], "number": key["number"]});
+    if linked {
+        command["url"] = json!(field(entry, "url"));
+        command["source"] = json!("manual");
+    }
+    command
+}
+
+fn change_link(s: &mut App, thread: &str, linked: bool) {
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    if writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link { .. })) {
+        return;
+    }
+    let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
+    let write = Write::Link { linked };
+    match super::pull_requests::net_for(s, &entry).map(|net| net.dispatch(link_command(&entry, thread, linked))) {
+        Some(id) => meta(s).writes.push((env, id, write)),
+        None => fail(s, &write, "Actions need a connected environment."),
+    }
+}
+
+/// PullRequestThreadLinks' menu item on this page, which has no thread of its own to link: it
+/// opens the thread picker.
+pub fn link_entries(s: &App) -> Vec<MenuEntry> {
+    if s.ui.pages.detail.entry.as_ref().is_none_or(|e| field(e, "url").is_empty()) {
+        return Vec::new();
+    }
+    let pending = writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link { .. }));
+    vec![MenuEntry::item(MenuItem::new("Link to thread").icon(&i::LINK_2).disabled(pending).on_select(open_link_picker))]
+}
+
+fn open_link_picker(s: &mut App) {
+    s.ui.pages.detail.menu = false;
+    let u = meta(s);
+    u.link_picker = true;
+    u.link_query = rune::TextEdit::default();
+    u.link_query.focused = true;
+}
+
+/// The picker's threads: active ones matching `query` by title or project, newest first, each with
+/// its project's title.
+pub fn link_candidates<'a>(threads: &[&'a Value], projects: &[&Value], query: &str) -> Vec<(&'a Value, String)> {
+    let search = query.trim().to_lowercase();
+    let project = |id: &str| projects.iter().find(|p| field(p, "id") == id).map_or(String::new(), |p| field(p, "title").to_string());
+    let mut out: Vec<(&Value, String)> = threads
+        .iter()
+        .filter(|th| th["archivedAt"].is_null())
+        .map(|th| (*th, project(field(th, "projectId"))))
+        .filter(|(th, name)| format!("{} {name}", field(th, "title")).to_lowercase().contains(&search))
+        .collect();
+    out.sort_by(|a, b| field(b.0, "updatedAt").cmp(field(a.0, "updatedAt")));
+    out
+}
+
+/// PullRequestThreadLinks' picker: the environment's threads to link this pull request to; one
+/// already linked says so and can't be picked again.
+fn link_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
+    let u = &s.ui.pages.detail.meta;
+    let Some(entry) = s.ui.pages.detail.entry.as_ref().filter(|_| u.link_picker) else { return };
+    let pending = writing(u, |w| matches!(w, Write::Link { .. }));
+    let env = crate::env::of(s, entry);
+    let state = s.state();
+    let threads: Vec<&Value> = state.threads.iter().filter(|th| crate::env::of(s, th) == env).collect();
+    let projects: Vec<&Value> = state.projects.iter().filter(|p| crate::env::of(s, p) == env).collect();
+    let linked: Vec<&str> = u.linked.data.as_ref().and_then(|v| v["threads"].as_array()).into_iter().flatten().map(|th| field(th, "id")).collect();
+    let input = kit::Input::new(&u.link_query).placeholder("Search threads or projects...").disabled(pending).on_edit(|s: &mut App| &mut meta(s).link_query).build(t).single_line().key("pr-link-thread-search");
+    let candidates = link_candidates(&threads, &projects, &u.link_query.text);
+    let mut list = col().key("pr-link-thread-list").w_full().max_h(320.0).scroll(ScrollSpec { stick_bottom: false }).role("listbox").label("Choose a thread");
+    if candidates.is_empty() {
+        list = list.child(row().w_full().center().px(12.0).py(24.0).child(text("No active threads found.").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+    }
+    for (thread, project) in candidates {
+        let id = field(thread, "id").to_string();
+        let title = thread["title"].as_str().filter(|v| !v.is_empty()).unwrap_or("Untitled thread").to_string();
+        let here = linked.contains(&id.as_str());
+        let names = col().grow(1.0).shrink().min_w(0.0).child(text(title.clone()).font(theme::TEXT_SM).color(t.c.foreground).truncate()).child(text(project).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate());
+        let mut line = row()
+            .key(format!("pr-link-thread-{id}"))
+            .role("option")
+            .label(title)
+            .w_full()
+            .px(8.0)
+            .py(6.0)
+            .gap(8.0)
+            .center_y()
+            .radius(radius::MD)
+            .child(icon(&i::MESSAGE_SQUARE, 16.0).color(t.c.foreground))
+            .child(names)
+            .children(here.then(|| row().gap(4.0).center_y().child(icon(&i::CHECK, 14.0).color(t.c.foreground)).child(text("Linked").font(theme::TEXT_XS).color(t.c.muted_foreground))));
+        line = if here || pending {
+            line.disabled(true).opacity(0.64)
+        } else {
+            line.cursor(Cursor::Pointer).hover(t.c.accent).focusable(true).focus_highlight(t.c.accent).on_press(move |s: &mut App| change_link(s, &id, true))
+        };
+        list = list.child(line);
+    }
+    let term = super::pr_row::term(entry);
+    kit::Dialog::new("pr-link-thread", format!("Link {term} to a thread"))
+        .width(448.0)
+        .open(true)
+        .child(col().w_full().gap(8.0).child(input).child(list))
+        .on_close(|s: &mut App| meta(s).link_picker = false)
+        .build(t, overlays);
+}
+
 /// PullRequestThreadLinks' count: the threads linked to this pull request, each opening from its
-/// menu, or "?" when they couldn't be read.
+/// menu with a way to unlink it, or "?" when they couldn't be read. Also mounts the thread picker.
 pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
+    link_dialog(s, t, overlays);
     let u = &s.ui.pages.detail.meta;
     let threads = u.linked.data.as_ref().and_then(|v| v["threads"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
     if threads.is_empty() && u.linked.error.is_none() {
@@ -595,10 +762,21 @@ pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     let mut menu = Menu::new("pr-linked-threads").trigger(trigger).placement(Placement::BottomEnd).min_width(240.0).open(u.linked_open).on_close(|s: &mut App| meta(s).linked_open = false);
     if u.linked_open {
         menu = menu.group_label(label);
+        let pending = writing(u, |w| matches!(w, Write::Link { .. }));
         for thread in threads {
             let id = field(thread, "id").to_string();
             let title = thread["title"].as_str().filter(|v| !v.is_empty()).unwrap_or("Untitled thread");
-            menu = menu.item(MenuItem::new(title).icon(&i::MESSAGE_SQUARE).on_select(move |s: &mut App| open_thread(s, &id)));
+            let gone = id.clone();
+            let unlink = kit::Button::new("")
+                .variant("ghost-muted")
+                .size("icon-xs")
+                .icon(&i::UNLINK_2)
+                .disabled(pending)
+                .on_press(move |s: &mut App| change_link(s, &gone, false))
+                .build(t)
+                .label("Unlink from thread")
+                .help("Unlink from thread");
+            menu = menu.item(MenuItem::new(title).icon(&i::MESSAGE_SQUARE).trailing(unlink).on_select(move |s: &mut App| open_thread(s, &id)));
         }
         if let (true, Some(error)) = (threads.is_empty(), &u.linked.error) {
             menu = menu.group_label(error.clone());
@@ -1065,7 +1243,8 @@ fn fix_findings(s: &mut App) {
 // ---- scenes -----------------------------------------------------------------------------
 
 /// Holds a scene's state over the open detail: a picker open on its recorded candidates, a base
-/// fallen behind, the linked threads' menu, or a stacked layer's stack menu.
+/// fallen behind or stacked on another branch, the linked threads' menu or thread picker, or a
+/// stacked layer's stack menu.
 pub fn scene(s: &mut App, which: &str) {
     match which {
         "labels" => toggle_picker(s, "labels"),
@@ -1085,6 +1264,21 @@ pub fn scene(s: &mut App, which: &str) {
             u.linked.asked = true;
             u.linked.data = recorded;
             u.linked_open = true;
+        }
+        "link-thread" => {
+            let first = s.state().threads.first().cloned();
+            let u = meta(s);
+            u.linked.asked = true;
+            u.linked.data = Some(json!({"threads": first.into_iter().collect::<Vec<_>>()}));
+            open_link_picker(s);
+        }
+        "stacked" => {
+            if let Some(d) = &mut s.ui.pages.detail.detail {
+                d["baseBranch"] = json!("feat/rune-pull-requests");
+            }
+            let u = meta(s);
+            u.refs.asked = true;
+            u.refs.data = Some(json!({"refs": [{"name": "origin/main", "isDefault": true, "isRemote": true, "remoteName": "origin"}]}));
         }
         "stack" => {
             let layer = s.ui.pages.pull_requests.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| e["number"] == 2479).map(|e| field(e, "url").to_string()));
@@ -1170,6 +1364,40 @@ mod tests {
         hosted["host"] = json!("GitLab.Example.com");
         assert_eq!(linked_input(&hosted)["host"], "gitlab.example.com");
         assert_eq!([linked_label(0), linked_label(1), linked_label(3)], ["Linked threads", "Linked from 1 thread", "Linked from 3 threads"]);
+
+        let link = link_command(&entry(), "t1", true);
+        assert_eq!(
+            link,
+            json!({"type": "thread.pull-request.link", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479, "url": "https://GitHub.com/S5Labs/S5Code/pull/2479", "source": "manual"})
+        );
+        assert_eq!(link_command(&entry(), "t1", false), json!({"type": "thread.pull-request.unlink", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479}));
+        assert_eq!(failure(&Write::Link { linked: false }, "merge request").0, "Could not unlink the merge request");
+    }
+
+    #[test]
+    fn the_thread_picker_lists_active_threads_newest_first_by_title_or_project() {
+        let projects = [json!({"id": "p1", "title": "s5code"}), json!({"id": "p2", "title": "billing-api"})];
+        let threads = [
+            json!({"id": "a", "projectId": "p1", "title": "Port the page", "archivedAt": null, "updatedAt": "2026-11-01T00:00:00Z"}),
+            json!({"id": "b", "projectId": "p2", "title": "Idempotency keys", "archivedAt": null, "updatedAt": "2026-11-03T00:00:00Z"}),
+            json!({"id": "c", "projectId": "p1", "title": "Old", "archivedAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-11-04T00:00:00Z"}),
+        ];
+        let (threads, projects): (Vec<&Value>, Vec<&Value>) = (threads.iter().collect(), projects.iter().collect());
+        let ids = |q: &str| link_candidates(&threads, &projects, q).iter().map(|(th, project)| format!("{}:{project}", field(th, "id"))).collect::<Vec<_>>();
+        assert_eq!(ids(""), ["b:billing-api", "a:s5code"], "archived threads stay out");
+        assert_eq!(ids(" BILLING "), ["b:billing-api"], "a project's title matches its threads");
+        assert_eq!(ids("port"), ["a:s5code"]);
+    }
+
+    #[test]
+    fn a_base_other_than_the_default_branch_is_stacked() {
+        let remote = [json!({"name": "origin/main", "isDefault": true, "isRemote": true, "remoteName": "origin"}), json!({"name": "origin/dev", "isDefault": false})];
+        assert!(!stacked_base("main", &remote), "a remote default is read without its remote");
+        assert!(stacked_base("feat/base", &remote));
+        let unnamed = [json!({"name": "upstream/trunk", "isDefault": true, "isRemote": true})];
+        assert!(!stacked_base("trunk", &unnamed), "the remote is the name's first segment when unreported");
+        assert!(stacked_base("main", &[json!({"name": "trunk", "isDefault": true, "isRemote": false})]));
+        assert!(!stacked_base("feat/base", &[json!({"name": "dev", "isDefault": false})]), "unknown without a default ref");
     }
 
     #[test]

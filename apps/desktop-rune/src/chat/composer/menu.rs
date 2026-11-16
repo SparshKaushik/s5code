@@ -67,6 +67,8 @@ const BUILTIN_SLASH: [(&str, &str); 1] = [("model", "Switch response model for t
 /// Shown after `/model` when the provider has plan mode.
 const PLAN_SLASH: [(&str, &str); 2] =
     [("plan", "Switch this thread into plan mode"), ("default", "Switch this thread back to normal build mode")];
+/// Shown last among the built-ins, at the message start, on a thread that can start side chats.
+const SIDE_SLASH: [(&str, &str); 2] = [("side", "Ask a side question in a new side chat"), ("btw", "Same as /side")];
 
 pub fn open_menu(s: &App) -> Option<Open> {
     let d = draft(s)?;
@@ -103,7 +105,10 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
             let plan: &[(&str, &str)] = if supports_plan(s) { &PLAN_SLASH[..] } else { &[] };
             // Provider commands work only at the message start.
             let at_start = m.start == 0;
-            let builtins = BUILTIN_SLASH.iter().chain(plan).map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
+            let reason = crate::chat::side::disabled_reason(s);
+            let side: Vec<(&str, &str)> =
+                if at_start && crate::chat::side::available(s) { SIDE_SLASH.iter().map(|&(n, d)| (n, reason.unwrap_or(d))).collect() } else { Vec::new() };
+            let builtins = BUILTIN_SLASH.iter().chain(plan).chain(&side).map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
             let skills = slash_menu_skills(s);
             let skill_names: Vec<String> = skills.iter().map(|k| data::s(k, "name").trim().to_lowercase()).collect();
             let compact = compact_available(s, m);
@@ -115,7 +120,7 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
                 .map(|c| item(format!("/{}", data::s(c, "name")), format!("/{}", data::s(c, "name")), command_description(c)));
             // A skill runs anywhere in the prompt, as `$name`.
             let skill_items = skills.iter().map(|k| item(format!("${}", data::s(k, "name")), format!("/skill:{}", data::s(k, "name")), skill_description(k, "")));
-            let builtin = BUILTIN_SLASH.len() + plan.len();
+            let builtin = BUILTIN_SLASH.len() + plan.len() + side.len();
             let all: Vec<Item> = builtins.chain(provided).chain(skill_items).collect();
             ranked_slash(all, builtin, q.trim_start_matches('/'))
         }
@@ -388,11 +393,22 @@ pub fn choose(s: &mut App, m: &Open, index: usize, _tx: &mut Tx) {
         super::picker::toggle(s);
         return;
     }
+    // `/usage-limits` opens the provider's limits rather than going to the agent.
+    if item.id == "/usage-limits" && m.kind == Kind::Slash && super::usage_limits::offered(s) {
+        let d = draft_mut(s);
+        d.edit.set_selection(m.start, m.end);
+        d.edit.insert("");
+        super::usage_limits::open(s);
+        return;
+    }
     if let Some(mode) = item.id.strip_prefix('/').filter(|_| m.kind == Kind::Slash).filter(|id| PLAN_SLASH.iter().any(|(n, _)| n == id)) {
         let d = draft_mut(s);
         d.edit.set_selection(m.start, m.end);
         d.edit.insert("");
         set_interaction_mode(s, mode);
+        return;
+    }
+    if matches!(item.id.as_str(), "/side" | "/btw") && m.kind == Kind::Slash && crate::chat::side::disabled_reason(s).is_some() {
         return;
     }
     if let Some(pr) = &item.pr {
@@ -536,7 +552,27 @@ mod tests {
     fn plan_commands_follow_model_only_for_plan_capable_providers() {
         assert_eq!(slash_labels("codex")[..3], ["/model", "/plan", "/default"]);
         assert_eq!(slash_labels("devReplay")[..1], ["/model"]);
-        assert!(!slash_labels("codex").iter().any(|l| l == "/side" || l == "/btw"), "side chats are not implemented");
+        assert!(!slash_labels("codex").iter().any(|l| l == "/side" || l == "/btw"), "side chats start from a thread");
+    }
+
+    #[test]
+    fn side_chat_commands_follow_the_built_ins_on_a_thread_whose_server_has_side_chats() {
+        let mut s = App::new();
+        let id = s.state().threads.iter().find(|t| t["lineage"]["relationshipToParent"] != "subagent" && t["lineage"]["sideChat"] != true && t["delegatedFrom"].is_null()).map(|t| data::s(t, "id").to_owned()).unwrap();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["sideChats"] = json!(true);
+        }
+        s.navigate(crate::Route::Thread(id));
+        let labels = |s: &mut App, text: &str, caret: usize| {
+            let d = draft_mut(s);
+            d.model = Some(("codex".into(), "m".into()));
+            d.edit = rune::TextEdit::new(text);
+            d.edit.set_caret(caret);
+            let m = open_menu(s).unwrap();
+            items(s, &m).into_iter().map(|i| i.label).collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&mut s, "/", 1)[..5], ["/model", "/plan", "/default", "/side", "/btw"]);
+        assert!(!labels(&mut s, "fix it /", 8).contains(&"/btw".to_owned()));
     }
 
     #[test]

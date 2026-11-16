@@ -31,6 +31,7 @@ image = (
         "fontconfig",
         "fonts-dejavu-core",
         "fonts-liberation",
+        "fonts-noto-color-emoji",
     )
 )
 
