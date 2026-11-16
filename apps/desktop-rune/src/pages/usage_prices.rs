@@ -803,7 +803,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         );
     }
     if let Some(attempt) = &u.attempt {
-        let mut lines = col().w_full().gap(4.0);
+        let mut lines = col().w_full().gap(4.0).role("status");
         for (_, label, result) in &attempt.results {
             let (status, ink) = match result {
                 Status::Failed(error) => (format!("Not saved \u{b7} {error}"), t.c.destructive),
@@ -887,7 +887,7 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                 .build(t),
         ),
     );
-    let mut table = col().w_full().radius(radius()).border(1.0, t.c.border).clip_rounded(radius()).child(header).child(el().w_full().h(1.0).fill(t.c.border));
+    let mut table = col().w_full().role("table").label("Custom model prices").radius(radius()).border(1.0, t.c.border).clip_rounded(radius()).child(header).child(el().w_full().h(1.0).fill(t.c.border));
     let rows = rows(u, target);
     if rows.is_empty() {
         let line = if target.iter().any(|t| t.prices.is_none()) { "Some environment prices are unavailable." } else { "No custom prices or mappings. Add a row to set one." };
@@ -924,7 +924,7 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
             Some(name) => model_col.child(row().h(28.0).center_y().child(text(name.clone()).font(theme::TEXT_SM).color(if removed { muted } else { t.c.foreground }).wrap())),
         };
         if let Some(error) = error {
-            model_col = model_col.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+            model_col = model_col.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert"));
         }
         let shown = if model.is_empty() { "new model".to_string() } else { model.clone() };
         let mut line = row().w_full().px(12.0).py(8.0).gap(8.0).items_start().child(model_col);
@@ -997,7 +997,7 @@ fn apply_trigger(t: &T, label: &str, disabled: bool) -> El {
         .border(1.0, t.c.input)
         .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
         .role("button")
-        .label(format!("Apply to: {label}"))
+        .label(format!("Apply to {label}"))
         .child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
         .child(rune::icon(&i::CHEVRON_DOWN, 14.0).color(t.c.foreground));
     if disabled {

@@ -3,6 +3,7 @@
 //! the Diff panel's (`panel::diff::view`), drawn over this tab's own `DiffState`.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,7 @@ use serde_json::{Value, json};
 use super::avatars::avatar;
 use super::pr_conversation::{list, scoped_commit};
 use super::pr_detail::{file_counts, reference};
+use super::pr_edit::Draft as EditDraft;
 use crate::App;
 use crate::data::{s as field, ts};
 use crate::env::TAG;
@@ -40,6 +42,12 @@ const WIDE_TOOLBAR: f32 = 512.0;
 /// Past this many removed-by-added line pairs a change keeps its whitespace-only lines.
 const WS_CELLS: usize = 1 << 20;
 const REPLY_FAILED: &str = "Reply could not be posted";
+const EDIT_FAILED: &str = "The comment could not be saved";
+const COMMENTS_FAILED: &str = "More comments could not be loaded";
+/// The web keeps this in localStorage (`t3code:diff-file-tree-width`).
+const TREE_WIDTH_KEY: &str = "diffFileTreeWidth";
+/// PullRequestCommentBody's clip (`max-h-[240px]`).
+const COMMENT_CLIP: f32 = 240.0;
 const ENVIRONMENT_TICKS: &str = "This host keeps no shared record of which files you have read, so these ticks are kept by this environment. They follow you between the apps connected to it, but the host's own web UI will not show them.";
 
 #[derive(Default)]
@@ -83,6 +91,19 @@ pub struct Ui {
     thread_pending: Option<(u64, &'static str)>,
     /// The narrow toolbar's Diff options menu.
     options: bool,
+    /// Whether the toolbar measured under `WIDE_TOOLBAR` when it was last shown.
+    narrow: Cell<Option<bool>>,
+    /// Comments read past a thread's first page and the cursor after them, by thread (loadedPage).
+    loaded: HashMap<String, (Vec<Value>, Option<String>)>,
+    /// Comment pages in flight: the request, its thread and the scope it was asked for.
+    comment_pages: Vec<(u64, String, String)>,
+    /// The review thread comment being edited.
+    editing: Option<(String, EditDraft)>,
+    /// The file tree's row width as last laid out, and the width being dragged.
+    tree_row: Cell<f32>,
+    tree_drag: Option<f32>,
+    /// Comments shown past PullRequestCommentBody's clip.
+    full_comments: HashSet<String>,
     /// The file last revealed from outside the tab, shown even while tests are hidden (revealRequest).
     revealed: Option<String>,
 }
@@ -551,6 +572,9 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.next = None;
         c.paging = None;
         c.page_failed = false;
+        c.loaded.clear();
+        c.editing = None;
+        c.full_comments.clear();
         changed = true;
     }
     c.diff.set_mode(mode);
@@ -574,7 +598,7 @@ pub(super) fn poll(s: &mut App) -> bool {
         }
         changed |= sync_page(s, &entry) | sync_notes(s);
     }
-    changed |= sync_thread_command(s, &entry);
+    changed |= sync_thread_command(s, &entry) | sync_comment_pages(s, &entry);
     sync_viewed(s, &entry) | changed
 }
 
@@ -843,8 +867,9 @@ fn selection_context(st: &DiffState, d: &Draft, number: i64, body: &str) -> Opti
     Some(comment)
 }
 
-/// "Add to agent" (addSelectionToAgent): a new thread holding the request, the pull request and
-/// the lines.
+/// "Add to agent" (addSelectionToAgent through startAsk): a new thread holding the request, the
+/// pull request and the lines. Web attaches to a thread's composer only where the detail sits in
+/// that thread's right panel, which this page never does.
 fn add_to_agent(s: &mut App) {
     let body = s.ui.pages.code.edit.text.trim().to_owned();
     let Some(d) = s.ui.pages.detail.detail.clone() else { return };
@@ -859,8 +884,7 @@ fn add_to_agent(s: &mut App) {
     sync_notes(s);
     let Some(comment) = comment else { return };
     let chip = crate::chat::composer::chips::pull_request(&d, true, &[]);
-    super::pr_detail::handoff(s, super::pr_detail::bounded(&body), Some(chip));
-    crate::chat::composer::add_context(s, comment);
+    super::pr_detail::ask(s, super::pr_detail::bounded(&body), vec![chip, comment]);
 }
 
 /// The draft's primary button: the review where the host takes line comments, else the agent.
@@ -899,8 +923,19 @@ fn sync_thread_command(s: &mut App, entry: &Value) -> bool {
     s.ui.pages.code.thread_pending = None;
     match got {
         Ok(_) => {
-            if failure == REPLY_FAILED {
-                s.ui.pages.code.replying = None;
+            // A reply returns no comment, so a thread read past its first page reads on again.
+            if failure == REPLY_FAILED
+                && let Some((thread, _)) = s.ui.pages.code.replying.take()
+            {
+                let cursor = threads(s).iter().find(|th| field(th, "id") == thread).and_then(|th| th["nextCommentsCursor"].as_str()).map(str::to_owned);
+                if let Some(page) = s.ui.pages.code.loaded.get_mut(&thread) {
+                    page.1 = page.1.take().or(cursor);
+                }
+            }
+            if failure == EDIT_FAILED
+                && let Some((id, draft)) = s.ui.pages.code.editing.take()
+            {
+                edit_loaded(&mut s.ui.pages.code.loaded, &id, &draft.edit.text);
             }
             super::pr_detail::refresh(s);
         }
@@ -934,6 +969,143 @@ fn flip(s: &mut App, thread: &str) {
     if !flipped.remove(thread) {
         flipped.insert(thread.to_owned());
     }
+}
+
+/// loadMore: the thread's next page of comments, one read per thread at a time.
+fn load_comments(s: &mut App, thread: &str, cursor: &str) {
+    if s.ui.pages.code.comment_pages.iter().any(|(_, on, _)| on == thread) {
+        return;
+    }
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    let mut input = reference(&entry);
+    input["threadId"] = json!(thread);
+    input["cursor"] = json!(cursor);
+    let scope = s.ui.pages.code.scope.clone();
+    match super::pull_requests::net_for(s, &entry) {
+        Some(net) => {
+            let id = net.request("pullRequests.threadComments", input);
+            s.ui.pages.code.comment_pages.push((id, thread.to_owned(), scope));
+        }
+        None => crate::shell::palette::toast_error(s, COMMENTS_FAILED, None),
+    }
+}
+
+fn sync_comment_pages(s: &mut App, entry: &Value) -> bool {
+    let mut changed = false;
+    for (id, thread, asked) in std::mem::take(&mut s.ui.pages.code.comment_pages) {
+        let Some(got) = reply(s, entry, id) else {
+            s.ui.pages.code.comment_pages.push((id, thread, asked));
+            continue;
+        };
+        changed = true;
+        if asked != s.ui.pages.code.scope {
+            continue;
+        }
+        match got {
+            Ok(page) => take_page(&mut s.ui.pages.code.loaded, &thread, &page),
+            Err(_) => crate::shell::palette::toast_error(s, COMMENTS_FAILED, None),
+        }
+    }
+    changed
+}
+
+/// A page of a thread's comments joins the ones read before it.
+fn take_page(loaded: &mut HashMap<String, (Vec<Value>, Option<String>)>, thread: &str, page: &Value) {
+    let had = loaded.remove(thread).map(|l| l.0).unwrap_or_default();
+    let comments = merge_comments(&had, list(Some(page), "comments"));
+    loaded.insert(thread.to_owned(), (comments, page["nextCursor"].as_str().map(str::to_owned)));
+}
+
+/// mergePullRequestThreadComments: `more` after `base`, each comment once.
+fn merge_comments(base: &[Value], more: &[Value]) -> Vec<Value> {
+    let mut seen: HashSet<String> = base.iter().map(|c| field(c, "id").to_owned()).collect();
+    let mut out = base.to_vec();
+    out.extend(more.iter().filter(|c| seen.insert(field(c, "id").to_owned())).cloned());
+    out
+}
+
+/// editPullRequestThreadComment over every thread's read pages.
+fn edit_loaded(loaded: &mut HashMap<String, (Vec<Value>, Option<String>)>, id: &str, body: &str) {
+    for page in loaded.values_mut() {
+        for c in &mut page.0 {
+            if field(c, "id") == id {
+                c["body"] = json!(body);
+            }
+        }
+    }
+}
+
+/// canEditPullRequestComment for a review thread's comment.
+fn can_edit(s: &App, comment: &Value) -> bool {
+    let probe = json!({"kind": "review-comment", "author": comment["author"], "canEdit": comment["canEdit"]});
+    s.ui.pages.detail.detail.as_ref().is_some_and(|d| super::pr_edit::can_edit_comment(d, &probe))
+}
+
+fn saving_edit(c: &Ui) -> bool {
+    c.thread_pending.is_some_and(|(_, failure)| failure == EDIT_FAILED)
+}
+
+fn start_edit(s: &mut App, id: &str, body: &str) {
+    let c = &mut s.ui.pages.code;
+    if !saving_edit(c) {
+        c.editing = Some((id.to_owned(), EditDraft::new(body)));
+    }
+}
+
+/// The editor's onSave: a comment may not be emptied.
+fn save_edit(s: &mut App) {
+    let Some((id, draft)) = &s.ui.pages.code.editing else { return };
+    if draft.edit.text.trim().is_empty() {
+        return;
+    }
+    let fields = json!({"commentId": id, "kind": "review-comment", "body": draft.edit.text});
+    thread_command(s, "pullRequests.updateComment", fields, EDIT_FAILED);
+}
+
+fn edit_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if super::pr_edit::submits(e) {
+        if !tx.key_repeat() {
+            save_edit(s);
+        }
+        return true;
+    }
+    if e.key != Key::Escape {
+        return false;
+    }
+    s.ui.pages.code.editing = None;
+    true
+}
+
+/// startFixFinding for a review thread: the project's new-thread draft holding the task, with the
+/// thread attached on its line.
+fn fix_thread(s: &mut App, th: &Value) {
+    let Some(d) = s.ui.pages.detail.detail.clone() else { return };
+    let (text, records) = super::pr_detail::finding_handoff(&d, &super::pr_detail::Finding::Thread(th.clone()));
+    super::pr_detail::handoff(s, text, records.into_iter().next());
+}
+
+/// Whether the toolbar is under `WIDE_TOOLBAR`, as web's `@lg` container query reads it: its own
+/// width last frame, else the detail's that it spans, else the last answer, so a tab switch or a
+/// reopened panel never paints the wide toolbar for a frame.
+fn narrow_toolbar(toolbar: Option<bool>, panel: impl FnOnce() -> Option<bool>, last: Option<bool>) -> bool {
+    toolbar.or_else(panel).or(last).unwrap_or(false)
+}
+
+/// FileExplorerPane's first width: 320, or two fifths of the row when that is less, at least 192.
+fn tree_default(row: f32) -> f32 {
+    (row * 0.4).min(320.0).max(192.0)
+}
+
+/// FileExplorerPane's bounds: 192 up to 560, leaving the diff 256 unless the first width needs it.
+fn tree_width(w: f32, row: f32) -> f32 {
+    let max = (row - 256.0).max(tree_default(row)).min(560.0).max(192.0);
+    w.clamp(192.0, max)
+}
+
+/// The tree's width: the one being dragged, else the saved one, else the first.
+fn tree_shown(s: &App, row: f32) -> f32 {
+    let saved = s.client_settings.values.get(TREE_WIDTH_KEY).and_then(Value::as_f64).map(|w| w as f32);
+    s.ui.pages.code.tree_drag.or(saved).map_or_else(|| tree_default(row), |w| tree_width(w, row))
 }
 
 fn reply_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
@@ -1116,8 +1288,12 @@ pub(super) fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     left = left.child(line);
     let (wrap, ignore, mode) = (wrap_on(s), ignore_ws(s), c.diff.mode());
     let mut right = row().gap(4.0).center_y();
-    // The toolbar's own width, as web's `@lg` container query reads it.
-    if rune::memo::layout_with("pr-code-toolbar", |r| r[2] < WIDE_TOOLBAR).unwrap_or(false) {
+    let toolbar = rune::memo::layout_with("pr-code-toolbar", |r| r[2] < WIDE_TOOLBAR);
+    let narrow = narrow_toolbar(toolbar, || rune::memo::layout_with("pr-detail", |r| r[2] < WIDE_TOOLBAR), c.narrow.get());
+    c.narrow.set(Some(narrow));
+    // The thread cards' reaction bars sit in diff rows, which hold no overlay layer.
+    super::pr_edit::reaction_picker(s, t, overlays);
+    if narrow {
         let trigger = kit::Button::new("Diff options")
             .icon(&i::SETTINGS_2)
             .variant("ghost")
@@ -1173,11 +1349,44 @@ pub(super) fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
 
 /// The loaded diff, beside the file tree when it is open, under the conversations it has no line for.
 pub(super) fn view(s: &App, t: &T) -> El {
-    let mut main = row().grow(1.0).min_h(0.0).w_full().items_stretch().child(diff_view(s, t));
+    let mut main = row().key("pr-code-main").grow(1.0).min_h(0.0).w_full().items_stretch().child(diff_view(s, t));
     if tree_open(s) && !s.ui.pages.code.diff.files().is_empty() {
-        main = main.child(el().w(1.0).self_stretch().fill(t.c.border.alpha_mul(0.6))).child(tree(s, t));
+        let row_w = rune::memo::layout_with("pr-code-main", |r| r[2]);
+        if let Some(w) = row_w {
+            s.ui.pages.code.tree_row.set(w);
+        }
+        main = main.child(tree_handle(t)).child(tree(s, t, row_w.map(|w| tree_shown(s, w))));
     }
     col().grow(1.0).min_h(0.0).w_full().children(orphans(s, t)).child(main)
+}
+
+/// FileExplorerPane's resize handle: the tree's left edge, so moving left widens it; the width is
+/// saved once the drag ends.
+fn tree_handle(t: &T) -> El {
+    el().key("pr-code-tree-resize")
+        .w(1.0)
+        .self_stretch()
+        .fill(t.c.border.alpha_mul(0.6))
+        .cursor(Cursor::ResizeColumn)
+        .role("separator")
+        .label("Resize PR Code files")
+        .on_drag(|s: &mut App, d: &mut rune::Drag, _: &mut Tx| {
+            let row = s.ui.pages.code.tree_row.get();
+            if d.cancelled() {
+                s.ui.pages.code.tree_drag = None;
+                return;
+            }
+            match d.phase {
+                rune::Phase::Down => d.data = tree_shown(s, row),
+                rune::Phase::Move => s.ui.pages.code.tree_drag = Some(tree_width(d.data - d.dx, row)),
+                rune::Phase::Up => {
+                    if let Some(w) = s.ui.pages.code.tree_drag.take() {
+                        s.client_settings.values.insert(TREE_WIDTH_KEY.into(), json!(w.round()));
+                        s.client_settings.save();
+                    }
+                }
+            }
+        })
 }
 
 /// The review threads no shown line holds, by file, folded under their count.
@@ -1244,7 +1453,12 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
     let id = field(th, "id").to_owned();
     let resolved = th["isResolved"] == true;
     let open = !resolved ^ c.flipped.contains(&id);
-    let comments = list(Some(th), "comments");
+    let page = c.loaded.get(&id);
+    let comments = merge_comments(list(Some(th), "comments"), page.map_or(&[][..], |p| p.0.as_slice()));
+    let next = match page {
+        Some(p) => p.1.clone(),
+        None => th["nextCommentsCursor"].as_str().map(str::to_owned),
+    };
     let count = th["commentCount"].as_u64().map_or(comments.len(), |n| n as usize);
     let muted = t.c.muted_foreground;
     let busy = c.thread_pending.is_some() || !writable(s);
@@ -1260,6 +1474,9 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         head = head.child(text("outdated").font(theme::TEXT_XS).color(muted));
     }
     head = head.child(spacer());
+    let fixed = th.clone();
+    let fix = kit::Button::new("Fix in a thread").icon(&i::HAMMER).variant("ghost").size("xs").disabled(c.thread_pending.is_some()).on_press(move |s: &mut App| fix_thread(s, &fixed));
+    head = head.child(fix.build(t));
     if can_resolve(s, th) {
         let thread = id.clone();
         let label = if resolved { "Unresolve" } else { "Resolve" };
@@ -1270,7 +1487,7 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         return card;
     }
     let mut thread = col().w_full().gap(12.0).mt(8.0);
-    for comment in comments {
+    for comment in &comments {
         let login = comment["author"]["login"].as_str().unwrap_or("ghost").to_owned();
         let mut meta = row()
             .w_full()
@@ -1281,9 +1498,28 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         if let Some(at) = ts(comment, "createdAt") {
             meta = meta.child(text(super::pull_requests::relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
         }
-        thread = thread.child(col().w_full().min_w(0.0).gap(4.0).child(meta).child(super::pr_detail::markdown(t, field(comment, "body"))));
+        meta = meta.child(spacer()).children(super::pr_edit::reaction_bar(s, t, comment));
+        let cid = field(comment, "id").to_owned();
+        let body = match &c.editing {
+            Some((on, draft)) if *on == cid => comment_editor(s, t, draft),
+            _ => {
+                let mut line = row().w_full().gap(4.0).items_start().child(super::pr_detail::markdown(t, field(comment, "body")).grow(1.0).shrink().min_w(0.0));
+                if can_edit(s, comment) {
+                    let shown = field(comment, "body").to_owned();
+                    line = line.child(super::pr_edit::pencil(t, "Edit comment", move |s: &mut App| start_edit(s, &cid, &shown)));
+                }
+                line
+            }
+        };
+        thread = thread.child(col().w_full().min_w(0.0).gap(4.0).hover_group().child(meta).child(body));
     }
     card = card.child(thread);
+    if let Some(cursor) = next {
+        let loading = c.comment_pages.iter().any(|(_, on, _)| *on == id);
+        let more = id.clone();
+        let label = if loading { "Loading..." } else { "Load more comments" };
+        card = card.child(row().mt(8.0).child(kit::Button::new(label).variant("ghost").size("xs").disabled(loading).on_press(move |s: &mut App| load_comments(s, &more, &cursor)).build(t)));
+    }
     if !can_reply(s) {
         return card;
     }
@@ -1311,6 +1547,71 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         }
         _ => card.child(row().mt(8.0).child(kit::Button::new("Reply").variant("ghost").size("xs").on_press(move |s: &mut App| start_reply(s, &id)).build(t))),
     }
+}
+
+/// PullRequestMarkdownEditor on a thread comment: Write or Preview, Cancel and Save; Cmd/Ctrl+Enter
+/// saves, Escape cancels.
+fn comment_editor(s: &App, t: &T, draft: &EditDraft) -> El {
+    let saving = saving_edit(&s.ui.pages.code);
+    let empty = draft.edit.text.trim().is_empty();
+    let mode = kit::ToggleGroup::new(&super::pr_edit::EDITOR_MODES, &[usize::from(draft.preview)])
+        .on_pick(|s: &mut App, n: usize, _: &mut Tx| {
+            let c = &mut s.ui.pages.code;
+            if !saving_edit(c)
+                && let Some((_, d)) = &mut c.editing
+            {
+                d.preview = n == 1;
+            }
+        })
+        .build(&kit::theme(t))
+        .label("Markdown editor mode");
+    let body = if draft.preview {
+        let shown = if empty { text("Nothing to preview.").font(theme::TEXT_XS).color(t.c.muted_foreground) } else { super::pr_detail::markdown(t, &draft.edit.text) };
+        col().w_full().px(12.0).py(8.0).radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).child(shown)
+    } else {
+        let input = super::pr_edit::area(t, "pr-code-edit-comment".into(), &draft.edit, 6.0, "Edit comment".into(), "");
+        if saving {
+            input.disabled(true).opacity(0.64)
+        } else {
+            input.on_edit(|s: &mut App| &mut s.ui.pages.code.editing.get_or_insert_with(Default::default).1.edit).on_input_key(edit_key)
+        }
+    };
+    let buttons = row()
+        .w_full()
+        .gap(8.0)
+        .justify_end()
+        .child(kit::Button::new("Cancel").variant("ghost").size("xs").disabled(saving).on_press(|s: &mut App| s.ui.pages.code.editing = None).build(t))
+        .child(kit::Button::new(if saving { "Saving..." } else { "Save" }).variant("outline").size("xs").disabled(!writable(s) || saving || empty).on_press(save_edit).build(t));
+    col().key("pr-code-comment-editor").w_full().mt(4.0).gap(8.0).child(row().child(mode)).child(body).child(buttons)
+}
+
+/// PullRequestCommentBody: a comment taller than 240 shows its top, fading out, until "Show full
+/// comment". For the Summary's comment cards (pr_detail), keyed by the comment's id.
+pub(super) fn clipped_comment(s: &App, t: &T, id: &str, body: El) -> El {
+    let key = format!("pr-comment-clip-{id}");
+    let overflowing = rune::memo::layout_with(&format!("{key}/body"), |r| r[3] > COMMENT_CLIP).unwrap_or(false);
+    let expanded = s.ui.pages.code.full_comments.contains(id);
+    let mut clip = col().key(key).w_full().min_w(0.0).child(col().key("body").w_full().min_w(0.0).child(body));
+    if !expanded {
+        clip = clip.max_h(COMMENT_CLIP).clip_fade(0.0, 0.0, 0.0, if overflowing { 40.0 } else { 0.0 });
+    }
+    let mut out = col().w_full().min_w(0.0).child(clip);
+    if overflowing {
+        let toggled = id.to_owned();
+        let button = kit::Button::new(if expanded { "Show less" } else { "Show full comment" })
+            .variant("ghost-muted")
+            .size("xs")
+            .on_press(move |s: &mut App| {
+                let full = &mut s.ui.pages.code.full_comments;
+                if !full.remove(&toggled) {
+                    full.insert(toggled.clone());
+                }
+            })
+            .build(t)
+            .expanded(expanded);
+        out = out.child(row().mt(8.0).child(button));
+    }
+    out
 }
 
 fn row_key(s: &App, i: usize) -> Cow<'_, str> {
@@ -1549,8 +1850,9 @@ fn annotation(s: &App, l: &Look, n: usize) -> El {
     )
 }
 
-/// DiffFileTree: the files by folder; pressing one opens it and scrolls to it.
-fn tree(s: &App, t: &T) -> El {
+/// DiffFileTree: the files by folder; pressing one opens it and scrolls to it. `width` waits on
+/// the row's first layout.
+fn tree(s: &App, t: &T, width: Option<f32>) -> El {
     let c = &s.ui.pages.code;
     let st = &c.diff;
     let u = &s.ui.pages.detail;
@@ -1626,10 +1928,12 @@ fn tree(s: &App, t: &T) -> El {
         };
         list = list.child(line);
     }
-    let out = col()
-        .key("pr-code-tree")
-        .w_frac(0.4)
-        .max_w(320.0)
+    let out = col().key("pr-code-tree");
+    let out = match width {
+        Some(w) => out.w(w),
+        None => out.w_frac(0.4).max_w(320.0),
+    };
+    let out = out
         .min_h(0.0)
         .self_stretch()
         .child(head)
@@ -1652,8 +1956,11 @@ fn tree(s: &App, t: &T) -> El {
 // ---- scenes -----------------------------------------------------------------------------
 
 /// Fixture states for the Code tab: `tree` (file tree and viewed ticks), `split` (side by side),
-/// `threads` (a conversation inline, and two no line holds, opened), `options` (the narrow
-/// toolbar's menu open), `more-files` (a next page to read), `pending-review` (two comments
+/// `threads` (a conversation inline, and two no line holds, opened), `thread-edit` and
+/// `thread-reactions` (its comments reacted to, one more page read, and one comment being edited
+/// or the reaction picker open), `options` (the narrow
+/// toolbar's menu open), `tree-resized` (the file tree at a saved 420), `more-files` (a next
+/// page to read), `pending-review` (two comments
 /// pending, for the composer) and `line-comment` (a pending comment and a ranged draft).
 pub(super) fn scene(s: &mut App, kind: &str) {
     let usage = "apps/desktop-rune/src/pages/usage.rs";
@@ -1679,9 +1986,37 @@ pub(super) fn scene(s: &mut App, kind: &str) {
             s.ui.pages.code.orphans_open = true;
             sync_notes(s);
         }
+        "thread-edit" | "thread-reactions" => {
+            scene(s, "threads");
+            if let Some(d) = &mut s.ui.pages.detail.detail {
+                d["capabilities"]["reactions"] = json!(true);
+                d["capabilities"]["edit"]["comment"] = json!(true);
+            }
+            if let Some(th) = s.ui.pages.detail.activity.as_mut().and_then(|a| a["reviewThreads"].get_mut(0)) {
+                th["commentCount"] = json!(4);
+                if let Some(first) = th["comments"].get_mut(0) {
+                    first["reactions"] = json!([{"content": "thumbs-up", "count": 2, "actors": ["theo"], "viewerHasReacted": true}, {"content": "eyes", "count": 1, "actors": ["theo"], "viewerHasReacted": false}]);
+                }
+                if let Some(second) = th["comments"].get_mut(1) {
+                    second["canEdit"] = json!(true);
+                }
+            }
+            let later = json!({"id": "tc5", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": "The zone is read once per render now, fine by me.", "createdAt": "2026-11-06T10:02:00.000Z", "url": null});
+            s.ui.pages.code.loaded.insert("t1".into(), (vec![later], Some("c3".into())));
+            if kind == "thread-edit" {
+                s.ui.pages.code.editing = Some(("tc2".into(), EditDraft::new("Yes, switched to the local IANA zone, read once per render.")));
+            } else {
+                s.ui.pages.detail.edit.picker = Some("tc1".into());
+            }
+        }
         "options" => {
             unfold(s, usage);
             s.ui.pages.code.options = true;
+        }
+        "tree-resized" => {
+            s.client_settings.values.insert(TREE_KEY.into(), json!(true));
+            s.client_settings.values.insert(TREE_WIDTH_KEY.into(), json!(420));
+            unfold(s, usage);
         }
         "more-files" => {
             s.client_settings.values.insert(TREE_KEY.into(), json!(true));
@@ -1937,6 +2272,51 @@ mod tests {
         s.ui.pages.detail.commit = Some("abc".into());
         s.ui.pages.detail.activity.as_mut().unwrap()["commits"] = json!([{"oid": "abc"}]);
         assert_eq!(orphans(&s).len(), 5, "a commit's lines are another diff's, so every thread is listed apart");
+    }
+
+    #[test]
+    fn the_narrow_toolbar_reads_the_last_frame_before_painting_wide() {
+        assert!(narrow_toolbar(Some(true), || Some(false), Some(false)), "its own width wins");
+        assert!(!narrow_toolbar(Some(false), || Some(true), Some(true)));
+        assert!(narrow_toolbar(None, || Some(true), Some(false)), "a tab switch reads the panel it spans");
+        assert!(narrow_toolbar(None, || None, Some(true)), "a reopened panel keeps the last answer");
+        assert!(!narrow_toolbar(None, || None, None), "nothing measured yet reads wide");
+    }
+
+    #[test]
+    fn the_file_tree_starts_at_320_or_two_fifths_and_resizes_within_its_bounds() {
+        assert_eq!((tree_default(1000.0), tree_default(600.0), tree_default(300.0)), (320.0, 240.0, 192.0));
+        assert_eq!((tree_width(100.0, 1000.0), tree_width(900.0, 1000.0)), (192.0, 560.0));
+        assert_eq!(tree_width(300.0, 500.0), 244.0, "the diff keeps 256");
+        assert_eq!(tree_width(300.0, 300.0), 192.0, "never under the first width");
+        let mut s = App::new();
+        s.client_settings.values.remove(TREE_WIDTH_KEY);
+        assert_eq!(tree_shown(&s, 1000.0), 320.0);
+        s.client_settings.values.insert(TREE_WIDTH_KEY.into(), json!(900));
+        assert_eq!(tree_shown(&s, 1000.0), 560.0, "a saved width is clamped to the row");
+        s.ui.pages.code.tree_drag = Some(250.0);
+        assert_eq!(tree_shown(&s, 1000.0), 250.0, "the drag wins over the saved width");
+    }
+
+    #[test]
+    fn a_threads_later_comments_join_once_and_an_edit_reaches_them() {
+        let c = |id: &str, body: &str| json!({"id": id, "body": body});
+        let mut loaded = HashMap::new();
+        take_page(&mut loaded, "t", &json!({"comments": [c("a", "1"), c("b", "2")], "nextCursor": "n2"}));
+        take_page(&mut loaded, "t", &json!({"comments": [c("b", "2"), c("c", "3")], "nextCursor": null}));
+        assert_eq!(loaded["t"], (vec![c("a", "1"), c("b", "2"), c("c", "3")], None));
+        assert_eq!(merge_comments(&[c("a", "1")], &loaded["t"].0).len(), 3, "the first page's comments show once");
+        edit_loaded(&mut loaded, "b", "two");
+        assert_eq!(loaded["t"].0[1]["body"], "two");
+
+        let mut s = App::new();
+        s.ui.pages.detail.detail = Some(json!({"viewer": "sparsh", "capabilities": {"edit": {"comment": true}}}));
+        assert!(can_edit(&s, &json!({"author": {"login": "Sparsh"}})), "the viewer's own comment");
+        assert!(!can_edit(&s, &json!({"author": {"login": "theo"}})));
+        assert!(can_edit(&s, &json!({"author": {"login": "theo"}, "canEdit": true})), "the host's word wins");
+        s.ui.pages.code.thread_pending = Some((1, EDIT_FAILED));
+        start_edit(&mut s, "a", "1");
+        assert!(s.ui.pages.code.editing.is_none(), "no other comment opens while one saves");
     }
 
     #[test]

@@ -1123,12 +1123,18 @@ fn breakdown_grid(t: &T, b: &Value, (additions, deletions): (i64, i64)) -> El {
 
 // ---- row meta ---------------------------------------------------------------------------
 
-/// The meta line's `@xs` container width (20rem), from which the matched badge spells itself out.
-const META_XS: f32 = 320.0;
+/// The meta line's `@xs`, `@xl` and `@3xl` container widths (20rem, 36rem, 48rem).
+const META_BREAKPOINTS: [f32; 3] = [320.0, 576.0, 768.0];
 
-/// `@xs/pr-row-meta`: whether a meta line laid out at `rect` fits the badge's words.
-pub fn meta_wide(rect: [f32; 4]) -> bool {
-    rect[2] >= META_XS
+/// `@xs`, `@xl` and `@3xl/pr-row-meta`: how many breakpoints a meta line laid out at `rect` reaches.
+/// From `@xs` the matched badge spells itself out and the author's login shows beside the avatar.
+pub fn meta_tier(rect: [f32; 4]) -> usize {
+    META_BREAKPOINTS.iter().filter(|&&w| rect[2] >= w).count()
+}
+
+/// PullRequestRowLabels: one label below `@xl`, two below `@3xl`, else three.
+pub fn shown_labels(count: usize, tier: usize) -> usize {
+    count.min(tier.clamp(1, 3))
 }
 
 /// The badge on a row the hosts matched by its description, where no shown field holds the search;
@@ -1492,8 +1498,13 @@ mod tests {
     }
 
     #[test]
-    fn the_matched_badge_spells_itself_out_from_a_20rem_meta_line() {
-        assert!(!meta_wide([0.0, 0.0, 319.5, 16.0]));
-        assert!(meta_wide([12.0, 40.0, 320.0, 16.0]));
+    fn the_meta_line_spells_out_from_20rem_and_shows_more_labels_from_36_and_48rem() {
+        assert_eq!(meta_tier([0.0, 0.0, 319.5, 16.0]), 0);
+        assert_eq!(meta_tier([12.0, 40.0, 320.0, 16.0]), 1);
+        assert_eq!(meta_tier([0.0, 0.0, 600.0, 16.0]), 2);
+        assert_eq!(meta_tier([0.0, 0.0, 768.0, 16.0]), 3);
+        assert_eq!([0, 1, 2, 3].map(|tier| shown_labels(5, tier)), [1, 1, 2, 3]);
+        assert_eq!(shown_labels(2, 3), 2);
+        assert_eq!(shown_labels(0, 0), 0);
     }
 }

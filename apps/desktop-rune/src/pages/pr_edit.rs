@@ -30,7 +30,7 @@ const REACTIONS: [(&str, &str, &str); 8] = [
 
 /// The review form's VERDICTS, in its order.
 const VERDICTS: [(&str, &str); 3] = [("comment", "Comment"), ("approve", "Approve"), ("request-changes", "Request changes")];
-const EDITOR_MODES: [&str; 2] = ["Write", "Preview"];
+pub(super) const EDITOR_MODES: [&str; 2] = ["Write", "Preview"];
 const COMPOSER_MODES: [&str; 2] = ["Comment", "Review"];
 
 #[derive(Default)]
@@ -562,12 +562,12 @@ fn toggle_reaction(s: &mut App, subject: &str, sig: &str, content: &'static str,
 // ---- view -------------------------------------------------------------------------------
 
 /// PullRequestEditButton: a ghost pencil the row's hover reveals.
-fn pencil(t: &T, label: &str, press: impl Fn(&mut App) + 'static) -> El {
+pub(super) fn pencil(t: &T, label: &str, press: impl Fn(&mut App) + 'static) -> El {
     kit::Button::new("").variant("ghost-muted").size("icon-xs").icon(&i::PENCIL).on_press(press).build(t).label(label.to_string()).help(label.to_string()).group_opacity(0.0, 1.0)
 }
 
 /// The Textarea: a multi-line field `rows` lines tall.
-fn area(t: &T, key: String, edit: &TextEdit, rows: f32, label: String, placeholder: &str) -> El {
+pub(super) fn area(t: &T, key: String, edit: &TextEdit, rows: f32, label: String, placeholder: &str) -> El {
     let font = theme::TEXT_SM;
     text_input(edit, font)
         .key(key)
@@ -586,7 +586,7 @@ fn area(t: &T, key: String, edit: &TextEdit, rows: f32, label: String, placehold
         .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
 }
 
-fn submits(e: &KeyEvent) -> bool {
+pub(super) fn submits(e: &KeyEvent) -> bool {
     e.key == Key::Enter && (e.mods.cmd || e.mods.ctrl) && !e.mods.shift && !e.mods.alt
 }
 
@@ -791,7 +791,7 @@ pub fn reaction_bar(s: &App, t: &T, c: &Value) -> Option<El> {
 pub fn reaction_picker(s: &App, t: &T, overlays: &mut Vec<El>) {
     let u = &s.ui.pages.detail;
     let Some(subject) = u.edit.picker.clone() else { return };
-    if !matches!(u.tab, 0 | 1) {
+    if !matches!(u.tab, 0..=2) {
         return;
     }
     let (sig, shown) = layered(&u.edit, &subject, u.activity.as_ref().and_then(|a| find_comment(a, &subject)));

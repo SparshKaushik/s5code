@@ -463,9 +463,13 @@ pub fn poll(s: &mut App) -> bool {
         match take(s, &key, id) {
             None if env_net(s, &key).is_some() => ui(s).cursor_enabling.push((key, id)),
             reply => {
-                if matches!(reply, Some(Ok(_))) {
-                    refresh_usage(s, false);
-                    super::usage_limits::refresh(s, false);
+                match &reply {
+                    Some(Ok(_)) => {
+                        refresh_usage(s, false);
+                        super::usage_limits::refresh(s, false);
+                    }
+                    Some(Err(error)) => eprintln!("[atom-command] enable Cursor account usage failed: {error}"),
+                    None => {}
                 }
                 changed = true;
             }
@@ -575,16 +579,31 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
 /// The metric, window and hidden providers survive a restart (usagePagePreferences).
 const PREFERENCES: &str = "usagePagePreferences";
 
+/// UsagePagePreferencesSchema: one value it does not know fails the whole decode.
+fn decode_preferences(saved: &Value) -> Option<(&'static str, i64, Vec<&'static str>)> {
+    let metric = ["cost", "tokens", "limits"].into_iter().find(|m| saved["metric"] == *m)?;
+    let days = saved["windowDays"].as_i64().filter(|d| [1, 7, 30, 90].contains(d))?;
+    let hidden = match &saved["hiddenProviders"] {
+        Value::Null => Vec::new(),
+        Value::Array(list) => list.iter().map(|h| PROVIDERS.iter().map(|p| p.0).find(|k| h == k)).collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    Some((metric, days, hidden))
+}
+
+/// readUsagePagePreferences: an unreadable saved value leaves every default in place.
 fn apply_preferences(u: &mut Ui, saved: &Value) {
     u.preferences_read = true;
-    if let Some(metric) = ["cost", "tokens", "limits"].into_iter().find(|m| saved["metric"] == *m) {
-        u.metric = metric;
+    if saved.is_null() {
+        return;
     }
-    if let Some(days) = saved["windowDays"].as_i64().filter(|d| [1, 7, 30, 90].contains(d)) {
-        u.window_days = days;
-    }
-    if let Some(hidden) = saved["hiddenProviders"].as_array() {
-        u.hidden = PROVIDERS.iter().map(|p| p.0).filter(|k| hidden.iter().any(|h| h == k)).collect();
+    match decode_preferences(saved) {
+        Some((metric, days, hidden)) => {
+            u.metric = metric;
+            u.window_days = days;
+            u.hidden = hidden;
+        }
+        None => eprintln!("Could not read Usage page preferences."),
     }
 }
 
@@ -597,6 +616,9 @@ fn save_preferences(s: &mut App) {
     if s.client_settings.values.get(PREFERENCES) != Some(&value) {
         s.client_settings.values.insert(PREFERENCES.into(), value);
         s.client_settings.save();
+        if let Some(error) = &s.client_settings.error {
+            eprintln!("Could not save Usage page preferences. {error}");
+        }
     }
 }
 
@@ -1519,6 +1541,8 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .gap(12.0)
                 .center_y()
                 .shrink()
+                .role("navigation")
+                .label("Usage breadcrumb")
                 .child(text("Usage").font(theme::SM_MEDIUM).color(t.c.muted_foreground))
                 .child(sep())
                 .child(envs.build(&k, overlays))
@@ -1542,10 +1566,13 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 ToggleGroup::new(&window_labels, &[window_at])
                     .tips(&window_tips)
                     .on_pick(|s: &mut App, n: usize, _: &mut Tx| pick_window(s, WINDOWS[n].0))
-                    .build(&k),
+                    .build(&k)
+                    .label("Usage period"),
             );
         }
-        right = right.child(ToggleGroup::new(&metric_labels, &[metric_at]).tips(&metric_tips).on_pick(|s: &mut App, n: usize, _: &mut Tx| pick_metric(s, METRICS[n].0)).build(&k));
+        right = right.child(
+            ToggleGroup::new(&metric_labels, &[metric_at]).tips(&metric_tips).on_pick(|s: &mut App, n: usize, _: &mut Tx| pick_metric(s, METRICS[n].0)).build(&k).label("Usage metric"),
+        );
     } else {
         if !limits {
             right = right.child(
@@ -1774,11 +1801,12 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
         // The metric picks the splits: tokens by type, or cost by type and by speed.
         let mut shares = row().w_full().gap(48.0).opacity(dim);
         if tokens_view {
-            shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None)).child(el().grow(1.0).w(0.0));
+            shares = shares.children(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None)).child(el().grow(1.0).w(0.0));
         } else {
-            shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
+            // With no cost to split (all unpriced), web's bar renders nothing.
+            shares = shares.children(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
             shares = match speed_parts(t, &m) {
-                Some(parts) => shares.child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))),
+                Some(parts) => shares.children(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))),
                 None => shares.child(el().grow(1.0).w(0.0)),
             };
         }
@@ -1830,13 +1858,13 @@ fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<E
     let tokens_view = unknown || u.metric == "tokens";
     let mut shares = row().w_full().gap(40.0);
     if !unknown {
-        shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
+        shares = shares.children(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
     }
-    shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None));
+    shares = shares.children(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None));
     let providers: Vec<&'static str> = PROVIDERS.iter().map(|p| p.0).filter(|k| *k == kind).collect();
     let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, (u.model_hover, u.model_plot_w), true, &providers, &[])).child(shares);
     if let Some(parts) = speed_parts(t, &m) {
-        body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))));
+        body = body.child(row().w_full().children(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))));
     }
     if m.unpriced_tokens > 0.0 {
         let set_price = model.to_string();
@@ -1923,7 +1951,8 @@ fn source_messages(summary: &Value, hidden: &[&str]) -> Vec<String> {
         let status = source["status"].as_str().unwrap_or("");
         let count = source["malformedRecords"].as_i64().unwrap_or(0);
         let action = source["action"].as_bool().unwrap_or(false) || source["action"].is_object() || source["action"].is_string();
-        if !action && status != "partial" && status != "failed" && provider != "cursor" && !(status == "missing" && count > 0) {
+        // A source with an action shows its own prompt (the Cursor Enable row) instead.
+        if action || (status != "partial" && status != "failed" && provider != "cursor" && !(status == "missing" && count > 0)) {
             continue;
         }
         let mut message = source["message"].as_str().unwrap_or("").to_string();
@@ -1950,12 +1979,26 @@ fn source_messages(summary: &Value, hidden: &[&str]) -> Vec<String> {
     messages
 }
 
-fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> String, premium: Option<f64>) -> El {
+/// UsageShareBar's words: the bar's label and each visible segment's tooltip, or nothing when no
+/// segment has a value.
+fn share_words(title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> String) -> Option<(String, Vec<String>)> {
     let shown: Vec<_> = parts.iter().filter(|p| p.1 > 0.0).collect();
-    let mut bar = row().w_full().h(8.0).gap(2.0);
-    for (n, (_, v, c)) in shown.iter().enumerate() {
+    let total: f64 = shown.iter().map(|p| p.1).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let label = format!("{title}: {}", shown.iter().map(|p| format!("{} {}", p.0, fmt(p.1))).collect::<Vec<_>>().join(", "));
+    let tips = shown.iter().map(|p| format!("{} · {} · {}", p.0, fmt(p.1), percent(p.1 / total))).collect();
+    Some((label, tips))
+}
+
+fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> String, premium: Option<f64>) -> Option<El> {
+    let (label, tips) = share_words(title, parts, fmt)?;
+    let shown: Vec<_> = parts.iter().filter(|p| p.1 > 0.0).collect();
+    let mut bar = row().w_full().h(8.0).gap(2.0).role("img").label(label);
+    for (n, ((_, v, c), tip)) in shown.iter().zip(tips).enumerate() {
         let r = if n == 0 || n + 1 == shown.len() { radius::FULL } else { radius::XS };
-        bar = bar.child(el().grow(*v as f32).w(0.0).min_w(4.0).h(8.0).radius(r).fill(*c));
+        bar = bar.child(el().grow(*v as f32).w(0.0).min_w(4.0).h(8.0).radius(r).fill(*c).help(tip));
     }
     let mut legend = row().w_full().flex_wrap().gaps(4.0, 16.0);
     for (label, v, c) in &shown {
@@ -1972,7 +2015,7 @@ fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> S
     if let Some(premium) = premium {
         head = head.child(text("Premium").font(theme::TEXT_XS).color(t.c.muted_foreground)).child(text(usd(premium)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.foreground).ml(-8.0));
     }
-    col().grow(1.0).w(0.0).min_w(0.0).gap(10.0).child(head).child(bar).child(legend)
+    Some(col().grow(1.0).w(0.0).min_w(0.0).gap(10.0).child(head).child(bar).child(legend))
 }
 
 const VIEW_W: f32 = 960.0;
@@ -2037,6 +2080,11 @@ fn curve(pts: &[[f32; 2]]) -> Path {
         path = path.cubic_to([a[0] + dx / 3.0, a[1] + tan[k] * dx / 3.0], [b[0] - dx / 3.0, b[1] - tan[k + 1] * dx / 3.0], b);
     }
     path
+}
+
+/// The chart's `aria-label`, which names its resolution and metric.
+fn chart_label(hourly: bool, tokens_view: bool) -> String {
+    format!("{} {} by provider", if hourly { "Hourly" } else { "Daily" }, if tokens_view { "processed tokens" } else { "cost" })
 }
 
 /// The column a pointer `x` across a plot `w` wide hovers, of `n` evenly spaced periods.
@@ -2178,7 +2226,7 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, (hover, plot_w): (Option<(usize, 
         .grow(1.0)
         .min_w(0.0)
         .h(plot_h)
-        .child(canvas(shape.view_box(VIEW_W, VIEW_H)).w_full().h(plot_h))
+        .child(canvas(shape.view_box(VIEW_W, VIEW_H)).w_full().h(plot_h).role("img").label(chart_label(m.hourly, tokens_view)))
         .on_layout(move |s: &mut App, r| {
             let (_, w) = slot(ui(s), dialog);
             if (*w - r[2]).abs() > 0.5 {
@@ -2214,7 +2262,7 @@ fn breakdown(s: &App, t: &T, m: &Merged, loading: (bool, &[String])) -> El {
     let u = &s.ui.pages.usage;
     let k = kit::theme(t);
     let period = if m.hourly || u.answered.as_ref().is_some_and(|r| r["resolution"] == "hour") { "Hour" } else { "Day" };
-    let toggle = ToggleGroup::new(&["Model", period], &[usize::from(u.by_period)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| ui(s).by_period = n == 1).build(&k);
+    let toggle = ToggleGroup::new(&["Model", period], &[usize::from(u.by_period)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| ui(s).by_period = n == 1).build(&k).label("Usage breakdown");
     let header = row().w_full().center_y().child(h2(t, "Breakdown")).child(spacer()).child(toggle);
     let table = if u.by_period { period_table(t, m, loading) } else { model_table(t, m, u.metric == "tokens", loading) };
     col().w_full().gap(12.0).child(header).child(table)
@@ -2273,7 +2321,7 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool, (every, partway): (bool, &[
                     .hover(t.c.accent.alpha_mul(0.5))
                     .cursor(rune::Cursor::Pointer)
                     .role("button")
-                    .label(format!("{model} details"))
+                    .label(model.to_string())
                     .on_press(move |s: &mut App| ui(s).model = Some(open.clone()))
                     .child(row().pl(8.0).pr(12.0).w(40.0).child(text((n + 1).to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(muted)))
                     .child(
@@ -2297,13 +2345,14 @@ fn period_table(t: &T, m: &Merged, (every, partway): (bool, &[String])) -> El {
     let head = theme::TEXT_XS;
     let muted = t.c.muted_foreground;
     let num = theme::TEXT_SM.features("'tnum' 1");
-    let kinds: Vec<&str> = m.providers.iter().map(|p| p.0).collect();
+    // activeProviders: providers with figures, or still updating before their first ones.
+    let kinds = chart_providers(m, partway);
     let mut header = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text(if m.hourly { "Hour" } else { "Day" }).font(head).color(muted)));
     for kind in &kinds {
         header = header.child(cell(presentation(kind).0.to_string(), 120.0, head, muted));
     }
     header = header.child(cell("Total".into(), 112.0, head, muted)).child(cell("Tokens".into(), 112.0, head, muted).pr(8.0));
-    let mut table = col().w_full().child(header).child(el().w_full().h(1.0).fill(t.c.border));
+    let mut table = col().w_full().role("region").label("Usage breakdown by time").child(header).child(el().w_full().h(1.0).fill(t.c.border));
     let periods = active_periods(m);
     if periods.is_empty() {
         return table.child(row().w_full().py(24.0).center().child(text("No activity in this window.").font(theme::TEXT_SM).color(muted)));
@@ -2334,6 +2383,7 @@ fn tag_button(t: &T, line: &ModelRow) -> El {
         untagged: (!line.tagged).then(|| (line.api().to_string(), line.model.clone())),
         tagged_as: line.priced_as.clone().filter(|_| line.tagged),
     };
+    let caption = if line.tagged { "Tagged" } else { "Tag" };
     row()
         .key(format!("usage-tag-{}", line.key))
         .gap(4.0)
@@ -2345,10 +2395,10 @@ fn tag_button(t: &T, line: &ModelRow) -> El {
         .hover(t.c.accent)
         .cursor(rune::Cursor::Pointer)
         .role("button")
-        .label(format!("Tag {}", line.model))
+        .label(caption)
         .on_press(move |s: &mut App| super::usage_tags::open(s, target.clone()))
         .child(icon(&i::TAG, 12.0).color(t.c.muted_foreground))
-        .child(text(if line.tagged { "Tagged" } else { "Tag" }).font(theme::TEXT_XS).color(t.c.muted_foreground))
+        .child(text(caption).font(theme::TEXT_XS).color(t.c.muted_foreground))
 }
 
 /// The breakdown's order: by cost, or by tokens in the tokens view (sortModelsByTokens).
@@ -2505,6 +2555,17 @@ mod tests {
     }
 
     #[test]
+    fn share_bars_name_their_visible_segments_and_vanish_when_empty() {
+        let parts = [("Input", 3.0, Color::WHITE), ("Cache read", 0.0, Color::WHITE), ("Output", 1.0, Color::WHITE)];
+        let (label, tips) = share_words("Cost by type", &parts, usd).unwrap();
+        assert_eq!(label, "Cost by type: Input $3.00, Output $1.00");
+        assert_eq!(tips, ["Input · $3.00 · 75.0%", "Output · $1.00 · 25.0%"]);
+        assert!(share_words("Cost by type", &[("Input", 0.0, Color::WHITE)], usd).is_none());
+        assert_eq!(chart_label(true, false), "Hourly cost by provider");
+        assert_eq!(chart_label(false, true), "Daily processed tokens by provider");
+    }
+
+    #[test]
     fn token_counts_drop_only_an_all_zero_fraction() {
         assert_eq!(tokens(1_500_000.0), "1.50M");
         assert_eq!(tokens(2_000_000.0), "2M");
@@ -2524,6 +2585,7 @@ mod tests {
             {"fingerprint": fp("claude", "/c"), "status": "partial", "malformedRecords": 3, "message": warning(3)},
             {"fingerprint": fp("codex", "/d"), "status": "missing", "malformedRecords": 1},
             {"fingerprint": fp("grok", "/e"), "status": "failed", "malformedRecords": 0, "message": "Grok is hidden."},
+            {"fingerprint": fp("cursor", "/f"), "status": "missing", "malformedRecords": 0, "message": "Cursor needs the keychain.", "action": "enableCursorKeychain"},
         ]});
         assert_eq!(source_messages(&summary, &["grok"]), vec!["Could not read ~/.claude.".to_string(), "Read failed.".into(), warning(4)]);
     }
@@ -2566,17 +2628,23 @@ mod tests {
     }
 
     #[test]
-    fn page_preferences_round_trip_and_ignore_unknown_values() {
+    fn page_preferences_round_trip_and_fall_back_whole_on_any_unknown_value() {
         let mut u = Ui::default();
-        apply_preferences(&mut u, &json!({"metric": "tokens", "windowDays": 7, "hiddenProviders": ["grok", "nope", "codex"]}));
-        assert_eq!((u.metric, u.window_days, u.hidden.clone()), ("tokens", 7, vec!["codex", "grok"]));
+        apply_preferences(&mut u, &json!({"metric": "tokens", "windowDays": 7, "hiddenProviders": ["grok", "codex"]}));
+        assert_eq!((u.metric, u.window_days, u.hidden.clone()), ("tokens", 7, vec!["grok", "codex"]));
         let mut back = Ui::default();
         apply_preferences(&mut back, &preferences(&u));
-        assert_eq!((back.metric, back.window_days, back.hidden), ("tokens", 7, vec!["codex", "grok"]));
+        assert_eq!((back.metric, back.window_days, back.hidden), ("tokens", 7, vec!["grok", "codex"]));
 
-        let mut fresh = Ui::default();
-        apply_preferences(&mut fresh, &json!({"metric": "watts", "windowDays": 3}));
-        assert_eq!((fresh.metric, fresh.window_days, fresh.preferences_read), ("limits", 30, true));
+        let defaults = |saved: Value| {
+            let mut fresh = Ui::default();
+            apply_preferences(&mut fresh, &saved);
+            (fresh.metric, fresh.window_days, fresh.hidden.len(), fresh.preferences_read)
+        };
+        assert_eq!(defaults(json!({"metric": "watts", "windowDays": 7})), ("limits", 30, 0, true));
+        assert_eq!(defaults(json!({"metric": "tokens", "windowDays": 3})), ("limits", 30, 0, true));
+        assert_eq!(defaults(json!({"metric": "tokens", "windowDays": 7, "hiddenProviders": ["grok", "nope"]})), ("limits", 30, 0, true), "one unknown provider fails the whole decode");
+        assert_eq!(decode_preferences(&json!({"metric": "cost", "windowDays": 1})), Some(("cost", 1, Vec::new())));
     }
 
     #[test]
