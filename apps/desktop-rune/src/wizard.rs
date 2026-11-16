@@ -1399,6 +1399,20 @@ pub(crate) fn scene_pairing(s: &mut App) {
     ui.pairing_help = true;
 }
 
+/// Headless scene: the Agents step with Claude's sign-in terminal open and ready.
+pub(crate) fn scene_setup_terminal(s: &mut App) {
+    crate::scene_clock(s);
+    let env = s.ui.env.active.clone();
+    let (id, command) = ("onboarding-claudeAgent-scene".to_owned(), "claude auth login".to_owned());
+    let snapshot = json!({"type": "snapshot", "snapshot": {"cols": 80, "rows": 12, "history": format!("~ $ {command}"), "status": "running", "label": "", "sequence": 1}});
+    crate::panel::terminal::fixture(s, SETUP_THREAD, &id, &snapshot.to_string());
+    let ui = &mut s.ui.wizard;
+    ui.setup = vec![env.clone()];
+    ui.step = Step::Agents;
+    ui.open = true;
+    ui.terminal = Some(Setup { env, driver: "claudeAgent", instance: "claudeAgent".into(), id, cwd: "/home/me".into(), command, back: None });
+}
+
 /// Headless scene: every listed computer ticked, so those not connected are named as skipped.
 pub(crate) fn scene_computers(s: &mut App) {
     for env in crate::env::keys(s) {

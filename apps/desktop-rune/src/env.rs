@@ -1030,6 +1030,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         crate::wizard::scene_computers(s);
     }),
     ("wizard-import-denied", crate::wizard::scene_import_denied),
+    ("wizard-setup-terminal", crate::wizard::scene_setup_terminal),
     ("wizard-pairing-link", |s| {
         scene_failing(s);
         crate::wizard::scene_pairing(s);
