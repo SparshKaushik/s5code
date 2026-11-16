@@ -335,14 +335,15 @@ pub fn scene_uncertain(s: &mut App) {
     let picks = picks(s).cloned().unwrap_or_default();
     let Some(d) = draft(s) else { return };
     let snapshot = stored_draft(d);
+    let count = picks.len();
     let threads = picks.iter().map(|_| s5_net::uuid()).collect();
     let models = picks.into_iter().map(|m| (m, None)).collect();
     s.ui.chat.composer.fanout.batches.push(Batch { id: 0, key, draft: snapshot, models, threads });
     super::draft_mut(s).edit.clear();
-    let state = &mut s.ui.chat.composer.fanout;
-    settle(state, "fanout:0:0", Ok(()), true);
-    settle(state, "fanout:0:1", Err(&json!({"message": "The connection closed before the server answered."})), true);
-    settle(state, "fanout:0:2", Ok(()), true);
+    let dropped = json!({"message": "The connection closed before the server answered."});
+    for n in 0..count {
+        settle(&mut s.ui.chat.composer.fanout, &format!("{KEY}0:{n}"), if n == 1 { Err(&dropped) } else { Ok(()) }, true);
+    }
     finish(s);
 }
 
@@ -427,5 +428,14 @@ mod tests {
         allow_retry(&mut s);
         assert!(s.ui.chat.composer.fanout.uncertain.is_empty(), "FAILED: confirming allows the retry");
         assert_eq!(palette::toast_title(&s), None, "FAILED: confirming closes the failure toast");
+    }
+
+    #[test]
+    fn the_uncertain_scene_ends_on_its_failure_toast() {
+        let mut s = App::new();
+        scene_uncertain(&mut s);
+        assert!(s.ui.chat.composer.fanout.batches.is_empty(), "FAILED: every gathered model settles");
+        assert!(palette::toast_title(&s).is_some_and(|t| t.starts_with("Could not start ")), "FAILED: the failure toast shows");
+        assert_eq!(picks(&s).map(Vec::len), Some(1), "FAILED: only the failed model stays picked");
     }
 }
