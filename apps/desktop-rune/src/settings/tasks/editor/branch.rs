@@ -31,6 +31,12 @@ pub(super) struct Refs {
     /// The chosen ref's name and `isRemote`, as last listed.
     selected: Option<(String, bool)>,
     active: usize,
+    /// The next page's cursor, and the request for it in flight.
+    cursor: Option<u64>,
+    paging: Option<u64>,
+    /// Set by the list's scroll when it nears the end going down.
+    near_end: std::rc::Rc<std::cell::Cell<bool>>,
+    last_scroll: std::rc::Rc<std::cell::Cell<Option<f32>>>,
 }
 
 /// `sanitizeNewRefName`: whitespace runs become `-`.
@@ -92,6 +98,7 @@ fn land(refs: &mut Refs, want: Want, reply: Result<Value, Value>, value: &str) {
             }
             refs.total = page["totalCount"].as_u64().unwrap_or(list.len() as u64);
             refs.more = !page["nextCursor"].is_null();
+            refs.cursor = page["nextCursor"].as_u64();
             refs.error = None;
             if let Some(r) = list.iter().find(|r| r["name"] == value) {
                 refs.selected = Some((value.to_owned(), r["isRemote"] == true));
@@ -106,6 +113,31 @@ fn land(refs: &mut Refs, want: Want, reply: Result<Value, Value>, value: &str) {
     }
     refs.shown = Some(want);
     refs.active = 0;
+    refs.paging = None;
+    refs.last_scroll.set(None);
+    refs.near_end.set(false);
+}
+
+/// `usePaginatedBranches`'s next page: appends the refs not already listed.
+fn land_next(refs: &mut Refs, reply: Result<Value, Value>) {
+    refs.paging = None;
+    match reply {
+        Ok(page) => {
+            for r in page["refs"].as_array().into_iter().flatten() {
+                if !refs.list.iter().any(|l| l["name"] == r["name"]) {
+                    refs.list.push(r.clone());
+                }
+            }
+            refs.total = refs.total.max(page["totalCount"].as_u64().unwrap_or(0));
+            refs.more = !page["nextCursor"].is_null();
+            refs.cursor = page["nextCursor"].as_u64();
+        }
+        Err(error) => {
+            refs.more = false;
+            refs.cursor = None;
+            refs.error = Some(error_message(&error, "Failed to load refs."));
+        }
+    }
 }
 
 /// Lands the listing in flight, then asks for the one the picker wants, one at a time.
@@ -121,7 +153,28 @@ pub(super) fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
+    if let Some(id) = s.ui.settings.tasks.editor.as_ref().and_then(|e| e.refs.paging)
+        && let Some(reply) = env::net_of(s, &key).and_then(|net| net.take_reply(id))
+    {
+        if let Some(e) = editor_mut(s) {
+            land_next(&mut e.refs, reply);
+        }
+        changed = true;
+    }
     let Some(e) = s.ui.settings.tasks.editor.as_ref() else { return changed };
+    if let Some((cursor, want)) = e.refs.cursor.zip(e.refs.shown.clone()).filter(|(_, w)| e.refs.paging.is_none() && wanted(s, e).as_ref() == Some(w) && w.2 == SEARCH_LIMIT)
+        && e.refs.near_end.replace(false)
+    {
+        let mut params = json!({"cwd": want.0, "limit": SEARCH_LIMIT, "cursor": cursor});
+        if !want.1.is_empty() {
+            params["query"] = json!(want.1);
+        }
+        let Some(id) = env::net_of(s, &key).map(|net| net.request("vcs.listRefs", params)) else { return changed };
+        if let Some(e) = editor_mut(s) {
+            e.refs.paging = Some(id);
+        }
+        return true;
+    }
     let Some(want) = wanted(s, e).filter(|w| e.refs.shown.as_ref() != Some(w)) else { return changed };
     let mut params = json!({"cwd": want.0, "limit": want.2});
     if !want.1.is_empty() {
@@ -188,6 +241,9 @@ fn status(refs: &Refs) -> Option<String> {
     }
     if refs.shown.is_none() {
         return Some("Loading refs...".into());
+    }
+    if refs.paging.is_some() {
+        return Some("Loading more refs...".into());
     }
     let shown = crate::chat::details::thousands(refs.list.len() as u64);
     refs.more.then(|| format!("Showing {shown} of {} refs", crate::chat::details::thousands(refs.total)))
@@ -306,7 +362,16 @@ pub(super) fn picker(s: &App, t: &T, e: &Editor, disabled: bool, popups: &mut Ve
         .min_h(0.0)
         .child(col().w_full().px(4.0).pt(4.0).child(search))
         .child(divider())
-        .child(rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }))
+        .child({
+            let (near_end, last, waker) = (refs.near_end.clone(), refs.last_scroll.clone(), s.ui.panel.waker.clone());
+            rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
+                if crate::chat::details::next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
+                    if let Some(w) = &waker {
+                        w();
+                    }
+                }
+            })
+        })
         .child(divider())
         .child(origin);
     if let Some(line) = status(refs) {
@@ -335,6 +400,20 @@ mod tests {
         assert_eq!(trigger_label("main", Some(false), false), "From main");
         assert_eq!(trigger_label("origin/main", Some(true), true), "From origin/main");
         assert_eq!(sanitize("feature  my branch"), "feature-my-branch");
+    }
+
+    #[test]
+    fn scrolling_to_the_end_appends_the_next_page() {
+        let mut refs = Refs::default();
+        let want: Want = ("/repo".into(), String::new(), SEARCH_LIMIT);
+        land(&mut refs, want, Ok(json!({"refs": [{"name": "main"}, {"name": "dev"}], "totalCount": 3, "nextCursor": 2})), "");
+        assert_eq!(refs.cursor, Some(2), "FAILED: the first page's cursor is what the next page continues from");
+        refs.paging = Some(7);
+        assert_eq!(status(&refs).as_deref(), Some("Loading more refs..."));
+        land_next(&mut refs, Ok(json!({"refs": [{"name": "dev"}, {"name": "old"}], "totalCount": 3, "nextCursor": null})));
+        let names: Vec<&str> = refs.list.iter().map(|r| data::s(r, "name")).collect();
+        assert_eq!(names, ["main", "dev", "old"]);
+        assert_eq!((refs.cursor, refs.paging, status(&refs)), (None, None, None));
     }
 
     #[test]

@@ -516,7 +516,7 @@ pub fn thousands(n: u64) -> String {
 }
 
 /// Scrolling down to within 96 points of the list's end asks for the next page.
-fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
+pub(crate) fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
     previous.is_some_and(|p| offset > p) && max - offset <= 96.0
 }
 
@@ -712,10 +712,38 @@ fn pick_item(s: &mut App, item: Item) {
 
 /// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
 /// the thread there; anything else is switched to in the thread's checkout.
+/// `canUpdateThreadBranch`: a started thread's branch is orchestration metadata.
+fn can_update_branch(s: &App) -> bool {
+    composer::ctx(s).thread.is_none() || grants(s, "orchestration:operate")
+}
+
+/// `canChangeThreadBranch`: switching or creating a ref also writes source control.
+fn can_change_branch(s: &App) -> bool {
+    grants(s, "source-control:write") && can_update_branch(s)
+}
+
+/// `BranchPickerRefItem`'s `disabled`: moving to a ref's existing worktree needs no source control.
+fn ref_disabled(s: &App, r: &Ref) -> bool {
+    !can_update_branch(s) || (!grants(s, "source-control:write") && !selecting_base(s) && r.worktree.is_none())
+}
+
+/// `resolveBranchSelectionTarget`: a ref's worktree is the project's own checkout when it is the
+/// checkout root, or, until that root loads, when it holds the project.
+fn own_checkout(worktree: &str, project_cwd: &str, root: Option<&str>) -> bool {
+    let trim = |p: &str| p.trim_end_matches('/').to_string();
+    let worktree = trim(worktree);
+    match root {
+        Some(root) => worktree == trim(root),
+        None => {
+            let project = trim(project_cwd);
+            worktree == project || worktree.starts_with(&format!("{project}/"))
+        }
+    }
+}
+
 /// `runBranchAction`'s guard: changing the branch writes source control, and a thread's metadata.
 fn branch_denied(s: &mut App) -> bool {
-    let thread = composer::ctx(s).thread.is_some();
-    let denied = !grants(s, "source-control:write") || (thread && !grants(s, "orchestration:operate"));
+    let denied = !can_change_branch(s);
     if denied {
         palette::toast_error_brief(s, "Action unavailable", Some("This connection cannot change the thread's branch."));
     }
@@ -723,22 +751,23 @@ fn branch_denied(s: &mut App) -> bool {
 }
 
 fn select_ref(s: &mut App, r: &Ref) {
+    if ref_disabled(s, r) || switching(s) {
+        return;
+    }
     if selecting_base(s) {
         draft_run_mut(s).base = Some(r.name.clone());
-        return;
-    }
-    if branch_denied(s) {
-        return;
-    }
-    if switching(s) {
         return;
     }
     let c = composer::ctx(s);
     let project_cwd = c.project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
     let active = worktree_here(s);
     if let Some(path) = &r.worktree {
-        let own = path == &project_cwd || path.starts_with(&format!("{}/", project_cwd.trim_end_matches('/')));
+        let root = s.state().vcs.get(&project_cwd).and_then(|v| v["local"]["workingTree"]["rootPath"].as_str());
+        let own = own_checkout(path, &project_cwd, root);
         set_thread_branch(s, &r.name, (!own).then(|| path.clone()));
+        return;
+    }
+    if branch_denied(s) {
         return;
     }
     let next = if r.default { None } else { active };
@@ -906,8 +935,8 @@ fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
 
 fn visible_items(s: &App) -> Vec<Item> {
     let ui = &s.ui.chat.details;
-    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s));
-    if let Some(reference) = pr::parse_reference(&ui.branch_query.text) {
+    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s) && can_change_branch(s));
+    if let Some(reference) = pr::parse_reference(&ui.branch_query.text).filter(|_| can_change_branch(s)) {
         items.insert(0, Item::CheckoutPr(reference));
     }
     items
@@ -1458,7 +1487,8 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
                 s.ui.chat.details.branch_copy = Some((name.clone(), (at.x, at.y)));
             });
         }
-        let mut line = line.on_press(move |s: &mut App| pick_item(s, item.clone()));
+        let disabled = matches!(&item, Item::Ref(r) if ref_disabled(s, &refs[*r]));
+        let mut line = if disabled { line.opacity(0.64).cursor(Cursor::Default) } else { line.on_press(move |s: &mut App| pick_item(s, item.clone())) };
         if let Some(subtitle) = subtitle {
             line = line.child(text(subtitle).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).max_w(160.0));
         }
@@ -1824,6 +1854,21 @@ mod tests {
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
+    }
+
+    #[test]
+    fn a_ref_in_a_worktree_is_the_projects_own_only_at_its_checkout_root() {
+        assert!(own_checkout("/repo/", "/repo/apps/web", Some("/repo")), "a subfolder project's checkout is the repository root");
+        assert!(!own_checkout("/repo/apps/web", "/repo/apps/web", Some("/repo")));
+        assert!(!own_checkout("/wt/feature", "/repo", Some("/repo")));
+        assert!(own_checkout("/repo/nested", "/repo", None), "until the root loads, one holding the project counts");
+        assert!(!own_checkout("/repo-2", "/repo", None));
+        let r = |worktree: Option<&str>| Ref { name: "feature".into(), remote: false, current: false, default: false, worktree: worktree.map(str::to_string) };
+        let mut s = App::new();
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"]}))));
+        assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
+        assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
+        assert!(!can_change_branch(&s));
     }
 
     #[test]
