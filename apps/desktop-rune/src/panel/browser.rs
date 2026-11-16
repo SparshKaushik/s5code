@@ -79,6 +79,16 @@ pub enum Cmd {
     Erase(TabId, f32, f32),
     /// The PNG of every mark's union, as `Event::Marked`.
     CaptureMarks(TabId),
+    /// Stops this profile's Chrome; `wipe` deletes the profile's data after.
+    Quit { wipe: bool },
+}
+
+/// Which tab a command acts on, when it names one.
+fn cmd_tab(cmd: &Cmd) -> Option<TabId> {
+    match cmd {
+        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) => Some(*tab),
+        _ => None,
+    }
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -114,11 +124,13 @@ pub struct Status {
     pub favicon: Option<String>,
     /// Chrome's target id once the page is attached, for an agent's own connection to it.
     pub target: Option<String>,
+    /// The DevTools `host:port` of the Chrome showing the tab: each profile runs its own.
+    pub host: Option<String>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None, target: None }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None, target: None, host: None }
     }
 }
 
@@ -151,35 +163,58 @@ pub struct Shared {
     /// Chrome could not start, or its connection dropped.
     pub fatal: Option<String>,
     pub events: Vec<Event>,
-    /// Chrome's DevTools `host:port` once it is up.
-    pub devtools: Option<String>,
     /// Bumped on every visible change, so the UI re-runs its view only when something moved.
     pub generation: u64,
 }
 
-pub struct Browser {
-    tx: Option<Sender<Cmd>>,
-    pub shared: Arc<Mutex<Shared>>,
-}
+/// The Default profile, which every tab uses unless it opens in another.
+pub const DEFAULT_PROFILE: &str = "default";
+pub const INCOGNITO_PROFILE: &str = "incognito";
 
-impl Default for Browser {
-    fn default() -> Self {
-        Browser { tx: None, shared: Arc::default() }
-    }
+/// The panel's Chrome: one process per browser profile in use, as Electron keeps one session per
+/// profile. Only the Default profile's starts with the panel; another starts with its first tab.
+#[derive(Default)]
+pub struct Browser {
+    workers: HashMap<String, Sender<Cmd>>,
+    pub shared: Arc<Mutex<Shared>>,
+    waker: Option<Waker>,
+    /// Each tab's profile, so its commands reach its Chrome.
+    profiles: HashMap<TabId, String>,
+    viewport: Option<(f32, f32, f32)>,
+    shown: Option<TabId>,
+    tracked: Option<TabId>,
+    recording: Option<TabId>,
+    /// Removed profiles whose Chrome still shows tabs: their data goes when the last one closes.
+    doomed: Vec<String>,
 }
 
 impl Browser {
     pub fn started(&self) -> bool {
-        self.tx.is_some()
+        !self.workers.is_empty()
     }
 
-    /// Launches Chrome on a worker; commands sent before it is up queue in the channel.
+    /// Launches the Default profile's Chrome on a worker; commands sent before it is up queue.
     pub fn start(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+        self.worker(DEFAULT_PROFILE);
+    }
+
+    /// Lets tabs start their profile's Chrome, without starting one yet.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// The profile's worker, starting its Chrome first if this is its first use.
+    fn worker(&mut self, profile: &str) -> Option<Sender<Cmd>> {
+        if let Some(tx) = self.workers.get(profile) {
+            return Some(tx.clone());
+        }
+        let waker = self.waker.clone()?;
         let (tx, rx) = channel();
-        self.tx = Some(tx);
         let shared = self.shared.clone();
+        let owned = profile.to_owned();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, shared.clone(), waker.clone()) {
+            if let Err(e) = run(rx, shared.clone(), waker.clone(), owned) {
                 let mut s = shared.lock().unwrap();
                 s.fatal = Some(e);
                 s.generation += 1;
@@ -187,20 +222,143 @@ impl Browser {
                 waker();
             }
         });
+        // A late Chrome learns what the others were told: the page area, and its shown tab.
+        if let Some((w, h, scale)) = self.viewport {
+            let _ = tx.send(Cmd::Viewport { w, h, scale });
+        }
+        let _ = tx.send(Cmd::Show(self.shown.filter(|t| self.profile(*t) == profile)));
+        let _ = tx.send(Cmd::Track(self.tracked.filter(|t| self.profile(*t) == profile)));
+        self.workers.insert(profile.to_owned(), tx.clone());
+        Some(tx)
     }
 
+    fn profile(&self, tab: TabId) -> &str {
+        self.profiles.get(&tab).map_or(DEFAULT_PROFILE, String::as_str)
+    }
+
+    /// The Default profile's worker, which browser imports write into.
     pub fn sender(&self) -> Option<Sender<Cmd>> {
-        self.tx.clone()
+        self.workers.get(DEFAULT_PROFILE).cloned()
     }
 
-    pub fn send(&self, cmd: Cmd) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(cmd);
+    /// Opens a tab in `profile`'s Chrome.
+    pub fn open(&mut self, tab: TabId, pixels: Pixels, profile: &str) {
+        self.profiles.insert(tab, profile.to_owned());
+        if let Some(tx) = self.worker(profile) {
+            let _ = tx.send(Cmd::Open(tab, pixels));
+        }
+    }
+
+    /// Shows a popup as `tab` in its opener's Chrome, the only one that has it.
+    pub fn adopt(&mut self, tab: TabId, pixels: Pixels, target: String, opener: Option<TabId>) {
+        let profile = opener.map_or(DEFAULT_PROFILE, |o| self.profile(o)).to_owned();
+        self.profiles.insert(tab, profile.clone());
+        if let Some(tx) = self.worker(&profile) {
+            let _ = tx.send(Cmd::Adopt(tab, pixels, target));
+        }
+    }
+
+    /// Clears a profile's cookies and cache, as Electron clears its session: through its Chrome
+    /// when it runs, else by deleting its folder. A removed profile's tabs stay open, as web's
+    /// "Removed profile", and its folder goes with the last of them.
+    pub fn clear(&mut self, profile: &str, removed: bool) {
+        match self.workers.get(profile) {
+            Some(tx) => {
+                for cmd in [Cmd::ClearCookies, Cmd::ClearCache] {
+                    let _ = tx.send(cmd);
+                }
+                if removed && !self.doomed.iter().any(|p| p == profile) {
+                    self.doomed.push(profile.to_owned());
+                }
+            }
+            None => self.quit(profile, true),
+        }
+    }
+
+    /// Stops `profile`'s Chrome, deleting its data when `wipe`.
+    fn quit(&mut self, profile: &str, wipe: bool) {
+        match self.workers.remove(profile) {
+            Some(tx) => {
+                let _ = tx.send(Cmd::Quit { wipe });
+            }
+            None if wipe => {
+                let dir = profile_dir(profile);
+                std::thread::spawn(move || std::fs::remove_dir_all(dir));
+            }
+            None => {}
+        }
+    }
+
+    pub fn send(&mut self, cmd: Cmd) {
+        let route = |b: &Browser, tab: Option<TabId>| tab.map_or(DEFAULT_PROFILE, |t| b.profile(t)).to_owned();
+        match cmd {
+            Cmd::Viewport { w, h, scale } => {
+                self.viewport = Some((w, h, scale));
+                for tx in self.workers.values() {
+                    let _ = tx.send(Cmd::Viewport { w, h, scale });
+                }
+            }
+            Cmd::Show(tab) | Cmd::Track(tab) => {
+                let show = matches!(cmd, Cmd::Show(_));
+                if show {
+                    self.shown = tab;
+                } else {
+                    self.tracked = tab;
+                }
+                for (profile, tx) in &self.workers {
+                    let mine = tab.filter(|t| self.profile(*t) == profile);
+                    let _ = tx.send(if show { Cmd::Show(mine) } else { Cmd::Track(mine) });
+                }
+            }
+            Cmd::Open(tab, pixels) => self.open(tab, pixels, DEFAULT_PROFILE),
+            Cmd::SetCookies(..) => {
+                if let Some(tx) = self.workers.get(DEFAULT_PROFILE) {
+                    let _ = tx.send(cmd);
+                }
+            }
+            Cmd::StopRecording(_) => {
+                let profile = route(self, self.recording.take());
+                if let Some(tx) = self.workers.get(&profile) {
+                    let _ = tx.send(cmd);
+                }
+            }
+            cmd => {
+                let tab = cmd_tab(&cmd);
+                if let Cmd::Record { tab, .. } = &cmd {
+                    self.recording = Some(*tab);
+                }
+                // Page input, edits and clearing data act on the shown tab's Chrome.
+                let profile = route(self, tab.or(self.shown));
+                let closed = matches!(cmd, Cmd::Close(_));
+                if let Some(tx) = self.workers.get(&profile) {
+                    let _ = tx.send(cmd);
+                }
+                if closed {
+                    self.profiles.remove(&tab.unwrap_or_default());
+                    // Only the Default profile's Chrome outlives its tabs.
+                    if profile != DEFAULT_PROFILE && !self.profiles.values().any(|p| *p == profile) {
+                        let wipe = profile == INCOGNITO_PROFILE || self.doomed.iter().any(|p| *p == profile);
+                        self.doomed.retain(|p| *p != profile);
+                        self.quit(&profile, wipe);
+                    }
+                }
+            }
         }
     }
 
     pub fn status(&self, tab: TabId) -> Status {
         self.shared.lock().unwrap().tabs.get(&tab).cloned().unwrap_or_default()
+    }
+}
+
+/// Where a profile keeps its Chrome data: Default's own folder, one per named profile, and a
+/// throwaway one for Incognito, emptied whenever its Chrome starts.
+pub fn profile_dir(profile: &str) -> PathBuf {
+    let root = crate::host::t3_home().join("userdata").join("browser");
+    match profile {
+        DEFAULT_PROFILE => root.join("rune-default"),
+        INCOGNITO_PROFILE => std::env::temp_dir().join(format!("s5-rune-incognito-{}", std::process::id())),
+        other => root.join(format!("rune-profile-{}", other.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>())),
     }
 }
 
@@ -222,23 +380,38 @@ fn chrome_path() -> String {
     candidates.iter().find(|p| std::path::Path::new(p).is_file()).cloned().unwrap_or_else(|| "chrome-headless-shell".into())
 }
 
-static CHROME: Mutex<Option<Child>> = Mutex::new(None);
+/// Every Chrome this process started, by profile.
+static CHROME: Mutex<Vec<(String, Child)>> = Mutex::new(Vec::new());
 
-/// Stops the headless Chrome this process started: once the window loop returns, or before a
+/// Stops the headless Chromes this process started: once the window loop returns, or before a
 /// relaunch at a new display scale.
 pub fn shutdown() {
-    if let Some(mut child) = CHROME.lock().unwrap().take() {
+    for (_, mut child) in std::mem::take(&mut *CHROME.lock().unwrap()) {
         let _ = child.kill();
         // Reaped, so a relaunch finds the profile free.
         let _ = child.wait();
     }
+    let _ = std::fs::remove_dir_all(profile_dir(INCOGNITO_PROFILE));
 }
 
-/// Starts Chrome on the persistent Default profile, as the Electron app keeps its default
-/// session; a profile another instance holds falls back to a throwaway one.
-fn launch(scale: f32) -> Result<(Child, String), String> {
-    let persistent = crate::host::t3_home().join("userdata").join("browser").join("rune-default");
-    launch_in(&persistent, scale).or_else(|_| launch_in(&std::env::temp_dir().join(format!("s5-rune-chrome-{}", std::process::id())), scale))
+/// Stops one profile's Chrome.
+fn shutdown_profile(profile: &str) {
+    let mut chromes = CHROME.lock().unwrap();
+    while let Some(i) = chromes.iter().position(|(p, _)| p == profile) {
+        let (_, mut child) = chromes.remove(i);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Starts Chrome on the profile's persistent folder, as the Electron app keeps one session per
+/// profile; a folder another instance holds falls back to a throwaway one.
+fn launch(profile: &str, scale: f32) -> Result<(Child, String), String> {
+    let dir = profile_dir(profile);
+    if profile == INCOGNITO_PROFILE {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    launch_in(&dir, scale).or_else(|_| launch_in(&std::env::temp_dir().join(format!("s5-rune-chrome-{}-{profile}", std::process::id())), scale))
 }
 
 fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), String> {
@@ -364,22 +537,27 @@ struct Worker {
     waker: Waker,
 }
 
-fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<(), String> {
+fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: String) -> Result<(), String> {
     // The headless shell paints frames at the device scale it starts with, whatever scale a page
     // emulates, so it waits for the window's.
     let mut early = Vec::new();
     let scale = loop {
-        let cmd = rx.recv().map_err(|_| "The window closed".to_string())?;
+        let Ok(cmd) = rx.recv() else { return Ok(()) };
+        if let Cmd::Quit { wipe } = cmd {
+            if wipe {
+                let _ = std::fs::remove_dir_all(profile_dir(&profile));
+            }
+            return Ok(());
+        }
         let scale = if let Cmd::Viewport { scale, .. } = &cmd { Some(*scale) } else { None };
         early.push(cmd);
         if let Some(scale) = scale {
             break scale;
         }
     };
-    let (child, url) = launch(scale)?;
-    *CHROME.lock().unwrap() = Some(child);
+    let (child, url) = launch(&profile, scale)?;
+    CHROME.lock().unwrap().push((profile.clone(), child));
     let host = url.trim_start_matches("ws://").split('/').next().unwrap_or_default().to_string();
-    shared.lock().unwrap().devtools = Some(host.clone());
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
     let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
@@ -413,8 +591,19 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         w.command(cmd);
     }
     loop {
-        while let Ok(cmd) = rx.try_recv() {
-            w.command(cmd);
+        loop {
+            match rx.try_recv() {
+                Ok(Cmd::Quit { wipe }) => {
+                    shutdown_profile(&profile);
+                    if wipe {
+                        let _ = std::fs::remove_dir_all(profile_dir(&profile));
+                    }
+                    return Ok(());
+                }
+                Ok(cmd) => w.command(cmd),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
         }
         let msg = match w.ws.read() {
             Ok(Message::Text(t)) => t,
@@ -772,6 +961,8 @@ impl Worker {
                     self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
                 }
             }
+            // The run loop takes it before a command reaches here.
+            Cmd::Quit { .. } => {}
         }
     }
 
@@ -1051,7 +1242,11 @@ impl Worker {
                 t.session = Some(session.clone());
                 let queue = std::mem::take(&mut t.queue);
                 let target = t.target.clone();
-                self.update(tab, |s| s.target = target);
+                let host = self.host.clone();
+                self.update(tab, |s| {
+                    s.target = target;
+                    s.host = Some(host);
+                });
                 self.sessions.insert(session.clone(), tab);
                 self.send(Some(&session), "Page.enable", json!({}), None);
                 self.send(Some(&session), "Network.enable", json!({}), None);
@@ -1836,6 +2031,47 @@ fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_profile_gets_its_tabs_commands_and_quits_with_its_last_tab() {
+        let mut b = Browser::default();
+        let (default_tx, default_rx) = channel();
+        let (work_tx, work_rx) = channel();
+        let (incognito_tx, incognito_rx) = channel();
+        b.workers.insert(DEFAULT_PROFILE.into(), default_tx);
+        b.workers.insert("work".into(), work_tx);
+        b.workers.insert(INCOGNITO_PROFILE.into(), incognito_tx);
+        let drain = |rx: &Receiver<Cmd>| rx.try_iter().collect::<Vec<_>>();
+        b.open(1, Pixels::new(), DEFAULT_PROFILE);
+        b.open(2, Pixels::new(), "work");
+        b.open(3, Pixels::new(), "work");
+        b.open(4, Pixels::new(), INCOGNITO_PROFILE);
+        b.adopt(5, Pixels::new(), "popup".into(), Some(2));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Open(1, _)]));
+        assert!(matches!(drain(&work_rx)[..], [Cmd::Open(2, _), Cmd::Open(3, _), Cmd::Adopt(5, ..)]));
+        drain(&incognito_rx);
+
+        b.send(Cmd::Show(Some(2)));
+        b.send(Cmd::Navigate(1, "http://a/".into()));
+        b.send(Cmd::Text("x".into()));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Show(None), Cmd::Navigate(1, _)]));
+        assert!(matches!(drain(&work_rx)[..], [Cmd::Show(Some(2)), Cmd::Text(_)]));
+        assert!(matches!(drain(&incognito_rx)[..], [Cmd::Show(None)]));
+
+        // Removing a running profile clears it now and deletes it with its last tab.
+        b.clear("work", true);
+        for tab in [2, 3, 5] {
+            b.send(Cmd::Close(tab));
+        }
+        assert!(matches!(drain(&work_rx)[..], [Cmd::ClearCookies, Cmd::ClearCache, Cmd::Close(2), Cmd::Close(3), Cmd::Close(5), Cmd::Quit { wipe: true }]));
+        assert!(!b.workers.contains_key("work"));
+        // Incognito forgets everything once its last tab closes; Default's Chrome stays.
+        b.send(Cmd::Close(4));
+        assert!(matches!(drain(&incognito_rx)[..], [Cmd::Close(4), Cmd::Quit { wipe: true }]));
+        b.send(Cmd::Close(1));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Close(1)]));
+        assert_eq!(b.workers.keys().collect::<Vec<_>>(), [DEFAULT_PROFILE]);
+    }
 
     #[test]
     fn zoom_shrinks_the_css_viewport() {

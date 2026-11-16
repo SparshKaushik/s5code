@@ -58,6 +58,9 @@ pub struct Ui {
     drawer: drawer::Ui,
     browser: preview::Ui,
     add_menu: bool,
+    /// The + menu's Browser profiles submenu, and the launcher's profile menu.
+    add_profiles: bool,
+    launcher_profiles: bool,
     /// The tab strip's right-click menu: its tab and window point.
     tab_menu: Option<(Surface, (f32, f32))>,
     thread: String,
@@ -91,6 +94,8 @@ impl Default for Ui {
             drawer: Default::default(),
             browser: Default::default(),
             add_menu: false,
+            add_profiles: false,
+            launcher_profiles: false,
             tab_menu: None,
             thread: String::new(),
             closed: Default::default(),
@@ -173,6 +178,10 @@ const LAUNCH: [(Surface, &str); 4] = [
     (Surface::Files, "F"),
     (Surface::Diff, "D"),
 ];
+fn add_in_profile(app: &mut App, profile: &str) {
+    let tab = preview::open_in(app, profile);
+    activate(app, Surface::Browser(tab));
+}
 fn add(app: &mut App, surface: Surface) {
     match surface {
         Surface::Browser(_) => {
@@ -759,6 +768,17 @@ fn picker(app: &App, t: &T) -> El {
                         .color(t.c.contrast_foreground)
                         .grow(1.),
                 )
+                // Web's "Open browser in a profile" chevron.
+                .children(matches!(surface, Surface::Browser(_)).then(|| {
+                    el().key("panel-launcher-profiles").child(
+                        kit::Button::new("Open browser in a profile")
+                            .icon(&icons::CHEVRON_DOWN)
+                            .variant("ghost-muted")
+                            .size("icon-xs")
+                            .build(t)
+                            .on_press(|s: &mut App| s.ui.panel.launcher_profiles ^= true),
+                    )
+                }))
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
                 .help(hint.unwrap_or_default())
                 .on_press(move |s: &mut App| add(s, surface)),
@@ -1158,6 +1178,9 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
         if app.ui.panel.add_menu {
             add_menu(app, t, &mut out);
         }
+        if app.ui.panel.launcher_profiles {
+            launcher_profiles(app, t, &mut out);
+        }
         if let Some((surface, at)) = app.ui.panel.tab_menu {
             tab_menu(app, t, surface, at, &mut out);
         }
@@ -1197,6 +1220,33 @@ fn tab_menu(app: &App, t: &T, surface: Surface, at: (f32, f32), out: &mut Vec<El
     .overlay(&kit::theme(t), out);
 }
 
+/// One item per browser profile, each opening a tab in it.
+fn profile_items(app: &App, close: fn(&mut App)) -> Vec<kit::MenuItem> {
+    crate::settings::browser_profiles::pickable(app)
+        .into_iter()
+        .map(|(id, name)| {
+            kit::MenuItem::new(name).on_select(move |s: &mut App| {
+                close(s);
+                add_in_profile(s, &id);
+            })
+        })
+        .collect()
+}
+
+/// The launcher Browser row's profile menu.
+fn launcher_profiles(app: &App, t: &T, out: &mut Vec<El>) {
+    let mut menu = kit::Menu::new("panel-launcher-profiles-menu")
+        .anchor("panel-launcher-profiles")
+        .placement(kit::Placement::BottomEnd)
+        .min_width(160.)
+        .open(true)
+        .on_close(|s: &mut App| s.ui.panel.launcher_profiles = false);
+    for item in profile_items(app, |s| s.ui.panel.launcher_profiles = false) {
+        menu = menu.item(item);
+    }
+    menu.overlay(&kit::theme(t), out);
+}
+
 /// The tab strip's + menu (web's add-surface menu).
 fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
     let mut menu = kit::Menu::new("panel-add-menu")
@@ -1204,23 +1254,34 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
         .placement(kit::Placement::BottomStart)
         .min_width(224.)
         .open(true)
-        .on_close(|s: &mut App| s.ui.panel.add_menu = false);
+        .on_close(|s: &mut App| {
+            s.ui.panel.add_menu = false;
+            s.ui.panel.add_profiles = false;
+        });
     for (surface, key) in LAUNCH {
         let available = match surface {
             Surface::Browser(_) => true,
             Surface::Diff => diff_available(app),
             _ => context(app).is_some(),
         };
-        menu = menu.item(
-            kit::MenuItem::new(surface.title())
-                .icon(surface.glyph())
-                .shortcut(key)
-                .disabled(!available)
-                .on_select(move |s: &mut App| {
-                    s.ui.panel.add_menu = false;
-                    add(s, surface);
-                }),
-        );
+        let mut item = kit::MenuItem::new(surface.title())
+            .icon(surface.glyph())
+            .shortcut(key)
+            .disabled(!available)
+            .on_select(move |s: &mut App| {
+                s.ui.panel.add_menu = false;
+                s.ui.panel.add_profiles = false;
+                add(s, surface);
+            });
+        // Web's Browser submenu: a new tab in any profile.
+        if matches!(surface, Surface::Browser(_)) {
+            let profiles = profile_items(app, |s| {
+                s.ui.panel.add_menu = false;
+                s.ui.panel.add_profiles = false;
+            });
+            item = item.submenu(profiles.into_iter().map(kit::MenuEntry::item).collect(), app.ui.panel.add_profiles).on_submenu_change(|s: &mut App, open| s.ui.panel.add_profiles = open);
+        }
+        menu = menu.item(item);
     }
     for (title, glyph, key) in [
         ("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"),

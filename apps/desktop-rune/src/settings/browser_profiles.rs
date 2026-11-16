@@ -95,6 +95,13 @@ fn listed(s: &App) -> Vec<(String, String, bool)> {
     out
 }
 
+/// `resolveBrowserProfiles`: every profile a tab can open in, built-ins first.
+pub(crate) fn pickable(s: &App) -> Vec<(String, String)> {
+    let mut out: Vec<_> = listed(s).into_iter().map(|(id, name, _)| (id, name)).collect();
+    out.insert(1, (INCOGNITO_ID.to_owned(), "Incognito".to_owned()));
+    out
+}
+
 /// `resolveBrowserDefaults().profileId`: the profile new tabs open with.
 pub(crate) fn default_profile(s: &App) -> String {
     default_id(s)
@@ -157,12 +164,15 @@ pub fn rename(s: &mut App, id: &str, next: Value) {
     update(s, "browserProfiles", json!(profiles));
 }
 
+/// Clears the profile on its server and in this computer's Chrome, as Electron clears both.
 fn clear_data(s: &mut App, id: &str) {
     request(s, "preview.clearProfile", json!({"profileId": id}));
+    crate::panel::preview::clear_profile(s, id, false);
 }
 
 fn remove(s: &mut App, id: &str) {
-    clear_data(s, id);
+    request(s, "preview.clearProfile", json!({"profileId": id}));
+    crate::panel::preview::clear_profile(s, id, true);
     let profiles: Vec<_> = user_profiles(s).into_iter().filter(|p| p["id"] != id).collect();
     update(s, "browserProfiles", json!(profiles));
     if setting(s, "browserDefaultProfileId") == id {

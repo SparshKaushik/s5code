@@ -84,11 +84,13 @@ struct Tab {
     remote: Option<String>,
     /// The stream's dialog last put on screen, so an answered one isn't shown again.
     stream_dialog: Option<(String, String, String)>,
+    /// The browser profile the tab opened in; a server tab's own is in its snapshot.
+    profile: String,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None, profile: browser::DEFAULT_PROFILE.to_owned() }
     }
 }
 
@@ -142,6 +144,8 @@ pub struct Ui {
     tracked: Option<TabId>,
     /// The page's open `alert`, `confirm` or `prompt`.
     dialog: Option<Dialog>,
+    /// A server page's `<input multiple>` picker, collecting files to upload.
+    chooser: Option<Chooser>,
     /// The page's right-click menu.
     context: Option<Context>,
     /// Chrome starts after a failed start; part of the viewport key so the new worker gets it.
@@ -179,6 +183,26 @@ pub struct Ui {
     chrome_scale: Option<f32>,
     /// Other environments whose preview sessions this panel follows, as streams.
     remote_watched: Vec<String>,
+}
+
+/// The files a server page's multi-file input will get. The native dialog picks one file at a
+/// time, so the sheet gathers several, from the dialog or dropped on it, before they upload.
+struct Chooser {
+    tab: TabId,
+    id: String,
+    accept: Vec<String>,
+    files: Vec<std::path::PathBuf>,
+}
+
+/// Adds picked or dropped files, once each; a drop skips files the input doesn't accept.
+fn choose(files: &mut Vec<std::path::PathBuf>, picked: impl IntoIterator<Item = std::path::PathBuf>, accept: &[String]) {
+    for path in picked {
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let accepted = accept.is_empty() || accept.contains(&ext);
+        if accepted && path.is_file() && !files.contains(&path) {
+            files.push(path);
+        }
+    }
 }
 
 struct Dialog {
@@ -236,15 +260,23 @@ struct Stroke {
 /// A new tab on a blank page; Chrome starts with the first one. On another machine's thread
 /// whose server runs a browser, the tab is that server's, as web's `previewRuntimeFor`.
 pub fn open(app: &mut App) -> TabId {
+    let profile = crate::settings::browser_profiles::default_profile(app);
+    open_in(app, &profile)
+}
+
+/// A new tab in a browser profile, as web's "Open browser in a profile". Here a profile other
+/// than Default runs its own Chrome, started for its first tab.
+pub fn open_in(app: &mut App, profile: &str) -> TabId {
     if let Some(env) = server_env(app) {
         let ui = &mut app.ui.panel.browser;
         ui.next += 1;
         let mut fresh = Tab::new(Pixels::new());
         fresh.remote = Some(env);
+        fresh.profile = profile.to_owned();
         ui.tabs.insert(ui.next, fresh);
         return ui.next;
     }
-    let tab = open_tab(app);
+    let tab = open_tab(app, profile);
     register(app, tab);
     tab
 }
@@ -283,7 +315,7 @@ fn open_remote(app: &mut App, tab: TabId, url: Option<String>) {
         Some((w, h)) => json!({ "_tag": "freeform", "width": w, "height": h }),
         None => json!({ "_tag": "fill" }),
     };
-    let profile = crate::settings::browser_profiles::default_profile(app);
+    let profile = app.ui.panel.browser.tabs.get(&tab).map(|t| t.profile.clone());
     let mut payload = json!({ "threadId": thread, "viewport": viewport, "runtime": "server", "profileId": profile });
     if let Some(url) = url {
         payload["url"] = json!(url);
@@ -296,19 +328,19 @@ fn open_remote(app: &mut App, tab: TabId, url: Option<String>) {
     app.ui.panel.browser.opening.push((id, tab, thread, env));
 }
 
-fn open_tab(app: &mut App) -> TabId {
+fn open_tab(app: &mut App, profile: &str) -> TabId {
     let waker = app.ui.panel.waker.clone();
     let ui = &mut app.ui.panel.browser;
-    if !ui.browser.started() {
-        if let Some(waker) = waker {
-            ui.browser.start(waker);
-        }
+    if let Some(waker) = waker {
+        ui.browser.set_waker(waker);
     }
     ui.next += 1;
     let tab = ui.next;
     let pixels = Pixels::new();
-    ui.tabs.insert(tab, Tab::new(pixels.clone()));
-    ui.browser.send(Cmd::Open(tab, pixels));
+    let mut fresh = Tab::new(pixels.clone());
+    fresh.profile = profile.to_owned();
+    ui.tabs.insert(tab, fresh);
+    ui.browser.open(tab, pixels, profile);
     // `browserDefaultZoomFactor`: "Page zoom applied to new browser tabs."
     let zoom = crate::settings::value(app, "browserDefaultZoomFactor").as_f64().unwrap_or(1.) as f32;
     if let Some(&zoom) = ZOOM_LEVELS.iter().find(|z| (**z - zoom).abs() < 0.001).filter(|z| **z != 1.) {
@@ -346,7 +378,7 @@ fn restart(app: &mut App) {
     let Some(waker) = app.ui.panel.waker.clone() else { return };
     let ui = &mut app.ui.panel.browser;
     ui.browser = browser::Browser::default();
-    ui.browser.start(waker);
+    ui.browser.set_waker(waker);
     ui.restarts += 1;
     ui.chrome_scale = None;
     // The new worker hasn't been told which tab shows or is tracked; poll resends both.
@@ -357,8 +389,10 @@ fn restart(app: &mut App) {
         let pixels = Pixels::new();
         let mut fresh = Tab::new(pixels.clone());
         fresh.session = ui.tabs.get(&tab).and_then(|t| t.session.clone());
+        fresh.profile = ui.tabs.get(&tab).map(|t| t.profile.clone()).unwrap_or_default();
+        let profile = fresh.profile.clone();
         ui.tabs.insert(tab, fresh);
-        ui.browser.send(Cmd::Open(tab, pixels));
+        ui.browser.open(tab, pixels, &profile);
     }
 }
 
@@ -371,16 +405,16 @@ fn relaunch(app: &mut App, scale: f32) {
     browser::shutdown();
     let ui = &mut app.ui.panel.browser;
     ui.browser = browser::Browser::default();
-    ui.browser.start(waker);
+    ui.browser.set_waker(waker);
     ui.chrome_scale = Some(scale);
     ui.shown = None;
     ui.tracked = None;
-    let mut tabs: Vec<(TabId, Pixels, &'static str)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, t)| (*id, t.pixels.clone(), t.scheme)).collect();
+    let mut tabs: Vec<(TabId, Pixels, &'static str, String)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, t)| (*id, t.pixels.clone(), t.scheme, t.profile.clone())).collect();
     tabs.sort_by_key(|(id, ..)| *id);
     // The address bars keep their pages while the new Chrome starts.
     ui.browser.shared.lock().unwrap().tabs = tabs.iter().filter_map(|(id, ..)| Some((*id, Status { loading: true, ..before.get(id)?.clone() }))).collect();
-    for (tab, pixels, scheme) in tabs {
-        ui.browser.send(Cmd::Open(tab, pixels));
+    for (tab, pixels, scheme, profile) in tabs {
+        ui.browser.open(tab, pixels, &profile);
         if !scheme.is_empty() {
             ui.browser.send(Cmd::ColorScheme(tab, scheme));
         }
@@ -429,8 +463,11 @@ fn adopt(app: &mut App, target: String, opener: String, url: String) {
     let pixels = Pixels::new();
     let mut fresh = Tab::new(pixels.clone());
     fresh.adopting = opener_key.clone().map(|key| (key, target.clone()));
+    if let Some(opener) = opener_tab.and_then(|id| ui.tabs.get(&id)) {
+        fresh.profile = opener.profile.clone();
+    }
     ui.tabs.insert(tab, fresh);
-    ui.browser.send(Cmd::Adopt(tab, pixels, target.clone()));
+    ui.browser.adopt(tab, pixels, target.clone(), opener_tab);
     match opener_key {
         Some(key) => agent::popup(&key, target, url),
         None => {
@@ -467,6 +504,9 @@ pub fn close(app: &mut App, tab: TabId) {
     }
     if ui.dialog.as_ref().is_some_and(|d| d.tab == tab) {
         ui.dialog = None;
+    }
+    if ui.chooser.as_ref().is_some_and(|c| c.tab == tab) {
+        ui.chooser = None;
     }
     if ui.popout == Some(tab) {
         ui.popout = None;
@@ -1265,15 +1305,13 @@ fn stream_events(app: &mut App, tx: &mut Tx) -> bool {
                 }
             }
             Event::Saved(Err(e)) => crate::shell::palette::toast(app, "Unable to save the download", Some(&e)),
+            // A multi-file input gathers its files in a sheet over the page.
+            Event::FileChooser { id, multiple: true, accept } => {
+                app.ui.panel.browser.chooser = Some(Chooser { tab, id, accept: accept_extensions(&accept), files: vec![] });
+            }
             // The native dialog picks one file; cancelling it cancels the page's picker.
-            Event::FileChooser { id, multiple, accept } => {
-                let title = if multiple { "Choose files to upload" } else { "Choose a file to upload" };
-                let mut options = rune::FileDialogOptions { title: title.into(), ..Default::default() };
-                let exts = accept_extensions(&accept);
-                if !exts.is_empty() {
-                    let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
-                    options = options.filter("Accepted files", exts.as_slice());
-                }
+            Event::FileChooser { id, multiple: false, accept } => {
+                let options = chooser_options("Choose a file to upload", &accept_extensions(&accept));
                 tx.open_file(options, move |s: &mut App, picked: rune::FileDialogResult, _| {
                     let files = match picked {
                         Ok(Some(path)) => vec![std::path::PathBuf::from(path)],
@@ -1284,11 +1322,130 @@ fn stream_events(app: &mut App, tx: &mut Tx) -> bool {
                     }
                 });
             }
-            Event::FileChooserClosed(_) => {}
+            Event::FileChooserClosed(id) => {
+                if app.ui.panel.browser.chooser.as_ref().is_some_and(|c| c.tab == tab && c.id == id) {
+                    app.ui.panel.browser.chooser = None;
+                }
+            }
             Event::Failed(title, e) => crate::shell::palette::toast(app, &title, Some(&e)),
         }
     }
     changed
+}
+
+fn chooser_options(title: &str, exts: &[String]) -> rune::FileDialogOptions {
+    let options = rune::FileDialogOptions { title: title.into(), ..Default::default() };
+    if exts.is_empty() {
+        return options;
+    }
+    let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+    options.filter("Accepted files", exts.as_slice())
+}
+
+/// Uploads the sheet's files, or none to cancel the page's picker.
+fn finish_chooser(app: &mut App, upload: bool) {
+    let Some(c) = app.ui.panel.browser.chooser.take() else { return };
+    if let Some(stream) = app.ui.panel.browser.tabs.get(&c.tab).and_then(|t| t.stream.as_ref()) {
+        stream.upload(&c.id, if upload { c.files } else { vec![] });
+    }
+}
+
+/// The multi-file sheet: the chosen files, Add file…, drops, Cancel and Upload.
+fn chooser_sheet(t: &T, c: &Chooser) -> El {
+    let mut list = col().key("browser-file-chooser-list").w_full().gap(2.).max_h(220.).scroll(rune::ScrollSpec { stick_bottom: false });
+    for (i, path) in c.files.iter().enumerate() {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        list = list.child(
+            row()
+                .w_full()
+                .h(28.)
+                .px(8.)
+                .gap(8.)
+                .center_y()
+                .radius(6.)
+                .fill(t.c.muted.alpha_mul(0.5))
+                .child(icon(&icons::FILE, 14.).color(t.c.muted_foreground).a11y_hidden())
+                .child(text(name).font(theme::TEXT_SM).color(t.c.contrast_foreground).grow(1.).min_w(0.).truncate())
+                .child(
+                    kit::Button::new("Remove file")
+                        .icon(&icons::X)
+                        .variant("ghost-muted")
+                        .size("icon-xs")
+                        .on_press(move |s: &mut App| {
+                            if let Some(c) = s.ui.panel.browser.chooser.as_mut().filter(|c| i < c.files.len()) {
+                                c.files.remove(i);
+                            }
+                        })
+                        .build(t),
+                ),
+        );
+    }
+    if c.files.is_empty() {
+        list = list.child(
+            col()
+                .w_full()
+                .h(72.)
+                .center()
+                .gap(6.)
+                .radius(8.)
+                .border(1., t.c.border)
+                .child(icon(&icons::UPLOAD, 16.).color(t.c.muted_foreground).a11y_hidden())
+                .child(text("Drop files here, or add them one at a time").font(theme::TEXT_XS).color(t.c.muted_foreground)),
+        );
+    }
+    let accepted = (!c.accept.is_empty()).then(|| text(format!("Accepts {}", c.accept.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(", "))).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    let exts = c.accept.clone();
+    let add = kit::Button::new("Add file…").variant("outline").size("sm").build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+        tx.open_file(chooser_options("Add a file to upload", &exts), |s: &mut App, picked: rune::FileDialogResult, _| {
+            if let (Ok(Some(path)), Some(c)) = (picked, s.ui.panel.browser.chooser.as_mut()) {
+                choose(&mut c.files, [std::path::PathBuf::from(path)], &[]);
+            }
+        });
+    });
+    let count = c.files.len();
+    let card = col()
+        .key("browser-file-chooser")
+        .role("dialog")
+        .label("Choose files to upload")
+        .w(400.)
+        .padding(16.)
+        .gap(12.)
+        .radius(12.)
+        .border(1., t.c.border)
+        .fill(t.c.popover)
+        .shadow(8., 24., Color::BLACK.alpha(0.25))
+        .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
+            if let Some(c) = s.ui.panel.browser.chooser.as_mut() {
+                choose(&mut c.files, files.iter().cloned(), &c.accept.clone());
+            }
+        })
+        .child(text("Choose files to upload").font(theme::SM_MEDIUM).color(t.c.contrast_foreground))
+        .children(accepted)
+        .child(list)
+        .child(
+            row()
+                .w_full()
+                .gap(8.)
+                .center_y()
+                .child(add)
+                .child(el().grow(1.))
+                .child(kit::Button::new("Cancel").variant("outline").size("sm").on_press(|s: &mut App| finish_chooser(s, false)).build(t))
+                .child(
+                    kit::Button::new(if count > 1 { format!("Upload {count} files") } else { "Upload".to_owned() })
+                        .size("sm")
+                        .disabled(count == 0)
+                        .on_press(|s: &mut App| finish_chooser(s, true))
+                        .build(t),
+                ),
+        );
+    row()
+        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        .fill(Color::BLACK.alpha(0.2))
+        .items_start()
+        .pt(24.)
+        .child(el().grow(1.))
+        .child(card)
+        .child(el().grow(1.))
 }
 
 /// The file extensions an `<input accept>` names; MIME types like `image/*` don't narrow it.
@@ -1597,6 +1754,28 @@ fn viewport_size(viewport: &Value) -> Option<Option<(u32, u32)>> {
     }
 }
 
+/// The tab's profile as a badge, unless it is the one new tabs open in.
+fn profile_badge(app: &App, t: &T, tab: TabId) -> Option<El> {
+    let profile = tab_profile(app, tab);
+    if profile == crate::settings::browser_profiles::default_profile(app) {
+        return None;
+    }
+    let name = crate::settings::browser_profiles::profile_name(app, &profile);
+    let short: String = if name.chars().count() > 14 { name.chars().take(13).chain(['…']).collect() } else { name.clone() };
+    Some(kit::badge(&short, "outline", "default", t).key(format!("browser-profile-{tab}")).label(&name).help(name))
+}
+
+/// The profile a tab shows pages in: a server tab's as its server reports it.
+fn tab_profile(app: &App, tab: TabId) -> String {
+    let Some(t) = app.ui.panel.browser.tabs.get(&tab) else { return browser::DEFAULT_PROFILE.to_owned() };
+    t.snapshot["profileId"].as_str().map_or_else(|| t.profile.clone(), str::to_owned)
+}
+
+/// Clears a profile's data on this computer, or with `removed`, deletes it once no tab uses it.
+pub fn clear_profile(app: &mut App, profile: &str, removed: bool) {
+    app.ui.panel.browser.browser.clear(profile, removed);
+}
+
 /// Tells the server each session's tab is attached once Chrome has its page, and again for a
 /// new server process or the new page after Chrome restarts.
 fn announce(app: &mut App) {
@@ -1605,13 +1784,13 @@ fn announce(app: &mut App) {
         return;
     }
     let generation = agent::generation();
-    let (host, targets): (Option<String>, HashMap<TabId, String>) = {
+    // Each profile's Chrome has its own DevTools address.
+    let targets: HashMap<TabId, (String, String)> = {
         let shared = ui.browser.shared.lock().unwrap();
-        (shared.devtools.clone(), shared.tabs.iter().filter_map(|(id, s)| s.target.clone().map(|t| (*id, t))).collect())
+        shared.tabs.iter().filter_map(|(id, s)| Some((*id, (s.target.clone()?, s.host.clone()?)))).collect()
     };
-    let Some(host) = host else { return };
     for (id, tab) in ui.tabs.iter_mut() {
-        let (Some(key), Some(target)) = (&tab.session, targets.get(id)) else { continue };
+        let (Some(key), Some((target, host))) = (&tab.session, targets.get(id)) else { continue };
         let now = Some((generation, target.clone()));
         if tab.announced != now {
             // Chrome restarted under this server: it drops the dead page before taking the new one.
@@ -2413,6 +2592,8 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                         .child(refresh_glyph),
                 ),
         )
+        // Web's profile badge, for a tab outside the profile new tabs use.
+        .children(profile_badge(app, t, tab))
         .child(row().grow(1.).min_w(0.).hover_group().child(address).children(external))
         // Web offers neither on a server's tab: the page isn't in this client.
         .children(streamed.is_none().then(|| {
@@ -2495,7 +2676,8 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             })
             .child(content)
             .children(zoom_pill)
-            .children(ui.dialog.as_ref().filter(|d| d.tab == tab).map(|d| js_dialog(t, d, &status.url))),
+            .children(ui.dialog.as_ref().filter(|d| d.tab == tab).map(|d| js_dialog(t, d, &status.url)))
+            .children(ui.chooser.as_ref().filter(|c| c.tab == tab).map(|c| chooser_sheet(t, c))),
     )
 }
 
@@ -3585,8 +3767,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 .child(zoom_button("Reset zoom", &icons::ROTATE_CCW, "ghost", blank, 0)),
         );
     let close = |s: &mut App| s.ui.panel.browser.menu = false;
-    let profile = ui.tabs.get(&tab).and_then(|t| t.snapshot["profileId"].as_str()).unwrap_or("default");
-    let profile = crate::settings::browser_profiles::profile_name(app, profile);
+    let profile = crate::settings::browser_profiles::profile_name(app, &tab_profile(app, tab));
     let moving = move_label(app, tab);
     let mut menu = kit::Menu::new("browser-more")
         .anchor("browser-menu")
@@ -3946,6 +4127,24 @@ mod tests {
     fn a_file_inputs_accept_list_filters_the_picker() {
         assert_eq!(accept_extensions(".PNG, .jpg,image/*,"), vec!["png", "jpg"]);
         assert!(accept_extensions("image/*").is_empty());
+    }
+
+    #[test]
+    fn a_multi_file_input_gathers_each_accepted_file_once() {
+        let dir = std::env::temp_dir().join(format!("s5-rune-chooser-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let [a, b, c] = ["a.png", "b.JPG", "c.txt"].map(|n| dir.join(n));
+        for path in [&a, &b, &c] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let accept = accept_extensions(".png,.jpg");
+        let mut files = vec![];
+        choose(&mut files, [a.clone(), c.clone(), dir.clone(), b.clone()], &accept);
+        choose(&mut files, [a.clone()], &accept);
+        assert_eq!(files, [a.clone(), b.clone()], "the text file, the folder and the repeat are left out");
+        choose(&mut files, [c.clone()], &[]);
+        assert_eq!(files.len(), 3, "an input without accept takes any file");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
