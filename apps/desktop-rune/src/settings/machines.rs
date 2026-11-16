@@ -356,6 +356,16 @@ pub(crate) fn pick_environment(s: &mut App, project_id: &str, provider_instance:
     members.into_iter().find(|(key, _)| *key == chosen)
 }
 
+/// A `server.getHostResources` request is still out (web's "Checking machines…").
+pub(crate) fn checking(s: &App) -> bool {
+    !s.ui.settings.connections.machines.probing.is_empty()
+}
+
+#[cfg(test)]
+pub(crate) fn set_resources(s: &mut App, key: &str, snapshot: Value) {
+    s.ui.settings.connections.machines.resources.insert(key.to_owned(), (snapshot, crate::data::now_ms()));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Pull request sharing
 
