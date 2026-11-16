@@ -1320,7 +1320,7 @@ fn escape(s: &mut App) -> bool {
         return true;
     }
     let shell = &s.ui.shell;
-    if shell.palette.open || shell.sidebar.menu.is_some() || shell.sidebar.confirm.is_some() {
+    if shell.palette.open || shell.sidebar.menu.is_some() || shell.confirm.is_open() {
         return false;
     }
     super::back(s);
