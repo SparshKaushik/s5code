@@ -649,22 +649,24 @@ fn rewrite_loopback(url: &str, environment: &str) -> Result<String, String> {
 
 /// Web's `isBrowserPreviewFile`: HTML and PDF files open in the browser.
 pub fn previewable_file(path: &str) -> bool {
-    let path = path.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
-    [".html", ".htm", ".pdf"].iter().any(|ext| path.ends_with(ext))
+    super::file_preview::kind(path.split(['?', '#']).next().unwrap_or_default()).opens_in_browser()
 }
 
-/// Web's `openFileInPreview`: the server serves the file at a signed address that opens in a new
-/// tab. `path` is absolute or relative to the thread's workspace.
+/// Web's `openFileInPreview`, the one path every "Open in browser" takes (the file preview's
+/// action, chat file links): the server serves the file at a signed address that opens in a new
+/// tab. `path` is absolute or relative to the workspace.
 pub fn open_file(app: &mut App, path: &str) {
-    let Some((thread, cwd)) = super::context(app) else {
-        crate::shell::palette::toast(app, "Unable to open file in browser", Some("Open a thread first."));
-        return;
-    };
+    let fail = |app: &mut App, why: &str| crate::shell::palette::toast(app, "Unable to open file in browser", Some(why));
+    let Some(cwd) = super::workspace(app) else { return fail(app, "Open a thread or a project first.") };
     let (absolute, inside) = asset_path(path, &cwd);
-    let resource = json!({ "resource": { "_tag": if inside { "workspace-file" } else { "media-file" }, "threadId": thread, "path": absolute } });
-    match app.src.net().map(|n| n.request("assets.createUrl", resource)) {
+    let resource = match super::context(app) {
+        Some((thread, _)) => json!({ "_tag": if inside { "workspace-file" } else { "media-file" }, "threadId": thread, "path": absolute }),
+        None if inside => json!({ "_tag": "draft-workspace-file", "cwd": cwd, "path": absolute }),
+        None => return fail(app, "Files outside the project open from a thread."),
+    };
+    match app.src.net().map(|n| n.request("assets.createUrl", json!({ "resource": resource }))) {
         Some(id) => app.ui.panel.browser.assets.push((id, path.to_owned())),
-        None => crate::shell::palette::toast(app, "Unable to open file in browser", Some("The environment is not connected.")),
+        None => fail(app, "The environment is not connected."),
     }
 }
 

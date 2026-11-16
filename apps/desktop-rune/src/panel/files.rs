@@ -85,7 +85,6 @@ pub struct Ui {
 
 enum AssetUse {
     External,
-    Browser,
     Save(std::path::PathBuf),
 }
 
@@ -619,10 +618,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             (Ok(v), Some(AssetUse::External)) => {
                 let _ = tx.open_url(&asset_url(&app.src, &v));
             }
-            (Ok(v), Some(AssetUse::Browser)) => {
-                let url = asset_url(&app.src, &v);
-                super::open_preview(app, &url);
-            }
             (Ok(v), Some(AssetUse::Save(path))) => {
                 let url = asset_url(&app.src, &v);
                 let (failed, wake) = (app.ui.panel.files.save_failed.clone(), app.ui.panel.waker.clone());
@@ -933,7 +928,8 @@ fn header(ui: &Ui, wrap: bool, t: &T) -> El {
         }
         if kind.opens_in_browser() {
             let label = "Open file in preview browser";
-            header = header.child(button(label, &icons::GLOBE).on_press(|s: &mut App| use_asset(s, AssetUse::Browser)).build(t).help(label));
+            let path = ui.selected.clone();
+            header = header.child(button(label, &icons::GLOBE).on_press(move |s: &mut App| super::preview::open_file(s, &path)).build(t).help(label));
         }
         if text_shown {
             let copied = ui.copied.is_some_and(|at| at.elapsed() < COPIED_FOR);
