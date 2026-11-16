@@ -52,6 +52,9 @@ import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion } from "./serviceProtocol.ts";
 
+const SERVICE_REQUIRED =
+  "Remote updates require the T3 Code background service. Run `t3 service install` on the server machine.";
+
 // A staged runtime's cold start can take over a minute on a loaded, swapping host.
 const PREFLIGHT_TIMEOUT = Duration.minutes(3);
 
@@ -226,13 +229,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",
       );
     }
-    // The target must accept the launcher that will run it, which can be older than this server.
-    const launcherProtocol = launcher.protocol;
-    if (capability === null || launcherProtocol === undefined) {
-      return yield* failWith(
-        "Remote updates require the T3 Code background service. Run `t3 service install` on the server machine.",
-      );
-    }
+    if (capability === null) return yield* failWith(SERVICE_REQUIRED);
 
     const unsafeCrossing = crossesTrackUnsafely(input);
     if (unsafeCrossing !== null) return yield* failWith(unsafeCrossing);
@@ -285,6 +282,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     }
 
     return yield* Effect.gen(function* () {
+      // The target must accept the launcher that will run it, which can be older than this server.
+      // A release binary replaces itself above and has no launcher.
+      const launcherProtocol = launcher.protocol;
+      if (launcherProtocol === undefined) return yield* failWith(SERVICE_REQUIRED);
       yield* reportProgress("downloading");
       const paths = yield* ensurePinnedRuntimeInstalled({
         baseDir: serverConfig.baseDir,

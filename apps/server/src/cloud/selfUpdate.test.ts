@@ -20,7 +20,7 @@ import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { ServerBinaryRuntime } from "./binaryRuntime.ts";
+import { ServerBinaryRuntime, type ServerBinaryIdentity } from "./binaryRuntime.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
@@ -37,6 +37,7 @@ interface HarnessOptions {
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
   readonly policy?: ManagedPolicyDocument;
+  readonly binaryIdentity?: ServerBinaryIdentity;
 }
 
 const archiveBytes = new TextEncoder().encode("not really a tarball");
@@ -172,7 +173,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HostProcess.Arguments, []),
     // Pin the process shape: without this the reference reads the ambient
     // process, so the launcher path under test would depend on how vitest ran.
-    Effect.provideService(ServerBinaryRuntime, Option.none()),
+    Effect.provideService(ServerBinaryRuntime, Option.fromNullishOr(options.binaryIdentity)),
     Effect.provide(
       Layer.merge(
         ServerConfig.layer({ ...config, mode: options.mode ?? "web" }),
@@ -224,6 +225,29 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       failDownload = false;
       expect((yield* selfUpdate.update({ targetVersion: "1.1.0" })).updateId).toBe("launcher-id");
       expect(order).toEqual(["extract", "preflight", "accept"]);
+    }),
+  );
+
+  it.effect("updates a release binary that runs without the background service launcher", () =>
+    Effect.gen(function* () {
+      const urls: string[] = [];
+      const { selfUpdate } = yield* makeHarness({
+        managed: false,
+        binaryIdentity: {
+          target: "linux-x64",
+          repo: "SparshKaushik/s5code",
+          executablePath: "/nonexistent/s5code-server",
+        },
+        httpClient: HttpClient.make((request) =>
+          Effect.sync(() => {
+            urls.push(request.url);
+            return HttpClientResponse.fromWeb(request, new Response(null, { status: 404 }));
+          }),
+        ),
+      });
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toContain("server binary");
+      expect(urls).toHaveLength(1);
     }),
   );
 
