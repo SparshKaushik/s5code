@@ -171,6 +171,8 @@ pub fn intake(attachments: &mut Vec<String>, paths: impl IntoIterator<Item = Str
 
 pub struct FileUpload {
     path: String,
+    /// Uploaded without a `type`, so the server stores it as an image.
+    image: bool,
     name: String,
     mime: &'static str,
     size: u64,
@@ -195,9 +197,22 @@ pub fn stage(path: &str) -> Result<Staged, String> {
             "sizeBytes": bytes.len(), "dataUrl": format!("data:{mime};base64,{data}"),
         })));
     }
+    Ok(Staged::File(upload(path, &name, size, false)))
+}
+
+/// Every file through a signed upload, as web sends a draft once uploads are on: the stored
+/// records belong to no thread, so several launches can share them.
+pub fn stage_upload(path: &str) -> Result<Staged, String> {
+    let size = check(path)?;
+    let name = file_name(path);
+    let image = image_type(&name).is_some() && size <= MAX_IMAGE_BYTES;
+    Ok(Staged::File(upload(path, &name, size, image)))
+}
+
+fn upload(path: &str, name: &str, size: u64, image: bool) -> FileUpload {
     let short: String = name.trim().chars().take(MAX_NAME_CHARS).collect();
     let short = if short.trim().is_empty() { "file".to_owned() } else { short.trim().to_owned() };
-    Ok(Staged::File(FileUpload { path: path.to_owned(), mime: mime_type(&name), name: short, size }))
+    FileUpload { path: path.to_owned(), image, mime: mime_type(name), name: short, size }
 }
 
 enum Step {
@@ -211,6 +226,8 @@ pub(super) struct Upload {
     pub(super) payload: Value,
     pub(super) launch: Option<String>,
     pub(super) outgoing: Outgoing,
+    /// More messages that send the same stored attachments.
+    pub(super) also: Vec<(Value, Option<String>, Outgoing)>,
     images: Result<Vec<Value>, u64>,
     files: Vec<(FileUpload, Step)>,
 }
@@ -222,7 +239,11 @@ pub(super) fn start(net: &mut s5_net::Net, thread_id: &str, message_id: &str, st
         match item {
             Staged::Image(v) => images.push(v),
             Staged::File(f) => {
-                let request = net.request("attachments.createUploadUrl", json!({"type": "file", "name": f.name, "mimeType": f.mime, "sizeBytes": f.size}));
+                let mut params = json!({"type": "file", "name": f.name, "mimeType": f.mime, "sizeBytes": f.size});
+                if f.image {
+                    params.as_object_mut().expect("object").remove("type");
+                }
+                let request = net.request("attachments.createUploadUrl", params);
                 files.push((f, Step::Url(request)));
             }
         }
@@ -232,7 +253,7 @@ pub(super) fn start(net: &mut s5_net::Net, thread_id: &str, message_id: &str, st
     } else {
         Err(net.request("assets.persistChatAttachments", json!({"threadId": thread_id, "messageId": message_id, "attachments": images})))
     };
-    Upload { payload, launch, outgoing, images, files }
+    Upload { payload, launch, outgoing, also: Vec::new(), images, files }
 }
 
 fn failed(name: &str, error: &Value) -> Value {
@@ -276,7 +297,8 @@ pub(super) fn advance(net: &mut s5_net::Net, u: &mut Upload) -> Result<Option<Va
     let mut out = images.clone();
     for (file, step) in &u.files {
         let Step::Done(id) = step else { return Ok(None) };
-        out.push(json!({"type": "file", "id": id, "name": file.name, "mimeType": file.mime, "sizeBytes": file.size}));
+        let kind = if file.image { "image" } else { "file" };
+        out.push(json!({"type": kind, "id": id, "name": file.name, "mimeType": file.mime, "sizeBytes": file.size}));
     }
     Ok(Some(Value::Array(out)))
 }
@@ -318,6 +340,10 @@ mod tests {
         assert_eq!(v, json!({"type": "image", "name": "shot.PNG", "mimeType": "image/png", "sizeBytes": 3, "dataUrl": "data:image/png;base64,AQID"}));
         let Ok(Staged::File(f)) = stage(notes.to_str().unwrap()) else { panic!("text uploads") };
         assert_eq!((f.name.as_str(), f.mime, f.size), ("notes.txt", "text/plain", 2));
+        let Ok(Staged::File(shared)) = stage_upload(png.to_str().unwrap()) else { panic!("a shared send uploads images too") };
+        assert_eq!((shared.image, shared.mime), (true, "image/png"), "FAILED: an uploaded image keeps its kind");
+        let Ok(Staged::File(shared)) = stage_upload(notes.to_str().unwrap()) else { panic!("text uploads") };
+        assert!(!shared.image);
         assert_eq!(stage(empty.to_str().unwrap()).err().unwrap(), "'empty.txt' is empty or could not be read.");
         assert_eq!(stage(dir.join("gone.png").to_str().unwrap()).err().unwrap(), "'gone.png' is empty or could not be read.");
         assert!(stage(dir.to_str().unwrap()).is_err());

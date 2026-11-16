@@ -23,6 +23,8 @@ pub struct State {
     init: Option<u64>,
     discovery: Option<Value>,
     discovery_pending: Option<u64>,
+    /// Commit dialog files sent to the editor, until each answers.
+    opening: Vec<u64>,
 }
 
 struct Running {
@@ -470,6 +472,17 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
+    for id in std::mem::take(&mut s.ui.chat.details.git.opening) {
+        match s.src.net().and_then(|net| net.take_reply(id)) {
+            None => s.ui.chat.details.git.opening.push(id),
+            Some(reply) => {
+                if let Err(e) = reply {
+                    palette::toast_error_brief(s, "Unable to open file", Some(&palette::error_message(&e, "An error occurred.")));
+                }
+                changed = true;
+            }
+        }
+    }
     if let Some(id) = s.ui.chat.details.git.discovery_pending
         && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
     {
@@ -676,8 +689,8 @@ fn open_file(s: &mut App, path: &str) {
         return palette::toast_error(s, "Editor opening is unavailable.", None);
     };
     let target = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", root.trim_end_matches('/')) };
-    if let Some(net) = s.src.net() {
-        net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
+    if let Some(id) = s.src.net().map(|net| net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}))) {
+        s.ui.chat.details.git.opening.push(id);
     }
 }
 
