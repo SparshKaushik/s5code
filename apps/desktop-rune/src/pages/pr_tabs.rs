@@ -24,6 +24,9 @@ const DRAG_DISTANCE: f32 = 6.0;
 const TAB_GAP: f32 = 4.0;
 /// closedViewStore keeps the 20 newest closed views.
 const CLOSED_CAP: usize = 20;
+/// closedViewStore's persisted `t3code:closed-views:v2`, beside the client settings as
+/// panel/closed.rs keeps the thread panel's.
+const CLOSED_FILE: &str = "pull-request-closed-views.json";
 /// The tab strip's horizontal scroll viewport.
 pub(super) const STRIP: &str = "pr-tab-scroll";
 
@@ -38,7 +41,56 @@ pub struct Tabs {
     /// The width while the handle is dragged; it is saved when the drag ends.
     resizing: Option<f32>,
     /// Closed tabs' entries for `view.reopenClosed`, newest first.
-    closed: Vec<Value>,
+    closed: Closed,
+}
+
+/// The closed tabs, read on first use and saved on each change so they outlive a restart.
+#[derive(Default)]
+struct Closed {
+    entries: Vec<Value>,
+    loaded: bool,
+}
+
+fn encode_closed(entries: &[Value]) -> Value {
+    json!({"version": 1, "entries": entries})
+}
+
+/// Rows that are not a pull request drop, as the web's `migrate` filters with `isClosedViewEntry`.
+fn decode_closed(v: &Value) -> Vec<Value> {
+    v["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| !field(e, "url").is_empty() && e["number"].as_u64().is_some_and(|n| n > 0))
+        .take(CLOSED_CAP)
+        .cloned()
+        .collect()
+}
+
+impl Closed {
+    fn path() -> Option<std::path::PathBuf> {
+        (!cfg!(test)).then(|| crate::settings::client::sibling_path(CLOSED_FILE))
+    }
+
+    fn entries(&mut self) -> &mut Vec<Value> {
+        if !std::mem::replace(&mut self.loaded, true)
+            && let Some(saved) = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        {
+            self.entries = decode_closed(&saved);
+        }
+        &mut self.entries
+    }
+
+    fn save(&self) {
+        let Some(path) = Self::path() else { return };
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let written = serde_json::to_vec(&encode_closed(&self.entries)).ok().is_some_and(|bytes| {
+            path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &path).is_ok()
+        });
+        if !written {
+            eprintln!("pull requests: saving closed tabs failed");
+        }
+    }
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -92,33 +144,42 @@ fn activate(u: &mut Ui, url: &str) {
 fn remember(u: &mut Ui, removed: Vec<Value>) {
     let active = u.selected.clone().or_else(|| u.hidden.clone());
     let (shown, rest): (Vec<Value>, Vec<Value>) = removed.into_iter().partition(|e| active.as_deref() == Some(field(e, "url")));
+    if shown.is_empty() && rest.is_empty() {
+        return;
+    }
+    let closed = u.tabs.closed.entries();
     for e in rest.into_iter().chain(shown) {
         let url = field(&e, "url").to_string();
-        u.tabs.closed.retain(|c| field(c, "url") != url);
-        u.tabs.closed.insert(0, e);
+        closed.retain(|c| field(c, "url") != url);
+        closed.insert(0, e);
     }
-    u.tabs.closed.truncate(CLOSED_CAP);
+    closed.truncate(CLOSED_CAP);
+    u.tabs.closed.save();
 }
 
 /// ReopenClosedViewShortcut (planNextReopen, openPullRequest): the newest closed tab that isn't
 /// already showing opens at the end of the strip and shows; the key of its tab, to reveal.
 pub(super) fn reopen(u: &mut Ui) -> Option<String> {
-    while !u.tabs.closed.is_empty() {
-        let e = u.tabs.closed.remove(0);
+    if u.tabs.closed.entries().is_empty() {
+        return None;
+    }
+    let mut found = None;
+    while found.is_none() && !u.tabs.closed.entries.is_empty() {
+        let e = u.tabs.closed.entries.remove(0);
         let url = field(&e, "url").to_string();
         let open = index(u, &url).is_some();
         if open && u.selected.is_some() {
             continue;
         }
-        let key = tab_key(&e);
+        found = Some(tab_key(&e));
         if !open {
             u.tabs.open.push(e);
         }
         u.selected = Some(url);
         u.hidden = None;
-        return Some(key);
     }
-    None
+    u.tabs.closed.save();
+    found
 }
 
 /// closeSurface: closing the shown tab shows the one that takes its place, else the one before;
@@ -572,8 +633,21 @@ mod tests {
 
         let mut u = opened(&(1..=25).collect::<Vec<u64>>(), 1);
         close_all(&mut u);
-        assert_eq!(u.tabs.closed.len(), CLOSED_CAP);
+        assert_eq!(u.tabs.closed.entries.len(), CLOSED_CAP);
         assert_eq!(reopened(&mut u), Some(url(1)));
+    }
+
+    #[test]
+    fn closed_tabs_read_back_and_rows_that_are_not_pull_requests_drop() {
+        let mut tagged = pr(2);
+        tagged[crate::env::TAG] = json!("remote");
+        let entries = vec![pr(1), tagged];
+        assert_eq!(decode_closed(&encode_closed(&entries)), entries, "the environment tag survives a restart");
+        let saved = json!({"entries": [{"url": "", "number": 3}, {"url": url(4)}, {"url": url(5), "number": 0}, "x", pr(6)]});
+        assert_eq!(decode_closed(&saved), vec![pr(6)]);
+        assert!(decode_closed(&json!(null)).is_empty());
+        let many: Vec<Value> = (1..=25).map(pr).collect();
+        assert_eq!(decode_closed(&encode_closed(&many)).len(), CLOSED_CAP);
     }
 
     #[test]

@@ -192,11 +192,13 @@ fn escapes_fold(kind: &str) -> bool {
 /// Where "Edit from here" rewinds each prompt to, by user message item id: the ready checkpoint
 /// after the run before it, or the thread's start checkpoint for the first run
 /// (deriveRevertTurnCountByUserMessageId + findRevertCheckpoint). Inherited history, steers and
-/// the turn still running have none.
-pub fn revert_targets(p: &Value) -> HashMap<String, (String, String)> {
+/// the turn still running have none, nor does a checkpoint the provider's conversation can't
+/// return to; with older history unloaded (`paged`), the first loaded run is not the start.
+pub fn revert_targets(p: &Value, paged: bool) -> HashMap<String, (String, String)> {
     let ready: Vec<&Value> = array(p, "checkpoints").iter().filter(|c| s(c, "status") == "ready").collect();
-    let start = ready.iter().rfind(|c| c["ordinalWithinScope"] == 0 && c["appRunOrdinal"].is_null());
-    let after = |run: &str| ready.iter().rfind(|c| s(c, "runId") == run);
+    let rewindable = rewindable(p);
+    let start = ready.iter().rfind(|c| c["ordinalWithinScope"] == 0 && c["appRunOrdinal"].is_null()).filter(|_| !paged && rewindable.contains(&0));
+    let after = |run: &str| ready.iter().rfind(|c| s(c, "runId") == run).filter(|c| c["appRunOrdinal"].as_i64().is_some_and(|n| rewindable.contains(&n)));
     let runs: HashMap<_, _> = array(p, "runs").iter().map(|r| (s(r, "id"), r)).collect();
     let entries: Vec<(&Value, bool)> = if p["visibleTurnItems"].is_array() {
         let mut visible: Vec<_> = array(p, "visibleTurnItems").iter().collect();
@@ -228,6 +230,36 @@ pub fn revert_targets(p: &Value) -> HashMap<String, (String, String)> {
         }
         if let Some(Some(c)) = target.get(run) {
             out.insert(s(item, "id").to_owned(), (s(c, "scopeId").to_owned(), s(c, "id").to_owned()));
+        }
+    }
+    out
+}
+
+/// `deriveAvailableRevertTurnCounts`: the turn counts the provider conversation can rewind to —
+/// the start, and each run whose active attempt last ran on the thread's active provider thread,
+/// while that thread has a session on the thread's current instance.
+fn rewindable(p: &Value) -> HashSet<i64> {
+    let mut out = HashSet::new();
+    let thread = &p["thread"];
+    let active = s(thread, "activeProviderThreadId");
+    let Some(provider) = array(p, "providerThreads").iter().find(|t| !active.is_empty() && s(t, "id") == active) else { return out };
+    if s(provider, "providerSessionId").is_empty() || s(provider, "providerInstanceId") != s(&thread["modelSelection"], "instanceId") {
+        return out;
+    }
+    out.insert(0);
+    let turns = array(p, "providerTurns");
+    for run in array(p, "runs") {
+        let attempt = s(run, "activeAttemptId");
+        if attempt.is_empty() {
+            continue;
+        }
+        let latest = turns.iter().filter(|t| s(t, "runAttemptId") == attempt).max_by_key(|t| t["ordinal"].as_i64().unwrap_or(0));
+        let turn = latest.or_else(|| {
+            let id = s(array(p, "attempts").iter().find(|a| s(a, "id") == attempt)?, "providerTurnId");
+            turns.iter().find(|t| !id.is_empty() && s(t, "id") == id)
+        });
+        if let (Some(_), Some(n)) = (turn.filter(|t| s(t, "providerThreadId") == active), run["ordinal"].as_i64()) {
+            out.insert(n);
         }
     }
     out
@@ -914,8 +946,20 @@ mod tests {
 
     #[test]
     fn prompts_rewind_to_the_checkpoint_before_their_run() {
-        let p = json!({
-            "runs": [{"id":"r1","status":"completed"},{"id":"r2","status":"completed"},{"id":"r3","status":"running"}],
+        let mut p = json!({
+            "thread": {"activeProviderThreadId": "pt", "modelSelection": {"instanceId": "codex"}},
+            "providerThreads": [{"id": "pt", "providerSessionId": "sess", "providerInstanceId": "codex"}],
+            "runs": [
+                {"id":"r1","status":"completed","ordinal":1,"activeAttemptId":"a1"},
+                {"id":"r2","status":"completed","ordinal":2,"activeAttemptId":"a2"},
+                {"id":"r3","status":"running","ordinal":3,"activeAttemptId":"a3"}
+            ],
+            "attempts": [{"id":"a1","providerTurnId":null},{"id":"a2","providerTurnId":"t2"}],
+            "providerTurns": [
+                {"id":"t1a","runAttemptId":"a1","ordinal":1,"providerThreadId":"old"},
+                {"id":"t1b","runAttemptId":"a1","ordinal":2,"providerThreadId":"pt"},
+                {"id":"t2","runAttemptId":null,"ordinal":3,"providerThreadId":"pt"}
+            ],
             "checkpoints": [
                 {"id":"c0","scopeId":"s","runId":null,"status":"ready","ordinalWithinScope":0,"appRunOrdinal":null},
                 {"id":"c1","scopeId":"s","runId":"r1","status":"ready","ordinalWithinScope":1,"appRunOrdinal":1},
@@ -929,11 +973,18 @@ mod tests {
                 {"type":"user_message","id":"u3","runId":"r3","inputIntent":"turn_start","ordinal":5}
             ]
         });
-        let t = revert_targets(&p);
+        let t = revert_targets(&p, false);
         assert_eq!(t.get("u1"), Some(&("s".to_owned(), "c0".to_owned())));
         assert_eq!(t.get("u2"), Some(&("s".to_owned(), "c1".to_owned())));
         // A steer is not a turn start; the running turn can't be rewound; r2's checkpoint failed.
         assert_eq!(t.len(), 2);
+        assert_eq!(rewindable(&p), HashSet::from([0, 1, 2]), "FAILED: a run counts by its latest provider turn, else its attempt's");
+
+        assert!(!revert_targets(&p, true).contains_key("u1"), "FAILED: a paged window's first run is not the thread start");
+        p["providerTurns"][1]["providerThreadId"] = json!("old");
+        assert_eq!(revert_targets(&p, false).keys().collect::<Vec<_>>(), ["u1"], "FAILED: r1 last ran on another provider thread");
+        p["thread"]["modelSelection"]["instanceId"] = json!("claude");
+        assert!(revert_targets(&p, false).is_empty(), "FAILED: a switched provider can't rewind its conversation");
     }
 
     #[test]

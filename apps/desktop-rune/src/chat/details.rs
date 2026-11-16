@@ -17,6 +17,7 @@ use crate::shell::palette;
 
 pub mod automations;
 pub mod child_work;
+pub mod cleanup;
 mod git;
 pub mod html_render;
 pub mod items;
@@ -52,6 +53,7 @@ pub struct Ui {
     /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
     drafts: HashMap<String, DraftRun>,
     run_on: run_on::State,
+    cleanup: cleanup::State,
     pub git: git::State,
     pub scripts: scripts::State,
     pub checkout: Option<pr::Checkout>,
@@ -612,6 +614,22 @@ fn draft_run_mut(s: &mut App) -> &mut DraftRun {
     s.ui.chat.details.drafts.entry(key).or_insert(fallback)
 }
 
+/// A new-thread draft's effective branch, as its branch toolbar resolves it: a picked existing
+/// worktree's branch, a new worktree's base, else the project checkout's current branch.
+pub(crate) fn draft_branch(s: &App, key: &str) -> Option<String> {
+    let project = key.strip_prefix("home:")?;
+    let preset = s.ui.chat.home.workspace.as_ref().filter(|(p, w)| p == project && w["type"] == "existing_worktree");
+    if let Some((_, w)) = preset {
+        return w["branch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned);
+    }
+    let root = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| data::s(p, "workspaceRoot"))?;
+    let current = s.state().vcs.get(root).and_then(|v| v["local"]["refName"].as_str()).filter(|b| !b.is_empty()).map(str::to_owned);
+    match s.ui.chat.details.drafts.get(key).filter(|r| r.worktree) {
+        Some(run) => run.base.clone().or(current),
+        None => current,
+    }
+}
+
 /// The branch picker chooses the new worktree's base instead of switching the checkout.
 fn selecting_base(s: &App) -> bool {
     draft_run(s).is_some_and(|r| r.worktree)
@@ -938,7 +956,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | cleanup::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
     poll_branch(s) || changed
 }
 
@@ -1026,7 +1044,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
 const PREFERRED_EDITOR: &str = "preferredEditor";
 
 /// `usePreferredEditor`: the editor last picked, while it is still installed, else the first.
-fn preferred_editor(s: &App) -> Option<(String, String)> {
+pub(crate) fn preferred_editor(s: &App) -> Option<(String, String)> {
     let stored = s.client_settings.values.get(PREFERRED_EDITOR).and_then(|v| v.as_str());
     pick_editor(editors(s), stored)
 }
@@ -1488,6 +1506,7 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     pr::overlays(s, t, &mut out);
     restore_dialog(s, t, &mut out);
     composer::fanout::retry_dialog(s, t, &mut out);
+    cleanup::dialog(s, t, &mut out);
     items::overlay(s, t, &mut out);
     child_work::overlay(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {

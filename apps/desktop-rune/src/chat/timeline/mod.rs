@@ -928,7 +928,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     };
     let (follow, composer_h, banner_h) = pane(app, cx, thread_id);
     let (rows, meta) = rows::derive_with_meta(&view.projection, app.now_ms);
-    let targets = rows::revert_targets(&view.projection);
+    let targets = rows::revert_targets(&view.projection, view.has_more_history);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
     // Replies whose meta row moved below their trailing work.

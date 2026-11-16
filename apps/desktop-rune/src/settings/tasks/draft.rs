@@ -590,7 +590,7 @@ pub fn iso(ms: i64) -> String {
 }
 
 /// `Intl.DateTimeFormat` with `dateStyle: "medium", timeStyle: "short"` in English.
-fn medium_short(wall: i64) -> String {
+pub(crate) fn medium_short(wall: i64) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let (y, m, d) = civil_from_days(wall.div_euclid(DAY));
     let minutes = wall.rem_euclid(DAY) / 60_000;

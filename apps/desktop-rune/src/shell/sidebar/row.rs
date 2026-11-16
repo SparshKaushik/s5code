@@ -391,6 +391,23 @@ fn over_srgb(top: Color, bottom: Color) -> Color {
 }
 
 /// The row surface: route row filled, selected rows tinted, hover lifts the rest.
+/// `useThreadHasUnsentDraft`, except on the open thread: its composer holds content.
+fn unsent_draft(s: &App, model: &Model, th: &Thread) -> bool {
+    model.route.as_deref() != Some(th.id.as_str()) && s.ui.chat.composer.drafts.get(&th.id).is_some_and(crate::chat::composer::has_user_content)
+}
+
+fn draft_pen(t: &T) -> El {
+    icon(&i::SQUARE_PEN, 12.0).color(t.sb.warning_foreground).shrink().help("Unsent draft")
+}
+
+/// The row surface; an unsent draft tints an idle row (`draftSurfaceClassName`).
+fn row_surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: bool, draft: bool) -> El {
+    if draft && !active && !selected && !dragging {
+        return surface(e, t, false, false, false, false).fill(t.sb.warning.alpha_mul(if hovered { 0.08 } else { 0.04 }));
+    }
+    surface(e, t, active, selected, hovered, dragging)
+}
+
 fn surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: bool) -> El {
     let e = e.radius(radius::MD).clip_rounded(radius::MD).press(t.sb.sidebar_row_active.alpha_mul(0.5));
     if dragging {
@@ -455,7 +472,12 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         t.sb.foreground
     };
 
-    let mut line1 = row().h(20.0).gap(6.0).center_y().child(super::favicon::mark(s, t, &th.project_id, model.project(th), false, 16.0));
+    let draft = unsent_draft(s, model, th);
+    let mut line1 = row().h(20.0).gap(6.0).center_y();
+    if draft {
+        line1 = line1.child(draft_pen(t));
+    }
+    line1 = line1.child(super::favicon::mark(s, t, &th.project_id, model.project(th), false, 16.0));
     if th.pinned {
         line1 = line1.child(icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
     }
@@ -474,6 +496,10 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered { 0.0 } else { 1.0 }));
         if hovered {
             let mut actions = row().h_full();
+            if draft {
+                let id = th.id.clone();
+                actions = actions.child(hover_action(t, format!("sb-discard-{}", th.id), &i::X, 14.0, None, 6.0).help("Discard draft").on_press(move |s: &mut App| super::drafts::discard(s, &id)));
+            }
             // `showSnoozeButton`: operate access, a loaded config, and a thread that can snooze.
             if th.can_snooze() && super::can_operate(s, &[th]) && super::config_of(s, th).is_some() {
                 let id = th.id.clone();
@@ -501,8 +527,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let mut meta = row().mt(2.0).gap(6.0).center_y();
             if let Some(branch) = branch {
                 // `ThreadWorktreeIndicator`: a worktree thread marks its branch.
-                if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
-                    meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+                if let Some(tip) = th.worktree.as_deref().and_then(|w| crate::chat::details::cleanup::worktree_tip(w, branch)) {
+                    meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink().label(tip.clone()).help(tip));
                 }
                 meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
             } else {
@@ -523,7 +549,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             body = body.child(line2);
         }
     }
-    let mut e = surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some());
+    let mut e = row_surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some(), draft);
     if receded && status == Status::Working && !hovered {
         e = e.opacity(0.7);
     }
@@ -610,10 +636,19 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     let two_line = rc.folder && crate::settings::value(s, "boringSidebarMultilineRows") == true;
     let meta = two_line.then(|| Meta::of(s, th)).flatten();
     let mut r = if two_line { row().h(24.0).gap(10.0).center_y() } else { row().h(36.0).px(10.0).gap(10.0).center_y() };
+    let draft = unsent_draft(s, model, th);
     r = if rc.folder {
-        if two_line { r } else { r.pl(36.0) }.child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
+        if two_line { r } else { r.pl(36.0) }
     } else {
-        r.child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0)).child(title(s, th, t, theme::TEXT_SM, title_color))
+        r.child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0))
+    };
+    if draft {
+        r = r.child(draft_pen(t));
+    }
+    r = if rc.folder {
+        r.child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
+    } else {
+        r.child(title(s, th, t, theme::TEXT_SM, title_color))
     };
     if two_line && meta.is_none() {
         r = r.child(trailing_icons(s, t, model, th, false));
@@ -655,7 +690,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         None if two_line => col().px(10.0).py(6.0).pl(36.0).child(r.w_full()),
         None => r,
     };
-    let e = surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some());
+    let e = row_surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some(), draft);
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
@@ -704,8 +739,8 @@ fn trailing_icons(s: &App, t: &T, model: &Model, th: &Thread, named: bool) -> El
 fn meta_line(s: &App, t: &T, model: &Model, th: &Thread, m: Meta) -> El {
     let mut meta = row().mt(2.0).h(16.0).gap(6.0).center_y();
     if let Some(branch) = &th.branch {
-        if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
-            meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+        if let Some(tip) = th.worktree.as_deref().and_then(|w| crate::chat::details::cleanup::worktree_tip(w, branch)) {
+            meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink().label(tip.clone()).help(tip));
         }
         meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
     } else if let Some(machine) = m.machine.clone() {
@@ -1131,6 +1166,26 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_with_unsent_text_is_marked_except_while_open() {
+        let mut s = App::new();
+        s.route = crate::Route::Settings("general".into());
+        let id = Model::build(&s).threads[0].id.clone();
+        let marked = |s: &App| {
+            let model = Model::build(s);
+            unsent_draft(s, &model, model.thread(&id).unwrap())
+        };
+        s.ui.chat.composer.drafts.entry(id.clone()).or_default();
+        assert!(!marked(&s), "FAILED: an empty draft is no unsent draft");
+        s.ui.chat.composer.drafts.get_mut(&id).unwrap().edit = rune::TextEdit::new("half a thought");
+        assert!(marked(&s));
+        s.route = crate::Route::Thread(id.clone());
+        assert!(!marked(&s), "FAILED: the open thread's composer shows it already");
+        s.route = crate::Route::Settings("general".into());
+        super::super::drafts::discard(&mut s, &id);
+        assert!(!marked(&s), "FAILED: discarding clears the marker");
+    }
 
     #[test]
     fn a_two_line_rows_meta_line_shows_only_with_something_to_say() {

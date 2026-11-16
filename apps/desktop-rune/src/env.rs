@@ -486,6 +486,14 @@ pub fn remove(s: &mut App, id: &str) {
     s.ui.env.alternates.remove(id);
     s.ui.env.error = persist(s);
     ssh::forget(s, id);
+    saving_failed(s, "Could not remove backend");
+}
+
+/// Web toasts a failed save from the Connections list, where no dialog shows the error.
+fn saving_failed(s: &mut App, title: &str) {
+    if let Some(error) = s.ui.env.error.clone() {
+        crate::shell::palette::toast_error(s, title, Some(&error));
+    }
 }
 
 /// Writes the saved environments, returning the error the settings page shows.
@@ -514,12 +522,43 @@ pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
         s.ui.env.off.push(id.to_owned());
     }
     s.ui.env.error = persist(s);
+    saving_failed(s, if enabled { "Could not switch backend on" } else { "Could not switch backend off" });
+}
+
+/// `ORCHESTRATION_PROTOCOL_VERSION`, which the transport asks for.
+const PROTOCOL: u64 = 2;
+
+/// A saved environment as pairing sees it: id, label and the addresses of its routes.
+type Known = (String, String, Vec<String>);
+
+/// Why `preparePairingRegistration` refuses a server before spending the code: an address
+/// claiming a saved environment it isn't a route of (`assertKnownAddress`, skipped when adding
+/// a route), or another orchestration protocol (`orchestrationProtocolCompatibilityError`).
+fn pairing_refusal(descriptor: &Value, base: &str, known: &[Known], adding_route: bool) -> Option<String> {
+    let id = crate::data::s(descriptor, "environmentId");
+    let same = |a: &str| a.trim_end_matches('/') == base.trim_end_matches('/');
+    if !adding_route
+        && let Some((_, label, bases)) = known.iter().find(|(k, ..)| k == id)
+        && !bases.iter().any(|b| same(b))
+    {
+        return Some(format!("That address claims to be {label}, which is already saved. Add it as a route from that environment's settings instead."));
+    }
+    let label = descriptor["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(base);
+    // Servers shipped before negotiation speak the first protocol.
+    match descriptor["orchestrationProtocolVersion"].as_u64().unwrap_or(1) {
+        PROTOCOL => None,
+        v if v > PROTOCOL => Some(format!("This client is not supported by this server. Update your app or use a compatible release to connect to {label}.")),
+        _ => Some(format!("This client requires a newer server. Update T3 Code on {label} to connect.")),
+    }
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
-fn pair(host: String, code: String) -> Result<Saved, String> {
+fn pair(host: String, code: String, known: Vec<Known>, adding_route: bool) -> Result<Saved, String> {
     let (base, credential) = s5_net::resolve_pairing(&host, &code)?;
     let descriptor = s5_net::fetch_descriptor(&base)?;
+    if let Some(refusal) = pairing_refusal(&descriptor, &base, &known, adding_route) {
+        return Err(refusal);
+    }
     let bearer = s5_net::exchange_bootstrap(&base, &credential).map_err(|e| format!("The pairing code was refused: {e}"))?;
     let id = descriptor["environmentId"].as_str().unwrap_or_default().to_owned();
     let label = descriptor["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(&base).to_owned();
@@ -573,10 +612,12 @@ fn start_pairing(s: &mut App, host: String, code: String) {
         s.ui.env.error = Some(e);
         return;
     }
+    let known: Vec<Known> = s.ui.env.saved.iter().map(|e| (e.id.clone(), e.label.clone(), routes(s, &e.id).into_iter().map(|r| r.base).collect())).collect();
+    let adding_route = s.ui.env.route_for.is_some();
     let (tx, rx) = channel();
     let waker = s.ui.panel.waker.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(pair(host, code));
+        let _ = tx.send(pair(host, code, known, adding_route));
         if let Some(w) = waker {
             w();
         }
@@ -989,6 +1030,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         crate::wizard::scene_computers(s);
     }),
     ("wizard-import-denied", crate::wizard::scene_import_denied),
+    ("wizard-setup-terminal", crate::wizard::scene_setup_terminal),
     ("wizard-pairing-link", |s| {
         scene_failing(s);
         crate::wizard::scene_pairing(s);
@@ -1001,6 +1043,28 @@ mod tests {
 
     fn saved(id: &str) -> Saved {
         Saved { id: id.into(), label: format!("Box {id}"), base: format!("https://{id}.example"), bearer: "token".into() }
+    }
+
+    #[test]
+    fn pairing_refuses_a_saved_machine_at_a_new_address_and_other_protocols() {
+        let descriptor = |id: &str, version: Option<u64>| json!({"environmentId": id, "label": "Box", "orchestrationProtocolVersion": version});
+        let known = vec![("box".to_string(), "Box".to_string(), vec!["https://box.example".to_string(), "http://10.0.0.2:3773".to_string()])];
+        assert_eq!(pairing_refusal(&descriptor("box", Some(2)), "https://box.example/", &known, false), None, "FAILED: a saved route's address pairs again");
+        assert_eq!(pairing_refusal(&descriptor("new", Some(2)), "https://new.example", &known, false), None);
+        assert_eq!(
+            pairing_refusal(&descriptor("box", Some(2)), "https://elsewhere.example", &known, false).as_deref(),
+            Some("That address claims to be Box, which is already saved. Add it as a route from that environment's settings instead.")
+        );
+        assert_eq!(pairing_refusal(&descriptor("box", Some(2)), "https://elsewhere.example", &known, true), None, "FAILED: adding a route is how a new address joins");
+        assert_eq!(
+            pairing_refusal(&descriptor("new", Some(3)), "https://new.example", &known, false).as_deref(),
+            Some("This client is not supported by this server. Update your app or use a compatible release to connect to Box.")
+        );
+        assert_eq!(
+            pairing_refusal(&descriptor("new", None), "https://new.example", &known, false).as_deref(),
+            Some("This client requires a newer server. Update T3 Code on Box to connect."),
+            "FAILED: a server from before negotiation speaks protocol 1"
+        );
     }
 
     #[test]

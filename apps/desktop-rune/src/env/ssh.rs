@@ -517,6 +517,12 @@ pub fn adding(s: &App) -> bool {
     busy(&s.ui.env.ssh, ADD)
 }
 
+/// Whether any SSH config host is not saved yet, so the host field has suggestions to filter.
+pub fn has_unsaved(s: &App) -> bool {
+    let ui = &s.ui.env.ssh;
+    ui.hosts.iter().any(|h| !ui.targets.iter().any(|(_, t)| t.alias == h.alias))
+}
+
 /// SSH config hosts not saved yet that match the host field: alias and hostname.
 pub fn suggestions(s: &App) -> Vec<(String, String)> {
     let ui = &s.ui.env.ssh;
