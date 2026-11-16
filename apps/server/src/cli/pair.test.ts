@@ -698,13 +698,22 @@ describe("t3 pair", () => {
         runCli(["pair", "--base-dir", baseDir, "--tailscale"]).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(FetchHttpClient.Fetch, async (input) => {
-            if (String(input) === "http://127.0.0.1:3773/.well-known/t3/environment") {
-              return Response.json(testDescriptor);
-            }
-            assert.equal(String(input), "https://pair-test.tail.ts.net/.well-known/t3/environment");
-            return new Response(null, { status: 503 });
-          }),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            Object.assign(
+              async (input: Parameters<typeof fetch>[0]) => {
+                if (String(input) === "http://127.0.0.1:3773/.well-known/t3/environment") {
+                  return Response.json(testDescriptor);
+                }
+                assert.equal(
+                  String(input),
+                  "https://pair-test.tail.ts.net/.well-known/t3/environment",
+                );
+                return new Response(null, { status: 503 });
+              },
+              { preconnect: () => {} },
+            ),
+          ),
           Effect.flip,
         ),
       );
