@@ -201,6 +201,7 @@ function layerPool(
           pickFiles: () => Effect.die("unexpected file picker"),
           showMessageBox: () => Effect.die("unexpected message box"),
           showErrorBox: () => Effect.void,
+          confirm: () => Effect.die("unexpected confirm"),
         } satisfies ElectronDialog.ElectronDialog["Service"]),
         ElectronApp.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
