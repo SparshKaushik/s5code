@@ -1071,6 +1071,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "data/models.csv", "provider,model,context,notes\nClaude,Opus 5.5,1000000,\"Default for \"\"hard\"\" turns\"\nClaude,Haiku 5.5,200000,Cheap replays\nCodex,Luna,400000,\nCursor,Auto,128000,\"Multi\nline\"\n", true);
     }),
+    ("panel-file-mermaid", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "docs/turn.mmd", "flowchart LR\n  Client -->|command| Orchestrator\n  Orchestrator -->|events| Sink[(Event sink)]\n  Sink --> Projections\n  Sink --> Worker[Effect worker]\n  Worker -->|result command| Orchestrator\n", true);
+    }),
     ("panel-file-no-preview", |s| {
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "docs/spec.pdf", "", false);
