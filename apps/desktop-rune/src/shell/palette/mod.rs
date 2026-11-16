@@ -62,7 +62,8 @@ enum Action {
     Navigate(Route),
     Page(&'static str),
     Appearance(&'static str),
-    Theme(String),
+    /// A theme for both appearances, or for the one it has (`setThemeHalf`).
+    Theme(String, Option<&'static str>),
     PinProject(String, bool),
     /// A project group's pin, set on every member (`toggleProjectGroupPin`).
     PinGroup(Vec<String>, bool),
@@ -103,6 +104,8 @@ enum Trailing {
     Check(bool),
     /// The theme or appearance in use: "Current" in muted text.
     Current,
+    /// A theme row: "Current" when in use, then a 12px preview per appearance it has.
+    Theme(bool, serde_json::Value, Vec<&'static str>),
     /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
     /// It writes every member of the project's group together.
     Pin(Vec<String>, bool),
@@ -269,7 +272,7 @@ fn item(
         pick: (0, false),
         references: vec![],
         fields: match &action {
-            Action::Theme(_) | Action::Appearance(_) => vec![],
+            Action::Theme(..) | Action::Appearance(_) => vec![],
             Action::Restart(_) => [
                 "restart", "reset", "reload", "agent", "session", "skills", "plugins", "mcp",
             ]
@@ -296,23 +299,32 @@ fn item(
     }
 }
 
-/// "Change theme": every theme in the library, the one the current mode uses marked Current.
+/// "Change theme": T3 Code, the built-ins, saved themes, then the environment's published ones;
+/// the theme the rendered appearance uses is Current.
 fn theme_items(s: &App) -> Vec<Item> {
-    // Under System the palette cannot see the OS mode; the halves normally agree.
-    let dark = s.appearance != Appearance::Light;
+    let dark = s.ui.shell.dark.get();
     let current = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(serde_json::Value::as_str).unwrap_or("t3-code").to_owned();
     crate::settings::themes::library(s)
-        .iter()
+        .into_iter()
         .map(|v| {
-            let id = data::s(v, "id").to_owned();
-            let mut row = item(data::s(v, "label"), "Change theme", &icons::PALETTE, "", Action::Theme(id.clone()));
-            row.fields = keywords(&[data::s(v, "label"), "theme", "appearance"]);
-            if id == current {
-                row.trailing = Trailing::Current;
-            }
+            let id = data::s(&v, "id").to_owned();
+            let modes = crate::settings::themes::modes(&v);
+            let half = (modes.len() == 1 && id != "t3-code").then(|| modes[0]);
+            let mut row = item(data::s(&v, "label"), "Change theme", &icons::PALETTE, "", Action::Theme(id.clone(), half));
+            row.description = half.map(|mode| format!("For {mode} mode"));
+            row.fields = keywords(&[data::s(&v, "label"), "theme", "appearance"]);
+            row.trailing = Trailing::Theme(id == current, v, modes);
             row
         })
         .collect()
+}
+/// `notifyThemeSaveFailure` when the client settings file could not take the choice.
+fn theme_saved(s: &mut App) -> bool {
+    if s.client_settings.error.is_none() {
+        return true;
+    }
+    toast_error(s, "Couldn't save theme selection", Some("Try again."));
+    false
 }
 /// "Change appearance": System, Light and Dark, the saved mode marked Current.
 fn appearance_items(s: &App) -> Vec<Item> {
@@ -1581,10 +1593,20 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             s.ui.settings.project = Some(project);
             crate::shell::sidebar::go(s, Route::Settings("projects".into()))
         }
-        Action::Appearance(mode) => crate::settings::update(s, "appearance", serde_json::json!(mode)),
-        Action::Theme(id) => {
-            crate::settings::update(s, "themeLight", serde_json::json!(id));
-            crate::settings::update(s, "themeDark", serde_json::json!(id));
+        Action::Appearance(mode) => {
+            crate::settings::update(s, "appearance", serde_json::json!(mode));
+            theme_saved(s);
+        }
+        Action::Theme(id, half) => {
+            let keys: &[&str] = match half {
+                Some("dark") => &["themeDark"],
+                Some(_) => &["themeLight"],
+                None => &["themeLight", "themeDark"],
+            };
+            for key in keys {
+                crate::settings::update(s, key, serde_json::json!(id));
+            }
+            theme_saved(s);
         }
         Action::PinProject(project, pinned) => actions::pin_project(s, &project, pinned),
         Action::PinGroup(members, pinned) => {
@@ -1720,7 +1742,9 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             Appearance::Dark => ("system", "System"),
         };
         crate::settings::update(s, "appearance", serde_json::json!(mode));
-        toast(s, &format!("Appearance: {label}"), None);
+        if theme_saved(s) {
+            toast(s, &format!("Appearance: {label}"), None);
+        }
         return true;
     }
     if crate::panel::shortcut(s, e, "thread.copyReference") && actions::copy_thread(s, tx) {
@@ -2099,6 +2123,13 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
+        Trailing::Theme(current, theme, modes) => {
+            if *current {
+                entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7)));
+            }
+            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
+            entry = entry.child(row().gap(4.0).center_y().children(circles));
+        }
         Trailing::Pin(members, pinned) if *pinned || selected => {
             let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
@@ -2311,6 +2342,31 @@ mod tests {
         assert!(leave_emptied_page(&mut s));
         assert_eq!(s.ui.shell.palette.page, "add-project");
         assert!(!leave_emptied_page(&mut s), "only the browse page leaves on an empty field");
+    }
+
+    #[test]
+    fn a_one_appearance_theme_sets_only_its_half_and_a_failed_save_says_so() {
+        let mut s = App::new();
+        for key in ["themeLight", "themeDark"] {
+            s.client_settings.values.insert(key.into(), serde_json::json!("t3-code"));
+        }
+        let dusk = serde_json::json!({"id":"custom-dusk","label":"Dusk","appearance":"dark","colors":{"accent":"#123456"}});
+        s.client_settings.values.insert("customThemes".into(), serde_json::json!([dusk]));
+        let rows = theme_items(&s);
+        assert_eq!(rows[0].title, "T3 Code", "FAILED: the standard card leads");
+        assert!(matches!(&rows[0].trailing, Trailing::Theme(true, _, modes) if modes == &["light", "dark"]));
+        let dusk = rows.iter().find(|v| v.title == "Dusk").unwrap();
+        assert_eq!(dusk.description.as_deref(), Some("For dark mode"));
+        execute(&mut s, dusk.action.clone(), &mut Tx::default());
+        let value = |s: &App, key: &str| s.client_settings.values[key].as_str().unwrap().to_owned();
+        assert_eq!((value(&s, "themeLight"), value(&s, "themeDark")), ("t3-code".into(), "custom-dusk".into()));
+        let grove = rows.iter().find(|v| v.title == "Grove").unwrap().action.clone();
+        execute(&mut s, grove.clone(), &mut Tx::default());
+        assert_eq!((value(&s, "themeLight"), value(&s, "themeDark")), ("grove".into(), "grove".into()), "FAILED: a two-appearance theme is whole");
+        assert_eq!(toast_title(&s), None);
+        s.client_settings.error = Some("Could not save client settings: denied".into());
+        execute(&mut s, grove, &mut Tx::default());
+        assert_eq!(toast_title(&s), Some("Couldn't save theme selection"));
     }
 
     #[test]

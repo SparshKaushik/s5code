@@ -43,7 +43,8 @@ fn subscribe(route: &Route, sub: &Subscription) -> Value {
             "orchestration.subscribeShell",
             json!({"requestCompletionMarker":true}),
         ),
-        Route::Config => ("subscribeServerConfig", json!({})),
+        // Opt in to `environmentThemesUpdated`, which the palette lists as published themes.
+        Route::Config => ("subscribeServerConfig", json!({"environmentThemes": true})),
         Route::Thread(id) => (
             "orchestration.subscribeThread",
             json!({"threadId":id,"requestCompletionMarker":true,"acceptBoundedSnapshot":true,"acceptDeferredWork":true}),
