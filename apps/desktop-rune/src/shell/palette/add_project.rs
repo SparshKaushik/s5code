@@ -998,6 +998,11 @@ mod tests {
         assert_eq!(s.ui.shell.palette.page, "add-project", "one connected environment skips the list");
         assert_eq!(new_projects_root(&s).as_deref(), Some("/home/me/new"));
         assert!(environment_items(&s)[1].disabled, "a disconnected environment is listed but cannot be picked");
+        s.ui.shell.palette.query = rune::TextEdit::new("~/projects/");
+        assert_eq!(browse_error(&s), None);
+        crate::settings::permissions::set_session(&mut s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert_eq!(browse_error(&s).as_deref(), Some("This connection cannot browse host folders."));
+        assert!(!browse_pending(&s), "FAILED: a denied session is an answer, not a wait");
 
         let mut closed = ready("/home/me/new");
         closed.conn = s5_net::Conn::Closed("gone".into());

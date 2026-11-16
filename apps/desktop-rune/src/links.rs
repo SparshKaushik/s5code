@@ -1,8 +1,9 @@
 //! Prompt links (packages/shared/src/promptLinks.ts): `s5code://new?prompt=…&repo=owner/name`,
 //! or the hosted app's `/new?…`, open a new-thread draft holding the prompt on the repository's
 //! project (NewThreadLinkView): with no project for it, they offer to clone it; with no
-//! repository, the draft opens in the Scratch project. Nothing is sent; the person reads the
-//! prompt in the composer first. They arrive on the command line (Linux and Windows hand links
+//! repository, the draft opens in the Scratch project. `/new?pr=owner/name/123` opens the
+//! thread already on that pull request, else offers to check it out. Nothing is sent; the
+//! person reads the prompt in the composer first. They arrive on the command line (Linux and Windows hand links
 //! to a new process) or through macOS's `on_open_url`, and wait for the shell before they land.
 //!
 //! Web pages the OS hands over (macOS: http links and `.html` files) open in a thread's browser,
@@ -20,11 +21,14 @@ const REPOSITORY_HOSTS: [&str; 3] = ["github.com", "git.cafe", "staging.git.cafe
 
 #[derive(Debug, PartialEq)]
 pub struct NewThread {
+    /// Empty only on a pull-request link, whose prompt is optional.
     prompt: String,
+    /// The pull request's repository on a pull-request link.
     repository: Option<(String, String)>,
     /// The provider driver the link asks for, lowercased, and its model.
     provider: Option<String>,
     model: Option<String>,
+    pull_request: Option<u64>,
 }
 
 #[derive(Default)]
@@ -47,9 +51,20 @@ enum Landing {
     Missing(NewThread),
     /// `projectClone.start` sent to `env` for the new project `project`.
     Cloning { request: u64, env: String, project: String, link: NewThread },
-    /// A scratch project is starting for a link without a repository; holds the prompt.
-    Scratch(String),
+    /// The clone started; `waitForProject` gives its project until `deadline` to appear.
+    Awaiting { project: String, link: NewThread, deadline: std::time::Instant },
+    /// A scratch project is starting for the link's draft.
+    Scratch(NewThread),
+    /// `pullRequests.linkedThreads` on each of the repository's projects, most recent first:
+    /// (environment, request, reply). `project` is where a checkout would go.
+    Lookup { requests: Vec<(String, u64, Option<s5_net::Reply>)>, link: NewThread, project: String },
+    /// "Check out owner/name#N?": checkout runs the pull request's setup script, so a link alone
+    /// never starts it.
+    Checkout { link: NewThread, project: String, started: bool },
 }
+
+/// `waitForProject`'s 5 seconds.
+const CLONE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 const CANNOT_CLONE: &str = "This machine cannot clone from a link. Update T3 Code on it, or clone the repository from the command palette.";
 const NO_SCRATCH: &str = "None of your machines can start a thread without a project right now.";
@@ -106,18 +121,58 @@ fn sanitize(raw: &str) -> (String, usize) {
     (text.trim().to_owned(), dropped)
 }
 
+/// What follows `https://github.com/` (any case, http, `www.`), if `value` starts with it.
+fn github_path(value: &str) -> Option<&str> {
+    ["https://github.com/", "http://github.com/", "https://www.github.com/", "http://www.github.com/"]
+        .iter()
+        .find_map(|p| value.get(..p.len()).filter(|head| head.eq_ignore_ascii_case(p)).map(|_| &value[p.len()..]))
+}
+
 /// `parsePromptLinkRepository`: `owner/name` or a github.com repository URL.
 fn repository(value: &str) -> Option<(String, String)> {
     let value = value.trim();
-    let path = ["https://github.com/", "http://github.com/", "https://www.github.com/", "http://www.github.com/"]
-        .iter()
-        .find_map(|p| value.get(..p.len()).filter(|head| head.eq_ignore_ascii_case(p)).map(|_| value[p.len()..].trim_end_matches('/')))
-        .unwrap_or(value);
+    let path = github_path(value).map_or(value, |path| path.trim_end_matches('/'));
     let (owner, name) = path.split_once('/')?;
     let name = name.strip_suffix(".git").or_else(|| name.strip_suffix(".GIT")).unwrap_or(name);
     let owner_ok = (1..=39).contains(&owner.len()) && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !owner.starts_with('-');
     let name_ok = (1..=100).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) && !name.chars().all(|c| c == '.');
     (owner_ok && name_ok).then(|| (owner.to_owned(), name.to_owned()))
+}
+
+/// `parsePromptLinkPullRequest`: a github.com pull request URL, `owner/name/123` or
+/// `owner/name#123`.
+fn pull_request(value: &str) -> Option<((String, String), u64)> {
+    let value = value.trim();
+    let (owner, name, number) = match github_path(value) {
+        Some(path) => {
+            let mut parts = path.splitn(4, '/');
+            let (owner, name, pull, rest) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+            if !pull.eq_ignore_ascii_case("pull") || [owner, name].iter().any(|p| p.contains(['?', '#'])) {
+                return None;
+            }
+            (owner, name, &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())])
+        }
+        None => {
+            let (owner, rest) = value.split_once('/')?;
+            let at = rest.find(['/', '#'])?;
+            if [owner, &rest[..at]].iter().any(|p| p.contains(|c: char| c.is_whitespace() || c == '#')) {
+                return None;
+            }
+            (owner, &rest[..at], &rest[at + 1..])
+        }
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // `Number.isSafeInteger`.
+    let number = number.parse::<u64>().ok().filter(|n| (1..1 << 53).contains(n))?;
+    Some((repository(&format!("{owner}/{name}"))?, number))
+}
+
+/// `promptLinkPullRequestUrl`.
+fn pull_request_url(link: &NewThread) -> Option<String> {
+    let ((owner, name), number) = (link.repository.as_ref()?, link.pull_request?);
+    Some(format!("https://github.com/{owner}/{name}/pull/{number}"))
 }
 
 /// `APP_SCHEME`: this fork's `s5code://` (what the app registers) or upstream's `t3code://`.
@@ -172,8 +227,8 @@ fn resume_route(url: &str) -> Option<Route> {
     })
 }
 
-/// `promptLinkAppPath` + `parseNewThreadLink` for new-thread links. `None` when `url` is not a
-/// prompt link at all; thread links and pull-request links are not handled here.
+/// `promptLinkAppPath` + `parseNewThreadLink` for new-thread and pull-request links. `None` when
+/// `url` is not one at all; thread links are not handled here.
 pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
     let parsed = s5_net::url::Url::parse(url.trim()).ok()?;
     let is_new = if app_scheme(parsed.scheme()) {
@@ -185,9 +240,6 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
         return None;
     }
     let param = |k: &str| parsed.query_pairs().find(|(key, _)| key == k).map(|(_, v)| v.into_owned());
-    if param("pr").is_some() {
-        return Some(Err("Pull request links open in the web app for now.".into()));
-    }
     Some((|| {
         let raw = param("prompt").unwrap_or_default();
         if raw.chars().count() > MAX_PROMPT {
@@ -196,6 +248,10 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
         let (prompt, dropped) = sanitize(&raw);
         if prompt.is_empty() && dropped > 0 {
             return Err("This prompt had only hidden characters, so it may be malicious. T3 Code did not open it.".into());
+        }
+        if let Some(pr) = param("pr") {
+            let (repository, number) = pull_request(&pr).ok_or("This link names a pull request T3 Code cannot read.")?;
+            return Ok(NewThread { prompt, repository: Some(repository), provider: None, model: None, pull_request: Some(number) });
         }
         if prompt.is_empty() {
             return Err("This link has no prompt.".into());
@@ -206,7 +262,7 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
         };
         let provider = param("provider").map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty());
         let model = param("model").map(|m| m.trim().to_owned()).filter(|m| !m.is_empty() && provider.is_some());
-        Ok(NewThread { prompt, repository, provider, model })
+        Ok(NewThread { prompt, repository, provider, model, pull_request: None })
     })())
 }
 
@@ -279,10 +335,11 @@ pub fn on_open_url(s: &mut App, url: &str, _: &mut rune::Tx) {
 }
 
 /// `findPromptLinkProjects`: the repository's projects, most recently updated first.
-fn project_for(s: &App, (owner, name): &(String, String)) -> Option<String> {
+fn projects_for(s: &App, (owner, name): &(String, String)) -> Vec<String> {
     let path = format!("{owner}/{name}").to_lowercase();
     let keys: Vec<String> = REPOSITORY_HOSTS.iter().map(|h| format!("{h}/{path}")).collect();
-    s.state()
+    let mut projects: Vec<&serde_json::Value> = s
+        .state()
         .projects
         .iter()
         .filter(|p| p["archivedAt"].is_null())
@@ -291,8 +348,31 @@ fn project_for(s: &App, (owner, name): &(String, String)) -> Option<String> {
             let key = identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str()).unwrap_or_default().to_lowercase();
             keys.contains(&key)
         })
-        .max_by_key(|p| data::ts(p, "updatedAt").unwrap_or(0))
-        .map(|p| data::s(p, "id").to_owned())
+        .collect();
+    projects.sort_by_key(|p| std::cmp::Reverse(data::ts(p, "updatedAt").unwrap_or(0)));
+    projects.into_iter().map(|p| data::s(p, "id").to_owned()).collect()
+}
+
+/// `findPromptLinkPullRequestThread`: the latest-updated thread linked to the pull request,
+/// leaving out side chats and dismissed stack links.
+fn pull_request_thread(s: &App, (owner, name): &(String, String), number: u64) -> Option<String> {
+    let repository = format!("{owner}/{name}");
+    s.state()
+        .threads
+        .iter()
+        .filter(|t| t["lineage"]["sideChat"] != true)
+        .filter(|t| {
+            t["pullRequests"].as_array().is_some_and(|links| {
+                links.iter().any(|l| {
+                    data::s(l, "host").eq_ignore_ascii_case("github.com")
+                        && data::s(l, "repository").eq_ignore_ascii_case(&repository)
+                        && l["number"].as_u64() == Some(number)
+                        && data::s(l, "source") != "stack-dismissed"
+                })
+            })
+        })
+        .max_by_key(|t| data::ts(t, "updatedAt").unwrap_or(i64::MIN))
+        .map(|t| data::s(t, "id").to_owned())
 }
 
 /// `buildNewThreadLink` through `promptLinkFor`: the hosted app's `/new` link for a draft's prompt,
@@ -364,7 +444,16 @@ fn landing_dialog(s: &App, t: &crate::theme::T, layers: &mut Vec<rune::El>) {
                         .child(Button::new("Use without project").size("sm").variant("outline").on_press(use_without_project).build(t)),
                 )
         }
-        Some(Landing::Cloning { .. }) => crate::kit::Dialog::new("prompt-link", "Opening the link...")
+        Some(Landing::Checkout { link: NewThread { repository: Some((owner, name)), pull_request: Some(number), .. }, started, .. }) => {
+            crate::kit::Dialog::new("prompt-link", format!("Check out {owner}/{name}#{number}?"))
+                .description("This puts the pull request's code in a new worktree and runs your project's setup script on it.")
+                .child(
+                    rune::row().w_full().justify_end().child(
+                        Button::new(if *started { "Checking out..." } else { "Check out" }).size("sm").disabled(*started).on_press(check_out).build(t),
+                    ),
+                )
+        }
+        Some(Landing::Cloning { .. } | Landing::Awaiting { .. } | Landing::Lookup { .. }) => crate::kit::Dialog::new("prompt-link", "Opening the link...")
             .child(rune::row().child(crate::kit::Spinner::new().size("sm").tone("muted").build(&crate::kit::theme(t)))),
         _ => return,
     };
@@ -418,17 +507,18 @@ fn clone_repository(s: &mut App) {
 
 fn use_without_project(s: &mut App) {
     let Some(Landing::Missing(link)) = s.ui.links.landing.take() else { return };
-    start_scratch(s, link.prompt);
+    start_scratch(s, link);
 }
 
-/// `openScratchDraft`: a link without a repository drafts in the Scratch project.
-fn start_scratch(s: &mut App, prompt: String) {
+/// `openScratchDraft`: a link without a repository, or without its project, drafts in the
+/// Scratch project.
+fn start_scratch(s: &mut App, link: NewThread) {
     use crate::shell::palette::actions;
     if actions::scratch_available(s) {
         actions::new_without_project(s);
     }
     if actions::scratch_pending(s) {
-        s.ui.links.landing = Some(Landing::Scratch(prompt));
+        s.ui.links.landing = Some(Landing::Scratch(link));
     } else {
         crate::shell::palette::toast(s, "Could not open the link", Some(NO_SCRATCH));
     }
@@ -456,25 +546,72 @@ fn poll_landing(s: &mut App) -> bool {
                 }
                 Some(Ok(_)) => {
                     crate::env::adopt(s, &project, &env);
-                    crate::shell::sidebar::go(s, Route::Home { project_id: Some(project) });
-                    crate::chat::composer::append_to_draft(s, &link.prompt);
+                    s.ui.links.landing = Some(Landing::Awaiting { project, link, deadline: std::time::Instant::now() + CLONE_WAIT });
+                    // The deadline passes without anything else waking the window.
+                    if let Some(waker) = s.ui.panel.waker.clone() {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(CLONE_WAIT);
+                            waker();
+                        });
+                    }
+                    poll_landing(s);
                     true
                 }
             }
         }
-        Some(Landing::Scratch(prompt)) if actions::scratch_pending(s) => {
-            s.ui.links.landing = Some(Landing::Scratch(prompt));
-            false
-        }
-        // The scratch flow reports its own failure.
-        Some(Landing::Scratch(prompt)) => {
-            let landed = matches!(&s.route, Route::Home { project_id: Some(id) }
-                if crate::chat::composer::project_by_id(s, id).is_some_and(|p| actions::is_scratch_project(s, p)));
-            if landed {
-                crate::chat::composer::append_to_draft(s, &prompt);
+        Some(Landing::Awaiting { project, link, .. }) if crate::chat::composer::project_by_id(s, &project).is_some() => {
+            match (&link.repository, link.pull_request) {
+                (Some((owner, name)), Some(_)) => crate::shell::palette::toast(s, &format!("Cloning {owner}/{name}"), Some("Open this link again when the clone finishes.")),
+                _ => {
+                    crate::shell::sidebar::go(s, Route::Home { project_id: Some(project) });
+                    land_draft(s, &link, None);
+                }
             }
             true
         }
+        Some(Landing::Awaiting { deadline, .. }) if std::time::Instant::now() >= deadline => {
+            crate::shell::palette::toast(s, "Could not open the link", Some("The clone started, but its project did not appear."));
+            true
+        }
+        Some(Landing::Scratch(link)) if actions::scratch_pending(s) => {
+            s.ui.links.landing = Some(Landing::Scratch(link));
+            false
+        }
+        // The scratch flow reports its own failure.
+        Some(Landing::Scratch(link)) => {
+            let landed = matches!(&s.route, Route::Home { project_id: Some(id) }
+                if crate::chat::composer::project_by_id(s, id).is_some_and(|p| actions::is_scratch_project(s, p)));
+            if landed {
+                land_draft(s, &link, pull_request_url(&link));
+            }
+            true
+        }
+        Some(Landing::Lookup { mut requests, link, project }) => {
+            for (env, request, reply) in &mut requests {
+                if reply.is_none() {
+                    *reply = crate::env::net_of(s, env).and_then(|net| net.take_reply(*request));
+                }
+                if reply.is_none() {
+                    *reply = s.src.net().and_then(|net| net.take_reply(*request));
+                }
+            }
+            match pick_linked_thread(&requests) {
+                None => {
+                    s.ui.links.landing = Some(Landing::Lookup { requests, link, project });
+                    false
+                }
+                Some(Some(thread)) => {
+                    open_thread(s, &thread, &link.prompt);
+                    true
+                }
+                Some(None) => {
+                    s.ui.links.landing = Some(Landing::Checkout { link, project, started: false });
+                    true
+                }
+            }
+        }
+        // The handoff reports how the checkout went.
+        Some(Landing::Checkout { started: true, .. }) if s.ui.chat.details.handoff.is_none() => true,
         other => {
             s.ui.links.landing = other;
             false
@@ -592,6 +729,82 @@ fn show_web(s: &mut App, page: WebPage) {
     }
 }
 
+/// `pickPromptLinkPullRequestThread`: the first unarchived thread, in order, once every lookup
+/// before it has answered. `Some(None)` when none has one; a failed lookup has none.
+fn pick_linked_thread(lookups: &[(String, u64, Option<s5_net::Reply>)]) -> Option<Option<String>> {
+    for (_, _, reply) in lookups {
+        let threads: &[serde_json::Value] = match reply.as_ref()? {
+            Ok(result) => result["threads"].as_array().map(Vec::as_slice).unwrap_or_default(),
+            Err(_) => &[],
+        };
+        if let Some(thread) = threads.iter().find(|t| t["archivedAt"].is_null()) {
+            return Some(Some(data::s(thread, "id").to_owned()));
+        }
+    }
+    Some(None)
+}
+
+/// Opens a thread the link points at, with the link's prompt in its composer.
+fn open_thread(s: &mut App, thread: &str, prompt: &str) {
+    crate::shell::sidebar::open_thread(s, thread);
+    if !prompt.is_empty() {
+        crate::chat::composer::append_to_draft(s, prompt);
+    }
+}
+
+/// `openDraft`: the link's prompt (and `extra`) and model on the draft the window now shows.
+fn land_draft(s: &mut App, link: &NewThread, extra: Option<String>) {
+    let text = [Some(link.prompt.as_str()).filter(|p| !p.is_empty()), extra.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    if !text.is_empty() {
+        crate::chat::composer::append_to_draft(s, &text);
+    }
+    if let Some(provider) = &link.provider {
+        apply_link_model(s, provider, link.model.as_deref());
+    }
+}
+
+/// `PullRequestLinkCheckout`'s button: the handoff runs on the project's draft.
+fn check_out(s: &mut App) {
+    let Some(Landing::Checkout { link, project, started: false }) = &s.ui.links.landing else { return };
+    let (Some(url), prompt, project) = (pull_request_url(link), link.prompt.clone(), project.clone()) else { return };
+    crate::shell::sidebar::go(s, Route::Home { project_id: Some(project) });
+    crate::chat::details::pr::start_link_handoff(s, &url, &prompt);
+    let pending = s.ui.chat.details.handoff.is_some();
+    if let Some(Landing::Checkout { started, .. }) = &mut s.ui.links.landing {
+        *started = pending;
+    }
+}
+
+/// NewThreadLinkView's decision once projects have loaded.
+fn open_link(s: &mut App, link: NewThread) {
+    let Some(repository) = link.repository.clone() else { return start_scratch(s, link) };
+    if let Some(thread) = link.pull_request.and_then(|number| pull_request_thread(s, &repository, number)) {
+        return open_thread(s, &thread, &link.prompt);
+    }
+    let projects = projects_for(s, &repository);
+    let Some(project) = projects.first().cloned() else {
+        s.ui.links.landing = Some(Landing::Missing(link));
+        return;
+    };
+    let Some(number) = link.pull_request else {
+        s.navigate(Route::Home { project_id: Some(project) });
+        return land_draft(s, &link, None);
+    };
+    let requests = projects
+        .iter()
+        .map(|id| {
+            let env = crate::env::owner(s, id);
+            let payload = serde_json::json!({"projectId": id, "repository": format!("{}/{}", repository.0, repository.1), "number": number});
+            match crate::env::net_of(s, &env).map(|net| net.request("pullRequests.linkedThreads", payload)) {
+                Some(request) => (env, request, None),
+                None => (env, 0, Some(Err(serde_json::Value::Null))),
+            }
+        })
+        .collect();
+    s.ui.links.landing = Some(Landing::Lookup { requests, link, project });
+    poll_landing(s);
+}
+
 /// A link's `provider` and `model` pick the open draft's model, with a note when they can't.
 fn apply_link_model(s: &mut App, provider: &str, model: Option<&str>) {
     let resolved = link_model(s, provider, model);
@@ -618,23 +831,7 @@ pub fn poll(s: &mut App) -> bool {
     }
     match s.ui.links.pending.take().expect("checked above") {
         Err(message) => crate::shell::palette::toast(s, "Could not open the link", Some(&message)),
-        Ok(link) => {
-            let (provider, model) = (link.provider.clone(), link.model.clone());
-            match link.repository.as_ref().map(|repo| project_for(s, repo)) {
-                None => start_scratch(s, link.prompt),
-                Some(None) => {
-                    s.ui.links.landing = Some(Landing::Missing(link));
-                    return true;
-                }
-                Some(Some(id)) => {
-                    s.navigate(Route::Home { project_id: Some(id) });
-                    crate::chat::composer::append_to_draft(s, &link.prompt);
-                }
-            }
-            if let Some(provider) = provider {
-                apply_link_model(s, &provider, model.as_deref());
-            }
-        }
+        Ok(link) => open_link(s, link),
     }
     true
 }
@@ -646,10 +843,18 @@ fn scene_missing_repository(s: &mut App) {
         s.navigate(Route::Thread(id));
     }
     let repository = Some(("acme".to_owned(), "widgets".to_owned()));
-    s.ui.links.landing = Some(Landing::Missing(NewThread { prompt: "Fix the flaky tests".into(), repository, provider: None, model: None }));
+    s.ui.links.landing = Some(Landing::Missing(NewThread { prompt: "Fix the flaky tests".into(), repository, provider: None, model: None, pull_request: None }));
 }
 
-pub const SCENES: &[(&str, fn(&mut App))] = &[("link-missing-repository", scene_missing_repository)];
+/// A pull request link with no thread on it yet: the checkout offer.
+fn scene_pull_request_checkout(s: &mut App) {
+    scene_missing_repository(s);
+    let link = NewThread { prompt: String::new(), repository: Some(("acme".into(), "widgets".into())), provider: None, model: None, pull_request: Some(128) };
+    s.ui.links.landing = Some(Landing::Checkout { link, project: String::new(), started: false });
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] =
+    &[("link-missing-repository", scene_missing_repository), ("link-pull-request-checkout", scene_pull_request_checkout)];
 
 #[cfg(test)]
 mod tests {
@@ -702,7 +907,7 @@ mod tests {
     fn prompt_links_parse_like_the_web() {
         let ok = |url: &str| parse(url).expect("a prompt link").expect("valid");
         let link = ok("t3code://new?prompt=Fix%20the%20tests&repo=pingdotgg/t3code");
-        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())), provider: None, model: None });
+        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())), provider: None, model: None, pull_request: None });
         assert_eq!(ok("https://app.s5code.touchtech.club/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
         assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
@@ -726,6 +931,96 @@ mod tests {
         assert_eq!(pairing_link("https://pair?pairingUrl=https://box"), None);
         assert!(is_app_link("s5code://pair?pairingUrl=https://box") && is_app_link("s5code://new?prompt=hi") && !is_app_link("s5code://other"));
         assert!(parse("--check-server").is_none());
+        // `parsePromptLinkPullRequest`: the prompt is optional and provider/model don't apply.
+        let acme = Some(("acme".to_string(), "app".to_string()));
+        let pr = ok("s5code://new?pr=https://github.com/acme/app/pull/12/files&provider=codex");
+        assert_eq!(pr, NewThread { prompt: String::new(), repository: acme.clone(), provider: None, model: None, pull_request: Some(12) });
+        assert_eq!(pull_request_url(&pr).as_deref(), Some("https://github.com/acme/app/pull/12"));
+        let short = ok("s5code://new?pr=acme/app%237&prompt=Review%20it");
+        assert_eq!((short.repository, short.pull_request, short.prompt.as_str()), (acme.clone(), Some(7), "Review it"));
+        assert_eq!(ok("s5code://new?pr=HTTPS://www.GitHub.com/acme/app.git/PULL/3?w=1").pull_request, Some(3));
+        assert_eq!(ok("s5code://new?pr=acme/app/9").repository, acme);
+        for bad in ["acme/app", "acme/app/0", "acme/app/1x", "acme/app/+1", "https://gitlab.com/a/b/pull/1", "https://github.com/a/b/issues/1", "a b/c/1", "acme/app/9007199254740992"] {
+            assert_eq!(err(&format!("s5code://new?pr={}", bad.replace('#', "%23"))), "This link names a pull request T3 Code cannot read.", "{bad}");
+        }
+        assert_eq!(err("s5code://new?pr=acme/app/1&prompt=%E2%80%8B"), "This prompt had only hidden characters, so it may be malicious. T3 Code did not open it.");
+    }
+
+    fn ready(projects: Vec<serde_json::Value>, threads: Vec<serde_json::Value>) -> App {
+        let mut s = App::new();
+        let mut state = crate::data::empty_state();
+        state.shell_ready = true;
+        state.projects = projects;
+        state.threads = threads;
+        s.src = crate::data::Source::Fixture(state);
+        s
+    }
+
+    #[test]
+    fn pull_request_links_open_the_linked_thread_else_offer_the_checkout() {
+        use serde_json::json;
+        let pr = |number: u64, extra: serde_json::Value| {
+            let mut link = json!({"host": "github.com", "repository": "Acme/App", "number": number});
+            link.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            link
+        };
+        let mut s = ready(
+            vec![json!({"id": "p1", "repositoryIdentity": {"canonicalKey": "github.com/acme/app"}, "updatedAt": "2026-01-01T00:00:00.000Z"})],
+            vec![
+                json!({"id": "t1", "updatedAt": "2026-01-02T00:00:00.000Z", "pullRequests": [pr(12, json!({}))]}),
+                json!({"id": "side", "updatedAt": "2026-01-03T00:00:00.000Z", "lineage": {"sideChat": true}, "pullRequests": [pr(12, json!({}))]}),
+                json!({"id": "dismissed", "updatedAt": "2026-01-04T00:00:00.000Z", "pullRequests": [pr(12, json!({"source": "stack-dismissed"}))]}),
+                json!({"id": "gitlab", "updatedAt": "2026-01-05T00:00:00.000Z", "pullRequests": [pr(12, json!({"host": "gitlab.com"}))]}),
+            ],
+        );
+        s.ui.links.pending = parse("s5code://new?pr=https://github.com/acme/app/pull/12&prompt=Review");
+        assert!(poll(&mut s));
+        assert_eq!(s.route, Route::Thread("t1".into()), "FAILED: the latest visible thread on the pull request opens");
+        let text = |s: &App| s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(s, s.frame_route())).map(|d| d.edit.text.clone());
+        assert_eq!(text(&s).as_deref(), Some("Review"));
+        // No local thread: each project's machine is asked; one that can't answer has none.
+        s.ui.links.pending = parse("s5code://new?pr=acme/app/13");
+        assert!(poll(&mut s));
+        assert!(matches!(&s.ui.links.landing, Some(Landing::Checkout { project, started: false, .. }) if project == "p1"), "{:?}", s.ui.links.landing);
+        check_out(&mut s);
+        assert_eq!(s.route, Route::Home { project_id: Some("p1".into()) });
+        assert!(matches!(&s.ui.links.landing, Some(Landing::Checkout { started: false, .. })), "FAILED: a fixture has no server to prepare the checkout, so the button stays");
+        s.ui.links.landing = None;
+        s.ui.links.pending = parse("s5code://new?pr=other/repo/1");
+        assert!(poll(&mut s));
+        assert!(matches!(&s.ui.links.landing, Some(Landing::Missing(NewThread { pull_request: Some(1), .. }))));
+        // `pickPromptLinkPullRequestThread`.
+        let lookup = |reply: Option<s5_net::Reply>| (String::new(), 0, reply);
+        let threads = |id: &str, archived: serde_json::Value| Some(Ok(json!({"threads": [{"id": id, "archivedAt": archived}]})));
+        assert_eq!(pick_linked_thread(&[lookup(None), lookup(threads("x", json!(null)))]), None, "FAILED: waits for the earlier machine");
+        assert_eq!(pick_linked_thread(&[lookup(threads("x", json!("2026-01-01T00:00:00.000Z"))), lookup(Some(Err(json!(null)))), lookup(threads("y", json!(null)))]), Some(Some("y".into())));
+        assert_eq!(pick_linked_thread(&[lookup(Some(Err(json!(null))))]), Some(None));
+    }
+
+    #[test]
+    fn a_cloned_project_lands_the_draft_or_times_out() {
+        let link = |url: &str| parse(url).unwrap().unwrap();
+        let awaiting = |url: &str, deadline| Some(Landing::Awaiting { project: "p9".into(), link: link(url), deadline });
+        let later = std::time::Instant::now() + CLONE_WAIT;
+        let mut s = ready(vec![], vec![]);
+        s.ui.links.landing = awaiting("s5code://new?prompt=hi&repo=acme/app", later);
+        assert!(!poll_landing(&mut s), "FAILED: keeps waiting for the project");
+        assert!(matches!(s.ui.links.landing, Some(Landing::Awaiting { .. })));
+        s.ui.links.landing = awaiting("s5code://new?prompt=hi&repo=acme/app", std::time::Instant::now());
+        assert!(poll_landing(&mut s));
+        assert_eq!((s.ui.links.landing.is_none(), crate::shell::palette::toast_title(&s)), (true, Some("Could not open the link")));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.projects.push(serde_json::json!({"id": "p9"}));
+        }
+        s.ui.links.landing = awaiting("s5code://new?pr=acme/app/4", later);
+        assert!(poll_landing(&mut s));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Cloning acme/app"), "FAILED: a pull request link asks to be opened again");
+        s.ui.links.landing = awaiting("s5code://new?prompt=hi&repo=acme/app&provider=nobody", later);
+        assert!(poll_landing(&mut s));
+        assert_eq!(s.route, Route::Home { project_id: Some("p9".into()) });
+        let draft = s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(&s, s.frame_route())).map(|d| d.edit.text.clone());
+        assert_eq!(draft.as_deref(), Some("hi"));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Prompt added from a link"), "FAILED: the link's provider is applied on this path too");
     }
 
     #[test]
@@ -737,7 +1032,7 @@ mod tests {
         s.ui.links.pending = parse("s5code://new?prompt=hi&repo=acme/app");
         assert!(poll(&mut s));
         let repository = ("acme".to_string(), "app".to_string());
-        assert_eq!(s.ui.links.landing, Some(Landing::Missing(NewThread { prompt: "hi".into(), repository: Some(repository.clone()), provider: None, model: None })));
+        assert_eq!(s.ui.links.landing, Some(Landing::Missing(NewThread { prompt: "hi".into(), repository: Some(repository.clone()), provider: None, model: None, pull_request: None })));
         clone_repository(&mut s);
         assert_eq!(s.ui.links.landing, None, "a machine without newProjectsRoot cannot clone from a link");
         let payload = clone_payload(&repository, "~/code", "p1");
@@ -773,7 +1068,7 @@ mod tests {
         assert_eq!(link, "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests+%26+ship&repo=acme%2Fapp&provider=claudeAgent&model=claude-haiku-5-5");
         assert_eq!(
             parse(&link).unwrap().unwrap(),
-            NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo), provider: Some("claudeagent".into()), model: Some("claude-haiku-5-5".into()) }
+            NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo), provider: Some("claudeagent".into()), model: Some("claude-haiku-5-5".into()), pull_request: None }
         );
         assert_eq!(new_thread_link("hi", None, None, Some("ignored")).unwrap(), "https://app.s5code.touchtech.club/new?prompt=hi");
         assert_eq!(new_thread_link("   ", None, None, None), None);

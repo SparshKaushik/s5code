@@ -86,7 +86,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(new_threads(s, cx, t))
         .child(actions(s, t, project));
 
-    let checkout = super::about::about_row(t, &environment, &root, el());
+    let checkout = super::about::about_row(t, &environment, &root, super::checkout_grouping::trigger(s, t, project));
     let remove = (id.clone(), title.clone());
     let danger = super::about::about_row(
         t,
@@ -482,7 +482,19 @@ fn archived_row(s: &App, t: &T, thread: &Value) -> El {
 }
 
 fn unarchive(s: &mut App, id: &str) {
-    dispatch(s, json!({"type": "thread.unarchive", "threadId": id}));
+    dispatch(s, json!({"type": "thread.unarchive", "threadId": id}), UNARCHIVE);
+}
+
+const UNARCHIVE: &str = "thread action: unarchive";
+const DELETE: &str = "thread action: delete";
+
+/// Web's toast title when an archived thread's unarchive or delete command fails.
+pub(super) fn failure_title(method: &str) -> Option<&'static str> {
+    match method {
+        UNARCHIVE => Some("Failed to unarchive thread"),
+        DELETE => Some("Failed to delete thread"),
+        _ => None,
+    }
 }
 
 /// Web `useThreadActions.confirmAndDeleteThread`: asks first while `confirmThreadDelete` is on.
@@ -492,7 +504,7 @@ fn request_delete(s: &mut App, id: String, title: String) {
     if confirm {
         s.ui.settings.delete_thread = Some((id, title));
     } else {
-        dispatch(s, json!({"type": "thread.delete", "threadId": id}));
+        dispatch(s, json!({"type": "thread.delete", "threadId": id}), DELETE);
     }
 }
 
@@ -517,10 +529,10 @@ pub fn archive_menu(s: &App, t: &T, layers: &mut Vec<El>) {
         }))
         .overlay(&crate::kit::theme(t), layers);
 }
-fn dispatch(s: &mut App, command: Value) {
+fn dispatch(s: &mut App, command: Value, action: &str) {
     if let Some(net) = s.src.net() {
         let id = net.dispatch(command);
-        s.ui.settings.pending.insert(id, "thread action".into());
+        s.ui.settings.pending.insert(id, action.into());
     }
 }
 pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
@@ -550,7 +562,7 @@ pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
                     crate::kit::Button::new("Delete")
                         .variant("destructive")
                         .on_press(move |s: &mut App| {
-                            dispatch(s, json!({"type":"thread.delete","threadId":id}));
+                            dispatch(s, json!({"type":"thread.delete","threadId":id}), DELETE);
                             s.ui.settings.delete_thread = None;
                         })
                         .build(t),
@@ -649,5 +661,12 @@ mod tests {
         s.client_settings.values.insert("confirmThreadDelete".into(), json!(false));
         request_delete(&mut s, "t".into(), "Fix it".into());
         assert_eq!(s.ui.settings.delete_thread, None);
+    }
+
+    #[test]
+    fn archive_action_failures_toast_web_titles() {
+        assert_eq!(super::failure_title(super::UNARCHIVE), Some("Failed to unarchive thread"));
+        assert_eq!(super::failure_title(super::DELETE), Some("Failed to delete thread"));
+        assert_eq!(super::failure_title("server.updateSettings"), None);
     }
 }
