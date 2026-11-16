@@ -40,7 +40,7 @@ pub mod search;
 mod snapshots;
 mod snooze;
 mod source_control;
-mod storage;
+pub(crate) mod storage;
 pub(crate) mod browser_profiles;
 mod diagnostics;
 mod resource_telemetry;

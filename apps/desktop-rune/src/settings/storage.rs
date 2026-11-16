@@ -96,6 +96,14 @@ fn rules(policy: &Value, storage: &Value) -> Value {
     }
 }
 
+/// `resolveWorktreeCleanup(settings, project).worktreeOnDelete`: the server removes a deleted
+/// thread's worktree itself.
+pub(crate) fn worktree_on_delete(settings: &Value, project: &str) -> bool {
+    let own = &settings["projectSettingsOverrides"][project]["worktreeCleanup"];
+    let policy = if own.is_object() { own } else { &settings["worktreeCleanup"] };
+    rules(policy, &settings["storageCleanup"])["worktreeOnDelete"] == true
+}
+
 fn rules_enabled(rules: &Value) -> bool {
     !rules["worktreeAfterDays"].is_null()
         || !rules["worktreeSettledAfterDays"].is_null()

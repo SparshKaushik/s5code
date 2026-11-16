@@ -912,6 +912,7 @@ pub fn request_delete(s: &mut App, id: &str) {
 
 pub fn delete(s: &mut App, id: &str) {
     s.ui.shell.sidebar.delete = None;
+    crate::chat::details::cleanup::before_delete(s, id);
     dispatch(s, "thread.delete", id, json!({}));
     patch(s, id, |p| p.archived = true);
     if s.route == Route::Thread(id.to_string()) {
