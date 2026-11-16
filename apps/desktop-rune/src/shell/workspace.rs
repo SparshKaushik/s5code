@@ -73,6 +73,11 @@ pub fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     } else {
         return false;
     };
+    focus(s, forward)
+}
+
+/// Moves focus to the next (or previous) workspace area.
+pub fn focus(s: &mut App, forward: bool) -> bool {
     let areas = areas(s);
     if areas.is_empty() {
         return false;

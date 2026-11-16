@@ -73,14 +73,6 @@ pub struct Inflight {
     pub rollback: Vec<String>,
 }
 
-/// A question the sidebar asks before it acts, as `dialogs.confirm` does.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Confirm {
-    Archive(String),
-    Unpin(String),
-    Delete(Vec<String>),
-}
-
 #[derive(Default)]
 pub struct Ui {
     pub collapsed: bool,
@@ -115,12 +107,6 @@ pub struct Ui {
     pub forward: Vec<Route>,
     /// The row whose title is being edited in place, and the edit.
     pub rename: Option<(String, TextEdit)>,
-    /// The thread a delete confirmation is open for (`confirmThreadDelete`).
-    pub delete: Option<String>,
-    /// Archive, unpin and bulk-delete confirmations (`dialogs.confirm`).
-    pub confirm: Option<Confirm>,
-    /// Questions waiting behind `confirm`, asked one at a time as web's dialog host queues them.
-    pub confirm_queue: Vec<Confirm>,
     /// The open "Share with guest" dialog.
     pub guest: Option<share::Guest>,
     /// A pending `projects.createFromThread` and the thread's title for its toast.
@@ -183,7 +169,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("sidebar-delete", |s| {
         scene_on(s, "Replay showcase");
-        s.ui.shell.sidebar.delete = thread_titled(s, "Todo list replay");
+        if let Some(id) = thread_titled(s, "Todo list replay") {
+            ask_delete(s, &id);
+        }
     }),
     ("sidebar-scope", |s| {
         scene_on(s, "Replay showcase");
@@ -817,7 +805,8 @@ pub fn unsnooze(s: &mut App, id: &str) {
 /// "Archive thread": asks first when `confirmThreadArchive` is on.
 pub fn request_archive(s: &mut App, id: &str) {
     if client_flag(s, "confirmThreadArchive") {
-        s.ui.shell.sidebar.confirm = Some(Confirm::Archive(id.to_string()));
+        let id = id.to_string();
+        crate::shell::confirm::request(s, format!("Archive thread \"{}\"?", title_of(s, &id)), false, move |s: &mut App| archive(s, &id));
     } else {
         archive(s, id);
     }
@@ -826,7 +815,7 @@ pub fn request_archive(s: &mut App, id: &str) {
 /// "Unpin thread": asks first when `confirmThreadUnpin` is on.
 pub fn request_unpin(s: &mut App, id: &str) {
     if client_flag(s, "confirmThreadUnpin") {
-        s.ui.shell.sidebar.confirm = Some(Confirm::Unpin(id.to_string()));
+        ask_unpin(s, id);
     } else {
         unpin(s, id);
     }
@@ -862,23 +851,34 @@ pub fn request_unpin_many(s: &mut App, ids: Vec<String>) {
         }
         return;
     }
-    let mut queue: Vec<Confirm> = ids.into_iter().map(Confirm::Unpin).collect();
-    if s.ui.shell.sidebar.confirm.is_none() && !queue.is_empty() {
-        s.ui.shell.sidebar.confirm = Some(queue.remove(0));
+    for id in &ids {
+        ask_unpin(s, id);
     }
-    s.ui.shell.sidebar.confirm_queue.extend(queue);
 }
 
-/// Closes the open question and asks the next queued one.
-fn next_confirm(s: &mut App) {
-    let queue = &mut s.ui.shell.sidebar.confirm_queue;
-    s.ui.shell.sidebar.confirm = (!queue.is_empty()).then(|| queue.remove(0));
+/// A thread's title for a question about it.
+fn title_of(s: &App, id: &str) -> String {
+    Model::build(s).thread(id).map(|t| t.title.clone()).unwrap_or_default()
+}
+
+fn ask_unpin(s: &mut App, id: &str) {
+    let message = format!("Unpin thread \"{}\"?\nThis will move the thread out of your pinned section.", title_of(s, id));
+    let id = id.to_string();
+    crate::shell::confirm::request(s, message, false, move |s: &mut App| unpin(s, &id));
+}
+
+fn ask_delete(s: &mut App, id: &str) {
+    let message = format!("Delete thread \"{}\"?\nThis permanently clears conversation history for this thread.", title_of(s, id));
+    let id = id.to_string();
+    crate::shell::confirm::request(s, message, true, move |s: &mut App| delete(s, &id));
 }
 
 /// "Delete (n)": asks first when `confirmThreadDelete` is on.
 pub fn request_delete_many(s: &mut App, ids: Vec<String>) {
     if client_flag(s, "confirmThreadDelete") {
-        s.ui.shell.sidebar.confirm = Some(Confirm::Delete(ids));
+        let n = ids.len();
+        let message = format!("Delete {n} thread{}?\nThis permanently clears conversation history for these threads.", if n == 1 { "" } else { "s" });
+        crate::shell::confirm::request(s, message, true, move |s: &mut App| delete_many(s, &ids));
     } else {
         delete_many(s, &ids);
     }
@@ -904,14 +904,13 @@ fn client_flag(s: &App, key: &str) -> bool {
 /// "Delete": asks first when `confirmThreadDelete` is on, as `useThreadActionMenu` does.
 pub fn request_delete(s: &mut App, id: &str) {
     if client_flag(s, "confirmThreadDelete") {
-        s.ui.shell.sidebar.delete = Some(id.to_string());
+        ask_delete(s, id);
     } else {
         delete(s, id);
     }
 }
 
 pub fn delete(s: &mut App, id: &str) {
-    s.ui.shell.sidebar.delete = None;
     crate::chat::details::cleanup::before_delete(s, id);
     dispatch(s, "thread.delete", id, json!({}));
     patch(s, id, |p| p.archived = true);
@@ -1010,57 +1009,6 @@ pub fn commit_rename(s: &mut App) {
     patch(s, &id, |p| p.title = Some(next));
 }
 
-/// The delete confirmation, as the web's destructive `dialogs.confirm`.
-fn delete_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
-    let Some(id) = s.ui.shell.sidebar.delete.clone() else { return };
-    let title = model.thread(&id).map(|t| t.title.clone()).unwrap_or_default();
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| s.ui.shell.sidebar.delete = None).build(t);
-    let confirm = crate::kit::Button::new("Delete").variant("destructive").on_press(move |s: &mut App| delete(s, &id)).build(t);
-    crate::kit::Dialog::new("sb-delete", format!("Delete thread \"{title}\"?"))
-        .alert()
-        .width(448.0)
-        .open(true)
-        .description("This permanently clears conversation history for this thread.")
-        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
-        .on_close(|s: &mut App| s.ui.shell.sidebar.delete = None)
-        .build(t, overlays);
-}
-
-/// Archive, unpin and bulk-delete questions, worded as `ConfirmDialogHost` splits the message.
-fn confirm_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
-    let Some(confirm) = s.ui.shell.sidebar.confirm.clone() else { return };
-    let title_of = |id: &str| model.thread(id).map(|t| t.title.clone()).unwrap_or_default();
-    let (title, description, label, destructive) = match &confirm {
-        Confirm::Archive(id) => (format!("Archive thread \"{}\"?", title_of(id)), None, "Confirm", false),
-        Confirm::Unpin(id) => (format!("Unpin thread \"{}\"?", title_of(id)), Some("This will move the thread out of your pinned section."), "Confirm", false),
-        Confirm::Delete(ids) => (
-            format!("Delete {} thread{}?", ids.len(), if ids.len() == 1 { "" } else { "s" }),
-            Some("This permanently clears conversation history for these threads."),
-            "Delete",
-            true,
-        ),
-    };
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(next_confirm).build(t);
-    let confirm_button = crate::kit::Button::new(label)
-        .variant(if destructive { "destructive" } else { "default" })
-        .on_press(move |s: &mut App| {
-            next_confirm(s);
-            match &confirm {
-                Confirm::Archive(id) => archive(s, id),
-                Confirm::Unpin(id) => unpin(s, id),
-                Confirm::Delete(ids) => delete_many(s, ids),
-            }
-        })
-        .build(t);
-    let mut dialog = crate::kit::Dialog::new("sb-confirm", title).alert().width(448.0).open(true);
-    if let Some(description) = description {
-        dialog = dialog.description(description);
-    }
-    dialog
-        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm_button))
-        .on_close(next_confirm)
-        .build(t, overlays);
-}
 
 /// The rows a drag carries: the selection when the dragged row is in it, else that row.
 pub fn dragged_ids(s: &App, model: &Model, key: &str) -> Vec<String> {
@@ -1396,14 +1344,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     if ui.collapsed {
         overlays.push(chrome::floating_toggle(t, inset));
         // The header's thread menu and its delete confirmation work with the sidebar hidden.
-        if ui.menu.is_some() || ui.delete.is_some() {
+        if ui.menu.is_some() {
             let model = Model::build(s);
             if let Some(m) = &ui.menu
                 && let Some(th) = model.thread(&m.thread)
             {
                 overlays.extend(menu::view(s, cx, &model, th, m, t));
             }
-            delete_dialog(s, &model, t, overlays);
         }
         share::dialog(s, t, overlays);
         return el().key("sidebar").w(0.0).h_full();
@@ -1420,8 +1367,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     if let Some(d) = ui.drag.as_ref().filter(|d| d.context) {
         drag_ghost(s, &model, cx, t, d, overlays);
     }
-    delete_dialog(s, &model, t, overlays);
-    confirm_dialog(s, &model, t, overlays);
     share::dialog(s, t, overlays);
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
@@ -1695,11 +1640,12 @@ mod tests {
         let mut s = App::new();
         s.client_settings.values.insert("confirmThreadUnpin".into(), json!(true));
         request_unpin_many(&mut s, vec!["a".into(), "b".into()]);
-        assert_eq!(s.ui.shell.sidebar.confirm, Some(Confirm::Unpin("a".into())), "FAILED: the first unpin asks");
-        next_confirm(&mut s);
-        assert_eq!(s.ui.shell.sidebar.confirm, Some(Confirm::Unpin("b".into())), "FAILED: answering asks the next");
-        next_confirm(&mut s);
-        assert_eq!(s.ui.shell.sidebar.confirm, None);
+        let asked = |s: &App| crate::shell::confirm::current(s).map(str::to_owned);
+        assert_eq!(asked(&s), Some("Unpin thread \"\"?\nThis will move the thread out of your pinned section.".into()), "FAILED: the first unpin asks");
+        crate::shell::confirm::respond(&mut s, false);
+        assert!(asked(&s).is_some(), "FAILED: answering asks the next");
+        crate::shell::confirm::respond(&mut s, false);
+        assert_eq!(asked(&s), None);
     }
 
     #[test]

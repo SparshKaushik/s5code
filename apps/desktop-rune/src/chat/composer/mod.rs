@@ -66,6 +66,8 @@ pub struct Draft {
     pub contexts: Vec<Value>,
     /// Other model options picked in this draft (speed, agent, switches), as `{id, value}`.
     pub options: Vec<Value>,
+    /// When the draft began (`DraftSessionState.createdAt`), ms; the sidebar lists newest first.
+    pub created_at: i64,
 }
 
 impl Default for Draft {
@@ -79,6 +81,7 @@ impl Default for Draft {
             effort: None,
             contexts: Vec::new(),
             options: Vec::new(),
+            created_at: data::now_ms(),
         }
     }
 }
@@ -1240,7 +1243,7 @@ fn stored_draft(d: &Draft) -> Value {
     json!({
         "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
         "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
-        "options": d.options,
+        "options": d.options, "createdAt": d.created_at,
     })
 }
 
@@ -1315,6 +1318,8 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
                 options: d["options"].as_array().cloned().unwrap_or_default(),
+                // Drafts stored before timestamps sort as the oldest.
+                created_at: d["createdAt"].as_i64().unwrap_or(0),
             },
         );
     }
