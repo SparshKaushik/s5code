@@ -541,6 +541,11 @@ pub fn poll(s: &mut App) -> bool {
         }
     }
     wanted.extend(resource_telemetry::wanted(s));
+    if let Some(resource) = crate::panel::device_wanted(s)
+        && !wanted.contains(&resource)
+    {
+        wanted.push(resource);
+    }
     for resource in add_provider::wanted(s) {
         if !wanted.contains(&resource) {
             wanted.push(resource);
