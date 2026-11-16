@@ -17,6 +17,7 @@ use crate::shell::palette;
 
 pub mod automations;
 pub mod child_work;
+pub mod cleanup;
 mod git;
 pub mod html_render;
 pub mod items;
@@ -52,6 +53,7 @@ pub struct Ui {
     /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
     drafts: HashMap<String, DraftRun>,
     run_on: run_on::State,
+    cleanup: cleanup::State,
     pub git: git::State,
     pub scripts: scripts::State,
     pub checkout: Option<pr::Checkout>,
@@ -938,7 +940,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | cleanup::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
     poll_branch(s) || changed
 }
 
@@ -1488,6 +1490,7 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     pr::overlays(s, t, &mut out);
     restore_dialog(s, t, &mut out);
     composer::fanout::retry_dialog(s, t, &mut out);
+    cleanup::dialog(s, t, &mut out);
     items::overlay(s, t, &mut out);
     child_work::overlay(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {

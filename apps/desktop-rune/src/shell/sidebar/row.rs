@@ -501,8 +501,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let mut meta = row().mt(2.0).gap(6.0).center_y();
             if let Some(branch) = branch {
                 // `ThreadWorktreeIndicator`: a worktree thread marks its branch.
-                if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
-                    meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+                if let Some(tip) = th.worktree.as_deref().and_then(|w| crate::chat::details::cleanup::worktree_tip(w, branch)) {
+                    meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink().label(tip.clone()).help(tip));
                 }
                 meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
             } else {
@@ -704,8 +704,8 @@ fn trailing_icons(s: &App, t: &T, model: &Model, th: &Thread, named: bool) -> El
 fn meta_line(s: &App, t: &T, model: &Model, th: &Thread, m: Meta) -> El {
     let mut meta = row().mt(2.0).h(16.0).gap(6.0).center_y();
     if let Some(branch) = &th.branch {
-        if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
-            meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+        if let Some(tip) = th.worktree.as_deref().and_then(|w| crate::chat::details::cleanup::worktree_tip(w, branch)) {
+            meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink().label(tip.clone()).help(tip));
         }
         meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
     } else if let Some(machine) = m.machine.clone() {
