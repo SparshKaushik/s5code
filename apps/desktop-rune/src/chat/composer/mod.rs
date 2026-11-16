@@ -1061,6 +1061,12 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         }
     };
     let launch = launch.then(|| thread_id.clone());
+    // The new thread belongs to the machine the draft sent from (the balanced or chosen one,
+    // which navigation made current), even if another is on screen when its reply lands.
+    if let Some(id) = &launch {
+        let machine = s.ui.env.active.clone();
+        crate::env::adopt(s, id, &machine);
+    }
     if background && launch.is_some() {
         s.ui.chat.composer.background.push(thread_id.clone());
     }
@@ -2996,6 +3002,21 @@ mod tests {
         assert_eq!(resolved(&s, false), Some("composer.sendAlternate"), "FAILED: a running turn flips steer and queue");
         draft_mut(&mut s).edit.focused = false;
         assert_eq!(resolved(&s, false), None, "FAILED: the prompt must have the keys");
+    }
+
+    #[test]
+    fn a_new_thread_belongs_to_the_machine_its_draft_sent_from() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project) });
+        // Auto balance or "Run on" moved the draft to another machine, which is now current.
+        s.ui.env.active = "box".into();
+        set_text(&mut s, "build it there");
+        send_with(&mut s, false, true);
+        let launched = s.ui.chat.composer.background.clone();
+        assert_eq!(launched.len(), 1, "FAILED: the draft launches a thread");
+        s.ui.env.active = crate::env::LOCAL.into();
+        assert_eq!(crate::env::owner(&s, &launched[0]), "box", "FAILED: the thread stays with the machine it was sent to");
     }
 
     #[test]
