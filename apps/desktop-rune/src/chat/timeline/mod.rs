@@ -908,7 +908,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     };
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
-    let targets = rows::revert_targets(&view.projection);
+    let targets = rows::revert_targets(&view.projection, view.has_more_history);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
     // Replies whose meta row moved below their trailing work.
@@ -1015,9 +1015,13 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 let switch = lifecycle::model_switch_label(&item["modelSwitch"], crate::chat::composer::providers(app));
                 let sender = s(item, "senderThreadId").to_owned();
                 let opener = match who {
-                    lifecycle::Attribution::Automation if task.is_some() => Some(
-                        inline_button("Open automation", false, t).on_press(|app: &mut App| app.navigate(crate::Route::Settings("scheduled-tasks".into()))),
-                    ),
+                    lifecycle::Attribution::Automation if task.is_some() => {
+                        let task = task.unwrap_or_default().to_owned();
+                        Some(inline_button("Open automation", false, t).on_press(move |app: &mut App| {
+                            let key = app.ui.env.active.clone();
+                            crate::settings::tasks::open_task(app, &key, &task);
+                        }))
+                    }
                     lifecycle::Attribution::Agent if !sender.is_empty() => {
                         Some(inline_button("Open thread", false, t).on_press(move |app: &mut App| crate::shell::sidebar::open_thread(app, &sender)))
                     }

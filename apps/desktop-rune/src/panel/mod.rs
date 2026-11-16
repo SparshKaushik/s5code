@@ -3,6 +3,7 @@ pub(crate) mod agent;
 pub(crate) mod stream;
 pub mod browser;
 mod closed;
+mod device;
 pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
@@ -11,6 +12,7 @@ mod files;
 mod history;
 pub mod popout;
 mod proactive;
+pub(crate) mod pull_requests;
 pub(crate) mod preview;
 pub mod browser_import;
 pub(crate) mod terminal;
@@ -29,6 +31,8 @@ pub enum Surface {
     Terminal,
     Files,
     Diff,
+    PullRequests,
+    Device,
 }
 impl Surface {
     fn title(self) -> &'static str {
@@ -37,6 +41,8 @@ impl Surface {
             Self::Terminal => "Terminal",
             Self::Files => "Files",
             Self::Diff => "Diff",
+            Self::PullRequests => "Pull requests",
+            Self::Device => "Device",
         }
     }
     fn glyph(self) -> &'static rune::Icon {
@@ -45,6 +51,8 @@ impl Surface {
             Self::Terminal => &icons::SQUARE_TERMINAL,
             Self::Files => &icons::FILES,
             Self::Diff => &icons::FILE_DIFF,
+            Self::PullRequests => &icons::LINK,
+            Self::Device => &icons::SMARTPHONE,
         }
     }
 }
@@ -53,7 +61,9 @@ pub struct Ui {
     surfaces: Vec<Surface>,
     active: Option<Surface>,
     pub diff: diff::Ui,
+    pub(crate) pull_requests: pull_requests::Ui,
     files: files::Ui,
+    device: device::Ui,
     terminal: terminal::Ui,
     drawer: drawer::Ui,
     browser: preview::Ui,
@@ -89,7 +99,9 @@ impl Default for Ui {
             surfaces: vec![],
             active: None,
             diff: Default::default(),
+            pull_requests: Default::default(),
             files: Default::default(),
+            device: Default::default(),
             terminal: Default::default(),
             drawer: Default::default(),
             browser: Default::default(),
@@ -172,11 +184,13 @@ fn workspace(app: &App) -> Option<String> {
     crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
 }
 /// The launcher's entries; Browser always opens a new tab, as web's.
-const LAUNCH: [(Surface, &str); 4] = [
+const LAUNCH: [(Surface, &str); 6] = [
     (Surface::Browser(0), "B"),
     (Surface::Terminal, "T"),
     (Surface::Files, "F"),
     (Surface::Diff, "D"),
+    (Surface::PullRequests, "L"),
+    (Surface::Device, "M"),
 ];
 fn add_in_profile(app: &mut App, profile: &str) {
     let tab = preview::open_in(app, profile);
@@ -217,9 +231,23 @@ pub fn open_tool_diff(app: &mut App, thread: String, item: String) {
     diff::open_tool_call(app, thread, item);
     activate(app, Surface::Diff);
 }
+/// The thread's linked pull requests: the sidebar badge, the palette and the toolbar's PR badge.
+pub fn show_pull_requests(app: &mut App) {
+    // A badge on another thread's row navigates first; that thread's panel takes the surface.
+    switch_thread(app);
+    activate(app, Surface::PullRequests);
+}
+/// The open panel shows the linked pull requests list.
+pub fn showing_pull_requests(app: &App) -> bool {
+    app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::PullRequests)
+}
 /// The open panel shows a browser tab, as web's `threadShowingBrowser`.
 pub fn showing_browser(app: &App) -> bool {
     app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_)))
+}
+/// The device state subscription, while a thread's panel has its Device surface.
+pub fn device_wanted(app: &App) -> Option<(String, Value)> {
+    app.ui.panel.surfaces.contains(&Surface::Device).then(|| (device::STATE.to_owned(), json!({})))
 }
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
@@ -259,7 +287,7 @@ fn field(app: &App, region: Region) -> Option<Field> {
             Surface::Browser(tab) => Some(Field::Bar(tab)),
             Surface::Files => files::field_focused(app).map(|_| Field::Files),
             Surface::Terminal => terminal(drawer::Owner::Panel),
-            Surface::Diff => None,
+            Surface::Diff | Surface::PullRequests | Surface::Device => None,
         },
     }
 }
@@ -296,8 +324,9 @@ fn close(app: &mut App, surface: Surface) {
     let view = match surface {
         Surface::Files => Some(closed::View::Files(files::selected(app))),
         Surface::Diff => Some(closed::View::Diff),
+        Surface::PullRequests => Some(closed::View::PullRequests),
         Surface::Browser(tab) => preview::url(app, tab).map(closed::View::Browser),
-        Surface::Terminal => None,
+        Surface::Terminal | Surface::Device => None,
     };
     if let (Some(view), Some((thread, _))) = (view, context(app)) {
         app.ui.panel.closed.record(closed::Closed { thread, view });
@@ -320,6 +349,7 @@ fn reopen_closed(app: &mut App) -> bool {
                 && current.as_deref() == Some(c.thread.as_str())
                 && match &c.view {
                     closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
+                    closed::View::PullRequests => app.ui.panel.surfaces.contains(&Surface::PullRequests),
                     closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
                     closed::View::Browser(_) => false,
                 }
@@ -338,6 +368,7 @@ fn reopen_closed(app: &mut App) -> bool {
     }
     match c.view {
         closed::View::Diff => activate(app, Surface::Diff),
+        closed::View::PullRequests => activate(app, Surface::PullRequests),
         closed::View::Files(path) if path.is_empty() => activate(app, Surface::Files),
         closed::View::Files(path) => open_file(app, path),
         closed::View::Browser(url) => open_preview(app, &url),
@@ -430,11 +461,12 @@ impl Surface {
             Self::Terminal => Some("terminal"),
             Self::Files => Some("files"),
             Self::Diff => Some("diff"),
-            Self::Browser(_) => None,
+            Self::PullRequests => Some("pull-requests"),
+            Self::Browser(_) | Self::Device => None,
         }
     }
     fn from_saved_id(id: &str) -> Option<Self> {
-        [Self::Terminal, Self::Files, Self::Diff].into_iter().find(|s| s.saved_id() == Some(id))
+        [Self::Terminal, Self::Files, Self::Diff, Self::PullRequests].into_iter().find(|s| s.saved_id() == Some(id))
     }
 }
 
@@ -454,11 +486,19 @@ impl Ui {
         if let Some(v) = entry(&self.surfaces, self.active, open).filter(|_| !self.stash_key.is_empty()) {
             threads.insert(self.stash_key.clone(), v);
         }
-        json!({"version": 1, "byThreadKey": threads})
+        let mut saved = json!({"version": 1, "byThreadKey": threads});
+        // Web keeps this in `t3code:diff-file-tree-width`; it outlives a restart for every thread.
+        if let Some(w) = self.diff.tree_w {
+            saved["diffFileTreeWidth"] = json!(w);
+        }
+        saved
     }
 
     /// Fills the stash, so the first switch to a thread brings its saved panel back.
     fn restore(&mut self, v: &Value) {
+        if let Some(w) = v["diffFileTreeWidth"].as_f64() {
+            self.diff.tree_w = Some(w as f32);
+        }
         for (key, entry) in v["byThreadKey"].as_object().into_iter().flatten() {
             if key.is_empty() || *key == self.stash_key || self.stash.contains_key(key) {
                 continue;
@@ -577,9 +617,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         context_changed |= proactive::poll(app);
     }
 
+    pull_requests::want_avatars(app);
     let changed = diff::poll(app)
         | diff::reveal(app, tx)
         | files::poll(app, tx)
+        | device::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)
         | preview::poll(app, tx);
@@ -710,7 +752,7 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         if let Key::Text(v) = &e.key {
             let key = v.to_uppercase();
             if let Some(&(surface, _)) = LAUNCH.iter().find(|(_, k)| *k == key) {
-                if surface != Surface::Diff || diff_available(app) {
+                if launchable(app, surface) {
                     add(app, surface);
                 }
                 return true;
@@ -730,6 +772,15 @@ fn action(t: &T, label: &str, glyph: &'static rune::Icon) -> kit::Button {
         .variant("ghost-muted")
         .size("icon-xs")
 }
+/// Whether the launcher can open `surface` here.
+fn launchable(app: &App, surface: Surface) -> bool {
+    match surface {
+        Surface::Browser(_) => true,
+        Surface::Diff => diff_available(app),
+        Surface::PullRequests => pull_requests::available(app),
+        _ => context(app).is_some(),
+    }
+}
 fn picker(app: &App, t: &T) -> El {
     let mut list = col().w(320.).gap(2.).child(
         text("Open a surface")
@@ -738,13 +789,40 @@ fn picker(app: &App, t: &T) -> El {
             .color(t.c.contrast_foreground)
             .mb(10.),
     );
+    let unported = |title: &'static str, glyph: &'static rune::Icon, key: &'static str| {
+        row()
+            .h(32.)
+            .px(10.)
+            .gap(10.)
+            .center_y()
+            .opacity(0.5)
+            .role("button")
+            .label(title)
+            .disabled(true)
+            .child(
+                icon(glyph, 16.)
+                    .size(16., 16.)
+                    .color(t.c.contrast_foreground),
+            )
+            .child(
+                text(title)
+                    .font(theme::TEXT_SM)
+                    .color(t.c.contrast_foreground)
+                    .grow(1.),
+            )
+            .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
+    };
     for (surface, key) in LAUNCH {
-        let available = match surface {
-            Surface::Browser(_) => true,
-            Surface::Diff => diff_available(app),
-            _ => context(app).is_some(),
+        if surface == Surface::PullRequests {
+            list = list.child(unported("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"));
+        }
+        let available = launchable(app, surface);
+        let hint = match surface {
+            Surface::Diff if !available && diff_context(app).is_some() => Some("Available for Git repositories."),
+            Surface::PullRequests if !available => Some("No linked pull requests available."),
+            _ => None,
         };
-        let hint = (surface == Surface::Diff && !available && diff_context(app).is_some()).then_some("Available for Git repositories.");
+        let title = if surface == Surface::PullRequests { "Linked pull requests" } else { surface.title() };
         list = list.child(
             row()
                 .h(32.)
@@ -755,7 +833,7 @@ fn picker(app: &App, t: &T) -> El {
                 .hover(t.c.accent.alpha_mul(0.6))
                 .focusable(true)
                 .role("button")
-                .label(surface.title())
+                .label(title)
                 .disabled(!available)
                 .child(
                     icon(surface.glyph(), 16.)
@@ -763,7 +841,7 @@ fn picker(app: &App, t: &T) -> El {
                         .color(t.c.contrast_foreground),
                 )
                 .child(
-                    text(surface.title())
+                    text(title)
                         .font(theme::TEXT_SM)
                         .color(t.c.contrast_foreground)
                         .grow(1.),
@@ -782,35 +860,6 @@ fn picker(app: &App, t: &T) -> El {
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
                 .help(hint.unwrap_or_default())
                 .on_press(move |s: &mut App| add(s, surface)),
-        );
-    }
-    for (title, glyph, key) in [
-        ("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"),
-        ("Linked pull requests", &icons::LINK, "L"),
-        ("Device", &icons::SMARTPHONE, "M"),
-    ] {
-        list = list.child(
-            row()
-                .h(32.)
-                .px(10.)
-                .gap(10.)
-                .center_y()
-                .opacity(0.5)
-                .role("button")
-                .label(title)
-                .disabled(true)
-                .child(
-                    icon(glyph, 16.)
-                        .size(16., 16.)
-                        .color(t.c.contrast_foreground),
-                )
-                .child(
-                    text(title)
-                        .font(theme::TEXT_SM)
-                        .color(t.c.contrast_foreground)
-                        .grow(1.),
-                )
-                .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground)),
         );
     }
     col()
@@ -842,7 +891,7 @@ fn close_panel(s: &mut App) {
     s.ui.shell.panel_open = false;
 }
 
-pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
+pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let viewport = cx.layout_with("shell", |r| r[2]);
     let sheet = viewport.and_then(sheet_width);
     let width = sheet.unwrap_or_else(|| app.ui.panel.width.min(viewport.map_or(1000., |w| w * 0.7)));
@@ -946,7 +995,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
-        Some(Surface::Files) => files::view(app, t),
+        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
+        Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
+        Some(Surface::Device) => device::view(app, t),
         Some(Surface::Terminal) => col()
             .grow(1.)
             .min_h(0.)
@@ -1065,6 +1116,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "docs/spec.pdf", "", false);
     }),
+    ("panel-device-list", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([]));
+    }),
+    ("panel-device-h264", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
         files::edit_fixture(s, None, false);
@@ -1149,9 +1208,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         }
         s.ui.chat.details.menu = Some(crate::chat::details::Menu::RunContext);
     }),
+    ("details-run-on", crate::chat::details::run_on::scene),
+    ("composer-multiple-models", crate::chat::composer::fanout::scene),
+    ("composer-fanout-uncertain", crate::chat::composer::fanout::scene_uncertain),
+    ("composer-allow-retry", crate::chat::composer::fanout::scene_allow_retry),
+    ("delete-worktree-too", crate::chat::details::cleanup::scene),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);
+    }),
+    ("panel-pull-requests", |s| pull_requests_scene(s, pull_requests::fixture_links())),
+    ("panel-pull-requests-empty", |s| pull_requests_scene(s, json!([]))),
+    ("panel-pull-requests-menu", |s| {
+        pull_requests_scene(s, pull_requests::fixture_links());
+        s.ui.panel.pull_requests.menu = Some(("github.com/acme/app#20".into(), None));
     }),
     ("terminal-drawer-close", |s| {
         (crate::shell::SCENES[1].1)(s);
@@ -1159,6 +1229,18 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         drawer::request_close(s, drawer::Owner::Drawer, "term-1");
     }),
 ];
+
+/// The thread scene with `links` as its linked pull requests, showing the list.
+fn pull_requests_scene(app: &mut App, links: Value) {
+    (crate::shell::SCENES[1].1)(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let data::Source::Fixture(state) = &mut app.src
+        && let Some(thread) = state.threads.iter_mut().find(|v| v["id"] == id.as_str())
+    {
+        thread["pullRequests"] = links;
+    }
+    activate(app, Surface::PullRequests);
+}
 
 const TERMINAL_DEV: &str = include_str!("../../fixtures/panel/terminal.json");
 const TERMINAL_VIM: &str = include_str!("../../fixtures/panel/terminal-vim.json");
@@ -1280,15 +1362,14 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
             s.ui.panel.add_profiles = false;
         });
     for (surface, key) in LAUNCH {
-        let available = match surface {
-            Surface::Browser(_) => true,
-            Surface::Diff => diff_available(app),
-            _ => context(app).is_some(),
-        };
-        let mut item = kit::MenuItem::new(surface.title())
+        if surface == Surface::PullRequests {
+            menu = menu.item(kit::MenuItem::new("Pull request").icon(&icons::GIT_PULL_REQUEST_ARROW).shortcut("P").disabled(true));
+        }
+        let title = if surface == Surface::PullRequests { "Linked pull requests" } else { surface.title() };
+        let mut item = kit::MenuItem::new(title)
             .icon(surface.glyph())
             .shortcut(key)
-            .disabled(!available)
+            .disabled(!launchable(app, surface))
             .on_select(move |s: &mut App| {
                 s.ui.panel.add_menu = false;
                 s.ui.panel.add_profiles = false;
@@ -1303,13 +1384,6 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
             item = item.submenu(profiles.into_iter().map(kit::MenuEntry::item).collect(), app.ui.panel.add_profiles).on_submenu_change(|s: &mut App, open| s.ui.panel.add_profiles = open);
         }
         menu = menu.item(item);
-    }
-    for (title, glyph, key) in [
-        ("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"),
-        ("Linked pull requests", &icons::LINK, "L"),
-        ("Device", &icons::SMARTPHONE, "M"),
-    ] {
-        menu = menu.item(kit::MenuItem::new(title).icon(glyph).shortcut(key).disabled(true));
     }
     menu.overlay(&kit::theme(t), out);
 }
@@ -1359,9 +1433,11 @@ mod tests {
         assert!(!switch_thread(&mut app));
 
         // A restart brings each thread's surfaces back, less its browser tabs.
+        app.ui.panel.diff.tree_w = Some(300.0);
         let saved = app.ui.panel.to_json(app.ui.shell.panel_open);
         let mut restarted = App::new();
         restarted.ui.panel.restore(&saved);
+        assert_eq!(restarted.ui.panel.diff.tree_w, Some(300.0), "the Changes tree keeps its width");
         restarted.ui.panel.restore(&json!({"byThreadKey": {"bad": {"surfaces": ["browser:1", 7]}, "dupes": {"surfaces": ["diff", "files", "diff"], "activeSurfaceId": "terminal"}}}));
         restarted.navigate(Route::Thread(ids[0].clone()));
         assert!(switch_thread(&mut restarted));

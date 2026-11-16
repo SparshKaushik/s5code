@@ -7,6 +7,7 @@ mod attachments;
 pub mod banners;
 pub mod chips;
 mod context;
+pub mod fanout;
 mod menu;
 mod picker;
 pub mod provider_icons;
@@ -65,6 +66,8 @@ pub struct Draft {
     pub contexts: Vec<Value>,
     /// Other model options picked in this draft (speed, agent, switches), as `{id, value}`.
     pub options: Vec<Value>,
+    /// When the draft began (`DraftSessionState.createdAt`), ms; the sidebar lists newest first.
+    pub created_at: i64,
 }
 
 impl Default for Draft {
@@ -78,6 +81,7 @@ impl Default for Draft {
             effort: None,
             contexts: Vec::new(),
             options: Vec::new(),
+            created_at: data::now_ms(),
         }
     }
 }
@@ -119,6 +123,7 @@ pub struct Ui {
     /// Drafts on disk: read once connected, then the last written copy and the next write check.
     stored: Option<String>,
     store_at: Option<std::time::Instant>,
+    fanout: fanout::State,
 }
 
 /// A dispatched command's draft key, and the draft it sent (`stored_draft`) to put back when it
@@ -852,6 +857,9 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         end_queued_edit(s, false);
         return;
     }
+    if crate::chat::details::run_on::holds_send(s) || fanout::send(s) {
+        return;
+    }
     let mode = mode_for(s, alternate);
     let key = active_key(s);
     let Some(d) = draft(s) else { return };
@@ -1139,12 +1147,15 @@ pub fn poll(s: &mut App) -> bool {
             continue;
         };
         let upload = composer.uploads.remove(i);
-        match stored {
-            Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
-            Err(e) => {
-                let background = upload.launch.as_ref().map(|id| composer.background.contains(id));
-                composer.background.retain(|b| Some(b) != upload.launch.as_ref());
-                failed.push((upload.outgoing, e, background));
+        let messages = std::iter::once((upload.payload, upload.launch, upload.outgoing)).chain(upload.also);
+        for (payload, launch, outgoing) in messages {
+            match &stored {
+                Ok(stored) => deliver(net, composer, payload, launch, stored.clone(), outgoing),
+                Err(e) => {
+                    let background = launch.as_ref().map(|id| composer.background.contains(id));
+                    composer.background.retain(|b| Some(b) != launch.as_ref());
+                    failed.push((outgoing, e.clone(), background));
+                }
             }
         }
         changed = true;
@@ -1159,6 +1170,10 @@ pub fn poll(s: &mut App) -> bool {
         };
         let (request, outgoing) = composer.sends.remove(i);
         let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
+        changed = true;
+        if fanout::settle(&mut composer.fanout, &outgoing.key, reply.as_ref().map(|_| ()), true) {
+            continue;
+        }
         // A background launch stays where the user is.
         let quiet = launch.as_ref().is_some_and(|id| composer.background.contains(id));
         if let Some(id) = &launch {
@@ -1172,8 +1187,11 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     for (outgoing, error, background) in failed {
-        send_failed(s, outgoing, &error, background);
+        if !fanout::settle(&mut s.ui.chat.composer.fanout, &outgoing.key, Err(&error), false) {
+            send_failed(s, outgoing, &error, background);
+        }
     }
+    changed |= fanout::finish(s);
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
     if let Some(id) = opened {
@@ -1225,7 +1243,7 @@ fn stored_draft(d: &Draft) -> Value {
     json!({
         "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
         "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
-        "options": d.options,
+        "options": d.options, "createdAt": d.created_at,
     })
 }
 
@@ -1300,6 +1318,8 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
                 options: d["options"].as_array().cloned().unwrap_or_default(),
+                // Drafts stored before timestamps sort as the oldest.
+                created_at: d["createdAt"].as_i64().unwrap_or(0),
             },
         );
     }
@@ -1592,9 +1612,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
+    // On the draft hero web moves its notices below the composer (isDraftHeroState).
+    let hero = matches!(s.frame_route(), Route::Home { .. });
+    let detached = crate::add_to_machine::banner(s, t, true).filter(|_| hero);
     let docked = crate::chat::timeline::composer_requests(s, t)
         .or_else(|| plan::banner(s, t))
-        .or_else(|| crate::add_to_machine::banner(s, t))
+        .or_else(|| crate::add_to_machine::banner(s, t, false).filter(|_| !hero))
         .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
     let docked = usage_limits::banner(s, cx, t).or(docked);
@@ -1609,7 +1632,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         (None, Some(badge)) => stack = stack.child(row().w_full().px(22.0).mb(-17.0).child(spacer()).child(badge)),
         (None, None) => {}
     }
-    stack.child(body)
+    stack.child(body).children(detached.map(|banner| col().w_full().pt(16.0).child(banner)))
 }
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
@@ -1814,23 +1837,27 @@ fn footer(s: &App, t: &T, folded: bool) -> El {
         controls = controls.child(provider_unavailable(s, t));
     } else if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
-        let name = chip_name(s, &instance, &model);
-        controls = controls.child(
-            row()
-                .key("composer-model-chip")
-                .h(28.0)
-                .px(9.0)
-                .gap(6.0)
-                .center_y()
-                .radius(theme::layout::CONTROL_RADIUS)
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(model_name(s, &instance, &model))
-                .child(provider_icon(t, &driver, 16.0))
-                .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
-                .children(chip_suffix(s, t))
-                .on_press(|s: &mut App| picker::toggle(s)),
-        );
+        // Several models read "A, B, N more", every name in the tooltip (ProviderModelPicker).
+        let multiple = fanout::chip_label(s);
+        let name = multiple.as_ref().map_or_else(|| chip_name(s, &instance, &model), |(shown, _)| shown.clone());
+        let mut chip = row()
+            .key("composer-model-chip")
+            .h(28.0)
+            .px(9.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .label(multiple.as_ref().map_or_else(|| model_name(s, &instance, &model), |(_, all)| all.clone()))
+            .child(provider_icon(t, &driver, 16.0))
+            .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+            .children(if multiple.is_some() { Vec::new() } else { chip_suffix(s, t) })
+            .on_press(|s: &mut App| picker::toggle(s));
+        if let Some((_, all)) = multiple {
+            chip = chip.help(all);
+        }
+        controls = controls.child(chip);
     }
     if folded {
         controls = controls.child(

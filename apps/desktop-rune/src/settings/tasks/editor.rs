@@ -1,4 +1,6 @@
 //! Web `ScheduledTaskEditorDialog`: where a task runs, what it does, and when.
+mod branch;
+
 use super::draft::{self, Draft, Filter, Mode, Workspace};
 use super::{Kind, all_tasks, can_operate, config, connected, environments, labels, machine, send};
 use crate::data::Zone;
@@ -17,6 +19,7 @@ pub struct Editor {
     pub(super) saving: bool,
     /// The select whose list is open.
     open: Option<String>,
+    refs: branch::Refs,
 }
 
 pub(super) fn open(s: &mut App, key: &str, task: Option<Value>) {
@@ -24,12 +27,35 @@ pub(super) fn open(s: &mut App, key: &str, task: Option<Value>) {
         Some(task) => Draft::from_task(task, Zone::Local),
         None => Draft::new(default_project(s, key)),
     };
-    s.ui.settings.tasks.editor = Some(Editor { env: key.to_owned(), task, draft, saving: false, open: None });
+    s.ui.settings.tasks.editor = Some(Editor { env: key.to_owned(), task, draft, saving: false, open: None, refs: Default::default() });
 }
 
 /// Escape closes an open list first; the dialog itself closes in the caller.
 pub(super) fn escape(s: &mut App) -> bool {
     s.ui.settings.tasks.editor.as_mut().is_some_and(|e| e.open.take().is_some())
+}
+
+pub(super) fn poll(s: &mut App) -> bool {
+    branch::poll(s)
+}
+
+/// The settings model picker's selection for `models::TASK`: the model the task saves with.
+pub(super) fn model(s: &App) -> Option<(String, String)> {
+    let e = s.ui.settings.tasks.editor.as_ref()?;
+    let m = active_selection(s, e)?;
+    Some((m["instanceId"].as_str()?.to_owned(), m["model"].as_str()?.to_owned()))
+}
+
+pub(super) fn set_model(s: &mut App, instance: &str, model: &str) {
+    if let Some(e) = editor_mut(s) {
+        e.draft.model_key = format!("{instance}:{model}");
+    }
+}
+
+pub(super) fn scene_refs(s: &mut App, refs: Vec<Value>, total: u64, next: Option<u64>) {
+    if let Some(e) = editor_mut(s) {
+        branch::scene(e, refs, total, next);
+    }
 }
 
 fn editor_mut(s: &mut App) -> Option<&mut Editor> {
@@ -133,21 +159,6 @@ fn active_selection(s: &App, e: &Editor) -> Option<Value> {
     }
     let project = selected_project(s, e);
     default_model(config, project.as_ref().and_then(|p| p["id"].as_str()))
-}
-
-/// Every enabled provider's models, as `instanceId:model` and a label.
-fn model_options(config: &Value) -> Vec<(String, String)> {
-    providers(config)
-        .filter(|p| p["enabled"] != false)
-        .flat_map(|p| {
-            let provider = p["displayName"].as_str().or(p["instanceId"].as_str()).unwrap_or_default().to_owned();
-            let instance = p["instanceId"].as_str().unwrap_or_default().to_owned();
-            p["models"].as_array().into_iter().flatten().filter_map(move |m| {
-                let slug = m["slug"].as_str()?;
-                Some((format!("{instance}:{slug}"), format!("{provider} · {}", m["name"].as_str().unwrap_or(slug))))
-            })
-        })
-        .collect()
 }
 
 /// Contracts `managedCapabilityDenial(policy, "webhookTasks")`.
@@ -449,6 +460,7 @@ pub(super) fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 e.draft.base_ref = TextEdit::new("main");
                 e.draft.start_from_origin = true;
                 e.draft.checkout = TextEdit::new("");
+                e.refs = Default::default();
             }
         })
         .build(&kit::theme(t), &mut popups);
@@ -539,21 +551,8 @@ pub(super) fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     );
     match draft.workspace {
         Workspace::Worktree => {
-            let origin = row().w_full().gap(12.0).center_y().child(text("Start from remote").font(theme::XS_MEDIUM).color(t.c.muted_foreground).grow(1.0)).child(
-                kit::Switch::new(draft.start_from_origin)
-                    .label("Start worktree from remote")
-                    .hide_label()
-                    .size("sm")
-                    .disabled(saving || !is_connected)
-                    .on_toggle(|s: &mut App| {
-                        if let Some(e) = editor_mut(s) {
-                            e.draft.start_from_origin ^= true;
-                        }
-                    })
-                    .build(&kit::theme(t)),
-            );
-            let control = col().w_full().gap(8.0).child(input(t, &draft.base_ref, "main", saving || !is_connected, |d| &mut d.base_ref)).child(origin);
-            form = form.child(field(t, "Base branch", None, control));
+            let picker = branch::picker(s, t, e, saving || !is_connected, &mut popups);
+            form = form.child(field(t, "Base branch", None, picker));
         }
         Workspace::Existing => {
             form = form.child(field(t, "Checkout path", None, input(t, &draft.checkout, "/path/to/checkout", saving, |d| &mut d.checkout)));
@@ -578,26 +577,11 @@ pub(super) fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
         .on_edit(|s: &mut App| draft_text(s, |d| &mut d.prompt));
     form = form.child(field(t, "Prompt", None, prompt));
-    // Model.
-    let selection = active_selection(s, e);
-    let model = select(
-        e,
-        t,
-        &mut popups,
-        Choice {
-            id: "model",
-            options: model_options(&config),
-            current: selection.map(|m| format!("{}:{}", m["instanceId"].as_str().unwrap_or_default(), m["model"].as_str().unwrap_or_default())),
-            placeholder: "Model",
-            width: FULL,
-            disabled: saving || !is_connected,
-        },
-        |s, value| {
-            if let Some(e) = editor_mut(s) {
-                e.draft.model_key = value.to_owned();
-            }
-        },
-    );
+    // Model: the settings model picker over this environment's providers.
+    let mut model = row().child(crate::settings::models::control(s, t, crate::settings::models::TASK));
+    if saving || !is_connected {
+        model = model.disabled(true).inert().opacity(0.64);
+    }
     form = form.child(field(t, "Model", None, model));
     form = form.child(schedule_section(s, t, e, denial.as_deref(), live.as_ref(), &mut popups));
     form = form.child(switch_row(t, "Enabled", "Disabled tasks stay saved but do not run.", draft.enabled, |d| d.enabled ^= true));

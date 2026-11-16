@@ -5,6 +5,7 @@
 //! shared select, field and switch plumbing edits them and `value`/`update` route here.
 
 use super::{controls as c, nested_object, server_settings, update};
+use crate::env;
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
 use rune::{Cx, El, col, el, row, text};
@@ -34,8 +35,10 @@ pub struct Maintenance {
     /// Environments whose database notice was dismissed (web localStorage
     /// `database-storage-notice-dismissed`), read once.
     dismissed: Option<Vec<String>>,
-    /// Scenes: a database status standing in for the server's.
-    scene: Option<Value>,
+    /// Scenes: database statuses standing in for the servers', by environment key.
+    scene: Vec<(String, Value)>,
+    /// Environments whose database storage the page watches.
+    watching: Vec<String>,
     pub(super) dialog: bool,
     pub(super) tip: bool,
 }
@@ -91,6 +94,14 @@ fn rules(policy: &Value, storage: &Value) -> Value {
             rules
         }
     }
+}
+
+/// `resolveWorktreeCleanup(settings, project).worktreeOnDelete`: the server removes a deleted
+/// thread's worktree itself.
+pub(crate) fn worktree_on_delete(settings: &Value, project: &str) -> bool {
+    let own = &settings["projectSettingsOverrides"][project]["worktreeCleanup"];
+    let policy = if own.is_object() { own } else { &settings["worktreeCleanup"] };
+    rules(policy, &settings["storageCleanup"])["worktreeOnDelete"] == true
 }
 
 fn rules_enabled(rules: &Value) -> bool {
@@ -195,9 +206,37 @@ pub fn set(s: &mut App, key: &str, next: Value) {
 
 /// The last-run subscription the Maintenance page watches.
 pub fn report_resource(s: &App) -> Vec<(String, Value)> {
-    let report = capability(s, "storageCleanupRun").then(|| (REPORT.to_owned(), json!({})));
-    let database = (capability(s, "databaseStorage") && !project_scope(s)).then(|| (DATABASE.to_owned(), json!({})));
-    report.into_iter().chain(database).collect()
+    capability(s, "storageCleanupRun").then(|| (REPORT.to_owned(), json!({}))).into_iter().collect()
+}
+
+/// Web `DatabaseStorageNotice`'s `connectedEnvironments`: the environment in scope, or every
+/// connected one, that reports its database storage.
+fn database_environments(s: &App) -> Vec<String> {
+    let keys = if s.ui.settings.environment_only { vec![s.ui.env.active.clone()] } else { env::keys(s) };
+    keys.into_iter()
+        .filter(|key| {
+            env::connected(s, key)
+                && env::source(s, key).and_then(|src| src.state().config.as_ref()).is_some_and(|c| c["environment"]["capabilities"]["databaseStorage"] == true)
+        })
+        .collect()
+}
+
+/// Watches `server.getDatabaseStorage` on each of them while Maintenance shows.
+fn watch_databases(s: &mut App) {
+    let page = matches!(&s.route, crate::Route::Settings(p) if p == "maintenance" || p == "storage");
+    let wanted = if page && !project_scope(s) { database_environments(s) } else { Vec::new() };
+    let watching = std::mem::take(&mut s.ui.settings.maintenance.watching);
+    for key in watching.iter().filter(|k| !wanted.contains(k)) {
+        if let Some(net) = env::net_of(s, key) {
+            net.unwatch_resource(DATABASE, json!({}));
+        }
+    }
+    for key in wanted.iter().filter(|k| !watching.contains(k)) {
+        if let Some(net) = env::net_of(s, key) {
+            net.watch_resource(DATABASE, json!({}));
+        }
+    }
+    s.ui.settings.maintenance.watching = wanted;
 }
 
 const DATABASE: &str = "server.getDatabaseStorage";
@@ -217,23 +256,56 @@ fn recommend(status: &Value) -> bool {
     status["incrementalVacuumEnabled"] == false && status["reclaimableBytes"].as_f64().is_some_and(|b| b >= COMPACTION_RECOMMENDED_BYTES)
 }
 
-/// Web `DatabaseStorageNotice`: suggests `t3 doctor` while the database holds at least 1 GiB of
-/// freed pages, until dismissed for that environment.
+/// Web `databaseCompactionRecommendations` less the dismissed: `(environment id, label, status)`,
+/// most reclaimable first.
+fn recommendations(mut found: Vec<(String, String, Value)>, dismissed: &[String]) -> Vec<(String, String, Value)> {
+    found.retain(|(id, _, status)| recommend(status) && !dismissed.contains(id));
+    let bytes = |status: &Value| status["reclaimableBytes"].as_f64().unwrap_or_default();
+    found.sort_by(|a, b| bytes(&b.2).total_cmp(&bytes(&a.2)));
+    found
+}
+
+/// Web `DatabaseStorageNotice`: suggests `t3 doctor` on each machine whose database holds at least
+/// 1 GiB of freed pages, until dismissed for that environment.
 fn database(s: &App, t: &T) -> Option<El> {
-    let status = super::resource(s, DATABASE, json!({})).or(s.ui.settings.maintenance.scene.as_ref()).filter(|v| recommend(v))?;
-    let config = s.state().config.as_ref()?;
-    let id = config["environment"]["environmentId"].as_str()?.to_owned();
-    if s.ui.settings.maintenance.dismissed.as_ref().is_some_and(|d| d.contains(&id)) {
+    let ui = &s.ui.settings.maintenance;
+    let statuses: Vec<(String, Value)> = if ui.scene.is_empty() {
+        database_environments(s)
+            .into_iter()
+            .filter_map(|key| match env::source(s, &key)? {
+                crate::data::Source::Live(net) => net.resource(DATABASE, json!({})).cloned().map(|status| (key, status)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        ui.scene.clone()
+    };
+    let found = statuses
+        .into_iter()
+        .map(|(key, status)| {
+            // Saved environments are keyed by their environment id.
+            let id = if key == env::LOCAL { env::local_id(s).unwrap_or_else(|| key.clone()) } else { key.clone() };
+            let label = Some(env::label(s, &key)).filter(|l| !l.is_empty()).unwrap_or_else(|| id.clone());
+            (id, label, status)
+        })
+        .collect();
+    let visible = recommendations(found, ui.dismissed.as_deref().unwrap_or_default());
+    if visible.is_empty() {
         return None;
     }
-    let gib = status["reclaimableBytes"].as_f64().unwrap_or_default() / COMPACTION_RECOMMENDED_BYTES;
-    let label = config["environment"]["label"].as_str().unwrap_or(&id).to_owned();
-    let command = status["compactCommand"].as_str().unwrap_or_default().to_owned();
     let header = super::connections::info_row(
         t,
         "Reclaim freed database space",
         "Old history is cleaned up automatically, but these databases still hold the freed space. Run the command on each machine to return it to disk; it pauses and restarts the background service. Quit the desktop app first if it hosts the environment.",
     );
+    let mut rows = vec![header];
+    rows.extend(visible.into_iter().map(|(id, label, status)| database_row(t, id, &label, &status)));
+    Some(c::section("Database", rows, t))
+}
+
+fn database_row(t: &T, id: String, label: &str, status: &Value) -> El {
+    let gib = status["reclaimableBytes"].as_f64().unwrap_or_default() / COMPACTION_RECOMMENDED_BYTES;
+    let command = status["compactCommand"].as_str().unwrap_or_default().to_owned();
     let copy = command.clone();
     let controls = row()
         .gap(6.0)
@@ -245,7 +317,7 @@ fn database(s: &App, t: &T) -> Option<El> {
                 .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copy.clone())),
         )
         .child(crate::kit::Button::new("Dismiss").variant("ghost").size("xs").on_press(move |s: &mut App| dismiss(s, &id)).build(t));
-    let machine = row()
+    row()
         .w_full()
         .px(16.0)
         .py(12.0)
@@ -259,18 +331,23 @@ fn database(s: &App, t: &T) -> Option<El> {
                 .child(text(format!("{gib:.1} GiB on {label}")).font(theme::SM_MEDIUM).color(t.c.foreground))
                 .child(text(command).font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground).wrap().selectable(true)),
         )
-        .child(controls);
-    Some(c::section("Database", vec![header, machine], t))
+        .child(controls)
 }
 
 /// Scene: a database still holding freed pages.
 pub(super) fn scene_database(s: &mut App) {
-    s.ui.settings.maintenance.scene = Some(json!({
-        "databaseBytes": 6.2 * COMPACTION_RECOMMENDED_BYTES,
-        "reclaimableBytes": 2.4 * COMPACTION_RECOMMENDED_BYTES,
-        "incrementalVacuumEnabled": false,
-        "compactCommand": "npx t3 doctor --compact-database",
-    }));
+    let status = |gib: f64| {
+        json!({
+            "databaseBytes": 6.2 * COMPACTION_RECOMMENDED_BYTES,
+            "reclaimableBytes": gib * COMPACTION_RECOMMENDED_BYTES,
+            "incrementalVacuumEnabled": false,
+            "compactCommand": "npx t3 doctor --compact-database",
+        })
+    };
+    let active = s.ui.env.active.clone();
+    s.ui.settings.maintenance.scene = vec![(active, status(2.4)), ("env-box".into(), status(1.3))];
+    s.ui.env.saved.push(env::Saved { id: "env-box".into(), label: "Hetzner box".into(), base: "https://box.tail1234.ts.net".into(), bearer: String::new() });
+    env::park(s, "env-box", crate::data::Source::Fixture(crate::data::fixture_state()));
 }
 
 fn dismiss(s: &mut App, id: &str) {
@@ -286,6 +363,7 @@ pub fn poll(s: &mut App) -> bool {
     if s.ui.settings.maintenance.dismissed.is_none() && matches!(&s.route, crate::Route::Settings(p) if p == "maintenance") {
         s.ui.settings.maintenance.dismissed = Some(ui_prefs().get::<Vec<String>>(DISMISSED_KEY).unwrap_or_default());
     }
+    watch_databases(s);
     let Some(id) = s.ui.settings.maintenance.run else { return false };
     let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) else { return false };
     s.ui.settings.maintenance.run = None;
@@ -794,6 +872,16 @@ mod tests {
         assert!(!recommend(&status(COMPACTION_RECOMMENDED_BYTES - 1.0, false)));
         assert!(!recommend(&status(4.0 * COMPACTION_RECOMMENDED_BYTES, true)), "incremental vacuum returns it already");
         assert!(!recommend(&Value::Null));
+        let gib = COMPACTION_RECOMMENDED_BYTES;
+        let found = vec![
+            ("local".to_owned(), "This Mac".to_owned(), status(1.2 * gib, false)),
+            ("box".to_owned(), "Box".to_owned(), status(3.0 * gib, false)),
+            ("pi".to_owned(), "Pi".to_owned(), status(0.5 * gib, false)),
+            ("vps".to_owned(), "VPS".to_owned(), status(9.0 * gib, false)),
+        ];
+        let ids = |list: Vec<(String, String, Value)>| list.into_iter().map(|(id, ..)| id).collect::<Vec<_>>();
+        assert_eq!(ids(recommendations(found.clone(), &[])), ["vps", "box", "local"], "one row per machine, most reclaimable first");
+        assert_eq!(ids(recommendations(found, &["vps".to_owned()])), ["box", "local"], "a dismissal hides only its machine");
     }
 
     #[test]

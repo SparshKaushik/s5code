@@ -128,9 +128,8 @@ pub(super) fn want(s: &mut App, kind: Kind, e: &Value) {
         Kind::Checks => "pullRequests.detail",
         Kind::Breakdown => "pullRequests.changeBreakdown",
     };
-    match super::pull_requests::net_for(s, e) {
-        Some(net) => {
-            let id = net.request(method, reference(e));
+    match super::pull_requests::request_for(s, e, method, reference(e)) {
+        Some(id) => {
             reads(ui(s), kind).entry(key).or_default().pending = Some(id);
         }
         None if !crate::host::live() => {
@@ -153,7 +152,7 @@ fn recorded(kind: Kind) -> Value {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) {
+    if !matches!(s.frame_route(), Route::PullRequests) && !crate::panel::showing_pull_requests(s) {
         return false;
     }
     let now = s.now_ms;
@@ -240,7 +239,7 @@ fn poll_session(s: &mut App, env: &str, now: i64) -> bool {
 
 /// Tracks Shift held alone; true when the rows' quick actions appear or go.
 pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
-    if !matches!(e.key, Key::Modifier { .. }) || !matches!(s.route, Route::PullRequests) {
+    if !matches!(e.key, Key::Modifier { .. }) || !(matches!(s.route, Route::PullRequests) || crate::panel::showing_pull_requests(s)) {
         return false;
     }
     let speed = e.mods.shift && !e.mods.cmd && !e.mods.ctrl && !e.mods.alt;
@@ -491,8 +490,7 @@ fn close_batch(s: &mut App, entries: Vec<Value>) {
     }
     let mut sent = Vec::new();
     for e in batch {
-        if let Some(net) = super::pull_requests::net_for(s, &e) {
-            let id = net.request("pullRequests.runAction", action_payload(&e, "close", None));
+        if let Some(id) = super::pull_requests::request_for(s, &e, "pullRequests.runAction", action_payload(&e, "close", None)) {
             sent.push(Acting { key: row_key(&e), entry: e, action: "close", step: Step::Run, id, batch: None });
         }
     }
@@ -556,9 +554,9 @@ fn perform(s: &mut App, e: &Value, action: &'static str) {
 }
 
 fn send(s: &mut App, mut a: Acting, step: Step, method: &str, payload: Value) {
-    match super::pull_requests::net_for(s, &a.entry) {
-        Some(net) => {
-            a.id = net.request(method, payload);
+    match super::pull_requests::request_for(s, &a.entry, method, payload) {
+        Some(id) => {
+            a.id = id;
             a.step = step;
             ui(s).acting.push(a);
         }
@@ -1123,12 +1121,18 @@ fn breakdown_grid(t: &T, b: &Value, (additions, deletions): (i64, i64)) -> El {
 
 // ---- row meta ---------------------------------------------------------------------------
 
-/// The meta line's `@xs` container width (20rem), from which the matched badge spells itself out.
-const META_XS: f32 = 320.0;
+/// The meta line's `@xs`, `@xl` and `@3xl` container widths (20rem, 36rem, 48rem).
+const META_BREAKPOINTS: [f32; 3] = [320.0, 576.0, 768.0];
 
-/// `@xs/pr-row-meta`: whether a meta line laid out at `rect` fits the badge's words.
-pub fn meta_wide(rect: [f32; 4]) -> bool {
-    rect[2] >= META_XS
+/// `@xs`, `@xl` and `@3xl/pr-row-meta`: how many breakpoints a meta line laid out at `rect` reaches.
+/// From `@xs` the matched badge spells itself out and the author's login shows beside the avatar.
+pub fn meta_tier(rect: [f32; 4]) -> usize {
+    META_BREAKPOINTS.iter().filter(|&&w| rect[2] >= w).count()
+}
+
+/// PullRequestRowLabels: one label below `@xl`, two below `@3xl`, else three.
+pub fn shown_labels(count: usize, tier: usize) -> usize {
+    count.min(tier.clamp(1, 3))
 }
 
 /// The badge on a row the hosts matched by its description, where no shown field holds the search;
@@ -1492,8 +1496,13 @@ mod tests {
     }
 
     #[test]
-    fn the_matched_badge_spells_itself_out_from_a_20rem_meta_line() {
-        assert!(!meta_wide([0.0, 0.0, 319.5, 16.0]));
-        assert!(meta_wide([12.0, 40.0, 320.0, 16.0]));
+    fn the_meta_line_spells_out_from_20rem_and_shows_more_labels_from_36_and_48rem() {
+        assert_eq!(meta_tier([0.0, 0.0, 319.5, 16.0]), 0);
+        assert_eq!(meta_tier([12.0, 40.0, 320.0, 16.0]), 1);
+        assert_eq!(meta_tier([0.0, 0.0, 600.0, 16.0]), 2);
+        assert_eq!(meta_tier([0.0, 0.0, 768.0, 16.0]), 3);
+        assert_eq!([0, 1, 2, 3].map(|tier| shown_labels(5, tier)), [1, 1, 2, 3]);
+        assert_eq!(shown_labels(2, 3), 2);
+        assert_eq!(shown_labels(0, 0), 0);
     }
 }

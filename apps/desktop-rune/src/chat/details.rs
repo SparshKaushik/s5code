@@ -17,10 +17,12 @@ use crate::shell::palette;
 
 pub mod automations;
 pub mod child_work;
+pub mod cleanup;
 mod git;
 pub mod html_render;
 pub mod items;
 pub mod pr;
+pub mod run_on;
 pub mod scripts;
 pub mod servers;
 
@@ -50,6 +52,8 @@ pub struct Ui {
     pending: Option<(u64, Pending)>,
     /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
     drafts: HashMap<String, DraftRun>,
+    run_on: run_on::State,
+    cleanup: cleanup::State,
     pub git: git::State,
     pub scripts: scripts::State,
     pub checkout: Option<pr::Checkout>,
@@ -99,6 +103,24 @@ pub fn grants(s: &App, scope: &str) -> bool {
         Some(Ok(session)) => crate::settings::session_grants(session, scope),
         Some(Err(())) => false,
         None => true,
+    }
+}
+
+/// useEnvironmentPermission's three states: checking until the session answers (the recorded
+/// scenes never ask), then allowed or not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Access {
+    Pending,
+    Granted,
+    Denied,
+}
+
+pub fn access(s: &App, scope: &str) -> Access {
+    match &s.ui.chat.details.session {
+        Some(Ok(session)) if crate::settings::session_grants(session, scope) => Access::Granted,
+        Some(_) => Access::Denied,
+        None if matches!(s.src, data::Source::Live(_)) => Access::Pending,
+        None => Access::Granted,
     }
 }
 
@@ -207,6 +229,9 @@ pub struct DraftRun {
     pub worktree: bool,
     pub base: Option<String>,
     pub from_origin: bool,
+    pub selection: run_on::Selection,
+    /// The machine "Auto balance" moved the draft to (`loadBalancedEnvironmentId`).
+    pub balanced: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -496,7 +521,7 @@ pub fn thousands(n: u64) -> String {
 }
 
 /// Scrolling down to within 96 points of the list's end asks for the next page.
-fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
+pub(crate) fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
     previous.is_some_and(|p| offset > p) && max - offset <= 96.0
 }
 
@@ -589,6 +614,22 @@ fn draft_run_mut(s: &mut App) -> &mut DraftRun {
     s.ui.chat.details.drafts.entry(key).or_insert(fallback)
 }
 
+/// A new-thread draft's effective branch, as its branch toolbar resolves it: a picked existing
+/// worktree's branch, a new worktree's base, else the project checkout's current branch.
+pub(crate) fn draft_branch(s: &App, key: &str) -> Option<String> {
+    let project = key.strip_prefix("home:")?;
+    let preset = s.ui.chat.home.workspace.as_ref().filter(|(p, w)| p == project && w["type"] == "existing_worktree");
+    if let Some((_, w)) = preset {
+        return w["branch"].as_str().filter(|b| !b.is_empty()).map(str::to_owned);
+    }
+    let root = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| data::s(p, "workspaceRoot"))?;
+    let current = s.state().vcs.get(root).and_then(|v| v["local"]["refName"].as_str()).filter(|b| !b.is_empty()).map(str::to_owned);
+    match s.ui.chat.details.drafts.get(key).filter(|r| r.worktree) {
+        Some(run) => run.base.clone().or(current),
+        None => current,
+    }
+}
+
 /// The branch picker chooses the new worktree's base instead of switching the checkout.
 fn selecting_base(s: &App) -> bool {
     draft_run(s).is_some_and(|r| r.worktree)
@@ -613,6 +654,16 @@ pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
         strategy["startFromOrigin"] = json!(true);
     }
     Some(strategy)
+}
+
+/// The base each picked model's worktree starts from, and whether from origin; none outside a
+/// Git checkout (`multipleModelSendBlock`'s branch).
+pub fn draft_base(s: &App) -> Option<(String, bool)> {
+    let run = draft_run(s)?;
+    if !vcs(s).is_some_and(|v| v["local"]["isRepo"] == true) {
+        return None;
+    }
+    Some((worktree_base(s, &run)?, run.from_origin))
 }
 
 fn set_env_mode(s: &mut App, worktree: bool) {
@@ -905,7 +956,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | cleanup::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
     poll_branch(s) || changed
 }
 
@@ -993,7 +1044,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
 const PREFERRED_EDITOR: &str = "preferredEditor";
 
 /// `usePreferredEditor`: the editor last picked, while it is still installed, else the first.
-fn preferred_editor(s: &App) -> Option<(String, String)> {
+pub(crate) fn preferred_editor(s: &App) -> Option<(String, String)> {
     let stored = s.client_settings.values.get(PREFERRED_EDITOR).and_then(|v| v.as_str());
     pick_editor(editors(s), stored)
 }
@@ -1064,10 +1115,11 @@ fn frame(t: &T, body: El, cap: f32) -> El {
 fn card(s: &App, t: &T, cap: f32) -> Option<El> {
     let muted = t.c.muted_foreground;
     let fg = t.c.foreground.alpha_mul(0.8);
-    let env = env_label(s);
+    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
     let thread = composer::ctx(s).thread;
     let run = draft_run(s);
-    let new_worktree = run.as_ref().is_some_and(|r| r.worktree);
+    let fanout = composer::fanout::forces_worktree(s);
+    let new_worktree = fanout || run.as_ref().is_some_and(|r| r.worktree);
     let worktree = worktree_here(s).is_some();
     let mode = match (new_worktree, worktree, thread.is_some()) {
         (true, ..) => "New worktree",
@@ -1086,9 +1138,9 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         .gap(9.0)
         .center_y()
         .label(format!("Run context: {env}, {mode}"))
-        .child(icon(&icons::SERVER, 18.0).color(muted))
+        .child(icon(if run_on::auto_label(s).is_some() { &icons::SCALE } else { &icons::SERVER }, 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
-        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(workspace_path(s).unwrap_or_else(|| mode.to_string())));
+        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(if fanout { "Each model starts in its own worktree.".to_string() } else { workspace_path(s).unwrap_or_else(|| mode.to_string()) }));
     if workspace_path(s).is_some() {
         run_context = run_context.on_secondary_press(|s: &mut App, _: rune::PointerPress, _: &mut Tx| s.ui.chat.details.menu = Some(Menu::Path));
     }
@@ -1276,18 +1328,24 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
-    let worktree = draft_run(s).is_some_and(|r| r.worktree);
+    let fanout = composer::fanout::forces_worktree(s);
+    let worktree = fanout || draft_run(s).is_some_and(|r| r.worktree);
+    let checkout = if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" };
+    let auto = run_on::auto_label(s).is_some();
     let mut rows = vec![group_label(t, "Run on")];
     // One row per environment holding the project's repository; picking one moves the draft.
     let hosts = hosts(s);
     if hosts.is_empty() {
-        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
+        rows.push(radio_row(t, &icons::SERVER, &env_label(s), !auto, run_on::keep_here));
     }
     let current = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).unwrap_or_default();
     for project in hosts {
         let label = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| crate::env::location(s, p)).unwrap_or_default();
-        let checked = project == current;
-        rows.push(radio_row(t, &icons::SERVER, &label, checked, move |s: &mut App| move_draft(s, &project)));
+        let checked = !auto && project == current;
+        rows.push(radio_row(t, &icons::SERVER, &label, checked, move |s: &mut App| {
+            run_on::keep_here(s);
+            move_draft(s, &project);
+        }));
     }
     // BranchToolbar's "Add to another machine": clone this project onto a connected environment.
     if let Some(id) = composer::ctx(s).project.map(|p| data::s(p, "id").to_owned())
@@ -1301,9 +1359,16 @@ fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     rows.extend([
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
-        radio_row(t, &icons::FOLDER, if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" }, !worktree, |s: &mut App| set_env_mode(s, false)),
+        if fanout {
+            menu_row(t, Some(icon(&icons::FOLDER, 16.0).color(t.c.muted_foreground)), checkout, None::<fn(&mut App)>, None).child(el().size(16.0, 16.0))
+        } else {
+            radio_row(t, &icons::FOLDER, checkout, !worktree, |s: &mut App| set_env_mode(s, false))
+        },
         radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
     ]);
+    if let Some(auto) = run_on::auto_row(s, t) {
+        rows.insert(1, auto);
+    }
     if let Some((branch, _)) = previous_seed(s) {
         let label = branch.map_or_else(|| "Previous worktree".to_string(), |b| format!("Previous worktree ({b})"));
         rows.push(radio_row(t, &icons::HISTORY, &label, false, |s: &mut App| {
@@ -1440,6 +1505,8 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     scripts::overlays(s, t, &mut out);
     pr::overlays(s, t, &mut out);
     restore_dialog(s, t, &mut out);
+    composer::fanout::retry_dialog(s, t, &mut out);
+    cleanup::dialog(s, t, &mut out);
     items::overlay(s, t, &mut out);
     child_work::overlay(s, t, &mut out);
     if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {
@@ -1526,7 +1593,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftRun, Item, Pending, Ref, Shown, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
+    use super::{Access, DraftRun, Item, Pending, Ref, Shown, access, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
     use serde_json::{Value, json};
     use crate::{App, Route, data};
 
@@ -1611,6 +1678,11 @@ mod tests {
         assert!(grants(&s, "source-control:write") && !branch_denied(&mut s));
         s.ui.chat.details.session = Some(Err(()));
         assert!(!grants(&s, "filesystem:read"));
+        assert_eq!(access(&s, "filesystem:read"), Access::Denied);
+        s.ui.chat.details.session = Some(Ok(json!({"authenticated": true, "scopes": ["filesystem:read"]})));
+        assert_eq!(access(&s, "filesystem:read"), Access::Granted);
+        s.ui.chat.details.session = None;
+        assert_eq!(access(&s, "filesystem:read"), Access::Granted, "the recorded scenes never ask");
     }
 
     #[test]
@@ -1662,7 +1734,7 @@ mod tests {
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
         assert_eq!(take_draft_workspace(&mut s), None, "the checkout by default");
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true, ..DraftRun::default() };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
     }
@@ -1728,7 +1800,7 @@ mod tests {
         let mut s = App::new();
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true, ..DraftRun::default() };
         git::sync_branch(&mut s, &json!({"branch": {"status": "skipped_not_requested"}}));
         assert_eq!(draft_run(&s).unwrap().base.as_deref(), Some("main"));
         git::sync_branch(&mut s, &json!({"branch": {"status": "created", "name": "feature/fix"}}));

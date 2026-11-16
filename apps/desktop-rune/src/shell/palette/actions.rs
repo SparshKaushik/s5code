@@ -15,6 +15,8 @@ pub struct State {
     scratch: Option<Scratch>,
     /// The server's keybindings and config issues last seen, to toast when a reload changes them.
     keybindings: Option<(Value, Value)>,
+    /// The warning's "Open keybindings.json" request.
+    keybindings_open: Option<u64>,
 }
 /// `openScratch`: the request, then the project id until the project reaches the store, since
 /// a draft sends to the project it resolves.
@@ -259,9 +261,9 @@ pub fn copy_thread(s: &mut App, tx: &mut Tx) -> bool {
     toast(s, title, Some(&description));
     true
 }
-/// Rune's right panel has no pull-requests surface; opening the panel is the nearest place.
+/// "Show linked pull requests": the right panel's list.
 pub fn show_pull_requests(s: &mut App) {
-    s.ui.shell.panel_open = true;
+    crate::panel::show_pull_requests(s);
 }
 pub fn open_link(s: &mut App, thread: String) {
     let mut input = TextEdit::default();
@@ -506,6 +508,29 @@ pub fn highlighted(content: &str, ranges: &[(usize, usize)], font: rune::tok::Te
     rune::rich(content, spans).font(font).color(base).truncate()
 }
 
+const INVALID_KEYBINDINGS: &str = "Invalid keybindings configuration";
+
+/// `KeybindingsConfigWarning`: the issue as a warning, with "Open keybindings.json" while this
+/// connection may operate, the server names the file and an editor is installed.
+fn keybindings_warning(s: &mut App, message: &str) {
+    let path = config(s)["keybindingsConfigPath"].as_str().filter(|p| !p.is_empty()).map(str::to_owned);
+    let editor = crate::chat::details::preferred_editor(s).map(|e| e.0);
+    let usable = crate::chat::details::grants(s, "orchestration:operate") && path.is_some() && editor.is_some();
+    let open: super::ToastAction = (
+        "Open keybindings.json".to_owned(),
+        false,
+        std::rc::Rc::new(move |s: &mut App, _: &mut Tx| {
+            if let (Some(path), Some(editor)) = (&path, &editor)
+                && let Some(net) = s.src.net()
+            {
+                let id = net.request("shell.openInEditor", json!({"cwd": path, "editor": editor}));
+                s.ui.shell.palette.act.keybindings_open = Some(id);
+            }
+        }),
+    );
+    super::toast_warning(s, INVALID_KEYBINDINGS, Some(message), vec![open], !usable);
+}
+
 /// KeybindingsUpdateToast: a reload that changes the bindings or their issues, after the first.
 fn keybindings_reload(s: &mut App) -> Option<(&'static str, String)> {
     let config = s.state().config.as_ref()?;
@@ -522,7 +547,7 @@ fn keybindings_reload(s: &mut App) -> Option<(&'static str, String)> {
     }
     let issue = issues.as_array().into_iter().flatten().find(|v| v["kind"].as_str().is_some_and(|k| k.starts_with("keybindings.")));
     Some(match issue {
-        Some(issue) => ("Invalid keybindings configuration", data::s(issue, "message").to_owned()),
+        Some(issue) => (INVALID_KEYBINDINGS, data::s(issue, "message").to_owned()),
         None => ("Keybindings updated", "Keybindings configuration reloaded successfully.".to_owned()),
     })
 }
@@ -575,7 +600,21 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     if let Some((title, description)) = keybindings_reload(s) {
-        toast(s, title, Some(&description));
+        if title == INVALID_KEYBINDINGS {
+            keybindings_warning(s, &description);
+        } else {
+            toast(s, title, Some(&description));
+        }
+        changed = true;
+    }
+    if let Some(id) = s.ui.shell.palette.act.keybindings_open
+        && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
+    {
+        s.ui.shell.palette.act.keybindings_open = None;
+        if let Err(e) = reply {
+            let message = super::error_message(&e, "Unknown error opening file.");
+            super::toast_error_brief(s, "Unable to open keybindings file", Some(&message));
+        }
         changed = true;
     }
     const SCRATCH_FAILED: &str = "Could not start without a project";
@@ -650,6 +689,18 @@ mod tests {
         assert_eq!(set(&mut app, json!([{ "command": "b" }]), json!([])).map(|t| t.0), Some("Keybindings updated"));
         let bad = json!([{ "kind": "keybindings.invalid-entry", "message": "bad key" }]);
         assert_eq!(set(&mut app, json!([{ "command": "b" }]), bad), Some(("Invalid keybindings configuration", "bad key".to_owned())));
+
+        // `KeybindingsConfigWarning`: the open button greys out without a file or an editor.
+        keybindings_warning(&mut app, "bad key");
+        let notice = app.ui.shell.palette.notice.as_ref().expect("a warning");
+        assert!(notice.warning && notice.title == INVALID_KEYBINDINGS);
+        assert_eq!(notice.actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["Open keybindings.json"]);
+        assert_eq!(notice.disabled, vec!["Open keybindings.json".to_string()], "FAILED: no keybindingsConfigPath, so the button is disabled");
+        if let crate::data::Source::Fixture(st) = &mut app.src {
+            st.config = Some(json!({ "keybindingsConfigPath": "/home/me/.t3/keybindings.json", "availableEditors": ["vscode"] }));
+        }
+        keybindings_warning(&mut app, "bad key");
+        assert!(app.ui.shell.palette.notice.as_ref().unwrap().disabled.is_empty(), "FAILED: a file and an editor enable it");
     }
     #[test]
     fn pull_request_urls_and_numbers_resolve() {

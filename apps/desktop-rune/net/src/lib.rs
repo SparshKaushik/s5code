@@ -152,6 +152,27 @@ impl Net {
             wake: Arc::new(|| {}),
         }
     }
+    /// A connection over an in-memory transport that drops what it is sent and never answers,
+    /// so client tests can drive the code that subscribes and unsubscribes.
+    #[cfg(feature = "test-support")]
+    pub fn in_memory(base_url: &str) -> Net {
+        let (tx, commands) = mpsc::channel::<Command>();
+        let (incoming_tx, rx) = mpsc::channel();
+        std::thread::spawn(move || commands.into_iter().for_each(drop));
+        Self {
+            state: State::default(),
+            tx,
+            rx,
+            replies: HashMap::new(),
+            chunks: HashMap::new(),
+            resources: HashMap::new(),
+            resource_events: HashMap::new(),
+            base_url: base_url.to_owned(),
+            bearer: String::new(),
+            incoming_tx,
+            wake: Arc::new(|| {}),
+        }
+    }
     /// Folds decoded messages without waiting for network I/O.
     pub fn drain(&mut self) -> bool {
         let mut changed = false;
@@ -270,6 +291,10 @@ impl Net {
     /// Drains ordered terminal events; snapshots alone cannot preserve burst output.
     pub fn take_resource_events(&mut self, method: &str, payload: Value) -> Vec<Value> {
         self.resource_events.remove(&Route::Resource(method.into(), payload.to_string())).unwrap_or_default()
+    }
+    /// Whether a [`Net::watch_resource`] subscription is open, answered or not.
+    pub fn watching(&self, method: &str, payload: Value) -> bool {
+        self.resources.contains_key(&Route::Resource(method.into(), payload.to_string()))
     }
     pub fn unwatch_resource(&mut self, method: &str, payload: Value) {
         let route = Route::Resource(method.into(), payload.to_string());
@@ -412,6 +437,14 @@ impl Net {
                 .insert(id, Err(json!({"message":"network worker stopped"})));
         }
         id
+    }
+    /// An id no server will answer, for a reply this client is handed instead (see [`Net::put_reply`]).
+    pub fn reserve_id(&self) -> u64 {
+        next_id()
+    }
+    /// Answers `id` as the server would, for a request that other clients carried.
+    pub fn put_reply(&mut self, id: u64, reply: Reply) {
+        self.replies.insert(id, reply);
     }
     pub fn take_reply(&mut self, id: u64) -> Option<Reply> {
         self.replies.remove(&id)

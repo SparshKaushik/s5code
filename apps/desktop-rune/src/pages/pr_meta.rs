@@ -42,8 +42,8 @@ pub enum Write {
     Update(String),
     Maintainer { previous: Option<Choice> },
     Stack(&'static str),
-    /// A thread linked to this pull request, or unlinked from it.
-    Link { linked: bool },
+    /// A thread linked to this pull request.
+    Link,
 }
 
 /// MaintainerEditsChoice: the saved value, shown until the host's next reading.
@@ -103,7 +103,7 @@ pub fn actors(u: &Ui) -> impl Iterator<Item = &Value> {
 fn send(s: &mut App, method: &str, input: Value) -> Option<(String, u64)> {
     let entry = s.ui.pages.detail.entry.clone()?;
     let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
-    let id = super::pull_requests::net_for(s, &entry)?.request(method, input);
+    let id = super::pull_requests::request_for(s, &entry, method, input)?;
     Some((env, id))
 }
 
@@ -235,8 +235,7 @@ pub fn failure(write: &Write, term: &str) -> (String, String) {
             "The host refused the merge. Check that you have write access, that the checks it requires have passed, and that the branch is not conflicting.".into(),
         ),
         Write::Stack(_) => ("Could not rebase the stack".into(), "The host refused the rebase. A rebase stops at the first commit that does not apply cleanly.".into()),
-        Write::Link { linked: true } => (format!("Could not link the {term}"), "Try again.".into()),
-        Write::Link { .. } => (format!("Could not unlink the {term}"), "Try again.".into()),
+        Write::Link => (format!("Could not link the {term}"), "Try again.".into()),
     }
 }
 
@@ -278,7 +277,7 @@ fn finish(s: &mut App, write: Write, reply: Result<Value, Value>) {
                 Write::Reviewer { .. } => load_candidates(s, "reviewers"),
                 Write::Stack(_) => s.ui.pages.pull_requests.requested = None,
                 // The linked threads read again; the pull request itself is unchanged.
-                Write::Link { .. } => {
+                Write::Link => {
                     let u = meta(s);
                     u.link_picker = false;
                     u.linked_open = false;
@@ -627,27 +626,20 @@ fn open_thread(s: &mut App, id: &str) {
     crate::shell::sidebar::go(s, Route::Thread(id.to_string()));
 }
 
-/// `thread.pull-request.link` (a manual link) or `.unlink` for `thread`, keyed as the linked
-/// threads are read.
-pub fn link_command(entry: &Value, thread: &str, linked: bool) -> Value {
+/// `thread.pull-request.link`, a manual link of `thread`, keyed as the linked threads are read.
+pub fn link_command(entry: &Value, thread: &str) -> Value {
     let key = linked_input(entry);
-    let kind = if linked { "thread.pull-request.link" } else { "thread.pull-request.unlink" };
-    let mut command = json!({"type": kind, "threadId": thread, "host": key["host"], "repository": key["repository"], "number": key["number"]});
-    if linked {
-        command["url"] = json!(field(entry, "url"));
-        command["source"] = json!("manual");
-    }
-    command
+    json!({"type": "thread.pull-request.link", "threadId": thread, "host": key["host"], "repository": key["repository"], "number": key["number"], "url": field(entry, "url"), "source": "manual"})
 }
 
-fn change_link(s: &mut App, thread: &str, linked: bool) {
+fn link(s: &mut App, thread: &str) {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
-    if writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link { .. })) {
+    if writing(&s.ui.pages.detail.meta, |w| *w == Write::Link) {
         return;
     }
     let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
-    let write = Write::Link { linked };
-    match super::pull_requests::net_for(s, &entry).map(|net| net.dispatch(link_command(&entry, thread, linked))) {
+    let write = Write::Link;
+    match super::pull_requests::net_for(s, &entry).map(|net| net.dispatch(link_command(&entry, thread))) {
         Some(id) => meta(s).writes.push((env, id, write)),
         None => fail(s, &write, "Actions need a connected environment."),
     }
@@ -659,7 +651,7 @@ pub fn link_entries(s: &App) -> Vec<MenuEntry> {
     if s.ui.pages.detail.entry.as_ref().is_none_or(|e| field(e, "url").is_empty()) {
         return Vec::new();
     }
-    let pending = writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link { .. }));
+    let pending = writing(&s.ui.pages.detail.meta, |w| *w == Write::Link);
     vec![MenuEntry::item(MenuItem::new("Link to thread").icon(&i::LINK_2).disabled(pending).on_select(open_link_picker))]
 }
 
@@ -691,7 +683,7 @@ pub fn link_candidates<'a>(threads: &[&'a Value], projects: &[&Value], query: &s
 fn link_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
     let u = &s.ui.pages.detail.meta;
     let Some(entry) = s.ui.pages.detail.entry.as_ref().filter(|_| u.link_picker) else { return };
-    let pending = writing(u, |w| matches!(w, Write::Link { .. }));
+    let pending = writing(u, |w| *w == Write::Link);
     let env = crate::env::of(s, entry);
     let state = s.state();
     let threads: Vec<&Value> = state.threads.iter().filter(|th| crate::env::of(s, th) == env).collect();
@@ -724,7 +716,7 @@ fn link_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
         line = if here || pending {
             line.disabled(true).opacity(0.64)
         } else {
-            line.cursor(Cursor::Pointer).hover(t.c.accent).focusable(true).focus_highlight(t.c.accent).on_press(move |s: &mut App| change_link(s, &id, true))
+            line.cursor(Cursor::Pointer).hover(t.c.accent).focusable(true).focus_highlight(t.c.accent).on_press(move |s: &mut App| link(s, &id))
         };
         list = list.child(line);
     }
@@ -738,7 +730,7 @@ fn link_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
 }
 
 /// PullRequestThreadLinks' count: the threads linked to this pull request, each opening from its
-/// menu with a way to unlink it, or "?" when they couldn't be read. Also mounts the thread picker.
+/// menu, or "?" when they couldn't be read. Also mounts the thread picker.
 pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     link_dialog(s, t, overlays);
     let u = &s.ui.pages.detail.meta;
@@ -762,21 +754,10 @@ pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     let mut menu = Menu::new("pr-linked-threads").trigger(trigger).placement(Placement::BottomEnd).min_width(240.0).open(u.linked_open).on_close(|s: &mut App| meta(s).linked_open = false);
     if u.linked_open {
         menu = menu.group_label(label);
-        let pending = writing(u, |w| matches!(w, Write::Link { .. }));
         for thread in threads {
             let id = field(thread, "id").to_string();
             let title = thread["title"].as_str().filter(|v| !v.is_empty()).unwrap_or("Untitled thread");
-            let gone = id.clone();
-            let unlink = kit::Button::new("")
-                .variant("ghost-muted")
-                .size("icon-xs")
-                .icon(&i::UNLINK_2)
-                .disabled(pending)
-                .on_press(move |s: &mut App| change_link(s, &gone, false))
-                .build(t)
-                .label("Unlink from thread")
-                .help("Unlink from thread");
-            menu = menu.item(MenuItem::new(title).icon(&i::MESSAGE_SQUARE).trailing(unlink).on_select(move |s: &mut App| open_thread(s, &id)));
+            menu = menu.item(MenuItem::new(title).icon(&i::MESSAGE_SQUARE).on_select(move |s: &mut App| open_thread(s, &id)));
         }
         if let (true, Some(error)) = (threads.is_empty(), &u.linked.error) {
             menu = menu.group_label(error.clone());
@@ -875,6 +856,8 @@ fn run_stack(s: &mut App, action: &'static str) {
         return;
     }
     let Some(payload) = stack_payload(&entry, &stack, &plan, action, &method) else { return };
+    // The loading toast; the outcome's toast takes its place.
+    crate::shell::palette::toast(s, if action == "merge" { "Merging stack..." } else { "Rebasing stack..." }, None);
     submit(s, "pullRequests.runAction", payload, Write::Stack(action));
 }
 
@@ -1132,7 +1115,7 @@ fn tail<V>(v: &[V], n: usize) -> &[V] {
 }
 
 /// reviewThreadContext: an unresolved thread as a review comment on the line it was written against.
-fn thread_record(thread: &Value, number: i64) -> Value {
+pub(super) fn thread_record(thread: &Value, number: i64) -> Value {
     let line = thread["line"].as_i64();
     let index = (line.unwrap_or(1) - 1).max(0);
     let range = match line {
@@ -1365,13 +1348,12 @@ mod tests {
         assert_eq!(linked_input(&hosted)["host"], "gitlab.example.com");
         assert_eq!([linked_label(0), linked_label(1), linked_label(3)], ["Linked threads", "Linked from 1 thread", "Linked from 3 threads"]);
 
-        let link = link_command(&entry(), "t1", true);
+        let link = link_command(&entry(), "t1");
         assert_eq!(
             link,
             json!({"type": "thread.pull-request.link", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479, "url": "https://GitHub.com/S5Labs/S5Code/pull/2479", "source": "manual"})
         );
-        assert_eq!(link_command(&entry(), "t1", false), json!({"type": "thread.pull-request.unlink", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479}));
-        assert_eq!(failure(&Write::Link { linked: false }, "merge request").0, "Could not unlink the merge request");
+        assert_eq!(failure(&Write::Link, "merge request").0, "Could not link the merge request");
     }
 
     #[test]
