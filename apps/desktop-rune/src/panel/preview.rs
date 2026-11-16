@@ -1766,6 +1766,62 @@ fn profile_badge(app: &App, t: &T, tab: TabId) -> Option<El> {
     Some(kit::badge(&short, "outline", "default", t).key(format!("browser-profile-{tab}")).label(&name).help(name))
 }
 
+/// A headless scene's tab on a painted page, without Chrome or a server: `annotation`, `rails`,
+/// `stream-dialog`, `host-setup`, `more` (a Work-profile server tab's More menu) or `chooser`.
+pub fn scene(app: &mut App, kind: &str) -> TabId {
+    app.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
+    let url = "http://localhost:5173/login";
+    let ui = &mut app.ui.panel.browser;
+    ui.next += 1;
+    let tab = ui.next;
+    let mut fresh = Tab::new(Pixels::new());
+    fresh.bar.replace_text(url);
+    let mut status = Status { url: url.into(), title: "Sign in · Demo".into(), painted: true, can_back: true, ..Default::default() };
+    let dialog = (kind == "stream-dialog").then(|| ("confirm".to_owned(), "Leave this page? Changes you made may not be saved.".to_owned(), String::new()));
+    let streamed = |host_setup| {
+        let state = super::stream::State { connected: true, painted: true, can_operate: true, controller: Some("you".into()), viewport: Some((800, 600)), host_setup, dialog: dialog.clone(), ..Default::default() };
+        Some(super::stream::Stream::fixture(state))
+    };
+    match kind {
+        "annotation" => {
+            let button = json!({ "tagName": "button", "selector": "#sign-in", "rect": { "x": 120, "y": 180, "width": 160, "height": 36 } });
+            ui.annotation = Some(Annotation { tab, tool: Tool::Region, targets: vec![Target::Element(button), Target::Region], anchor: Some([100., 160., 260., 120.]), drag: None, capturing: None });
+            ui.comment = TextEdit::new("Match the sign-in button to the brand blue");
+        }
+        "rails" => {
+            status.device = Some((390, 844));
+            fresh.device.preset = Some(2);
+        }
+        "host-setup" => {
+            fresh.stream = streamed(Some(("The server's machine is missing the libraries Chrome needs.".into(), Some("npx playwright install-deps chromium".into()))));
+        }
+        _ => {
+            fresh.stream = streamed(None);
+            fresh.snapshot = json!({ "profileId": "work", "navStatus": { "_tag": "Success", "url": url } });
+        }
+    }
+    if fresh.stream.is_some() {
+        fresh.remote = Some("remote".into());
+    }
+    match kind {
+        "stream-dialog" => {
+            if let Some((kind, message, _)) = dialog.clone() {
+                ui.dialog = Some(Dialog { tab, kind, message, input: TextEdit::new("") });
+            }
+            fresh.stream_dialog = dialog;
+        }
+        "more" => ui.menu = true,
+        "chooser" => {
+            let files = ["login-before.png", "login-after.png"].map(|n| std::path::PathBuf::from("/home/dev/shots").join(n)).to_vec();
+            ui.chooser = Some(Chooser { tab, id: "chooser-1".into(), accept: vec!["png".into(), "jpg".into()], files });
+        }
+        _ => {}
+    }
+    ui.tabs.insert(tab, fresh);
+    ui.browser.shared.lock().unwrap().tabs.insert(tab, status);
+    tab
+}
+
 /// The profile a tab shows pages in: a server tab's as its server reports it.
 fn tab_profile(app: &App, tab: TabId) -> String {
     let Some(t) = app.ui.panel.browser.tabs.get(&tab) else { return browser::DEFAULT_PROFILE.to_owned() };

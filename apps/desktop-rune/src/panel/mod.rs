@@ -1006,8 +1006,29 @@ fn scene(app: &mut App, surface: Option<Surface>) {
         activate(app, surface);
     }
 }
+fn browser_scene(app: &mut App, kind: &str) {
+    scene(app, None);
+    let tab = preview::scene(app, kind);
+    activate(app, Surface::Browser(tab));
+}
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-picker", |s| scene(s, None)),
+    ("browser-annotation", |s| browser_scene(s, "annotation")),
+    ("browser-rails", |s| browser_scene(s, "rails")),
+    ("browser-stream-dialog", |s| browser_scene(s, "stream-dialog")),
+    ("browser-host-setup", |s| browser_scene(s, "host-setup")),
+    ("browser-more-menu", |s| browser_scene(s, "more")),
+    ("browser-file-chooser", |s| browser_scene(s, "chooser")),
+    ("panel-launcher-profiles", |s| {
+        scene(s, None);
+        s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
+        s.ui.panel.launcher_profiles = true;
+    }),
+    ("panel-add-profiles", |s| {
+        browser_scene(s, "rails");
+        s.ui.panel.add_menu = true;
+        s.ui.panel.add_profiles = true;
+    }),
     ("panel-browser", |s| {
         scene(s, None);
         add(s, Surface::Browser(0));
