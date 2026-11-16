@@ -11,6 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import type { OpenCodeSettings } from "../settings.ts";
@@ -39,18 +40,31 @@ const OPENCODE_GATEWAYS = new Set(["opencode", "opencode-go"]);
  */
 type KiroContextMap = Map<string, number>;
 
-function estimateKiroSplit(
+// Records must arrive in native session order. Parsed records stay unestimated, so cached rows
+// re-run this on every scan.
+function estimateKiroCache(
   kiroContext: KiroContextMap,
-  sessionId: string,
-  model: string,
-  reportedInputTokens: number,
-): { uncachedInputTokens: number; cachedInputTokens: number } {
-  const key = `${sessionId}\u0000${model}`;
+  record: UsageRecord | null,
+): UsageRecord | null {
+  if (record === null || record.apiProvider !== "kiro") return record;
+  const { totals } = record;
+  const reportedInputTokens = totals.uncachedInputTokens;
+  if (reportedInputTokens === 0 || totals.cachedInputTokens !== 0) return record;
+  if (totals.cacheCreationTokens !== 0) return record;
+  const key = `${record.sessionId}\u0000${record.model}`;
   const previousContextTokens = kiroContext.get(key) ?? 0;
   const cachedInputTokens =
     reportedInputTokens >= previousContextTokens ? previousContextTokens : 0;
   kiroContext.set(key, reportedInputTokens);
-  return { uncachedInputTokens: reportedInputTokens - cachedInputTokens, cachedInputTokens };
+  return {
+    ...record,
+    totals: {
+      ...totals,
+      uncachedInputTokens: reportedInputTokens - cachedInputTokens,
+      cachedInputTokens,
+    },
+    inputTokensEstimated: true,
+  };
 }
 
 /**
@@ -64,7 +78,6 @@ function parseOpenCodeMessage(
     readonly id?: string;
     readonly sessionId?: string;
     readonly timestampMs?: number;
-    readonly kiroContext?: KiroContextMap;
   } = {},
 ): UsageRecord | null {
   let parsed: unknown;
@@ -87,20 +100,9 @@ function parseOpenCodeMessage(
   const reasoningTokens = tokens(usage.reasoning);
   const sessionId = fallback.sessionId || text(message.sessionID);
 
-  const reportedInputTokens = tokens(usage.input);
-  const inputTokensEstimated =
-    apiProvider === "kiro" &&
-    fallback.kiroContext !== undefined &&
-    reportedInputTokens > 0 &&
-    tokens(cache.read) === 0 &&
-    tokens(cache.write) === 0;
-  const { uncachedInputTokens, cachedInputTokens } = inputTokensEstimated
-    ? estimateKiroSplit(fallback.kiroContext, sessionId, model, reportedInputTokens)
-    : { uncachedInputTokens: reportedInputTokens, cachedInputTokens: tokens(cache.read) };
-
   const totals = {
-    uncachedInputTokens,
-    cachedInputTokens,
+    uncachedInputTokens: tokens(usage.input),
+    cachedInputTokens: tokens(cache.read),
     cacheCreationTokens: tokens(cache.write),
     outputTokens: tokens(usage.output) + reasoningTokens,
     reasoningTokens,
@@ -118,7 +120,7 @@ function parseOpenCodeMessage(
     ...(prefix !== undefined && !model.includes("/") ? { rateModel: `${prefix}/${model}` } : {}),
     sessionId,
     totals,
-    inputTokensEstimated,
+    inputTokensEstimated: false,
     // OpenCode records zero for unknown rates and paid subscriptions alike, so only its own
     // gateways' free models report zero; shared pricing estimates every other zero.
     reportedCostUsd:
@@ -149,6 +151,18 @@ export function resolveOpenCodeDatabasePath(
   return path.join(base, "opencode", "opencode.db");
 }
 
+interface CachedRow {
+  readonly updated: unknown;
+  readonly size: unknown;
+  readonly created: unknown;
+  readonly record: UsageRecord | null;
+}
+
+// Parsed rows by `${databasePath}\0${table}`, then rowid, so unchanged rows are not read again.
+const rowCache = new Map<string, { version: string; rows: Map<number, CachedRow> }>();
+// Concurrent scans of the same database would each read every uncached row.
+const scanLock = Semaphore.makeUnsafe(1);
+
 const isNotFound = (cause: PlatformError.PlatformError) => cause.reason._tag === "NotFound";
 const MESSAGE_PAGE_SIZE = 64;
 
@@ -172,6 +186,7 @@ const LEGACY_STAT_BATCH = 256;
 export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
   root: string,
   sinceMs: number,
+  retentionCutoffMs = sinceMs,
 ): Effect.fn.Return<OpenCodeUsageReadResult, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -229,6 +244,22 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
     found = true;
     const file = { path: path.join(rootDir, name), records: [] as UsageRecord[] };
     files.push(file);
+    // Taken before the snapshot opens, so a write that races the scan invalidates its rows.
+    const [main, wal] = yield* Effect.forEach([file.path, `${file.path}-wal`], (target) =>
+      Effect.option(fileSystem.stat(target)),
+    );
+    const stamp = (info: Option.Option<FileSystem.File.Info>) =>
+      Option.match(info, {
+        onNone: () => "none",
+        onSome: (stat) => `${stat.size}:${Option.getOrNull(stat.mtime)?.getTime()}`,
+      });
+    // A replaced or restored database can repeat rowids and change markers, so every key includes
+    // the main file; WAL commits leave it alone until a checkpoint.
+    const identity = Option.match(main!, {
+      onNone: () => "none",
+      onSome: (stat) =>
+        `${stat.dev}:${Option.getOrNull(stat.ino)}:${Option.getOrNull(stat.birthtime)?.getTime()}/${stamp(main!)}`,
+    });
     yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       // Fail promptly on live-writer locks instead of stalling the server.
@@ -239,55 +270,119 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
         )).map((row) => row.name),
       );
       if (!tables.has("message") && !tables.has("session_message")) error = true;
+      const columnsOf = (table: string) =>
+        sql
+          .unsafe<{ readonly name: unknown }>(`PRAGMA table_info(${table})`)
+          .pipe(Effect.map((rows) => new Set(rows.map((row) => row.name))));
+      // A fork copies its parent's messages through the boundary under new ids, keeping
+      // seq, creation time and data. Resolve each fork to its last copied seq so a copy
+      // names its original as (session, seq). A fork whose boundary is gone keeps its usage.
+      const forks = new Map<
+        string,
+        { readonly parent: string; readonly lastCopiedSeq: number; readonly created: number }
+      >();
+      if (
+        tables.has("session_v2") &&
+        tables.has("session_message") &&
+        (yield* columnsOf("session_message")).has("seq") &&
+        (yield* columnsOf("session_v2")).has("fork_boundary")
+      ) {
+        const resolved = yield* sql.unsafe<{
+          readonly id: unknown;
+          readonly parent: unknown;
+          readonly created: unknown;
+          readonly last_copied_seq: unknown;
+        }>(
+          `SELECT fork.id, fork.fork_session_id AS parent, fork.time_created AS created,
+             (SELECT MAX(copied.seq) FROM session_message AS copied
+              WHERE copied.session_id = fork.fork_session_id
+                AND CASE json_extract(fork.fork_boundary, '$.type')
+                  WHEN 'through' THEN copied.seq <= boundary.seq
+                  WHEN 'before' THEN copied.seq < boundary.seq
+                END) AS last_copied_seq
+           FROM session_v2 AS fork
+           JOIN session_message AS boundary
+             ON boundary.session_id = fork.fork_session_id
+            AND boundary.id = json_extract(fork.fork_boundary, '$.messageID')
+           WHERE fork.fork_session_id IS NOT NULL AND json_valid(fork.fork_boundary)`,
+        );
+        for (const row of resolved) {
+          if (typeof row.last_copied_seq !== "number" || typeof row.created !== "number") continue;
+          forks.set(text(row.id), {
+            parent: text(row.parent),
+            lastCopiedSeq: row.last_copied_seq,
+            created: row.created,
+          });
+        }
+      }
+      const original = (sessionId: string, seq: number, created: number) => {
+        const visited = new Set<string>();
+        let session = sessionId;
+        for (
+          let fork = forks.get(session);
+          fork !== undefined &&
+          seq <= fork.lastCopiedSeq &&
+          created < fork.created &&
+          !visited.has(session);
+          fork = forks.get(session)
+        ) {
+          visited.add(session);
+          session = fork.parent;
+        }
+        return `${session}:${seq}`;
+      };
+      const originals = new Set<string>();
       for (const table of ["message", "session_message"] as const) {
         if (!tables.has(table)) continue;
-        const columns = new Set(
-          (yield* sql.unsafe<{ readonly name: unknown }>(`PRAGMA table_info(${table})`)).map(
-            (row) => row.name,
-          ),
-        );
+        const columns = yield* columnsOf(table);
         const timestamp = columns.has("time_created") ? "time_created" : "NULL";
-        const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
+        const updated = columns.has("time_updated") ? "time_updated" : "NULL";
+        const lineage =
+          table === "session_message" && forks.size > 0 && columns.has("seq") ? "seq" : "NULL";
+        // Without time_updated an in-place edit can keep the length, so any database write counts.
+        const version = updated === "NULL" ? `${identity}/${stamp(wal!)}` : identity;
+        // OpenCode 2 records a compaction request's spend on its compaction message.
+        const predicates =
+          table === "session_message" ? ["type IN ('assistant', 'compaction')"] : [];
         if (timestamp !== "NULL") predicates.push("time_created >= ?");
-        const where = predicates.length ? `WHERE ${predicates.join(" AND ")}` : "";
-        const params = timestamp === "NULL" ? [] : [sinceMs];
-        // List only order keys so SQLite can use time indexes without reading message bodies.
-        // Kiro cache estimates follow native session order, which `seq` keeps after imports.
-        const rowIds = columns.has("seq")
-          ? (yield* sql.unsafe<{
-              readonly row_id: number;
-              readonly order_session: string;
-              readonly order_sequence: number;
-            }>(
-              `SELECT rowid AS row_id, COALESCE(session_id, '') AS order_session,
-                      COALESCE(seq, 0) AS order_sequence
-               FROM ${table} ${where}`,
-              params,
-            ))
-              .toSorted(
-                (left, right) =>
-                  (left.order_session < right.order_session
-                    ? -1
-                    : left.order_session > right.order_session
-                      ? 1
-                      : 0) ||
-                  left.order_sequence - right.order_sequence ||
-                  left.row_id - right.row_id,
-              )
-              .map((key) => key.row_id)
-          : (yield* sql.unsafe<{ readonly row_id: number }>(
-              `SELECT rowid AS row_id FROM ${table} ${where}`,
-              params,
-            ))
-              .map((row) => row.row_id)
-              .toSorted((a, b) => a - b);
-        databaseRows += rowIds.length;
+        // List rowids and change markers so SQLite can use time indexes without reading message
+        // bodies; octet_length comes from the record header.
+        const order = columns.has("seq")
+          ? "COALESCE(session_id, '') AS order_session, COALESCE(seq, 0) AS order_sequence"
+          : "'' AS order_session, 0 AS order_sequence";
+        const listed = (yield* sql.unsafe<{
+          readonly row_id: number;
+          readonly updated: unknown;
+          readonly size: unknown;
+          readonly created: unknown;
+          readonly seq: unknown;
+          readonly order_session: string;
+          readonly order_sequence: number;
+        }>(
+          `SELECT rowid AS row_id, ${updated} AS updated, octet_length(data) AS size,
+             ${timestamp} AS created, ${lineage} AS seq, ${order}
+           FROM ${table}
+           ${predicates.length ? `WHERE ${predicates.join(" AND ")}` : ""}`,
+          timestamp === "NULL" ? [] : [sinceMs],
+        )).toSorted((a, b) => a.row_id - b.row_id);
+        databaseRows += listed.length;
+        const key = `${file.path}\0${table}`;
+        const previous = rowCache.get(key);
+        const reusable = previous?.version === version ? previous.rows : undefined;
+        const cached = new Map<number, CachedRow>();
+        const misses: typeof listed = [];
+        for (const row of listed) {
+          const hit = reusable?.get(row.row_id);
+          if (hit && hit.updated === row.updated && hit.size === row.size)
+            cached.set(row.row_id, hit);
+          else misses.push(row);
+        }
         // Filter and project in SQLite: user diffs and assistant bodies can be hundreds of MB.
         const validAssistant = `CASE WHEN typeof(data) = 'text' AND json_valid(data)
           THEN json_type(data, '$.role') IS NULL OR data ->> '$.role' = 'assistant' END`;
         // Omit per-page spans; the enclosing scan records row and page counts.
-        for (let start = 0; start < rowIds.length; start += MESSAGE_PAGE_SIZE) {
-          const page = rowIds.slice(start, start + MESSAGE_PAGE_SIZE);
+        for (let start = 0; start < misses.length; start += MESSAGE_PAGE_SIZE) {
+          const page = misses.slice(start, start + MESSAGE_PAGE_SIZE);
           databasePages++;
           const rows = yield* sql
             .unsafe<{
@@ -304,30 +399,73 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
                  'time', data -> '$.time', 'id', data -> '$.id', 'sessionID', data -> '$.sessionID'
                ) AS data
                FROM ${table}
-               WHERE rowid IN (${page.map(() => "?").join(", ")}) AND ${validAssistant}`,
-              page,
+               WHERE rowid IN (${page.map(() => "?").join(", ")}) AND ${validAssistant}
+               ORDER BY rowid`,
+              page.map((row) => row.row_id),
             )
             .pipe(Effect.withTracerEnabled(false));
-          const byRowId = new Map(rows.map((row) => [row.row_id, row]));
-          for (const rowId of page) {
-            const row = byRowId.get(rowId);
-            if (!row) continue;
-            append(
-              file.records,
+          const parsed = new Map<number, UsageRecord | null>();
+          for (const row of rows) {
+            parsed.set(
+              row.row_id,
               parseOpenCodeMessage(text(row.data), {
-                kiroContext,
                 id: text(row.id),
                 sessionId: text(row.session_id),
                 ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
               }),
             );
           }
+          // Rows the SQL filter dropped are cached as empty so they are not read again either.
+          for (const row of page) {
+            cached.set(row.row_id, {
+              updated: row.updated,
+              size: row.size,
+              created: row.created,
+              record: parsed.get(row.row_id) ?? null,
+            });
+          }
           yield* Effect.yieldNow;
         }
+        const kept: typeof listed = [];
+        for (const row of listed) {
+          const record = cached.get(row.row_id)!.record;
+          if (record !== null && typeof row.seq === "number") {
+            const copyOf = original(record.sessionId, row.seq, record.timestampMs);
+            if (originals.has(copyOf)) continue;
+            originals.add(copyOf);
+          }
+          kept.push(row);
+        }
+        // Kiro cache estimates follow native session order, which `seq` keeps after imports.
+        const estimated = new Map<number, UsageRecord | null>();
+        for (const row of kept.toSorted(
+          (left, right) =>
+            (left.order_session < right.order_session
+              ? -1
+              : left.order_session > right.order_session
+                ? 1
+                : 0) ||
+            left.order_sequence - right.order_sequence ||
+            left.row_id - right.row_id,
+        )) {
+          estimated.set(row.row_id, estimateKiroCache(kiroContext, cached.get(row.row_id)!.record));
+        }
+        for (const row of kept) append(file.records, estimated.get(row.row_id)!);
+        // Rows before this window were not listed; keep them for a wider window until retention.
+        for (const [rowId, entry] of reusable ?? []) {
+          const created = entry.created;
+          if (typeof created === "number" && created < sinceMs && created >= retentionCutoffMs)
+            cached.set(rowId, entry);
+        }
+        rowCache.set(key, { version, rows: cached });
       }
     }).pipe(
       (read) => Effect.flatMap(SqlClient.SqlClient, (sql) => sql.withTransaction(read)),
-      Effect.provide(NodeSqliteClient.layer({ filename: file.path, readonly: true })),
+      // Run the scan on a reader worker so large databases do not block the server's event loop.
+      NodeSqliteClient.readOnly,
+      Effect.provide(
+        NodeSqliteClient.layer({ filename: file.path, readonly: true, readerWorker: true }),
+      ),
       Effect.catchTags({
         SqlError: () => {
           error = true;
@@ -385,7 +523,10 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
             files.push(file);
             yield* fileSystem.readFileString(entry).pipe(
               Effect.map((source) =>
-                append(file.records, parseOpenCodeMessage(source, { id, kiroContext })),
+                append(
+                  file.records,
+                  estimateKiroCache(kiroContext, parseOpenCodeMessage(source, { id })),
+                ),
               ),
               Effect.catchTags({
                 PlatformError: (cause) => {
@@ -411,7 +552,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
     "usage.database_pages": databasePages,
   });
   return { files, missing: !found && !error, error };
-});
+}, scanLock.withPermit);
 
 /**
  * The data directories to read: `OPENCODE_DATA_DIR` (comma-separated) or the
@@ -443,7 +584,11 @@ export type OpenCodeUsageReaderEnv = FileSystem.FileSystem | Path.Path;
 export const openCodeUsageReader: ProviderUsageReader<OpenCodeSettings, OpenCodeUsageReaderEnv> = {
   kind: "scan",
   provider: "opencode",
-  scan: Effect.fn("openCodeUsageReader.scan")(function* ({ instances, windowStartMs }) {
+  scan: Effect.fn("openCodeUsageReader.scan")(function* ({
+    instances,
+    windowStartMs,
+    retentionCutoffMs,
+  }) {
     const roots = new Set<string>();
     for (const instance of instances) {
       // A remote OpenCode server keeps its history on that machine.
@@ -453,7 +598,7 @@ export const openCodeUsageReader: ProviderUsageReader<OpenCodeSettings, OpenCode
     return yield* Effect.forEach(
       [...roots],
       (dir) =>
-        readOpenCodeUsage(dir, windowStartMs).pipe(
+        readOpenCodeUsage(dir, windowStartMs, retentionCutoffMs).pipe(
           Effect.map((result) => ({
             dir,
             files: result.missing && !result.error ? null : result.files,

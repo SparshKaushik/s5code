@@ -7,7 +7,6 @@ import {
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
-import * as Context from "effect/Context";
 import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -54,6 +53,7 @@ import {
   browserApiCorsAllowedHeaders,
   browserApiCorsAllowedMethods,
   DESKTOP_RENDERER_ORIGINS,
+  MCP_HTTP_PATH,
 } from "./httpCors.ts";
 import { requestUrl } from "./requestUrl.ts";
 
@@ -276,19 +276,16 @@ export const layerBrowserApiCors = Layer.unwrap(
       allowedHeaders: browserApiCorsAllowedHeaders,
       maxAge: 600,
     });
-
-    if (devOrigin !== undefined) {
-      return HttpRouter.middleware(cors, { global: true });
-    }
-
-    // Effect's CORS middleware applies ordinary response headers in a pre-response hook. Some
-    // packaged server adapters bypass that hook, while their OPTIONS path still works. Set the
-    // response header directly as a fallback without replacing an origin already added upstream.
     return HttpRouter.middleware(
-      (httpEffect) =>
-        Effect.withFiber((fiber) => {
-          const request = Context.getUnsafe(fiber.context, HttpServerRequest.HttpServerRequest);
-          return cors(httpEffect).pipe(
+      (httpEffect) => {
+        const withCors = cors(httpEffect);
+        return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+          if (request.url.split("?", 1)[0] === MCP_HTTP_PATH) return httpEffect;
+          if (devOrigin !== undefined) return withCors;
+          // Effect's CORS middleware applies ordinary response headers in a pre-response hook. Some
+          // packaged server adapters bypass that hook, while their OPTIONS path still works. Set the
+          // header directly as a fallback without replacing an origin already added upstream.
+          return withCors.pipe(
             Effect.map((response) => {
               if (Option.isSome(Headers.get(response.headers, "access-control-allow-origin"))) {
                 return response;
@@ -301,7 +298,8 @@ export const layerBrowserApiCors = Layer.unwrap(
               );
             }),
           );
-        }),
+        });
+      },
       { global: true },
     );
   }),
@@ -599,6 +597,12 @@ const streamStaticFile = (file: FileSystem.File, size: bigint) =>
     }),
   );
 
+// The app can approve agents and start threads in one click, so no other site may frame it.
+const SPA_FRAME_HEADERS = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+};
+
 const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
   function* (immutableBuildAssets: ReadonlySet<string>) {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -699,6 +703,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     };
     const headers: Record<string, string> = {
       "Cache-Control": cacheControl,
+      ...(isHtml ? SPA_FRAME_HEADERS : {}),
       ...validators(fileInfo),
     };
     const etag = headers.ETag;
@@ -735,6 +740,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
       return HttpServerResponse.uint8Array(bytes, {
         headers: {
           "Cache-Control": cacheControl,
+          ...(isHtml ? SPA_FRAME_HEADERS : {}),
           ...validators({ ...info, size: ByteSize.bytes(bytes.byteLength) }),
         },
         contentType,

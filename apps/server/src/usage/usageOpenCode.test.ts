@@ -247,7 +247,10 @@ describe("readOpenCodeUsage", () => {
             (record) => record.inputTokensEstimated && record.totals.uncachedInputTokens === 1_000,
           ),
         ).toBe(true);
-        expect(records[129]?.totals.cachedInputTokens).toBe(129_000);
+        expect(
+          records.find((record) => record.dedupeKey === "opencode:msg_130")?.totals
+            .cachedInputTokens,
+        ).toBe(129_000);
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 

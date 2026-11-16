@@ -322,6 +322,14 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
   return rate;
 }
 
+/** A priceable model the table has no rate for; a newer table may list it. */
+export function isUnlistedModel(table: RateTable, model: string): boolean {
+  const bareName = bareModelName(stripVariantSuffix(normalizeRateKey(model)));
+  return (
+    bareName.length > 0 && !UNPRICEABLE_MODELS.has(bareName) && lookupRate(table, model) === null
+  );
+}
+
 function resolveRate(table: RateTable, model: string): ModelRate | null {
   const key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
@@ -497,6 +505,11 @@ export class UsagePricer {
 
     const rate = recordRate(this.#rates, record);
     return rate === null ? null : { rate, source: "modelPriced", pricedAs: null };
+  }
+
+  /** Whether LiteLLM's flat table prices `model` under its own name. */
+  hasRate(model: string): boolean {
+    return lookupRate(this.#rates, model) !== null;
   }
 
   price(record: UsageRecord): PricedUsage {

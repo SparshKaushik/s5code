@@ -11,9 +11,9 @@ import { mergeUsageCopies } from "./usageAggregation.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
 // S5 cache versions: v6 adds gateway identity and estimated-token fields; v8, v9,
-// v10, v12 and v16 carry upstream v7, v8, v9, v11 and v15 reducer state respectively.
+// v10, v12, v16 and v17 carry upstream v7, v8, v9, v11, v15 and v17 reducer state respectively.
 // Upstream rows have no gateway fields and still load.
-const USAGE_SCAN_CACHE_VERSION = 16 as const;
+const USAGE_SCAN_CACHE_VERSION = 17 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -21,8 +21,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
  * the newer one; older files are removed once it is saved.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v16.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v17.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v16.json",
   "usage-scan-cache-v15.json",
   "usage-scan-cache-v14.json",
   "usage-scan-cache-v13.json",
@@ -242,6 +243,25 @@ export function decodeScanCache(
   // distinguishes the layouts, so saved history survives either upgrade path.
   const legacyFork = version === 4 && root.apiProviders !== undefined;
 
+  // S5 v4/v6, v8, v9, v10, v12, v16 and v17 hold upstream v5, v7, v8, v9, v11, v15 and v17 state.
+  // Pi entries from before auxiliary usage support must re-read live transcripts too.
+  const stateVersion =
+    root.apiProviders === undefined
+      ? version
+      : version >= 17
+        ? 17
+        : version >= 16
+          ? 15
+          : version >= 12
+            ? 11
+            : version >= 10
+              ? 9
+              : version >= 9
+                ? 8
+                : version >= 8
+                  ? 7
+                  : 5;
+
   // Reject entire corrupt entries; partial survivors would appear warm and hide usage until the file changes.
   const decodeRecords = (
     rows: readonly unknown[],
@@ -317,7 +337,16 @@ export function decodeScanCache(
         ...(version >= 7 && unresolvedServiceTierTurnId != null
           ? { unresolvedServiceTierTurnId }
           : {}),
-        dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
+        dedupeKey:
+          typeof dedupeKey !== "string"
+            ? null
+            : // Saved copies of moved transcripts must still match the re-parsed v17 key.
+              provider === "grok" &&
+                stateVersion < 17 &&
+                dedupeKey.endsWith(`:${model}`) &&
+                !dedupeKey.endsWith(`:${timestampMs}:${model}`)
+              ? `${dedupeKey.slice(0, -model.length)}${timestampMs}:${model}`
+              : dedupeKey,
       });
     }
     return records;
@@ -352,26 +381,12 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // S5 v4/v6, v8, v9, v10, v12 and v16 hold upstream v5, v7, v8, v9, v11 and v15 state.
-    // Pi entries from before auxiliary usage support must re-read live transcripts too.
-    const stateVersion =
-      root.apiProviders === undefined
-        ? version
-        : version >= 16
-          ? 15
-          : version >= 12
-            ? 11
-            : version >= 10
-              ? 9
-              : version >= 9
-                ? 8
-                : version >= 8
-                  ? 7
-                  : 5;
     // v13 adds Claude 1-hour cache writes; v14 uses Codex request ledgers.
     // v15 repairs skipped Codex requests whose counters rewound; clean v14 entries stay served.
+    // v17 keys Grok turns by time, restoring turns previously dropped as repeats.
     const legacy =
       (entry.p === "claude" && stateVersion < 13) ||
+      (entry.p === "grok" && stateVersion < 17) ||
       (format.state !== undefined &&
         (stateVersion < 6 ||
           (entry.p === "codex" &&
@@ -380,9 +395,10 @@ export function decodeScanCache(
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
-    // Before v15 the state lacks the latest snapshot time that keeps a re-emitted older snapshot
-    // from billing twice, so a grown file re-parses whole instead of resuming.
-    const resumable = !legacy && !(entry.p === "codex" && stateVersion < 15);
+    // Before v16 a Codex baseline can lack the time of its latest move, or carry an older one,
+    // and that time keeps a re-emitted older snapshot from billing twice. A grown file re-parses
+    // whole instead of resuming.
+    const resumable = !legacy && !(entry.p === "codex" && stateVersion < 16);
 
     const provider = entry.p;
     const records = decodeRecords(entry.r, provider);
