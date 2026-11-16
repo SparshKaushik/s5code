@@ -77,11 +77,18 @@ struct Tab {
     snapshot: Value,
     /// The page's last `(url, loading)`, to drop the agent's cursor on a navigation.
     nav: (String, bool),
+    /// The tab's `prefers-color-scheme`; "" follows the system.
+    scheme: &'static str,
+    /// The environment whose server renders this tab, for a tab opened on another machine's
+    /// thread: its session opens with the first page, and the server's frames show it.
+    remote: Option<String>,
+    /// The stream's dialog last put on screen, so an answered one isn't shown again.
+    stream_dialog: Option<(String, String, String)>,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default() }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None }
     }
 }
 
@@ -109,9 +116,9 @@ pub struct Ui {
     shown: Option<TabId>,
     menu: bool,
     appearance: bool,
-    scheme: &'static str,
     details: bool,
-    watching: bool,
+    /// The discovered-servers subscription's payload while it is watched.
+    servers_watch: Option<Value>,
     /// The tab floating over the chat (web's mini player).
     pub(super) pip: Option<TabId>,
     /// The page area's last size, in points.
@@ -121,8 +128,8 @@ pub struct Ui {
     zoom_until: i64,
     /// Whether the panel's browser had focus at the last key event (the `previewFocus` context).
     pub(super) focused: bool,
-    /// A picked element waiting for its comment, as web's annotation editor holds it.
-    pending: Option<Pending>,
+    /// Web's annotation session: what it marks so far, and its comment.
+    annotation: Option<Annotation>,
     comment: TextEdit,
     pub(super) favicons: super::favicon::Favicons,
     /// The floating preview's `[x, y, width]` in the chat area once moved or resized.
@@ -146,11 +153,19 @@ pub struct Ui {
     popout_seen: bool,
     /// Whether the local server's preview events are watched.
     sessions_watched: bool,
-    /// `preview.open` requests for tabs opened here: request id, tab, thread.
-    opening: Vec<(u64, TabId, String)>,
-    /// Session events held until this client's own `preview.open` replies, so its tab binds
-    /// instead of a second one opening.
-    deferred: Vec<Value>,
+    /// `preview.open` requests for tabs opened here: request id, tab, thread, environment.
+    opening: Vec<(u64, TabId, String, String)>,
+    /// Session events, by environment, held until this client's own `preview.open` replies, so
+    /// its tab binds instead of a second one opening.
+    deferred: Vec<(String, Value)>,
+    /// `preview.adjust` and `preview.resize` for streamed tabs: request id, environment, tab.
+    adjusting: Vec<(u64, String, TabId)>,
+    /// Workspace files on their way to a tab: the `assets.createUrl` request and the file.
+    assets: Vec<(u64, String)>,
+    /// The device rail being dragged: its tab and edge, and the size the drag started from.
+    rail: Option<(TabId, Edge, (u32, u32))>,
+    /// A display-scale change waiting for a recording to end before Chrome relaunches.
+    rescale: Option<f32>,
     /// The server process the tabs' sessions belong to.
     generation: u64,
     /// The server restarted; tabs take new sessions once the connection is back.
@@ -179,19 +194,106 @@ struct Context {
     info: Value,
 }
 
-struct Pending {
-    tab: TabId,
-    element: Value,
-    image: Option<Vec<u8>>,
-    /// The element's viewport rect in CSS pixels.
-    rect: [f32; 4],
+/// Desktop's annotation tools: pick elements, mark a region, draw, or erase a mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tool {
+    Select,
+    Region,
+    Draw,
+    Erase,
 }
 
-/// A new tab on a blank page; Chrome starts with the first one.
+/// One thing an annotation marks, in the order the page's marks were added.
+#[derive(Debug, PartialEq)]
+enum Target {
+    Element(Value),
+    Region,
+    Stroke,
+}
+
+struct Annotation {
+    tab: TabId,
+    tool: Tool,
+    targets: Vec<Target>,
+    /// The latest target's viewport rect in CSS pixels, which the editor sits beside.
+    anchor: Option<[f32; 4]>,
+    /// A region or stroke being dragged: where it started, where the pointer is, its bounds
+    /// and how many points it has, in viewport CSS pixels.
+    drag: Option<Stroke>,
+    /// A submit waiting for the screenshot; whether it sends the message too.
+    capturing: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct Stroke {
+    start: (f32, f32),
+    last: (f32, f32),
+    min: (f32, f32),
+    max: (f32, f32),
+    points: usize,
+}
+
+/// A new tab on a blank page; Chrome starts with the first one. On another machine's thread
+/// whose server runs a browser, the tab is that server's, as web's `previewRuntimeFor`.
 pub fn open(app: &mut App) -> TabId {
+    if let Some(env) = server_env(app) {
+        let ui = &mut app.ui.panel.browser;
+        ui.next += 1;
+        let mut fresh = Tab::new(Pixels::new());
+        fresh.remote = Some(env);
+        ui.tabs.insert(ui.next, fresh);
+        return ui.next;
+    }
     let tab = open_tab(app);
     register(app, tab);
     tab
+}
+
+/// The other environment that renders the current thread's tabs, when its server can.
+fn server_env(app: &App) -> Option<String> {
+    let Route::Thread(thread) = app.frame_route() else { return None };
+    let env = crate::env::owner(app, thread);
+    let capable = crate::env::source(app, &env).is_some_and(|s| s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["serverBrowser"] == true));
+    (env != crate::env::LOCAL && capable).then_some(env)
+}
+
+/// `browserDefaultViewport` as a device size, when it isn't the fill default.
+fn default_viewport(app: &App) -> Option<(u32, u32)> {
+    let v = crate::settings::value(app, "browserDefaultViewport");
+    viewport_size(&v).flatten()
+}
+
+/// `browserDefaultAppearance` as a color scheme; "" follows the system.
+fn default_scheme(app: &App) -> &'static str {
+    match crate::settings::value(app, "browserDefaultAppearance").as_str() {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        _ => "",
+    }
+}
+
+/// Opens a server tab's session on its environment, with its first page.
+fn open_remote(app: &mut App, tab: TabId, url: Option<String>) {
+    let Some(env) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.remote.clone()) else { return };
+    let Route::Thread(thread) = app.frame_route().clone() else { return };
+    if app.ui.panel.browser.opening.iter().any(|o| o.1 == tab) {
+        return;
+    }
+    let viewport = match default_viewport(app) {
+        Some((w, h)) => json!({ "_tag": "freeform", "width": w, "height": h }),
+        None => json!({ "_tag": "fill" }),
+    };
+    let profile = crate::settings::browser_profiles::default_profile(app);
+    let mut payload = json!({ "threadId": thread, "viewport": viewport, "runtime": "server", "profileId": profile });
+    if let Some(url) = url {
+        payload["url"] = json!(url);
+    }
+    let Some(net) = env_net(app, &env) else {
+        crate::shell::palette::toast(app, "Unable to open browser", Some("The environment is not connected."));
+        return;
+    };
+    let id = net.request("preview.open", payload);
+    app.ui.panel.browser.opening.push((id, tab, thread, env));
 }
 
 fn open_tab(app: &mut App) -> TabId {
@@ -211,6 +313,17 @@ fn open_tab(app: &mut App) -> TabId {
     let zoom = crate::settings::value(app, "browserDefaultZoomFactor").as_f64().unwrap_or(1.) as f32;
     if let Some(&zoom) = ZOOM_LEVELS.iter().find(|z| (**z - zoom).abs() < 0.001).filter(|z| **z != 1.) {
         app.ui.panel.browser.browser.send(Cmd::Zoom(tab, zoom));
+    }
+    // Web's `resolveBrowserDefaults` for a new tab: its appearance and device size.
+    let scheme = default_scheme(app);
+    if !scheme.is_empty() {
+        if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
+            t.scheme = scheme;
+        }
+        app.ui.panel.browser.browser.send(Cmd::ColorScheme(tab, scheme));
+    }
+    if let Some((w, h)) = default_viewport(app) {
+        set_device(app, tab, w, h, PRESETS.iter().position(|p| (p.1, p.2) == (w, h)));
     }
     tab
 }
@@ -239,7 +352,7 @@ fn restart(app: &mut App) {
     // The new worker hasn't been told which tab shows or is tracked; poll resends both.
     ui.shown = None;
     ui.tracked = None;
-    let tabs: Vec<TabId> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none()).map(|(id, _)| *id).collect();
+    let tabs: Vec<TabId> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, _)| *id).collect();
     for tab in tabs {
         let pixels = Pixels::new();
         let mut fresh = Tab::new(pixels.clone());
@@ -262,12 +375,15 @@ fn relaunch(app: &mut App, scale: f32) {
     ui.chrome_scale = Some(scale);
     ui.shown = None;
     ui.tracked = None;
-    let mut tabs: Vec<(TabId, Pixels)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none()).map(|(id, t)| (*id, t.pixels.clone())).collect();
-    tabs.sort_by_key(|(id, _)| *id);
+    let mut tabs: Vec<(TabId, Pixels, &'static str)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, t)| (*id, t.pixels.clone(), t.scheme)).collect();
+    tabs.sort_by_key(|(id, ..)| *id);
     // The address bars keep their pages while the new Chrome starts.
-    ui.browser.shared.lock().unwrap().tabs = tabs.iter().filter_map(|(id, _)| Some((*id, Status { loading: true, ..before.get(id)?.clone() }))).collect();
-    for (tab, pixels) in tabs {
+    ui.browser.shared.lock().unwrap().tabs = tabs.iter().filter_map(|(id, ..)| Some((*id, Status { loading: true, ..before.get(id)?.clone() }))).collect();
+    for (tab, pixels, scheme) in tabs {
         ui.browser.send(Cmd::Open(tab, pixels));
+        if !scheme.is_empty() {
+            ui.browser.send(Cmd::ColorScheme(tab, scheme));
+        }
         for cmd in before.get(&tab).map(|status| reopen(tab, status)).unwrap_or_default() {
             ui.browser.send(cmd);
         }
@@ -304,8 +420,10 @@ pub fn browser_failed(app: &App) -> bool {
 /// as the agent's own hidden tab (`adoptPopup`), and that session binds here.
 fn adopt(app: &mut App, target: String, opener: String, url: String) {
     let ui = &mut app.ui.panel.browser;
-    let opener_key = ui.browser.shared.lock().unwrap().tabs.iter().find(|(_, s)| s.target.as_deref() == Some(opener.as_str())).map(|(id, _)| *id);
-    let opener_key = opener_key.and_then(|id| ui.tabs.get(&id)?.session.clone()).filter(agent::driven);
+    let opener_tab = ui.browser.shared.lock().unwrap().tabs.iter().find(|(_, s)| s.target.as_deref() == Some(opener.as_str())).map(|(id, _)| *id);
+    // Web's `showPreviewPopup`: a popup from the floating preview floats in its place.
+    let floating = opener_tab.is_some() && opener_tab == ui.pip;
+    let opener_key = opener_tab.and_then(|id| ui.tabs.get(&id)?.session.clone()).filter(agent::driven);
     ui.next += 1;
     let tab = ui.next;
     let pixels = Pixels::new();
@@ -316,7 +434,12 @@ fn adopt(app: &mut App, target: String, opener: String, url: String) {
     match opener_key {
         Some(key) => agent::popup(&key, target, url),
         None => {
-            super::activate(app, super::Surface::Browser(tab));
+            match app.frame_route().clone() {
+                Route::Thread(thread) if floating => {
+                    super::add_browser(app, &thread, tab, true);
+                }
+                _ => super::activate(app, super::Surface::Browser(tab)),
+            }
             register(app, tab);
         }
     }
@@ -336,8 +459,8 @@ pub fn close(app: &mut App, tab: TabId) {
     if ui.shown == Some(tab) {
         ui.shown = None;
     }
-    if ui.pending.as_ref().is_some_and(|p| p.tab == tab) {
-        ui.pending = None;
+    if ui.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        ui.annotation = None;
     }
     if ui.pip == Some(tab) {
         ui.pip = None;
@@ -427,24 +550,51 @@ fn send(app: &mut App, cmd: Cmd) {
     }
     if let Cmd::Viewport { scale, .. } = &cmd {
         let (started, launched) = (app.ui.panel.browser.browser.started(), app.ui.panel.browser.chrome_scale);
+        // A recording would lose its encoder page, so the relaunch waits for it to end.
+        let recording = app.ui.panel.browser.browser.shared.lock().unwrap().tabs.values().any(|s| s.recording);
         match launched {
             _ if !started => {}
+            Some(launched) if (launched - scale).abs() > 0.01 && recording => app.ui.panel.browser.rescale = Some(*scale),
             Some(launched) if (launched - scale).abs() > 0.01 => relaunch(app, *scale),
-            Some(_) => {}
+            Some(_) => app.ui.panel.browser.rescale = None,
             None => app.ui.panel.browser.chrome_scale = Some(*scale),
+        }
+    }
+    // A server tab with no session yet opens one with its first page.
+    if let Cmd::Navigate(tab, url) = &cmd {
+        if app.ui.panel.browser.tabs.get(tab).is_some_and(|t| t.remote.is_some() && t.stream.is_none()) {
+            open_remote(app, *tab, Some(url.clone()));
+            return;
         }
     }
     let ui = &app.ui.panel.browser;
     let tab = match &cmd {
-        Cmd::Mouse { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) => ui.shown,
-        Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) => Some(*tab),
+        Cmd::Mouse { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) | Cmd::ClearCookies | Cmd::ClearCache => ui.shown,
+        Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::ColorScheme(tab, _) => Some(*tab),
         _ => None,
     };
-    // A streamed tab's page is the server's; what it can't do there does nothing.
+    // A server tab still opening has no page to act on.
+    if tab.and_then(|id| ui.tabs.get(&id)).is_some_and(|t| t.remote.is_some() && t.stream.is_none()) {
+        return;
+    }
+    // A streamed tab's page is the server's: settings go through its session, input through the
+    // stream, and what neither can do does nothing.
     if let Some((tab, stream)) = tab.and_then(|id| Some((id, ui.tabs.get(&id)?.stream.as_ref()?))) {
+        if let Some((method, mut payload)) = stream_rpc(&cmd) {
+            let Some(t) = ui.tabs.get(&tab) else { return };
+            let (Some((thread, session)), Some(env)) = (t.session.clone(), t.remote.clone()) else { return };
+            payload["threadId"] = json!(thread);
+            payload["tabId"] = json!(session);
+            if let Some(net) = env_net(app, &env) {
+                let id = net.request(method, payload);
+                app.ui.panel.browser.adjusting.push((id, env, tab));
+            }
+            return;
+        }
         stream.command(&cmd, stream_box(ui, tab).2);
         return;
     }
+    // ClearCookies and ClearCache are Chrome's, whichever tab shows.
     if let Cmd::Viewport { w, h, .. } = &cmd {
         for stream in ui.tabs.values().filter_map(|t| t.stream.as_ref()) {
             stream.resize(*w, *h);
@@ -453,19 +603,155 @@ fn send(app: &mut App, cmd: Cmd) {
     app.ui.panel.browser.browser.send(cmd);
 }
 
+/// What web sends a server tab's session for a panel setting: `preview.adjust` for zoom,
+/// appearance, a hard reload and clearing data, `preview.resize` for the device size.
+fn stream_rpc(cmd: &Cmd) -> Option<(&'static str, Value)> {
+    Some(match cmd {
+        Cmd::Zoom(_, zoom) => {
+            let snapped = ZOOM_LEVELS.iter().copied().min_by(|a, b| (a - zoom).abs().total_cmp(&(b - zoom).abs())).unwrap_or(1.);
+            // The server takes the levels' exact decimals, which f32 doesn't keep.
+            ("preview.adjust", json!({ "zoomFactor": (snapped as f64 * 100.).round() / 100. }))
+        }
+        Cmd::Reload { hard: true, .. } => ("preview.adjust", json!({ "hardReload": true })),
+        Cmd::ClearCookies => ("preview.adjust", json!({ "clear": "cookies" })),
+        Cmd::ClearCache => ("preview.adjust", json!({ "clear": "cache" })),
+        Cmd::ColorScheme(_, scheme) => ("preview.adjust", json!({ "colorScheme": if scheme.is_empty() { "system" } else { scheme } })),
+        Cmd::Device(_, size) => {
+            let viewport = match size {
+                Some((w, h)) => json!({ "_tag": "freeform", "width": w, "height": h }),
+                None => json!({ "_tag": "fill" }),
+            };
+            ("preview.resize", json!({ "viewport": viewport }))
+        }
+        _ => return None,
+    })
+}
+
+/// Web's `resolveDiscoveredServerUrl`: a loopback address on another machine's thread means that
+/// machine, reached at its server's host when that is on a private network.
+fn rewrite_loopback(url: &str, environment: &str) -> Result<String, String> {
+    let Ok(mut page) = s5_net::url::Url::parse(url) else { return Ok(url.to_owned()) };
+    let loopback = matches!(page.host_str(), Some("localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "[::]"));
+    if !loopback || !matches!(page.scheme(), "http" | "https") {
+        return Ok(url.to_owned());
+    }
+    let Some(host) = s5_net::url::Url::parse(environment).ok().and_then(|u| u.host_str().map(str::to_owned)) else { return Ok(url.to_owned()) };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if matches!(bare, "localhost" | "::1") || bare.starts_with("127.") {
+        return Ok(url.to_owned());
+    }
+    if !super::favicon::private_network_host(&host) {
+        return Err("This environment port needs the planned authenticated preview gateway; its server address is not directly private-network reachable.".into());
+    }
+    page.set_host(Some(&host)).map_err(|e| e.to_string())?;
+    Ok(page.to_string())
+}
+
+/// Web's `isBrowserPreviewFile`: HTML and PDF files open in the browser.
+pub fn previewable_file(path: &str) -> bool {
+    super::file_preview::kind(path.split(['?', '#']).next().unwrap_or_default()).opens_in_browser()
+}
+
+/// Web's `openFileInPreview`, the one path every "Open in browser" takes (the file preview's
+/// action, chat file links): the server serves the file at a signed address that opens in a new
+/// tab. `path` is absolute or relative to the workspace.
+pub fn open_file(app: &mut App, path: &str) {
+    let fail = |app: &mut App, why: &str| crate::shell::palette::toast(app, "Unable to open file in browser", Some(why));
+    let Some(cwd) = super::workspace(app) else { return fail(app, "Open a thread or a project first.") };
+    let (absolute, inside) = asset_path(path, &cwd);
+    let resource = match super::context(app) {
+        Some((thread, _)) => json!({ "_tag": if inside { "workspace-file" } else { "media-file" }, "threadId": thread, "path": absolute }),
+        None if inside => json!({ "_tag": "draft-workspace-file", "cwd": cwd, "path": absolute }),
+        None => return fail(app, "Files outside the project open from a thread."),
+    };
+    match app.src.net().map(|n| n.request("assets.createUrl", json!({ "resource": resource }))) {
+        Some(id) => app.ui.panel.browser.assets.push((id, path.to_owned())),
+        None => fail(app, "The environment is not connected."),
+    }
+}
+
+/// The file's absolute path, and whether it lies inside the workspace (`workspace-file`).
+fn asset_path(path: &str, cwd: &str) -> (String, bool) {
+    let root = cwd.trim_end_matches('/');
+    if path.starts_with('/') {
+        let inside = path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'));
+        return (path.to_owned(), inside);
+    }
+    let mut rest = path;
+    while let Some(r) = rest.strip_prefix("./") {
+        rest = r;
+    }
+    (format!("{root}/{rest}"), !rest.starts_with("../"))
+}
+
+fn take_assets(app: &mut App) -> bool {
+    let mut changed = false;
+    for (id, path) in std::mem::take(&mut app.ui.panel.browser.assets) {
+        let Some(net) = app.src.net() else { continue };
+        let Some(reply) = net.take_reply(id) else {
+            app.ui.panel.browser.assets.push((id, path));
+            continue;
+        };
+        let base = net.base_url().trim_end_matches('/').to_owned();
+        changed = true;
+        match reply {
+            Ok(v) => super::open_preview(app, &format!("{base}{}", data::s(&v, "relativeUrl"))),
+            Err(e) => {
+                let message = crate::shell::palette::error_message(&e, &path);
+                crate::shell::palette::toast(app, "Unable to open file in browser", Some(&message));
+            }
+        }
+    }
+    changed
+}
+
+/// Web's `previewPdfAssetUrl`: a workspace PDF the server's browser can't draw, fetched from
+/// this client's own connection to that server when the page's address is its loopback.
+fn pdf_asset_url(url: &str, base: &str) -> Option<String> {
+    let page = s5_net::url::Url::parse(url).ok()?;
+    let base = s5_net::url::Url::parse(base).ok()?;
+    if !matches!(page.scheme(), "http" | "https") || !page.path().starts_with("/api/assets/") || !page.path().to_ascii_lowercase().ends_with(".pdf") {
+        return None;
+    }
+    let loopback = matches!(page.host_str(), Some("localhost" | "0.0.0.0" | "[::1]")) || page.host_str().is_some_and(|h| h.starts_with("127."));
+    if page.origin() != base.origin() && !loopback {
+        return Some(page.to_string());
+    }
+    let mut own = base.join(page.path()).ok()?;
+    own.set_query(page.query());
+    own.set_fragment(page.fragment());
+    Some(own.to_string())
+}
+
 /// A streamed page's box in the page area and its scale from CSS pixels, as a device size's.
 fn stream_box(ui: &Ui, tab: TabId) -> (f32, f32, f32) {
-    let (w, h) = (ui.area.0.max(1.), ui.area.1.max(1.));
+    let device = ui.tabs.get(&tab).is_some_and(|t| viewport_size(&t.snapshot["viewport"]).flatten().is_some());
+    let (w, h) = if device { browser::device_area(ui.area.0, ui.area.1) } else { (ui.area.0.max(1.), ui.area.1.max(1.)) };
     let size = ui.tabs.get(&tab).and_then(|t| t.stream.as_ref()?.state().viewport).unwrap_or((w as u32, h as u32));
     browser::device_box(w, h, size, 1.)
+}
+
+/// A page for a tab this machine renders: another environment's loopback address is that machine.
+fn local_target(app: &App, tab: TabId, url: String) -> Result<String, String> {
+    if app.ui.panel.browser.tabs.get(&tab).map_or(true, |t| t.remote.is_some() || t.stream.is_some()) {
+        return Ok(url);
+    }
+    let Route::Thread(thread) = app.frame_route() else { return Ok(url) };
+    let env = crate::env::owner(app, thread);
+    match crate::env::source(app, &env) {
+        Some(data::Source::Live(net)) if env != crate::env::LOCAL => rewrite_loopback(&url, net.base_url()),
+        _ => Ok(url),
+    }
 }
 
 pub fn navigate(app: &mut App, tab: TabId, input: &str) {
     let engine = crate::settings::value(app, "browserSearchEngine");
     let custom = crate::settings::value(app, "browserCustomSearchUrl");
     let template = search_template(engine.as_str().unwrap_or(""), custom.as_str().unwrap_or(""));
-    match resolve(input, template) {
-        Some(url) => {
+    let resolved = resolve(input, template).map(|url| local_target(app, tab, url));
+    match resolved {
+        Some(Err(e)) => crate::shell::palette::toast(app, "Could not open this address", Some(&e)),
+        Some(Ok(url)) => {
             bar(app, tab).replace_text(url.clone());
             super::history::record(app, &url);
             if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
@@ -630,6 +916,8 @@ fn shown(app: &App) -> Option<TabId> {
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let synced = sync_sessions(app);
     let synced = sync_streams(app) || synced;
+    let synced = stream_events(app, tx) || synced;
+    let synced = take_assets(app) || synced;
     let wait = cursor_wake(app);
     if let Some(wait) = wait {
         tx.wake_after(wait + Duration::from_millis(16));
@@ -639,15 +927,22 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let synced = synced || std::mem::replace(&mut app.ui.panel.browser.cursor_seen, cursor) != cursor;
     let want = shown(app);
     let live = matches!(app.src, data::Source::Live(_));
-    let watch = live && !app.ui.panel.browser.tabs.is_empty();
-    if watch != app.ui.panel.browser.watching {
-        app.ui.panel.browser.watching = watch;
+    let watch = (live && !app.ui.panel.browser.tabs.is_empty()).then(|| servers_payload(app));
+    if watch != app.ui.panel.browser.servers_watch {
+        let before = std::mem::replace(&mut app.ui.panel.browser.servers_watch, watch.clone());
         if let Some(net) = app.src.net() {
-            if watch {
-                net.watch_resource(SERVERS, json!({}));
-            } else {
-                net.unwatch_resource(SERVERS, json!({}));
+            if let Some(before) = before {
+                net.unwatch_resource(SERVERS, before);
             }
+            if let Some(watch) = watch {
+                net.watch_resource(SERVERS, watch);
+            }
+        }
+    }
+    if let Some(scale) = app.ui.panel.browser.rescale {
+        if !app.ui.panel.browser.browser.shared.lock().unwrap().tabs.values().any(|s| s.recording) {
+            app.ui.panel.browser.rescale = None;
+            relaunch(app, scale);
         }
     }
     let now = data::now_ms();
@@ -659,7 +954,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         ui.shown = want;
         ui.browser.send(Cmd::Show(want));
     }
-    let track = ui.pending.as_ref().map(|p| p.tab);
+    // The editor follows the latest picked element as the page scrolls.
+    let track = ui.annotation.as_ref().filter(|a| matches!(a.targets.last(), Some(Target::Element(_)))).map(|a| a.tab);
     if ui.tracked != track {
         ui.tracked = track;
         ui.browser.send(Cmd::Track(track));
@@ -671,6 +967,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = generation != ui.seen || !events.is_empty();
     ui.seen = generation;
     let mut settled = vec![];
+    let mut left = vec![];
     let mut found = vec![];
     let mut loaded = vec![];
     for (id, tab) in ui.tabs.iter_mut() {
@@ -686,6 +983,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         let nav = (status.url.clone(), status.loading);
         if tab.nav != nav {
             if navigated(&tab.nav, &status) {
+                left.push(*id);
                 match &tab.stream {
                     Some(stream) => stream.clear_pointer(),
                     None => {
@@ -733,8 +1031,22 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             super::history::set_title(app, &url, &title);
         }
     }
+    // A new page has none of the annotation's marks.
+    if app.ui.panel.browser.annotation.as_ref().is_some_and(|a| left.contains(&a.tab) && a.capturing.is_none()) {
+        app.ui.panel.browser.annotation = None;
+    }
     for event in events {
         match event {
+            browser::Event::Erased(tab, Some(index)) => {
+                if let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| a.tab == tab && index < a.targets.len()) {
+                    a.targets.remove(index);
+                    if a.targets.is_empty() {
+                        a.anchor = None;
+                    }
+                }
+            }
+            browser::Event::Erased(_, None) => {}
+            browser::Event::Marked(tab, image) => annotated(app, tab, image),
             browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
@@ -806,7 +1118,7 @@ fn register_on(app: &mut App, tab: TabId, thread: String) {
     }
     let Some(net) = crate::env::local_mut(app).net() else { return };
     let id = net.request("preview.open", json!({ "threadId": thread, "viewport": { "_tag": "fill" }, "runtime": "server" }));
-    app.ui.panel.browser.opening.push((id, tab, thread));
+    app.ui.panel.browser.opening.push((id, tab, thread, crate::env::LOCAL.to_owned()));
 }
 
 fn close_session(app: &mut App, key: &agent::Key) {
@@ -841,7 +1153,9 @@ fn sync_remote(app: &mut App) -> bool {
         if !want {
             continue;
         }
-        let events = crate::env::net_of(app, &env).map(|n| n.take_resource_events(SESSIONS, json!({}))).unwrap_or_default();
+        changed |= take_replies(app, &env);
+        let mut events = take_deferred(app, &env);
+        events.extend(crate::env::net_of(app, &env).map(|n| n.take_resource_events(SESSIONS, json!({}))).unwrap_or_default());
         changed |= !events.is_empty();
         for event in events {
             session_event(app, &env, event);
@@ -863,6 +1177,8 @@ fn stream_status(snapshot: &Value, state: &super::stream::State) -> Status {
         painted: state.painted,
         failure,
         url,
+        zoom: snapshot["zoomFactor"].as_f64().map_or(1., |z| z as f32),
+        device: viewport_size(&snapshot["viewport"]).flatten(),
         ..Status::default()
     }
 }
@@ -871,6 +1187,8 @@ fn sync_streams(app: &mut App) -> bool {
     let ui = &app.ui.panel.browser;
     let mut changed = false;
     let mut gone = vec![];
+    let mut sized = vec![];
+    let mut dialogs = vec![];
     {
         let mut shared = ui.browser.shared.lock().unwrap();
         for (id, tab) in &ui.tabs {
@@ -881,12 +1199,45 @@ fn sync_streams(app: &mut App) -> bool {
                 gone.push(*id);
                 continue;
             }
+            if state.dialog != tab.stream_dialog {
+                dialogs.push((*id, state.dialog.clone()));
+            }
             let status = stream_status(&tab.snapshot, &state);
             if shared.tabs.get(id) != Some(&status) {
+                if let Some(size) = status.device.filter(|d| shared.tabs.get(id).and_then(|s| s.device) != Some(*d)) {
+                    sized.push((*id, size));
+                }
                 shared.tabs.insert(*id, status);
                 changed = true;
             }
         }
+    }
+    // The device toolbar's drafts follow the session's size.
+    for (tab, (w, h)) in sized {
+        let d = device(app, tab);
+        if !d.w.focused && !d.h.focused {
+            d.w.replace_text(w.to_string());
+            d.h.replace_text(h.to_string());
+            d.preset = PRESETS.iter().position(|p| (p.1, p.2) == (w, h));
+        }
+    }
+    // The page's alert, confirm or prompt shows as a local one does, answered through the stream.
+    for (tab, dialog) in dialogs {
+        let ui = &mut app.ui.panel.browser;
+        if let Some(t) = ui.tabs.get_mut(&tab) {
+            t.stream_dialog = dialog.clone();
+        }
+        match dialog {
+            Some((kind, message, default)) => {
+                let mut input = TextEdit::new(default.as_str());
+                input.focused = kind == "prompt";
+                input.set_selection(0, input.text.len());
+                ui.dialog = Some(Dialog { tab, kind, message, input });
+            }
+            None if ui.dialog.as_ref().is_some_and(|d| d.tab == tab) => ui.dialog = None,
+            None => {}
+        }
+        changed = true;
     }
     for tab in gone {
         if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
@@ -899,25 +1250,130 @@ fn sync_streams(app: &mut App) -> bool {
     changed
 }
 
+/// What a server tab's page asked of this viewer: copied text, a download, a file picker.
+fn stream_events(app: &mut App, tx: &mut Tx) -> bool {
+    use super::stream::Event;
+    let events: Vec<(TabId, Vec<Event>)> = app.ui.panel.browser.tabs.iter().filter_map(|(id, t)| Some((*id, t.stream.as_ref()?.take_events()))).filter(|(_, e)| !e.is_empty()).collect();
+    let changed = !events.is_empty();
+    for (tab, event) in events.into_iter().flat_map(|(tab, events)| events.into_iter().map(move |e| (tab, e))) {
+        match event {
+            Event::Clipboard(text) => tx.copy(text),
+            // As a person's download in a local tab: saved to Downloads and shown in its folder.
+            Event::Saved(Ok(path)) => {
+                if let Err(e) = reveal(&path) {
+                    crate::shell::palette::toast(app, "Unable to show the download", Some(&e));
+                }
+            }
+            Event::Saved(Err(e)) => crate::shell::palette::toast(app, "Unable to save the download", Some(&e)),
+            // The native dialog picks one file; cancelling it cancels the page's picker.
+            Event::FileChooser { id, multiple, accept } => {
+                let title = if multiple { "Choose files to upload" } else { "Choose a file to upload" };
+                let mut options = rune::FileDialogOptions { title: title.into(), ..Default::default() };
+                let exts = accept_extensions(&accept);
+                if !exts.is_empty() {
+                    let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+                    options = options.filter("Accepted files", exts.as_slice());
+                }
+                tx.open_file(options, move |s: &mut App, picked: rune::FileDialogResult, _| {
+                    let files = match picked {
+                        Ok(Some(path)) => vec![std::path::PathBuf::from(path)],
+                        _ => vec![],
+                    };
+                    if let Some(stream) = s.ui.panel.browser.tabs.get(&tab).and_then(|t| t.stream.as_ref()) {
+                        stream.upload(&id, files);
+                    }
+                });
+            }
+            Event::FileChooserClosed(_) => {}
+            Event::Failed(title, e) => crate::shell::palette::toast(app, &title, Some(&e)),
+        }
+    }
+    changed
+}
+
+/// The file extensions an `<input accept>` names; MIME types like `image/*` don't narrow it.
+fn accept_extensions(accept: &str) -> Vec<String> {
+    accept.split(',').filter_map(|a| a.trim().strip_prefix('.')).filter(|e| !e.is_empty()).map(str::to_ascii_lowercase).collect()
+}
+
 /// A server session as a tab showing the server's frames.
 fn open_stream(app: &mut App, env: &str, key: agent::Key, snapshot: &Value) -> Option<TabId> {
-    let waker = app.ui.panel.waker.clone()?;
-    let net = env_net(app, env)?;
-    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    app.ui.panel.waker.as_ref()?;
     let ui = &mut app.ui.panel.browser;
     ui.next += 1;
     let tab = ui.next;
-    let pixels = Pixels::new();
-    let mut fresh = Tab::new(pixels.clone());
-    let stream = super::stream::Stream::open(base, bearer, &key, pixels, waker);
-    if ui.area.0 >= 1. {
-        stream.resize(ui.area.0, ui.area.1);
-    }
-    fresh.stream = Some(stream);
-    fresh.session = Some(key);
-    fresh.snapshot = snapshot.clone();
+    let mut fresh = Tab::new(Pixels::new());
+    fresh.remote = Some(env.to_owned());
     ui.tabs.insert(tab, fresh);
-    Some(tab)
+    if attach_stream(app, tab, key, snapshot) {
+        return Some(tab);
+    }
+    app.ui.panel.browser.tabs.remove(&tab);
+    None
+}
+
+/// Connects a server tab to its session's frames.
+fn attach_stream(app: &mut App, tab: TabId, key: agent::Key, snapshot: &Value) -> bool {
+    let Some(waker) = app.ui.panel.waker.clone() else { return false };
+    let Some(env) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.remote.clone()) else { return false };
+    let Some(net) = env_net(app, &env) else { return false };
+    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    let ui = &mut app.ui.panel.browser;
+    let area = ui.area;
+    let Some(t) = ui.tabs.get_mut(&tab) else { return false };
+    let stream = super::stream::Stream::open(base, bearer, &key, t.pixels.clone(), waker);
+    if area.0 >= 1. {
+        stream.resize(area.0, area.1);
+    }
+    t.stream = Some(stream);
+    t.session = Some(key);
+    t.snapshot = snapshot.clone();
+    true
+}
+
+/// This environment's answers to `preview.open` for tabs opened here, and to settings a server
+/// tab sent its session.
+fn take_replies(app: &mut App, env: &str) -> bool {
+    let ui = &app.ui.panel.browser;
+    let ids: Vec<u64> = ui.opening.iter().filter(|o| o.3 == env).map(|o| o.0).chain(ui.adjusting.iter().filter(|a| a.1 == env).map(|a| a.0)).collect();
+    if ids.is_empty() {
+        return false;
+    }
+    let Some(net) = env_net(app, env) else { return false };
+    let replies: Vec<(u64, s5_net::Reply)> = ids.into_iter().filter_map(|id| net.take_reply(id).map(|r| (id, r))).collect();
+    let changed = !replies.is_empty();
+    for (id, reply) in replies {
+        let ui = &mut app.ui.panel.browser;
+        if let Some(i) = ui.opening.iter().position(|o| o.0 == id) {
+            let (_, tab, thread, env) = ui.opening.remove(i);
+            match reply {
+                Ok(snapshot) => {
+                    if let Some(session) = snapshot["tabId"].as_str().map(str::to_owned) {
+                        bind(app, tab, (thread, session), &snapshot);
+                    }
+                }
+                // This machine's own tabs register silently; a server tab the person opened says why.
+                Err(e) if env != crate::env::LOCAL => crate::shell::palette::toast(app, "Unable to open browser", e["message"].as_str()),
+                Err(_) => {}
+            }
+        } else if let Some(i) = ui.adjusting.iter().position(|a| a.0 == id) {
+            let (_, _, tab) = ui.adjusting.remove(i);
+            match reply {
+                Ok(snapshot) => {
+                    keep_snapshot(app, tab, &snapshot);
+                }
+                Err(e) => crate::shell::palette::toast(app, "Unable to change the browser tab", e["message"].as_str()),
+            }
+        }
+    }
+    changed
+}
+
+fn take_deferred(app: &mut App, env: &str) -> Vec<Value> {
+    let ui = &mut app.ui.panel.browser;
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut ui.deferred).into_iter().partition(|(e, _)| e == env);
+    ui.deferred = rest;
+    mine.into_iter().map(|(_, v)| v).collect()
 }
 
 /// Follows the local server's preview sessions as web's `followPreviewSessions` does: a session
@@ -955,20 +1411,11 @@ fn sync_local(app: &mut App) -> bool {
         app.ui.panel.browser.rebind = false;
         rebind(app);
     }
-    let ids: Vec<u64> = app.ui.panel.browser.opening.iter().map(|o| o.0).collect();
-    let Some(net) = crate::env::local_mut(app).net() else { return false };
+    let replied = take_replies(app, crate::env::LOCAL);
+    let Some(net) = crate::env::local_mut(app).net() else { return replied };
     let mut events = net.take_resource_events(SESSIONS, json!({}));
-    let replies: Vec<(u64, s5_net::Reply)> = ids.into_iter().filter_map(|id| net.take_reply(id).map(|r| (id, r))).collect();
-    let changed = !events.is_empty() || !replies.is_empty();
-    for (id, reply) in replies {
-        let ui = &mut app.ui.panel.browser;
-        let Some(i) = ui.opening.iter().position(|o| o.0 == id) else { continue };
-        let (_, tab, thread) = ui.opening.remove(i);
-        if let Some(session) = reply.ok().and_then(|snapshot| snapshot["tabId"].as_str().map(str::to_owned)) {
-            bind(app, tab, (thread, session));
-        }
-    }
-    let mut pending = std::mem::take(&mut app.ui.panel.browser.deferred);
+    let changed = !events.is_empty() || replied;
+    let mut pending = take_deferred(app, crate::env::LOCAL);
     pending.append(&mut events);
     for event in pending {
         session_event(app, crate::env::LOCAL, event);
@@ -983,28 +1430,34 @@ fn rebind(app: &mut App) {
     let ui = &mut app.ui.panel.browser;
     let mut stale = vec![];
     // A streamed tab follows its own server: it ends when the session does.
-    for (id, t) in ui.tabs.iter_mut().filter(|(_, t)| t.stream.is_none()) {
+    for (id, t) in ui.tabs.iter_mut().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()) {
         if let Some((thread, _)) = t.session.take() {
             t.announced = None;
             t.adopting = None;
             stale.push((*id, thread));
         }
     }
-    ui.opening.clear();
-    ui.deferred.clear();
+    ui.opening.retain(|o| o.3 != crate::env::LOCAL);
+    ui.deferred.retain(|(env, _)| env != crate::env::LOCAL);
     stale.sort();
     for (tab, thread) in stale {
         register_on(app, tab, thread);
     }
 }
 
-fn bind(app: &mut App, tab: TabId, key: agent::Key) {
+fn bind(app: &mut App, tab: TabId, key: agent::Key, snapshot: &Value) {
     let ui = &mut app.ui.panel.browser;
     if ui.tabs.values().any(|t| t.session.as_ref() == Some(&key)) {
         return;
     }
     if let Some(t) = ui.tabs.get_mut(&tab) {
-        if t.session.is_none() {
+        if t.session.is_some() {
+            return;
+        }
+        // A server tab shows its new session's frames; this machine's tab is that session's page.
+        if t.remote.is_some() {
+            attach_stream(app, tab, key, snapshot);
+        } else {
             t.session = Some(key);
         }
         return;
@@ -1035,8 +1488,8 @@ fn session_event(app: &mut App, env: &str, event: Value) {
                 return;
             }
             // Likely this client's own tab, still waiting for its `preview.open` reply.
-            if snapshot["automationOwner"].is_null() && app.ui.panel.browser.opening.iter().any(|o| o.2 == thread) {
-                app.ui.panel.browser.deferred.push(event);
+            if snapshot["automationOwner"].is_null() && app.ui.panel.browser.opening.iter().any(|o| o.2 == thread && o.3 == env) {
+                app.ui.panel.browser.deferred.push((env.to_owned(), event));
                 return;
             }
             // The server adopting a popup the agent's page opened, which is already a tab here.
@@ -1311,25 +1764,142 @@ fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
     crate::shell::palette::toast_with(app, "Screenshot saved", None, actions);
 }
 
-/// A picked element opens the comment editor beside it, as web's annotation overlay does.
-fn pick(app: &mut App, tab: TabId, element: Value, image: Option<Vec<u8>>) {
+/// Starts web's annotation session on `tab`, element picking first, or ends it.
+fn toggle_annotation(app: &mut App, tab: TabId) {
+    if app.ui.panel.browser.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        return end_annotation(app);
+    }
+    end_annotation(app);
+    let ui = &mut app.ui.panel.browser;
+    ui.annotation = Some(Annotation { tab, tool: Tool::Select, targets: vec![], anchor: None, drag: None, capturing: None });
+    ui.comment = TextEdit::new("");
+    send(app, Cmd::Pick(tab, true));
+}
+
+fn end_annotation(app: &mut App) {
+    let Some(a) = app.ui.panel.browser.annotation.take() else { return };
+    send(app, Cmd::Pick(a.tab, false));
+    send(app, Cmd::Mark(a.tab, "clear()".into()));
+}
+
+/// Desktop's tool keys and buttons: V, R, D and E.
+fn set_tool(app: &mut App, tool: Tool) {
+    let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| a.capturing.is_none()) else { return };
+    a.tool = tool;
+    a.drag = None;
+    let tab = a.tab;
+    send(app, Cmd::Pick(tab, tool == Tool::Select));
+}
+
+/// A picked element joins the annotation, boxed in the page, and picking carries on.
+fn pick(app: &mut App, tab: TabId, element: Value, _image: Option<Vec<u8>>) {
     let r = &element["rect"];
     let rect = [&r["x"], &r["y"], &r["width"], &r["height"]].map(|v| v.as_f64().unwrap_or(0.) as f32);
     let ui = &mut app.ui.panel.browser;
-    ui.pending = Some(Pending { tab, element, image, rect });
-    ui.comment = TextEdit::new("");
+    if !ui.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        ui.annotation = Some(Annotation { tab, tool: Tool::Select, targets: vec![], anchor: None, drag: None, capturing: None });
+        ui.comment = TextEdit::new("");
+    }
+    let Some(a) = ui.annotation.as_mut() else { return };
+    a.targets.push(Target::Element(element));
+    a.anchor = Some(rect);
+    let select = a.tool == Tool::Select && a.capturing.is_none();
     ui.comment.focused = true;
+    send(app, Cmd::Mark(tab, format!("element({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3])));
+    if select {
+        send(app, Cmd::Pick(tab, true));
+    }
 }
 
-/// Enter or Attach: the pending element and its comment go to the composer.
-fn submit_annotation(app: &mut App) {
-    let Some(p) = app.ui.panel.browser.pending.take() else { return };
-    let comment = app.ui.panel.browser.comment.text.trim().to_string();
-    attach(app, &p.element, p.image, &comment);
+/// A region drag or a stroke on the page, in viewport CSS pixels.
+fn mark_drag(s: &mut App, d: &rune::Drag, tab: TabId, scale: f32) {
+    let Some(a) = s.ui.panel.browser.annotation.as_mut().filter(|a| a.tab == tab && a.capturing.is_none()) else { return };
+    let scale = scale.max(0.01);
+    let p = (d.x / scale, d.y / scale);
+    let tool = a.tool;
+    let mut calls = vec![];
+    match (tool, d.phase) {
+        (Tool::Erase, Phase::Down) => {
+            send(s, Cmd::Erase(tab, p.0, p.1));
+            return;
+        }
+        (Tool::Erase, _) | (Tool::Select, _) => return,
+        (_, Phase::Down) => {
+            a.drag = Some(Stroke { start: p, last: p, min: p, max: p, points: 1 });
+            if tool == Tool::Draw {
+                calls.push(format!("begin({}, {})", p.0, p.1));
+            }
+        }
+        (_, Phase::Move) if !d.cancelled() => {
+            let Some(drag) = a.drag.as_mut() else { return };
+            drag.last = p;
+            drag.min = (drag.min.0.min(p.0), drag.min.1.min(p.1));
+            drag.max = (drag.max.0.max(p.0), drag.max.1.max(p.1));
+            drag.points += 1;
+            if tool == Tool::Draw {
+                calls.push(format!("point({}, {})", p.0, p.1));
+            }
+        }
+        _ => {
+            let Some(drag) = a.drag.take() else { return };
+            match tool {
+                Tool::Region if !d.cancelled() => {
+                    if let Some(rect) = region_rect(drag.start, drag.last) {
+                        a.targets.push(Target::Region);
+                        a.anchor = Some(rect);
+                        calls.push(format!("region({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3]));
+                    }
+                }
+                Tool::Draw => {
+                    calls.push("end()".into());
+                    if drag.points > 1 {
+                        a.targets.push(Target::Stroke);
+                        a.anchor = Some([drag.min.0, drag.min.1, drag.max.0 - drag.min.0, drag.max.1 - drag.min.1]);
+                    }
+                }
+                _ => {}
+            }
+            s.ui.panel.browser.comment.focused = true;
+        }
+    }
+    for call in calls {
+        send(s, Cmd::Mark(tab, call));
+    }
 }
 
-/// A picked element goes to the composer as web's preview annotation, its crop as an image.
-fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>, comment: &str) {
+/// Desktop's `isUsableRect`: a region at least 4 CSS pixels each way, whichever way it was dragged.
+fn region_rect(a: (f32, f32), b: (f32, f32)) -> Option<[f32; 4]> {
+    let (x, y) = (a.0.min(b.0), a.1.min(b.1));
+    let (w, h) = ((a.0 - b.0).abs(), (a.1 - b.1).abs());
+    (w >= 4. && h >= 4.).then_some([x, y, w, h])
+}
+
+/// Enter attaches the annotation and its screenshot; Cmd/Ctrl+Enter sends it too.
+fn submit_annotation(app: &mut App, send_now: bool) {
+    let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| !a.targets.is_empty() && a.capturing.is_none()) else { return };
+    a.capturing = Some(send_now);
+    a.drag = None;
+    let tab = a.tab;
+    send(app, Cmd::Pick(tab, false));
+    send(app, Cmd::CaptureMarks(tab));
+}
+
+/// The screenshot arrived: the annotation goes to the composer, and is sent when asked.
+fn annotated(app: &mut App, tab: TabId, image: Option<Vec<u8>>) {
+    let ui = &mut app.ui.panel.browser;
+    let Some(send_now) = ui.annotation.as_ref().filter(|a| a.tab == tab).and_then(|a| a.capturing) else { return };
+    let Some(a) = ui.annotation.take() else { return };
+    let comment = ui.comment.text.trim().to_string();
+    let status = ui.browser.status(tab);
+    send(app, Cmd::Mark(tab, "clear()".into()));
+    attach(app, (&status.url, &status.title), &a.targets, image, &comment, send_now);
+    if send_now {
+        crate::chat::composer::submit(app);
+    }
+}
+
+/// An annotation goes to the composer as web's preview annotation, its screenshot as an image.
+fn attach(app: &mut App, page: (&str, &str), targets: &[Target], image: Option<Vec<u8>>, comment: &str, quiet: bool) {
     let id = s5_net::uuid();
     let image = image.and_then(|bytes| {
         let dir = crate::host::t3_home().join("userdata").join("browser-artifacts");
@@ -1339,33 +1909,54 @@ fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>, comment: &str)
         std::fs::write(&path, bytes).ok()?;
         Some(path.display().to_string())
     });
-    let record = annotation(&id, element, comment);
-    let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
+    let record = annotation(&id, page, targets, comment);
+    let detail = record["targetSummary"].as_str().unwrap_or_default().to_string();
     crate::chat::composer::add_context(app, record);
     if let Some(image) = image {
         crate::chat::composer::attach_path(app, image);
     }
-    crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
+    if !quiet {
+        crate::shell::palette::toast(app, "Annotation added to the composer", Some(&detail));
+    }
 }
 
-/// `previewAnnotationContextRecord` for one picked element and its comment.
-fn annotation(id: &str, element: &Value, comment: &str) -> Value {
+/// Web's `previewAnnotationTargetSummary`: "2 selected elements, 1 marked region, 1 drawing".
+fn target_summary(targets: &[Target]) -> String {
+    let count = |f: fn(&Target) -> bool| targets.iter().filter(|t| f(t)).count();
+    let parts = [
+        (count(|t| matches!(t, Target::Element(_))), "selected element"),
+        (count(|t| *t == Target::Region), "marked region"),
+        (count(|t| *t == Target::Stroke), "drawing"),
+    ];
+    parts.iter().filter(|(n, _)| *n > 0).map(|(n, noun)| format!("{n} {noun}{}", if *n == 1 { "" } else { "s" })).collect::<Vec<_>>().join(", ")
+}
+
+/// `previewAnnotationContextRecord` for an annotation's targets and comment.
+fn annotation(id: &str, (url, title): (&str, &str), targets: &[Target], comment: &str) -> Value {
     let bounded = |v: &Value, max: usize| v.as_str().map(|s| s.chars().take(max).collect::<String>());
-    let page_url = bounded(&element["pageUrl"], 2048).unwrap_or_default();
-    let page_title = bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
+    let elements: Vec<&Value> = targets.iter().filter_map(|t| if let Target::Element(e) = t { Some(e) } else { None }).collect();
+    let first = elements.first().copied().cloned().unwrap_or_else(|| json!({ "pageUrl": url, "pageTitle": title }));
+    let page_url = bounded(&first["pageUrl"], 2048).unwrap_or_default();
+    let page_title = bounded(&first["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
     let label = page_title.as_deref().unwrap_or("Preview annotation").replace(['[', ']', '\\', '\r', '\n'], " ");
     let label: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
-    let details = json!({
-        "pageUrl": page_url,
-        "pageTitle": page_title,
-        "tagName": bounded(&element["tagName"], 255).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "element".into()),
-        "selector": bounded(&element["selector"], 2048),
-        "htmlPreview": bounded(&element["htmlPreview"], 8000).unwrap_or_default(),
-        "componentName": bounded(&element["componentName"], 2048),
-        "source": null,
-        "styles": bounded(&element["styles"], 8000).unwrap_or_default(),
-    });
-    json!({
+    let details: Vec<Value> = elements
+        .iter()
+        .take(50)
+        .map(|element| {
+            json!({
+                "pageUrl": bounded(&element["pageUrl"], 2048).unwrap_or_else(|| page_url.clone()),
+                "pageTitle": bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty()),
+                "tagName": bounded(&element["tagName"], 255).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "element".into()),
+                "selector": bounded(&element["selector"], 2048),
+                "htmlPreview": bounded(&element["htmlPreview"], 8000).unwrap_or_default(),
+                "componentName": bounded(&element["componentName"], 2048),
+                "source": null,
+                "styles": bounded(&element["styles"], 8000).unwrap_or_default(),
+            })
+        })
+        .collect();
+    let mut record = json!({
         "version": 1,
         "contextId": format!("preview-annotation_{id}"),
         "kind": "preview-annotation",
@@ -1374,12 +1965,23 @@ fn annotation(id: &str, element: &Value, comment: &str) -> Value {
         "pageUrl": page_url,
         "pageTitle": page_title,
         "comment": comment.chars().take(8000).collect::<String>(),
-        "targetSummary": "1 selected element",
+        "targetSummary": target_summary(targets),
         "styleChanges": [],
-        "elements": [details],
-        "elementIds": ["element-1"],
         "styleChangeDetails": [],
-    })
+    });
+    if !details.is_empty() {
+        record["elementIds"] = json!((1..=details.len()).map(|n| format!("element-{n}")).collect::<Vec<_>>());
+        record["elements"] = json!(details);
+    }
+    let regions = targets.iter().filter(|t| **t == Target::Region).count();
+    let strokes = targets.iter().filter(|t| **t == Target::Stroke).count();
+    if regions > 0 {
+        record["regionCount"] = json!(regions);
+    }
+    if strokes > 0 {
+        record["strokeCount"] = json!(strokes);
+    }
+    record
 }
 
 /// Records `previewFocus` before any shortcut resolves, so `when` clauses see it on this key.
@@ -1470,10 +2072,14 @@ fn toggle_device(app: &mut App, tab: TabId) {
         send(app, Cmd::Device(tab, None));
         return;
     }
-    // Responsive starts at the page's own size, under the toolbar it opens.
+    *device(app, tab) = Device::default();
+    // The saved default size, else responsive at the page's own size, under the toolbar it opens.
+    if let Some((w, h)) = default_viewport(app) {
+        set_device(app, tab, w, h, PRESETS.iter().position(|p| (p.1, p.2) == (w, h)));
+        return;
+    }
     let (w, h) = app.ui.panel.browser.area;
     let (w, h) = if w >= 1. { clamp_size(w.round() as u32, (h - DEVICE_TOOLBAR_H).max(1.).round() as u32) } else { (1024, 768) };
-    *device(app, tab) = Device::default();
     set_device(app, tab, w, h, None);
 }
 
@@ -1486,6 +2092,194 @@ fn set_device(app: &mut App, tab: TabId, w: u32, h: u32, preset: Option<usize>) 
         d.lock = Some(w as f32 / h as f32);
     }
     send(app, Cmd::Device(tab, Some((w, h))));
+}
+
+/// A device rail: which sides of the page it moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Edge {
+    West,
+    East,
+    South,
+    SouthWest,
+    SouthEast,
+}
+
+impl Edge {
+    fn east(self) -> bool {
+        matches!(self, Edge::East | Edge::SouthEast)
+    }
+    fn west(self) -> bool {
+        matches!(self, Edge::West | Edge::SouthWest)
+    }
+    fn south(self) -> bool {
+        matches!(self, Edge::South | Edge::SouthWest | Edge::SouthEast)
+    }
+}
+
+const VIEWPORT_MIN: f32 = 240.;
+const VIEWPORT_MAX: f32 = 3840.;
+const VIEWPORT_MAX_AREA: f32 = 3840. * 2160.;
+
+/// Web's `resizeFreeformViewport`: a CSS size moved by a delta in window points at `zoom`,
+/// within the server's limits, keeping a locked width / height ratio.
+fn resize_freeform(start: (u32, u32), delta: (f32, f32), zoom: f32, edge: Edge, ratio: Option<f32>) -> (u32, u32) {
+    let zoom = if zoom.is_finite() && zoom > 0. { zoom } else { 1. };
+    let dx = if edge.east() { delta.0 } else if edge.west() { -delta.0 } else { 0. };
+    let dy = if edge.south() { delta.1 } else { 0. };
+    let (sw, sh) = (start.0 as f32, start.1 as f32);
+    let (want_w, want_h) = (sw + dx / zoom, sh + dy / zoom);
+    if let Some(ratio) = ratio.filter(|r| r.is_finite() && *r > 0.) {
+        let by_width = match (dx != 0. || matches!(edge, Edge::East | Edge::West), dy != 0. || edge == Edge::South) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => ((want_w - sw) / sw).abs() >= ((want_h - sh) / sh).abs(),
+        };
+        return at_ratio(if by_width { want_w } else { want_h }, ratio, by_width);
+    }
+    let clamp = |v: f32| v.round().clamp(VIEWPORT_MIN, VIEWPORT_MAX);
+    let (mut w, mut h) = (clamp(want_w), clamp(want_h));
+    if w * h > VIEWPORT_MAX_AREA {
+        if dx.abs() >= dy.abs() {
+            w = (VIEWPORT_MAX_AREA / h).floor().max(VIEWPORT_MIN);
+        } else {
+            h = (VIEWPORT_MAX_AREA / w).floor().max(VIEWPORT_MIN);
+        }
+    }
+    (w as u32, h as u32)
+}
+
+/// Web's `resizeAtAspectRatio`: the driving side clamped, the other following the ratio.
+fn at_ratio(desired: f32, ratio: f32, by_width: bool) -> (u32, u32) {
+    let k = if by_width { ratio } else { 1. / ratio };
+    let min = VIEWPORT_MIN.max(VIEWPORT_MIN * k).ceil();
+    let max = VIEWPORT_MAX.min(VIEWPORT_MAX * k).min((VIEWPORT_MAX_AREA * k).sqrt()).floor();
+    let mut side = desired.round().max(min).min(max);
+    let mut other = (side / k).round();
+    while side * other > VIEWPORT_MAX_AREA && side > min {
+        side -= 1.;
+        other = (side / k).round();
+    }
+    if by_width { (side as u32, other as u32) } else { (other as u32, side as u32) }
+}
+
+/// Web's `resizeFromEndRail`: a centred page grows on both sides, so its edge moves half as far
+/// until it meets the area's edge.
+fn from_end_rail(start: f32, delta: f32, available: f32) -> f32 {
+    let edge = if start < available { (available + start) / 2. } else { start };
+    let target = edge + delta;
+    if target <= available { target * 2. - available } else { target }
+}
+
+fn from_start_rail(start: f32, delta: f32, available: f32) -> f32 {
+    if start > available {
+        let fit = start - available;
+        return if delta <= fit { start - delta } else { available - (delta - fit) * 2. };
+    }
+    let target = (available - start) / 2. + delta;
+    if target >= 0. { available - target * 2. } else { available - target }
+}
+
+/// Web's `resizeBrowserViewportFromRail`: the size a rail drag of `delta` window points makes,
+/// for a page drawn at `scale` window points per CSS pixel in an `available` area.
+fn from_rail(start: (u32, u32), delta: (f32, f32), available: (f32, f32), scale: f32, edge: Edge, ratio: Option<f32>) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale > 0. { scale } else { 1. };
+    let (sw, sh) = (start.0 as f32 * scale, start.1 as f32 * scale);
+    let want_w = if edge.east() { from_end_rail(sw, delta.0, available.0) } else if edge.west() { from_start_rail(sw, delta.0, available.0) } else { sw };
+    let want_h = if edge.south() { from_end_rail(sh, delta.1, available.1) } else { sh };
+    let (dw, dh) = (want_w - sw, want_h - sh);
+    resize_freeform(start, (if edge.west() { -dw } else { dw }, dh), scale, edge, ratio)
+}
+
+fn rail_drag(s: &mut App, d: &rune::Drag, tab: TabId, edge: Edge) {
+    let status = s.ui.panel.browser.browser.status(tab);
+    let Some(size) = status.device else { return };
+    let ui = &mut s.ui.panel.browser;
+    let start = match ui.rail {
+        Some((t, e, start)) if t == tab && e == edge && d.phase != Phase::Down => start,
+        _ => size,
+    };
+    ui.rail = Some((tab, edge, start));
+    let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+    let scale = browser::device_box(aw, ah, start, status.zoom).2;
+    let streamed = ui.tabs.get(&tab).is_some_and(|t| t.stream.is_some());
+    let next = if d.cancelled() { start } else { from_rail(start, (d.dx, d.dy), (aw, ah), scale, edge, device(s, tab).lock) };
+    let done = d.phase == Phase::Up || d.cancelled();
+    if done {
+        s.ui.panel.browser.rail = None;
+    }
+    // Chrome here follows the drag; a server's session takes the size once, on release.
+    if next != size && (!streamed || done) {
+        let preset = PRESETS.iter().position(|p| (p.1, p.2) == next);
+        set_device(s, tab, next.0, next.1, preset);
+    } else if streamed && !done {
+        let d = device(s, tab);
+        d.w.replace_text(next.0.to_string());
+        d.h.replace_text(next.1.to_string());
+    }
+}
+
+/// Web's arrow keys on a rail: 10 CSS pixels a press, 50 with Shift.
+fn rail_key(s: &mut App, e: &KeyEvent, tab: TabId, edge: Edge) -> bool {
+    let Some(size) = s.ui.panel.browser.browser.status(tab).device else { return false };
+    let step = if e.mods.shift { 50. } else { 10. };
+    let delta = match e.key {
+        Key::Left if edge != Edge::South => (-step, 0.),
+        Key::Right if edge != Edge::South => (step, 0.),
+        Key::Up if edge.south() => (0., -step),
+        Key::Down if edge.south() => (0., step),
+        _ => return false,
+    };
+    let next = resize_freeform(size, delta, 1., edge, device(s, tab).lock);
+    if next != size {
+        let preset = PRESETS.iter().position(|p| (p.1, p.2) == next);
+        set_device(s, tab, next.0, next.1, preset);
+    }
+    true
+}
+
+/// Web's `BrowserViewportResizeHandles`: rails left, right and below a device-size page, and
+/// its two lower corners, each dragged or moved with the arrow keys.
+fn rails(app: &App, t: &T, tab: TabId, page: El, (w, h): (f32, f32)) -> El {
+    let active = app.ui.panel.browser.rail.filter(|r| r.0 == tab).map(|r| r.1);
+    let rail = |edge: Edge, rw: f32, rh: f32| {
+        let ink = if active == Some(edge) { t.c.foreground } else { t.c.muted_foreground.alpha_mul(0.55) };
+        let line = |lw: f32, lh: f32| el().size(lw, lh).radius(0.5).fill(ink);
+        let (grip, cursor, label) = match edge {
+            Edge::West => (row().gap(1.).child(line(1., 24.)).child(line(1., 24.)), rune::Cursor::ResizeColumn, "Resize browser viewport from left edge. Use arrow keys to resize."),
+            Edge::East => (row().gap(1.).child(line(1., 24.)).child(line(1., 24.)), rune::Cursor::ResizeColumn, "Resize browser viewport from right edge. Use arrow keys to resize."),
+            Edge::South => (col().gap(1.).child(line(24., 1.)).child(line(24., 1.)), rune::Cursor::ResizeRow, "Resize browser viewport from bottom edge. Use arrow keys to resize."),
+            Edge::SouthWest => (el().size(4., 4.).radius(2.).fill(ink), rune::Cursor::Move, "Resize browser viewport from bottom-left corner. Use arrow keys to resize."),
+            Edge::SouthEast => (el().size(4., 4.).radius(2.).fill(ink), rune::Cursor::Move, "Resize browser viewport from bottom-right corner. Use arrow keys to resize."),
+        };
+        el().key(format!("browser-rail-{edge:?}"))
+            .size(rw, rh)
+            .center()
+            .cursor(cursor)
+            .focusable(true)
+            .role("button")
+            .label(label)
+            .child(grip.a11y_hidden())
+            .on_drag(move |s: &mut App, d, _| rail_drag(s, d, tab, edge))
+            .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| rail_key(s, e, tab, edge))
+    };
+    let rail_w = browser::RAIL;
+    col().child(row().child(rail(Edge::West, rail_w, h)).child(page).child(rail(Edge::East, rail_w, h))).child(row().child(rail(Edge::SouthWest, rail_w, rail_w)).child(rail(Edge::South, w, rail_w)).child(rail(Edge::SouthEast, rail_w, rail_w)))
+}
+
+/// Web's locked ratio while typing: the other side's draft follows each keystroke.
+fn follow_lock(app: &mut App, tab: TabId, height_edited: bool) {
+    let d = device(app, tab);
+    let Some(ratio) = d.lock else { return };
+    let (from, to) = if height_edited { (&d.h, &d.w) } else { (&d.w, &d.h) };
+    let Some(n) = from.text.trim().parse::<u32>().ok().filter(|n| *n > 0) else { return };
+    let other = locked_side(n, ratio, height_edited).to_string();
+    if to.text != other {
+        if height_edited { d.w.replace_text(other) } else { d.h.replace_text(other) }
+    }
+}
+
+fn locked_side(n: u32, ratio: f32, height_edited: bool) -> u32 {
+    (if height_edited { n as f32 * ratio } else { n as f32 / ratio }).round().max(1.) as u32
 }
 
 /// Applies the typed size; with the ratio locked, the edited side drives the other.
@@ -1529,6 +2323,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     let input_off = streamed.as_ref().is_some_and(|s| s.controller.as_deref() != Some("you"));
     let focused = state.bar.focused;
     let live = !idle(&status) && status.failure.is_none();
+    let annotating = ui.annotation.as_ref().is_some_and(|a| a.tab == tab);
     let address = text_input(&state.bar, theme::TEXT_SM)
         .key(format!("browser-url-{tab}"))
         .single_line()
@@ -1623,16 +2418,12 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         .children(streamed.is_none().then(|| {
             let help = if status.failure.is_some() {
                 "Page didn't load. Pick is unavailable until the page renders"
-            } else if status.picking {
+            } else if annotating {
                 "Cancel annotation (Esc)"
             } else {
                 "Annotate an element"
             };
-            toggle(t, if status.picking { "Cancel annotation" } else { "Annotate preview" }, &icons::MOUSE_POINTER_CLICK, status.picking, !status.painted || !live, move |s: &mut App| {
-                let on = !s.ui.panel.browser.browser.status(tab).picking;
-                send(s, Cmd::Pick(tab, on));
-            })
-            .help(help)
+            toggle(t, if annotating { "Cancel annotation" } else { "Annotate preview" }, &icons::MOUSE_POINTER_CLICK, annotating, !status.painted || !live, move |s: &mut App| toggle_annotation(s, tab)).help(help)
         }))
         .children(streamed.is_none().then(|| capture_button(t, tab, &status, live)))
         .child(toggle(
@@ -1667,9 +2458,11 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     } else if idle(&status) {
         empty(app, t, tab)
     } else if let Some(size) = status.device {
-        let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+        let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+        let (w, h, scale) = browser::device_box(aw, ah, size, status.zoom);
         let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
-        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))).children(agent_cursor(app, t, tab, scale)))
+        let page = page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))).children(agent_cursor(app, t, tab, scale));
+        col().grow(1.).min_h(0.).w_full().center().child(rails(app, t, tab, page, (w, h)))
     } else {
         let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
         page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover).children(annotation_editor(app, t, tab, status.zoom.max(0.25), ui.area)).children(agent_cursor(app, t, tab, status.zoom.max(0.25)))
@@ -1807,6 +2600,7 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
             .color(t.c.contrast_foreground)
             .caret(t.c.contrast_foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(move |s: &mut App| if height { &mut device(s, tab).h } else { &mut device(s, tab).w })
+            .on_input_change(move |s: &mut App, _| follow_lock(s, tab, height))
             .on_submit(move |s: &mut App, tx: &mut Tx| {
                 commit_device(s, tab, height);
                 tx.blur();
@@ -1881,7 +2675,8 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
     let status = ui.browser.status(tab);
     let (sw, sh) = match status.device {
         Some(size) => {
-            let (w, h, _) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+            let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+            let (w, h, _) = browser::device_box(aw, ah, size, status.zoom);
             (w, h)
         }
         None => ui.area,
@@ -2055,11 +2850,65 @@ fn pip_gesture(s: &mut App, d: &rune::Drag, dir: (i8, i8), aspect: f32) {
 fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
     let ui = &app.ui.panel.browser;
     let stream = ui.tabs.get(&tab)?.stream.as_ref()?;
-    if !stream.state().painted {
+    let state = stream.state();
+    if let Some((need, command)) = state.host_setup {
+        return Some(host_setup(t, need, command));
+    }
+    let nav = &ui.tabs.get(&tab)?.snapshot["navStatus"];
+    if let Some(pdf) = nav["url"].as_str().filter(|_| nav["_tag"] == "Success").and_then(|url| pdf_asset_url(url, stream.base())) {
+        return Some(stream_pdf(t, pdf));
+    }
+    if !state.painted {
         return Some(col().grow(1.).min_h(0.).w_full().center().child(text("Connecting to the server's browser…").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
     let (w, h, scale) = stream_box(ui, tab);
-    Some(col().grow(1.).min_h(0.).w_full().center().child(page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale))))
+    let page = page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale));
+    let page = if ui.browser.status(tab).device.is_some() { rails(app, t, tab, page, (w, h)) } else { page };
+    Some(col().grow(1.).min_h(0.).w_full().center().child(page))
+}
+
+/// Web embeds a workspace PDF in its own browser; this window has no PDF engine of its own, so
+/// the PDF opens in the system's viewer.
+fn stream_pdf(t: &T, url: String) -> El {
+    let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default().to_owned();
+    let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
+    let open = kit::Button::new("Open PDF").variant("outline").size("sm").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+        if let Err(e) = tx.open_url(&url) {
+            crate::shell::palette::toast(s, "Unable to open the PDF", Some(&e.to_string()));
+        }
+    });
+    let notice = col().max_w(360.).gap(10.).padding(16.).center().child(icon(&icons::FILE, 24.).color(t.c.muted_foreground)).child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground).wrap()).child(text("This PDF opens in your system's viewer.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()).child(open);
+    col().key("browser-stream-pdf").grow(1.).min_h(0.).w_full().center().child(notice)
+}
+
+/// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
+/// command runs there.
+fn host_setup(t: &T, need: String, command: Option<String>) -> El {
+    let mut notice = col().max_w(420.).gap(10.).padding(16.).child(text("The server can't open this page yet").font(theme::SM_MEDIUM).color(t.c.foreground)).child(text(need).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap());
+    if let Some(command) = command {
+        let copied = command.clone();
+        notice = notice
+            .child(text("Run this on the server's machine, then reopen the tab:").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap())
+            .child(row().w_full().gap(8.).center_y().padding(8.).radius(6.).fill(t.c.muted).child(text(command).font(theme::TEXT_XS).color(t.c.foreground).grow(1.).wrap().selectable(true)).child(
+                kit::Button::new("Copy").variant("outline").size("xs").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                    tx.copy(copied.clone());
+                    crate::shell::palette::toast_copied(s, tx, "Copy command");
+                }),
+            ));
+    }
+    col().key("browser-host-setup").grow(1.).min_h(0.).w_full().center().child(notice)
+}
+
+/// The tab's appearance: a server tab's from its session.
+fn tab_scheme(tab: &Tab) -> &'static str {
+    if tab.stream.is_none() {
+        return tab.scheme;
+    }
+    match tab.snapshot["colorScheme"].as_str() {
+        Some("light") => "light",
+        Some("dark") => "dark",
+        _ => "",
+    }
 }
 
 /// Web's stream control row: who drives the page, and taking or handing back control.
@@ -2158,18 +3007,47 @@ fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El>
     Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
 }
 
-/// The picked element's box and web's compact annotation editor beside it: the comment and
-/// Attach (Enter); Escape drops the pick.
+/// Desktop's annotation chrome over the page: the tool bar, a layer taking region and drawing
+/// drags, the region being dragged, and the compact editor beside the latest target with the
+/// comment and Attach (Enter, or Cmd/Ctrl+Enter to send); Escape ends the session.
 fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32)) -> Vec<El> {
     let ui = &app.ui.panel.browser;
-    let Some(pending) = ui.pending.as_ref().filter(|p| p.tab == tab) else { return Vec::new() };
-    // Where the element is now, so the box and editor follow a scroll, as web's overlay does.
-    let rect = ui.browser.status(tab).picked.unwrap_or(pending.rect);
-    let [x, y, w, h] = rect;
-    let mut out: Vec<El> = hover_rect(rect, scale, page)
-        .map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
-        .into_iter()
-        .collect();
+    let Some(a) = ui.annotation.as_ref().filter(|a| a.tab == tab) else { return Vec::new() };
+    let mut out = vec![];
+    if matches!(a.tool, Tool::Region | Tool::Draw | Tool::Erase) {
+        let cursor = if a.tool == Tool::Erase { rune::Cursor::Pointer } else { rune::Cursor::Crosshair };
+        out.push(el().key("browser-annotation-layer").pin(Some(0.), Some(0.), None, None).size(page.0, page.1).cursor(cursor).on_drag(move |s: &mut App, d, _| mark_drag(s, d, tab, scale)));
+    }
+    if let Some(rect) = a.drag.filter(|_| a.tool == Tool::Region).and_then(|d| region_rect(d.start, d.last)) {
+        out.extend(hover_rect(rect, scale, page).map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.06)).border(2., t.c.primary)));
+    }
+    let busy = a.capturing.is_some();
+    let tool = |label: &'static str, glyph: &'static rune::Icon, which: Tool| toggle(t, label, glyph, a.tool == which, busy, move |s: &mut App| set_tool(s, which)).help(label);
+    let summary = if a.targets.is_empty() { "Pick elements, mark a region or draw".to_string() } else { target_summary(&a.targets) };
+    out.push(
+        row()
+            .key("browser-annotation-tools")
+            .pin(Some(8.), Some(8.), None, None)
+            .h(36.)
+            .px(4.)
+            .gap(2.)
+            .center_y()
+            .radius(10.)
+            .border(1., t.c.border)
+            .fill(t.c.popover.alpha_mul(0.96))
+            .shadow(4., 16., Color::BLACK.alpha(0.2))
+            .child(tool("Select elements (V)", &icons::MOUSE_POINTER_2, Tool::Select))
+            .child(tool("Mark a region (R)", &icons::SCAN, Tool::Region))
+            .child(tool("Draw (D)", &icons::PENCIL, Tool::Draw))
+            .child(tool("Erase a mark (E)", &icons::TRASH_2, Tool::Erase))
+            .child(text(summary).font(theme::TEXT_XS).color(t.c.muted_foreground).px(6.).single_line()),
+    );
+    if a.targets.is_empty() {
+        return out;
+    }
+    // Where the latest element is now, so the editor follows a scroll, as web's overlay does.
+    let picked = ui.browser.status(tab).picked.filter(|_| matches!(a.targets.last(), Some(Target::Element(_))));
+    let [x, y, w, h] = picked.or(a.anchor).unwrap_or([0., 0., page.0 / scale.max(0.01), 0.]);
     let size = (360f32.min(page.0 - 16.).max(160.), 50.);
     let (left, top) = editor_position([x * scale, y * scale, w * scale, h * scale], size, page);
     let comment = text_input(&ui.comment, theme::TEXT_SM)
@@ -2186,17 +3064,23 @@ fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32))
         .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
         .on_edit(|s: &mut App| &mut s.ui.panel.browser.comment)
         .on_submit(|s: &mut App, tx: &mut Tx| {
-            submit_annotation(s);
+            submit_annotation(s, false);
             tx.blur();
         })
-        .on_input_key(|s: &mut App, e, tx| {
-            if !matches!(e.key, Key::Escape) {
-                return false;
+        .on_input_key(|s: &mut App, e, tx| match e.key {
+            Key::Enter if e.mods.cmd || e.mods.ctrl => {
+                submit_annotation(s, true);
+                tx.blur();
+                true
             }
-            s.ui.panel.browser.pending = None;
-            tx.blur();
-            true
+            Key::Escape => {
+                end_annotation(s);
+                tx.blur();
+                true
+            }
+            _ => false,
         });
+    let attach = kit::Button::new(if busy { "Capturing…" } else { "Attach" }).disabled(busy).on_press(|s: &mut App| submit_annotation(s, false)).build(t).help("Attach annotation and screenshot (Enter). Send with Cmd/Ctrl+Enter.");
     out.push(
         row()
             .key("browser-annotation-editor")
@@ -2211,7 +3095,7 @@ fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32))
             .fill(t.c.popover.alpha_mul(0.96))
             .shadow(8., 24., Color::BLACK.alpha(0.25))
             .child(comment)
-            .child(kit::Button::new("Attach").on_press(submit_annotation).build(t)),
+            .child(attach),
     );
     out
 }
@@ -2298,8 +3182,22 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) {
                 return false;
             }
-            if matches!(e.key, Key::Escape) && s.ui.panel.browser.pending.take().is_some() {
-                return true;
+            if s.ui.panel.browser.annotation.is_some() {
+                let tool = match &e.key {
+                    Key::Escape => {
+                        end_annotation(s);
+                        return true;
+                    }
+                    Key::Text(v) if v == "v" => Some(Tool::Select),
+                    Key::Text(v) if v == "r" => Some(Tool::Region),
+                    Key::Text(v) if v == "d" => Some(Tool::Draw),
+                    Key::Text(v) if v == "e" => Some(Tool::Erase),
+                    _ => None,
+                };
+                if let Some(tool) = tool {
+                    set_tool(s, tool);
+                    return true;
+                }
             }
             // Escape leaves element picking, as web's annotation mode.
             let picking = s.ui.panel.browser.shown.filter(|&tab| s.ui.panel.browser.browser.status(tab).picking);
@@ -2443,26 +3341,79 @@ fn notice_empty(t: &T, title: &str, description: &str) -> El {
         )
 }
 
+/// The current thread's project scripts' `previewUrl`s, as web's `configuredPreviewUrls`, bounded
+/// as `boundConfiguredLocalServerUrls`: loopback http(s), unique, at most 32.
+fn configured_urls(app: &App) -> Vec<String> {
+    let Route::Thread(thread) = app.frame_route() else { return vec![] };
+    let state = app.state();
+    let Some(project) = state.threads.iter().chain(&state.archived).find(|t| data::s(t, "id") == thread.as_str()).map(|t| data::s(t, "projectId").to_string()) else { return vec![] };
+    let Some(scripts) = state.projects.iter().find(|p| data::s(p, "id") == project).and_then(|p| p["scripts"].as_array()) else { return vec![] };
+    let mut out: Vec<String> = vec![];
+    for raw in scripts.iter().filter_map(|s| s["previewUrl"].as_str()) {
+        if raw.is_empty() || raw.len() > 2048 || raw.trim() != raw {
+            continue;
+        }
+        let Ok(url) = s5_net::url::Url::parse(raw) else { continue };
+        let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"));
+        if !matches!(url.scheme(), "http" | "https") || !loopback || url.as_str().len() > 2048 {
+            continue;
+        }
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if out.iter().any(|o| s5_net::url::Url::parse(o).is_ok_and(|mut u| { u.set_fragment(None); u == key })) {
+            continue;
+        }
+        out.push(url.to_string());
+        if out.len() >= 32 {
+            break;
+        }
+    }
+    out
+}
+
+fn servers_payload(app: &App) -> Value {
+    let urls = configured_urls(app);
+    if urls.is_empty() { json!({}) } else { json!({ "configuredUrls": urls }) }
+}
+
+/// Web's `mergeDiscoveredServers`: listening servers, a script's `previewUrl` first and opening
+/// that URL once probing settles, then the rest by port.
+fn previewable(response: &Value, configured: &[String]) -> Vec<(String, String, u64)> {
+    let loopback = |h: &str| matches!(h, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]");
+    let key = |host: &str, port: u64| format!("{}:{port}", if loopback(host) { "loopback" } else { host });
+    let wanted: Vec<(String, String)> = configured
+        .iter()
+        .filter_map(|raw| {
+            let u = s5_net::url::Url::parse(raw).ok()?;
+            Some((key(u.host_str()?, u.port_or_known_default()? as u64), u.to_string()))
+        })
+        .collect();
+    let probing = response["configuredUrlProbing"] == true;
+    let mut rows: Vec<(bool, String, String, u64)> = response["servers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            let port = v["port"].as_u64()?;
+            let host = data::s(v, "host");
+            let url = v["url"].as_str()?.to_string();
+            let name = v["processName"].as_str().filter(|n| !n.is_empty()).unwrap_or("Listening");
+            let configured = wanted.iter().find(|(k, _)| *k == key(host, port)).map(|(_, u)| u.clone());
+            let url = configured.clone().filter(|_| !probing).unwrap_or(url);
+            Some((configured.is_none(), url, format!("{name}\n{host}:{port}"), port))
+        })
+        .collect();
+    rows.sort_by_key(|r| (r.0, r.3));
+    rows.into_iter().map(|(_, url, label, port)| (url, label, port)).collect()
+}
+
 /// `PreviewEmptyState`: recent pages and the server's listening ports, else a hint.
 fn empty(app: &App, t: &T, tab: TabId) -> El {
-    let mut servers: Vec<(String, String, u64)> = match &app.src {
-        data::Source::Live(net) => net
-            .resource(SERVERS, json!({}))
-            .and_then(|v| v["servers"].as_array())
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|v| {
-                        let url = v["url"].as_str()?.to_string();
-                        let port = v["port"].as_u64()?;
-                        let name = v["processName"].as_str().filter(|n| !n.is_empty()).unwrap_or("Listening");
-                        Some((url, format!("{name}\n{}:{port}", data::s(v, "host")), port))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+    let payload = app.ui.panel.browser.servers_watch.clone().unwrap_or_else(|| json!({}));
+    let servers: Vec<(String, String, u64)> = match &app.src {
+        data::Source::Live(net) => net.resource(SERVERS, payload).map(|v| previewable(v, &configured_urls(app))).unwrap_or_default(),
         _ => vec![],
     };
-    servers.sort_by_key(|v| v.2);
     let history = super::history::entries(app);
     let recents = &history[..history.len().min(8)];
     if servers.is_empty() && recents.is_empty() {
@@ -2597,12 +3548,14 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     if !ui.menu {
         return;
     }
-    let scheme = ui.scheme;
+    let scheme = ui.tabs.get(&tab).map_or("", tab_scheme);
     let radio = |label: &'static str, value: &'static str| {
         kit::MenuEntry::item(kit::MenuItem::new(label).radio(scheme == value).on_select(move |s: &mut App| {
-            s.ui.panel.browser.scheme = value;
+            if let Some(t) = s.ui.panel.browser.tabs.get_mut(&tab) {
+                t.scheme = value;
+            }
             s.ui.panel.browser.menu = false;
-            send(s, Cmd::ColorScheme(value));
+            send(s, Cmd::ColorScheme(tab, value));
         }))
     };
     let blank = idle(&status);
@@ -2632,7 +3585,10 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 .child(zoom_button("Reset zoom", &icons::ROTATE_CCW, "ghost", blank, 0)),
         );
     let close = |s: &mut App| s.ui.panel.browser.menu = false;
-    kit::Menu::new("browser-more")
+    let profile = ui.tabs.get(&tab).and_then(|t| t.snapshot["profileId"].as_str()).unwrap_or("default");
+    let profile = crate::settings::browser_profiles::profile_name(app, profile);
+    let moving = move_label(app, tab);
+    let mut menu = kit::Menu::new("browser-more")
         .anchor("browser-menu")
         .placement(kit::Placement::BottomEnd)
         .min_width(248.)
@@ -2672,8 +3628,16 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         )
         .separator()
         .row(zoom_row)
-        .separator()
-        .group_label("Profile: Default")
+        .separator();
+    if let Some(label) = moving {
+        menu = menu
+            .item(kit::MenuItem::new(label).disabled(blank).on_select(move |s: &mut App| {
+                close(s);
+                move_tab(s, tab);
+            }))
+            .separator();
+    }
+    menu.group_label(format!("Profile: {profile}"))
         .item(kit::MenuItem::new("Clear cookies").on_select(move |s: &mut App| {
             close(s);
             send(s, Cmd::ClearCookies);
@@ -2683,6 +3647,42 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
             send(s, Cmd::ClearCache);
         }))
         .overlay(&kit::theme(t), out);
+}
+
+/// Web's `alternatePreviewRuntime`: on another machine's thread, a server tab can move to this
+/// computer's browser, and a tab here to that machine's.
+fn move_label(app: &App, tab: TabId) -> Option<String> {
+    let t = app.ui.panel.browser.tabs.get(&tab)?;
+    if t.remote.is_some() {
+        return t.stream.is_some().then(|| "Open on this computer".to_owned());
+    }
+    let env = server_env(app)?;
+    Some(format!("Open in {}'s browser", crate::env::label(app, &env)))
+}
+
+/// Opens the tab's page in the other runtime and closes it here, as web's `handleMoveTab`.
+fn move_tab(app: &mut App, tab: TabId) {
+    let Some(remote) = app.ui.panel.browser.tabs.get(&tab).map(|t| t.remote.is_some()) else { return };
+    let url = app.ui.panel.browser.browser.status(tab).url;
+    let moved = if remote {
+        let fresh = open_tab(app);
+        register(app, fresh);
+        fresh
+    } else {
+        let Some(env) = server_env(app) else { return };
+        let ui = &mut app.ui.panel.browser;
+        ui.next += 1;
+        let mut fresh = Tab::new(Pixels::new());
+        fresh.remote = Some(env);
+        ui.tabs.insert(ui.next, fresh);
+        ui.next
+    };
+    super::activate(app, super::Surface::Browser(moved));
+    if !url.is_empty() {
+        navigate(app, moved, &url);
+    }
+    super::drop_browser(app, tab);
+    close(app, tab);
 }
 
 /// Electron's page menu: Copy Link on a web link, Copy Image on an image, then the edit roles.
@@ -2779,14 +3779,14 @@ mod tests {
         let mut app = App::new();
         let thread = data::s(&app.state().threads[0], "id").to_string();
         let mine = open_tab(&mut app);
-        app.ui.panel.browser.opening.push((7, mine, thread.clone()));
+        app.ui.panel.browser.opening.push((7, mine, thread.clone(), crate::env::LOCAL.to_owned()));
         let opened = json!({ "type": "opened", "threadId": thread, "tabId": "s", "snapshot": { "runtime": "server" } });
         session_event(&mut app, crate::env::LOCAL, opened.clone());
         assert_eq!(app.ui.panel.browser.tabs.len(), 1, "held until preview.open answers");
         assert_eq!(app.ui.panel.browser.deferred.len(), 1);
 
         app.ui.panel.browser.opening.clear();
-        bind(&mut app, mine, (thread.clone(), "s".into()));
+        bind(&mut app, mine, (thread.clone(), "s".into()), &Value::Null);
         assert_eq!(session_tab(&app, &thread, "s"), Some(mine));
         session_event(&mut app, crate::env::LOCAL, opened);
         assert_eq!(app.ui.panel.browser.tabs.len(), 1);
@@ -2821,8 +3821,8 @@ mod tests {
             t.announced = Some((1, "T".into()));
         }
         app.ui.panel.browser.tabs.get_mut(&b).unwrap().adopting = Some(((thread.clone(), "s1".into()), "P".into()));
-        app.ui.panel.browser.opening.push((3, a, thread.clone()));
-        app.ui.panel.browser.deferred.push(json!({ "type": "opened" }));
+        app.ui.panel.browser.opening.push((3, a, thread.clone(), crate::env::LOCAL.to_owned()));
+        app.ui.panel.browser.deferred.push((crate::env::LOCAL.to_owned(), json!({ "type": "opened" })));
         rebind(&mut app);
         let ui = &app.ui.panel.browser;
         assert!(ui.tabs.values().all(|t| t.session.is_none() && t.announced.is_none() && t.adopting.is_none()));
@@ -2863,6 +3863,96 @@ mod tests {
         let failed = Status { url: "about:blank".into(), failure: Some(browser::Failure { url: "http://localhost:5173/".into(), description: "ERR_CONNECTION_REFUSED".into() }), ..Status::default() };
         assert!(matches!(&reopen(4, &failed)[..], [Cmd::Navigate(4, url)] if url == "http://localhost:5173/"));
         assert!(reopen(5, &Status::default()).is_empty());
+    }
+
+    #[test]
+    fn server_tab_settings_go_through_its_session() {
+        assert_eq!(stream_rpc(&Cmd::Zoom(1, 1.2)), Some(("preview.adjust", json!({ "zoomFactor": 1.25 }))));
+        assert_eq!(stream_rpc(&Cmd::Reload { tab: 1, hard: true }), Some(("preview.adjust", json!({ "hardReload": true }))));
+        assert_eq!(stream_rpc(&Cmd::Reload { tab: 1, hard: false }), None, "a plain reload is page input");
+        assert_eq!(stream_rpc(&Cmd::ClearCookies), Some(("preview.adjust", json!({ "clear": "cookies" }))));
+        assert_eq!(stream_rpc(&Cmd::ColorScheme(1, "")), Some(("preview.adjust", json!({ "colorScheme": "system" }))));
+        assert_eq!(stream_rpc(&Cmd::ColorScheme(1, "dark")), Some(("preview.adjust", json!({ "colorScheme": "dark" }))));
+        assert_eq!(stream_rpc(&Cmd::Device(1, Some((390, 844)))), Some(("preview.resize", json!({ "viewport": { "_tag": "freeform", "width": 390, "height": 844 } }))));
+        assert_eq!(stream_rpc(&Cmd::Device(1, None)), Some(("preview.resize", json!({ "viewport": { "_tag": "fill" } }))));
+        assert_eq!(stream_rpc(&Cmd::Back(1)), None);
+        let snapshot = json!({ "navStatus": { "_tag": "Success", "url": "https://a.dev/", "title": "" }, "zoomFactor": 1.5, "viewport": { "_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro" } });
+        let status = stream_status(&snapshot, &super::super::stream::State::default());
+        assert_eq!((status.zoom, status.device), (1.5, Some((390, 844))));
+    }
+
+    #[test]
+    fn another_machines_loopback_address_is_that_machine() {
+        assert_eq!(rewrite_loopback("http://localhost:5173/app?x#y", "http://192.168.1.20:3773").unwrap(), "http://192.168.1.20:5173/app?x#y");
+        assert_eq!(rewrite_loopback("http://127.0.0.1:3000/", "https://box.tail1234.ts.net").unwrap(), "http://box.tail1234.ts.net:3000/");
+        assert_eq!(rewrite_loopback("http://[::1]:8080/", "http://[fd7a:115c:a1e0::5]:3773").unwrap(), "http://[fd7a:115c:a1e0::5]:8080/");
+        // Already this machine, or not a loopback address: unchanged.
+        assert_eq!(rewrite_loopback("http://localhost:5173/", "http://127.0.0.1:3773").unwrap(), "http://localhost:5173/");
+        assert_eq!(rewrite_loopback("https://example.com/", "http://192.168.1.20:3773").unwrap(), "https://example.com/");
+        // A public server can't be reached on its ports directly.
+        assert!(rewrite_loopback("http://localhost:5173/", "https://t3.example.com").is_err());
+    }
+
+    #[test]
+    fn a_scripts_preview_url_leads_the_listening_servers() {
+        let response = json!({ "servers": [
+            { "host": "127.0.0.1", "port": 8080, "url": "http://127.0.0.1:8080/", "processName": "python" },
+            { "host": "localhost", "port": 5173, "url": "http://localhost:5173/", "processName": "node" },
+            { "host": "127.0.0.1", "port": 3000, "url": "http://127.0.0.1:3000/", "processName": "" },
+        ], "configuredUrlProbing": false });
+        let rows = previewable(&response, &["http://localhost:8080/admin".into()]);
+        assert_eq!(rows.iter().map(|r| (r.0.as_str(), r.2)).collect::<Vec<_>>(), vec![("http://localhost:8080/admin", 8080), ("http://127.0.0.1:3000/", 3000), ("http://localhost:5173/", 5173)]);
+        assert_eq!(rows[1].1, "Listening\n127.0.0.1:3000");
+        // While the server still probes the script's URL, its own address opens.
+        let probing = json!({ "servers": response["servers"], "configuredUrlProbing": true });
+        assert_eq!(previewable(&probing, &["http://localhost:8080/admin".into()])[0].0, "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn device_rails_resize_like_webs() {
+        // A centred page grows on both sides, so the edge travels half the size change.
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 1., Edge::East, None), (440, 600));
+        assert_eq!(from_rail((400, 600), (-20., 0.), (1000., 800.), 1., Edge::West, None), (440, 600));
+        assert_eq!(from_rail((400, 600), (0., 30.), (1000., 800.), 1., Edge::South, None), (400, 660));
+        // Past the area's edge the page grows one-for-one; at half scale each point is two pixels.
+        assert_eq!(from_rail((400, 600), (310., 0.), (1000., 800.), 1., Edge::East, None), (1010, 600));
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 0.5, Edge::East, None), (480, 600));
+        // The server's limits and a locked ratio hold.
+        assert_eq!(from_rail((400, 600), (-400., 0.), (1000., 800.), 1., Edge::East, None), (240, 600));
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 1., Edge::SouthEast, Some(400. / 600.)), (440, 660));
+        assert_eq!(resize_freeform((3840, 2000), (0., 400.), 1., Edge::South, None), (3840, 2160));
+        assert_eq!(resize_freeform((390, 844), (10., 0.), 1., Edge::West, None), (380, 844));
+        assert_eq!(resize_freeform((390, 844), (0., -50.), 1., Edge::SouthEast, None), (390, 794));
+        assert_eq!(browser::device_area(500., 400.), (480., 390.));
+    }
+
+    #[test]
+    fn workspace_html_and_pdf_open_in_the_browser() {
+        assert!(previewable_file("docs/Index.HTML") && previewable_file("a.htm?x=1") && previewable_file("/tmp/report.pdf#page=2"));
+        assert!(!previewable_file("notes.md") && !previewable_file("page.html/notes"));
+        assert_eq!(asset_path("./site/index.html", "/repo/"), ("/repo/site/index.html".into(), true));
+        assert_eq!(asset_path("/repo/out.pdf", "/repo"), ("/repo/out.pdf".into(), true));
+        assert_eq!(asset_path("/repository/out.pdf", "/repo"), ("/repository/out.pdf".into(), false));
+        assert_eq!(asset_path("../other/page.html", "/repo"), ("/repo/../other/page.html".into(), false));
+        // The server's own loopback address is fetched through this client's connection to it.
+        let base = "https://box.tail1.ts.net:3773";
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/api/assets/t/Report.pdf?sig=1", base).as_deref(), Some("https://box.tail1.ts.net:3773/api/assets/t/Report.pdf?sig=1"));
+        assert_eq!(pdf_asset_url("https://cdn.example.com/api/assets/t/a.pdf", base).as_deref(), Some("https://cdn.example.com/api/assets/t/a.pdf"));
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/api/assets/t/page.html", base), None);
+        assert_eq!(pdf_asset_url("http://127.0.0.1:3773/docs/a.pdf", base), None);
+    }
+
+    #[test]
+    fn a_file_inputs_accept_list_filters_the_picker() {
+        assert_eq!(accept_extensions(".PNG, .jpg,image/*,"), vec!["png", "jpg"]);
+        assert!(accept_extensions("image/*").is_empty());
+    }
+
+    #[test]
+    fn a_locked_ratio_follows_the_typed_side() {
+        assert_eq!(locked_side(390, 390. / 844., false), 844);
+        assert_eq!(locked_side(844, 390. / 844., true), 390);
+        assert_eq!(locked_side(1, 100., false), 1, "never zero");
     }
 
     #[test]
@@ -2958,17 +4048,32 @@ mod tests {
             "htmlPreview": "<button id=\"go\">Sign in</button>", "componentName": null, "source": null, "styles": "color: red",
             "rect": { "x": 1 }, "doc": { "x": 1 },
         });
-        let record = annotation("abc", &element, "Make it blue");
+        let page = ("http://localhost:5173/", "Demo");
+        let record = annotation("abc", page, &[Target::Element(element.clone())], "Make it blue");
         assert_eq!(record["contextId"], "preview-annotation_abc");
         assert_eq!(record["comment"], "Make it blue");
         assert_eq!(record["label"], "Demo home");
         assert_eq!(record["targetSummary"], "1 selected element");
+        assert_eq!(record["elementIds"], json!(["element-1"]));
         let details = &record["elements"][0];
         assert_eq!(details["selector"], "#go");
         assert!(details.get("rect").is_none() && details["source"].is_null());
-        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }), "");
+        assert!(record.get("regionCount").is_none() && record.get("strokeCount").is_none());
+        let untitled = annotation("x", page, &[Target::Element(json!({ "pageUrl": "http://a/", "pageTitle": "  " }))], "");
         assert_eq!(untitled["label"], "Preview annotation");
         assert!(untitled["pageTitle"].is_null());
+
+        // Several targets: web's summary and counts, the page from the tab without elements.
+        let targets = [Target::Element(element.clone()), Target::Element(element), Target::Region, Target::Stroke, Target::Stroke];
+        let record = annotation("m", page, &targets, "");
+        assert_eq!(record["targetSummary"], "2 selected elements, 1 marked region, 2 drawings");
+        assert_eq!((record["regionCount"].clone(), record["strokeCount"].clone()), (json!(1), json!(2)));
+        assert_eq!(record["elementIds"], json!(["element-1", "element-2"]));
+        let marks = annotation("r", page, &[Target::Region], "Too tight");
+        assert_eq!((marks["pageUrl"].clone(), marks["label"].clone()), (json!("http://localhost:5173/"), json!("Demo")));
+        assert!(marks.get("elements").is_none() && marks.get("elementIds").is_none());
+        assert_eq!(region_rect((50., 40.), (10., 10.)), Some([10., 10., 40., 30.]));
+        assert_eq!(region_rect((10., 10.), (12., 40.)), None);
     }
 
     #[test]

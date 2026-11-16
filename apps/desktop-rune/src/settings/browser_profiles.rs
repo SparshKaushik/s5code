@@ -95,6 +95,19 @@ fn listed(s: &App) -> Vec<(String, String, bool)> {
     out
 }
 
+/// `resolveBrowserDefaults().profileId`: the profile new tabs open with.
+pub(crate) fn default_profile(s: &App) -> String {
+    default_id(s)
+}
+
+/// A tab's profile by name, as web's `profileName`.
+pub(crate) fn profile_name(s: &App, id: &str) -> String {
+    if id == INCOGNITO_ID {
+        return "Incognito".into();
+    }
+    listed(s).into_iter().find(|(i, _, _)| i == id).map_or_else(|| "Removed profile".into(), |(_, name, _)| name)
+}
+
 fn default_id(s: &App) -> String {
     let id = setting(s, "browserDefaultProfileId").as_str().unwrap_or(DEFAULT_ID).to_owned();
     if listed(s).iter().any(|(i, _, _)| *i == id) { id } else { DEFAULT_ID.to_owned() }

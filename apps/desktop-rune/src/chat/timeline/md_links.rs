@@ -175,6 +175,8 @@ pub fn open(app: &mut App, url: &str, tx: &mut Tx) {
                 crate::shell::palette::toast_error(app, "Thread not found", Some("It may belong to another environment."));
             }
         }
+        // Web's file-link menu offers "Open in browser" for HTML and PDF files; Alt-click here.
+        Target::File { path, .. } if tx.mods().alt && crate::panel::previewable_file(&path) => crate::panel::open_file_in_preview(app, &path),
         Target::File { path, line } => open_file(app, &path, line),
         Target::Citation => {
             if let Some(citation) = super::citation::parse_href(url) {
@@ -444,6 +446,7 @@ fn inline(app: &App, src: &str, key: &str, t: &T, ink: rune::Color, font: TextSt
 pub fn help(url: &str) -> Option<String> {
     match classify(url) {
         Target::File { path, line: Some(n) } => Some(format!("Open {path}:{n}")),
+        Target::File { path, line: None } if crate::panel::previewable_file(&path) => Some(format!("Open {path} (Alt-click: open in browser)")),
         Target::File { path, line: None } => Some(format!("Open {path}")),
         Target::Thread(_) => Some("Open thread".into()),
         Target::Citation | Target::Web => None,

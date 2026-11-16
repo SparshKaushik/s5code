@@ -130,9 +130,31 @@ fn public_host(host: &str) -> bool {
 
 fn public_v4(ip: std::net::Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
-    let private = a == 0 || a == 10 || a == 127 || (a == 100 && (64..=127).contains(&b)) || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) || (a == 169 && b == 254) || (a == 198 && (18..=19).contains(&b));
     let special = a >= 224 || (a == 192 && b == 0 && (c == 0 || c == 2)) || (a == 192 && b == 88 && c == 99) || (a == 198 && b == 51 && c == 100) || (a == 203 && b == 0 && c == 113);
-    !private && !special
+    !private_v4(ip) && !special
+}
+
+fn private_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    a == 0 || a == 10 || a == 127 || (a == 100 && (64..=127).contains(&b)) || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) || (a == 169 && b == 254) || (a == 198 && (18..=19).contains(&b))
+}
+
+/// `isPrivateNetworkHost`: a host this machine may reach directly on a local network or tailnet.
+pub(super) fn private_network_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    if host == "::" || host == "::1" || host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") || host == "home.arpa" || host.ends_with(".home.arpa") || host.ends_with(".ts.net") || (!host.contains('.') && !host.contains(':')) {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return private_v4(v4);
+    }
+    let Ok(v6) = host.parse::<std::net::Ipv6Addr>() else { return false };
+    let s = v6.segments();
+    if s[..6] == [0, 0, 0, 0, 0, 0xffff] {
+        return private_v4(std::net::Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
+    }
+    (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
 }
 
 fn start_fetch(icons: &mut Favicons, url: &str, waker: Option<rune::Waker>) {
@@ -324,6 +346,16 @@ mod tests {
             assert_eq!(fallback_url(private), None, "{private}");
         }
         assert!(fallback_url("http://[2606:4700::1111]/").is_some());
+    }
+
+    #[test]
+    fn private_network_hosts_are_reachable_directly() {
+        for host in ["localhost", "192.168.1.4", "10.0.0.2", "100.100.1.1", "box.ts.net", "nas", "printer.local", "[fd7a:115c:a1e0::1]", "fe80::1", "::ffff:192.168.0.1"] {
+            assert!(private_network_host(host), "{host}");
+        }
+        for host in ["example.com", "8.8.8.8", "2606:4700::1111", "t3.codes"] {
+            assert!(!private_network_host(host), "{host}");
+        }
     }
 
     #[test]
