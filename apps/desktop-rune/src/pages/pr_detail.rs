@@ -2338,7 +2338,7 @@ mod tests {
         let (prompt, chip) = handoff_task(&d, true);
         assert_eq!(prompt, "Explain this merge request.");
         let text = chip["text"].as_str().unwrap();
-        assert!(text.contains("The merge request is #42") && !text.contains("pull request"), "{text}");
+        assert!(text.contains("The merge request is #42") && text.contains("comes from the merge request") && text.contains("Walk through this merge request"), "{text}");
         assert!(resolve_text(&d).starts_with("MR #42 "));
         assert!(resolve_text(&change("https://github.com/o/r/pull/42")).starts_with("PR #42 "));
     }
