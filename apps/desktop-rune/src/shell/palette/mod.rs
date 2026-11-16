@@ -512,24 +512,33 @@ fn items(s: &App) -> Vec<Item> {
         return rows;
     }
     let ui = &s.ui.shell.palette;
-    if ui.page == "files" {
+    let rows = items_on(s, &ui.page);
+    // `filterCommandPaletteGroups`: a submenu with no match falls back to the root search.
+    if rows.is_empty() && !matches!(ui.page.as_str(), "" | "files") && !ui.query.text.trim().is_empty() {
+        return items_on(s, "");
+    }
+    rows
+}
+fn items_on(s: &App, page: &str) -> Vec<Item> {
+    let ui = &s.ui.shell.palette;
+    if page == "files" {
         return actions::file_items(s);
     }
     let mut out = vec![];
-    if ui.page == "add-project" {
+    if page == "add-project" {
         out = add_project::source_items(s);
     }
-    if ui.page == "add-environment" {
+    if page == "add-environment" {
         out = add_project::environment_items(s);
     }
-    if ui.page == "themes" {
+    if page == "themes" {
         out.extend(theme_items(s));
     }
-    if ui.page == "appearance" {
+    if page == "appearance" {
         out.extend(appearance_items(s));
     }
-    let (actions_only, typed) = actions_filter(ui);
-    if ui.page.is_empty() {
+    let (actions_only, typed) = actions_filter(ui, page);
+    if page.is_empty() {
         let project = match &s.route {
             Route::Thread(id) => s
                 .state()
@@ -725,11 +734,11 @@ fn items(s: &App) -> Vec<Item> {
             }
         }
     }
-    if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
-        out.extend(project_items(s, ui.page == "projects"));
+    if page == "projects" || (!typed.trim().is_empty() && page.is_empty()) {
+        out.extend(project_items(s, page == "projects"));
     }
     // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
-    if !typed.trim().is_empty() && ui.page.is_empty() {
+    if !typed.trim().is_empty() && page.is_empty() {
         for setting in crate::settings::search::items().iter().filter(|i| crate::settings::search::shown(s, i)) {
             let page = crate::settings::label(&setting.to);
             let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Setting(setting.to.clone(), setting.title.clone()));
@@ -868,7 +877,7 @@ fn items(s: &App) -> Vec<Item> {
                         .then_with(|| b.pick.0.cmp(&a.pick.0))
                         .then_with(|| (qb * b.usage).total_cmp(&(qa * a.usage)))
                 });
-                let limit = if !ui.page.is_empty() {
+                let limit = if !page.is_empty() {
                     usize::MAX
                 } else if rows.first().is_some_and(|(v, _, _)| v.group == "Threads") {
                     20
@@ -880,7 +889,7 @@ fn items(s: &App) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && ui.page.is_empty() && !actions_only {
+        if ui.message_query == query && page.is_empty() && !actions_only {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -961,9 +970,9 @@ fn searching_messages(ui: &Ui) -> bool {
 }
 
 /// A root query starting with ">" searches actions only, by the text after it.
-fn actions_filter(ui: &Ui) -> (bool, &str) {
+fn actions_filter<'a>(ui: &'a Ui, page: &str) -> (bool, &'a str) {
     match ui.query.text.strip_prefix('>') {
-        Some(rest) if ui.page.is_empty() => (true, rest),
+        Some(rest) if page.is_empty() => (true, rest),
         _ => (false, ui.query.text.as_str()),
     }
 }
@@ -1922,7 +1931,7 @@ fn empty_text(s: &App) -> String {
         }
         .into();
     }
-    if actions_filter(ui).0 {
+    if actions_filter(ui, &ui.page).0 {
         return "No matching actions.".into();
     }
     if searching_messages(ui) {
@@ -2296,6 +2305,19 @@ mod tests {
         assert!(leave_emptied_page(&mut s));
         assert_eq!(s.ui.shell.palette.page, "add-project");
         assert!(!leave_emptied_page(&mut s), "only the browse page leaves on an empty field");
+    }
+
+    #[test]
+    fn a_submenu_query_with_no_match_searches_the_root_like_the_web() {
+        let mut s = App::new();
+        push_page(&mut s, "appearance", "");
+        set_query(&mut s, "dark");
+        assert!(items(&s).iter().all(|v| v.group != "Actions"), "FAILED: a submenu match stays scoped");
+        set_query(&mut s, "open usage");
+        let titles: Vec<_> = items(&s).into_iter().map(|v| v.title).collect();
+        assert!(titles.iter().any(|t| t == "Open usage"), "FAILED: no appearance matches, so the root search answers: {titles:?}");
+        set_query(&mut s, "");
+        assert!(items(&s).iter().all(|v| v.group != "Actions"), "FAILED: an empty query lists the submenu");
     }
 
     #[test]
