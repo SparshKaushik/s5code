@@ -1791,6 +1791,8 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
         "rails" => {
             status.device = Some((390, 844));
             fresh.device.preset = Some(2);
+            fresh.device.w.replace_text("390");
+            fresh.device.h.replace_text("844");
         }
         "host-setup" => {
             fresh.stream = streamed(Some(("The server's machine is missing the libraries Chrome needs.".into(), Some("npx playwright install-deps chromium".into()))));
@@ -1817,6 +1819,8 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
         }
         _ => {}
     }
+    // A snapshot draws one frame, before the page area reports its size.
+    ui.area = (539., 731.);
     ui.tabs.insert(tab, fresh);
     ui.browser.shared.lock().unwrap().tabs.insert(tab, status);
     tab
@@ -3173,6 +3177,10 @@ fn tab_scheme(tab: &Tab) -> &'static str {
 /// Web's stream control row: who drives the page, and taking or handing back control.
 fn stream_bar(app: &App, t: &T, tab: TabId) -> Option<El> {
     let state = app.ui.panel.browser.tabs.get(&tab)?.stream.as_ref()?.state();
+    // Nobody can drive a page the server can't open yet.
+    if state.host_setup.is_some() {
+        return None;
+    }
     let label = match (state.connected, state.can_operate, state.controller.as_deref()) {
         (false, _, _) | (_, _, None) => "Connecting...",
         (_, false, _) => "Read-only",
@@ -3366,7 +3374,9 @@ fn editor_position([x, y, w, h]: [f32; 4], (ew, eh): (f32, f32), (pw, ph): (f32,
     let candidates = [(x + w + gap, y), (x - ew - gap, y), (x + w - ew, y + h + gap), (x + w - ew, y - eh - gap)];
     let overflow = |(l, t): (f32, f32)| (-l).max(0.) + (-t).max(0.) + (l + ew - pw).max(0.) + (t + eh - ph).max(0.);
     let best = candidates.into_iter().fold(candidates[0], |best, c| if overflow(c) < overflow(best) { c } else { best });
-    (best.0.max(8.).min((pw - ew - 8.).max(8.)), best.1.max(8.).min((ph - eh - 8.).max(8.)))
+    // Below the tool row (8 pt in, 36 tall), so the editor never covers the tools.
+    let top = 8. + 36. + 8.;
+    (best.0.max(8.).min((pw - ew - 8.).max(8.)), best.1.max(top).min((ph - eh - 8.).max(top)))
 }
 
 /// A CSS-pixel rect in page points, cut to the page.
@@ -4243,6 +4253,16 @@ mod tests {
     }
 
     #[test]
+    fn a_server_that_cant_open_the_page_offers_no_control() {
+        let t = crate::theme::theme(true);
+        let mut app = App::new();
+        let blocked = scene(&mut app, "host-setup");
+        let live = scene(&mut app, "more");
+        assert!(stream_bar(&app, &t, blocked).is_none());
+        assert!(stream_bar(&app, &t, live).is_some());
+    }
+
+    #[test]
     fn a_region_drag_selects_the_elements_inside_it_or_marks_the_region() {
         let mut app = App::new();
         app.ui.panel.browser.tabs.insert(1, Tab::new(Pixels::new()));
@@ -4307,12 +4327,13 @@ mod tests {
 
     #[test]
     fn the_annotation_editor_sits_beside_its_element_and_inside_the_page() {
-        // Right of the element when it fits, else left, else below.
-        assert_eq!(editor_position([10., 10., 100., 40.], (360., 50.), (800., 600.)), (118., 10.));
-        assert_eq!(editor_position([600., 10., 190., 40.], (360., 50.), (800., 600.)), (232., 10.));
+        // Right of the element when it fits, else left, else below; never over the tool row.
+        assert_eq!(editor_position([10., 10., 100., 40.], (360., 50.), (800., 600.)), (118., 52.));
+        assert_eq!(editor_position([600., 10., 190., 40.], (360., 50.), (800., 600.)), (232., 52.));
         assert_eq!(editor_position([0., 10., 780., 40.], (360., 50.), (800., 600.)), (420., 58.));
-        // A page smaller than the editor pins it to the margin.
-        assert_eq!(editor_position([0., 0., 100., 100.], (360., 50.), (300., 40.)), (8., 8.));
+        assert_eq!(editor_position([10., 200., 100., 40.], (360., 50.), (800., 600.)), (118., 200.));
+        // A page smaller than the editor pins it to the margin below the tools.
+        assert_eq!(editor_position([0., 0., 100., 100.], (360., 50.), (300., 40.)), (8., 52.));
     }
 
     #[test]
