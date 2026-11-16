@@ -71,6 +71,11 @@ fn source<'a>(s: &'a App, key: &str) -> &'a [Value] {
     if key == TASK { super::tasks::model_providers(s) } else { providers(s) }
 }
 
+/// The settings holding a key's hidden models and favorites.
+fn settings_of<'a>(s: &'a App, key: &str) -> &'a Value {
+    if key == TASK { super::tasks::model_settings(s) } else { server_settings(s) }
+}
+
 /// The providers a key picks from: text generation skips providers that can't generate text.
 fn candidates<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
     source(s, key)
@@ -128,8 +133,12 @@ pub fn selection(s: &App, key: &str) -> Option<(String, String)> {
     Some((data::s(entry, "instanceId").to_owned(), default_model(entry)?))
 }
 
-fn model_label(s: &App, instance: &str, model: &str) -> String {
-    crate::chat::composer::model_name(s, instance, model)
+fn model_label(s: &App, key: &str, instance: &str, model: &str) -> String {
+    if key != TASK {
+        return crate::chat::composer::model_name(s, instance, model);
+    }
+    let named = source(s, key).iter().find(|p| p["instanceId"] == instance).and_then(|p| p["models"].as_array()?.iter().find(|m| m["slug"] == model));
+    named.map(|m| data::s(m, "name")).filter(|n| !n.is_empty()).unwrap_or(model).to_owned()
 }
 
 /// Web's dedicated-model control: a muted line without a server, else the picker while on, then
@@ -471,7 +480,7 @@ fn trigger(s: &App, t: &T, key: &str) -> El {
     let label = if key == "fallbackModelSelection" && stored_null {
         "None".to_owned()
     } else {
-        model_label(s, &instance, &model)
+        model_label(s, key, &instance, &model)
     };
     let driver = entries
         .iter()
@@ -533,8 +542,8 @@ fn rail_entries<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
     candidates(s, key).into_iter().filter(|p| p["enabled"] == true).collect()
 }
 
-fn favorites(s: &App) -> Vec<(String, String)> {
-    let list = server_settings(s)["favorites"].as_array().cloned().unwrap_or_default();
+fn favorites(s: &App, key: &str) -> Vec<(String, String)> {
+    let list = settings_of(s, key)["favorites"].as_array().cloned().unwrap_or_default();
     list.iter()
         .filter_map(|f| Some((f["provider"].as_str()?.to_owned(), f["model"].as_str()?.to_owned())))
         .collect()
@@ -544,16 +553,16 @@ fn favorites(s: &App) -> Vec<(String, String)> {
 fn models_for(s: &App, key: &str, rail: &str) -> Vec<(String, String, String)> {
     if rail == FAVORITES {
         let ids: Vec<_> = rail_entries(s, key).iter().map(|p| data::s(p, "instanceId").to_owned()).collect();
-        return favorites(s)
+        return favorites(s, key)
             .into_iter()
             .filter(|(i, _)| ids.contains(i))
             .map(|(i, m)| {
-                let n = model_label(s, &i, &m);
+                let n = model_label(s, key, &i, &m);
                 (i, m, n)
             })
             .collect();
     }
-    let hidden = server_settings(s)["providerModelPreferences"][rail]["hiddenModels"].clone();
+    let hidden = settings_of(s, key)["providerModelPreferences"][rail]["hiddenModels"].clone();
     let Some(p) = source(s, key).iter().find(|p| p["instanceId"] == rail) else { return Vec::new() };
     p["models"]
         .as_array()

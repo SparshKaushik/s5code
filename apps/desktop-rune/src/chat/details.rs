@@ -496,7 +496,7 @@ pub fn thousands(n: u64) -> String {
 }
 
 /// Scrolling down to within 96 points of the list's end asks for the next page.
-fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
+pub(crate) fn next_page_after_scroll(previous: Option<f32>, offset: f32, max: f32) -> bool {
     previous.is_some_and(|p| offset > p) && max - offset <= 96.0
 }
 

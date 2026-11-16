@@ -343,6 +343,16 @@ pub(super) fn model_providers(s: &App) -> &[Value] {
     s.ui.settings.tasks.editor.as_ref().and_then(|e| config(s, &e.env)).and_then(|c| c["providers"].as_array()).map_or(&[], |v| v.as_slice())
 }
 
+/// The task environment's settings, for its model picker's hidden models and favorites; the
+/// active environment's include a save still in flight.
+pub(super) fn model_settings(s: &App) -> &Value {
+    let Some(e) = s.ui.settings.tasks.editor.as_ref() else { return &Value::Null };
+    if e.env == s.ui.env.active {
+        return super::server_settings(s);
+    }
+    config(s, &e.env).and_then(|c| c.get("settings")).unwrap_or(&Value::Null)
+}
+
 pub(super) fn model(s: &App) -> Option<(String, String)> {
     editor::model(s)
 }
@@ -844,7 +854,7 @@ pub(super) fn scene(s: &mut App, open: &str) {
         "webhook" => editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-hook")),
         "unavailable" => s.ui.settings.tasks.link = Some((key, "task-deleted".into())),
         "link" => s.ui.settings.tasks.link = Some((key, "task-deps".into())),
-        "base-branch" => {
+        "base-branch" | "base-branch-long" => {
             editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-sentry"));
             let r = |name: &str, extra: Value| {
                 let mut r = json!({"name": name, "isRemote": name.starts_with("origin/"), "current": false, "isDefault": name.ends_with("main")});
@@ -860,7 +870,13 @@ pub(super) fn scene(s: &mut App, open: &str) {
                 r("origin/main", json!({})),
                 r("origin/release/2026-11", json!({})),
             ];
-            editor::scene_refs(s, refs);
+            if open == "base-branch-long" {
+                // The first of three pages: "Showing 100 of 240 refs" until the list scrolls on.
+                let long = refs.into_iter().chain((1..=95).map(|i| r(&format!("feature/task-{i:03}"), json!({})))).collect();
+                editor::scene_refs(s, long, 240, Some(100));
+            } else {
+                editor::scene_refs(s, refs, 5, None);
+            }
         }
         "model" => {
             editor::open(s, &key, tasks.into_iter().find(|t| t["id"] == "task-sentry"));
@@ -942,6 +958,7 @@ mod tests {
         assert_eq!(list(&s, &s.ui.env.active).ne(&List::Loading), true);
         assert!(run("editor").ui.settings.tasks.editor.is_some());
         assert!(run("base-branch").ui.settings.tasks.editor.is_some());
+        assert!(run("base-branch-long").ui.settings.tasks.editor.is_some());
         assert_eq!(run("model").ui.settings.models.open.as_deref(), Some(super::super::models::TASK));
         assert!(run("deliveries").ui.settings.tasks.deliveries.is_some());
     }
@@ -966,6 +983,27 @@ mod tests {
         s.ui.settings.tasks.link = Some((key, "task-deps".into()));
         poll(&mut s);
         assert!(s.ui.settings.tasks.editor.as_ref().is_some_and(|e| e.draft.editing_id.is_none()));
+    }
+
+    #[test]
+    fn the_task_model_picker_reads_the_task_environments_settings() {
+        let mut s = App::new();
+        let mut local = crate::data::empty_state();
+        local.config = Some(json!({"providers": [{"instanceId": "codex"}], "settings": {"favorites": [{"provider": "codex", "model": "local"}]}}));
+        s.src = crate::data::Source::Fixture(local);
+        s.ui.env.active = env::LOCAL.into();
+        let mut remote = crate::data::empty_state();
+        remote.config = Some(json!({"providers": [{"instanceId": "claude"}], "settings": {"favorites": [{"provider": "claude", "model": "box"}]}}));
+        env::park(&mut s, "box", crate::data::Source::Fixture(remote));
+        assert!(model_settings(&s).is_null() && model_providers(&s).is_empty(), "no editor, nothing to read");
+        editor::open(&mut s, "box", None);
+        assert_eq!(model_settings(&s)["favorites"][0]["model"], "box");
+        assert_eq!(model_providers(&s)[0]["instanceId"], "claude");
+        // On the active environment it reads the settings the rest of Settings shows.
+        s.ui.settings.optimistic_settings = Some(json!({"favorites": [{"provider": "codex", "model": "saving"}]}));
+        editor::open(&mut s, env::LOCAL, None);
+        assert_eq!(model_settings(&s)["favorites"][0]["model"], "saving");
+        assert_eq!(model_providers(&s)[0]["instanceId"], "codex");
     }
 
     #[test]

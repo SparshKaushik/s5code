@@ -37,7 +37,7 @@ mod projects;
 mod providers;
 mod scope;
 pub mod search;
-mod snapshots;
+pub(crate) mod snapshots;
 mod snooze;
 mod source_control;
 mod storage;
@@ -118,6 +118,7 @@ pub struct Ui {
     pub providers_ui: providers::Ui,
     pub source_control: source_control::Ui,
     pub connections: connections::Ui,
+    pub snapshots: snapshots::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
     pub session: permissions::Session,
@@ -1078,6 +1079,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
+    snapshots::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -1195,6 +1197,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-scheduled-tasks-base-branch", |s| {
         scene(s, "scheduled-tasks");
         tasks::scene(s, "base-branch");
+    }),
+    ("settings-scheduled-tasks-base-branch-long", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "base-branch-long");
     }),
     ("settings-scheduled-tasks-model", |s| {
         scene(s, "scheduled-tasks");
@@ -1549,6 +1555,9 @@ fn browser_profiles_scene(s: &mut App, light: bool, menu: Option<&str>) {
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
+    }
+    if snapshots::recording(s) {
+        return snapshots::on_key(s, e, tx);
     }
     if focuses_search(e, tx.focused().is_some()) {
         let search = &mut s.ui.settings.search;
