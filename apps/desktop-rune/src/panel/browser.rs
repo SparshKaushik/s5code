@@ -1817,8 +1817,8 @@ fn pdf_response(headers: &Value) -> bool {
 fn pdf_viewer(url: &str) -> String {
     let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
     let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
-    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    // pdf.js last, so its text is never searched for the placeholders.
+    // `{` too, so a file name can't stand in for the placeholders after it.
+    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('{', "&#123;");
     PDF_VIEWER.replace("{title}", &escape(&name)).replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
 }
 
