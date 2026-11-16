@@ -1777,3 +1777,26 @@ mod reveal_tests {
         assert_eq!(missing, UNBUILT, "FAILED: unkeyed search titles {missing:?}");
     }
 }
+
+#[cfg(test)]
+mod resource_tests {
+    use crate::{App, Route, data::Source};
+    use serde_json::json;
+
+    #[test]
+    fn switching_environment_moves_the_pages_subscriptions() {
+        let mut s = App::new();
+        s.src = Source::Live(s5_net::Net::in_memory("http://local.test"));
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "http://box.test".into(), bearer: String::new() });
+        crate::env::park(&mut s, "box", Source::Live(s5_net::Net::in_memory("http://box.test")));
+        // Set directly: navigating to Settings would bring this machine back into focus.
+        s.route = Route::Settings("devices".into());
+        let watching = |s: &mut App, key: &str| crate::env::net_of(s, key).is_some_and(|net| net.watching("subscribeDeviceState", json!({})));
+        super::poll(&mut s);
+        assert!(watching(&mut s, crate::env::LOCAL));
+        crate::env::switch(&mut s, "box");
+        super::poll(&mut s);
+        assert!(watching(&mut s, "box"), "FAILED: the newly focused environment is subscribed");
+        assert!(!watching(&mut s, crate::env::LOCAL), "FAILED: the old environment's subscription is dropped");
+    }
+}
