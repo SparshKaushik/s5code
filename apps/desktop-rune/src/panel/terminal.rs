@@ -984,15 +984,17 @@ pub(crate) fn open_web(app: &mut App, tx: &mut Tx, url: &str, force_browser: boo
     }
 }
 
+/// `useOpenInPreferredEditor`: the editor the details card would open, over SSH when it does.
 fn open_path(app: &mut App, target: String) {
-    let config = app.state().config.as_ref();
-    let editor = config
-        .and_then(|c| c["availableEditors"].as_array())
-        .and_then(|v| v.first())
-        .map(|e| e.as_str().map_or_else(|| data::s(e, "id").to_string(), str::to_string));
-    let Some(editor) = editor else {
+    let Some(editor) = crate::chat::details::preferred_editor(app).map(|e| e.0) else {
         return crate::shell::palette::toast_error(app, "Editor opening is unavailable.", None);
     };
+    if crate::env::ssh::open_in_editor(app, &editor, &target) {
+        return;
+    }
+    if !crate::chat::details::grants(app, "orchestration:operate") {
+        return crate::shell::palette::toast_error(app, "Unable to open path", Some("This connection cannot open an editor on this environment."));
+    }
     if let Some(net) = app.src.net() {
         net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
     }

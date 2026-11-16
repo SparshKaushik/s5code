@@ -20,7 +20,7 @@ enum Action {
     With(String),
 }
 
-fn label(id: &str) -> &str {
+pub(crate) fn label(id: &str) -> &str {
     match id {
         "cursor" => "Cursor",
         "trae" => "Trae",

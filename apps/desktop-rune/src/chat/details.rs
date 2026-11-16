@@ -419,23 +419,18 @@ fn action(t: &T, key: &str, glyph: El, label: &str, color: Color) -> El {
         .child(text(label.to_string()).font(ROW).color(color).truncate().grow(1.0).shrink().min_w(0.0))
 }
 
-fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
+fn split(t: &T, key: &str, main: El, label: &str, menu: Menu, enabled: bool) -> El {
+    let chooser = el().key(key.to_string()).size(32.0, 32.0).center().corners([0.0, 8.0, 8.0, 0.0]).label(label.to_string()).help(label.to_string());
+    let chooser = if enabled {
+        chooser.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle_menu(s, menu))
+    } else {
+        chooser.opacity(0.64)
+    };
     row()
         .w_full()
         .gap(1.0)
         .child(main.w(229.0).corners([8.0, 0.0, 0.0, 8.0]))
-        .child(
-            el().key(key.to_string())
-                .size(32.0, 32.0)
-                .center()
-                .corners([0.0, 8.0, 8.0, 0.0])
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(label.to_string())
-                .help(label.to_string())
-                .child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground))
-                .on_press(move |s: &mut App| toggle_menu(s, menu)),
-        )
+        .child(chooser.child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground)))
 }
 
 /// A card menu row: icon, label, and the reason it is disabled as its tooltip.
@@ -995,6 +990,9 @@ fn poll_branch(s: &mut App) -> bool {
 }
 
 fn open_in_editor(s: &mut App, editor: Option<String>) {
+    if !can_open_editor(s) {
+        return;
+    }
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
     if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
@@ -1005,10 +1003,36 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
     }
 }
 
-/// `(id, label)` for each editor the server found.
+fn editor_mode(s: &App) -> crate::env::ssh::OpenMode {
+    crate::env::ssh::open_mode(s, &s.ui.env.active)
+}
+
+/// OpenInPicker's `isHostEditorDenied`: the server's own editors need orchestration access.
+fn editor_denied(s: &App) -> bool {
+    editor_mode(s) == crate::env::ssh::OpenMode::Local && !grants(s, "orchestration:operate")
+}
+
+fn can_open_editor(s: &App) -> bool {
+    editor_mode(s) != crate::env::ssh::OpenMode::Unavailable && !editor_denied(s)
+}
+
+/// `editorLabelForPlatform`: the file manager takes this machine's name for it.
+fn editor_label(id: &str) -> String {
+    match id {
+        "file-manager" if cfg!(target_os = "macos") => "Finder".into(),
+        "file-manager" if cfg!(target_os = "windows") => "File Explorer".into(),
+        "file-manager" => "Files".into(),
+        id => crate::panel::diff::file_menu::label(id).to_string(),
+    }
+}
+
+/// `(id, label)` for each editor the server found; none without a route to the host.
 fn editors(s: &App) -> Vec<(String, String)> {
     if let Some(remote) = crate::env::ssh::editors(s) {
         return remote;
+    }
+    if editor_mode(s) == crate::env::ssh::OpenMode::Unavailable {
+        return Vec::new();
     }
     s.state()
         .config
@@ -1017,7 +1041,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .map(|v| {
             v.iter()
                 .map(|e| match e.as_str() {
-                    Some(id) => (id.to_string(), id.to_string()),
+                    Some(id) => (id.to_string(), editor_label(id)),
                     None => (data::s(e, "id").to_string(), data::s(e, "label").to_string()),
                 })
                 .collect()
@@ -1028,7 +1052,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
 const PREFERRED_EDITOR: &str = "preferredEditor";
 
 /// `usePreferredEditor`: the editor last picked, while it is still installed, else the first.
-fn preferred_editor(s: &App) -> Option<(String, String)> {
+pub(crate) fn preferred_editor(s: &App) -> Option<(String, String)> {
     let stored = s.client_settings.values.get(PREFERRED_EDITOR).and_then(|v| v.as_str());
     pick_editor(editors(s), stored)
 }
@@ -1147,10 +1171,11 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
             let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
-            if preferred.is_none() { open.opacity(0.64) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
+            if preferred.is_none() || !can_open_editor(s) { open.opacity(0.64).cursor(Cursor::Default) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
         "Choose editor",
         Menu::Editor,
+        !editor_denied(s),
     );
     let on = |id: &str| items::visible(&s.client_settings.values, id);
     let general: Vec<El> = [(on("environment"), Some(run_context)), (on("openIn"), Some(editor)), (on("scripts"), None)]
@@ -1279,9 +1304,14 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         Menu::Editor => {
             let editors = editors(s);
             let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
-            if editors.is_empty() {
-                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No installed editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let note = |list: El, line: String| list.child(row().h(32.0).px(8.0).center_y().child(text(line).font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let mode = editor_mode(s);
+            if mode == crate::env::ssh::OpenMode::Unavailable {
+                list = note(list, format!("No SSH route to {}", crate::env::label(s, &s.ui.env.active)));
+            } else if editors.is_empty() {
+                list = note(list, "No installed editors found".into());
             }
+            let hint = matches!(mode, crate::env::ssh::OpenMode::Links(..)) && s.client_settings.values.get(crate::env::ssh::REMOTE_OPEN_HINT_SEEN) != Some(&json!(true));
             let preferred = preferred_editor(s).map(|e| e.0);
             let shortcut = palette::shortcut_label(s, "editor.openFavorite");
             // OpenInPicker's panel menu picks the button's editor; the button opens it.
@@ -1294,6 +1324,9 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
                     }), None)
                     .children(mark),
                 );
+            }
+            if hint {
+                list = note(list, format!("Opens over SSH. Needs your key on {}", crate::env::label(s, &s.ui.env.active)));
             }
             ("details-editor-menu", list)
         }
@@ -1516,7 +1549,7 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
     // `editor.openFavorite` opens the card's preferred editor, as its button does.
     if crate::panel::shortcut(s, e, "editor.openFavorite") {
-        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some()) else { return false };
+        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some() && can_open_editor(s)) else { return false };
         open_in_editor(s, Some(editor));
         return true;
     }
@@ -1791,6 +1824,21 @@ mod tests {
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
+    }
+
+    #[test]
+    fn open_in_editor_needs_orchestration_access_and_a_route() {
+        let mut s = App::new();
+        assert!(can_open_editor(&s));
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:read"]}))));
+        assert!(editor_denied(&s) && !can_open_editor(&s), "FAILED: the server's editors need orchestration:operate");
+        set_session(&mut s, None);
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+        s.ui.env.active = "box".into();
+        assert!(!editor_denied(&s) && !can_open_editor(&s), "FAILED: no SSH route leaves nothing to open with");
+        assert!(editors(&s).is_empty());
+        assert_eq!(editor_label("vscode"), "VS Code");
+        assert_eq!(editor_label("file-manager"), if cfg!(target_os = "macos") { "Finder" } else { "Files" });
     }
 
     #[test]
