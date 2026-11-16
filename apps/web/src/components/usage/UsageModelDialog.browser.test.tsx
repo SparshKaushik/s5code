@@ -11,6 +11,11 @@ describe("UsageModelDialog", () => {
         model={{
           model: "claude-sonnet-4-5",
           provider: "claude",
+          apiProvider: "anthropic",
+          pricedAs: null,
+          unpriced: false,
+          tagged: false,
+          inputTokensEstimated: false,
           costUsd: 2,
           totalTokens: 1_000_000,
           tokens: {
