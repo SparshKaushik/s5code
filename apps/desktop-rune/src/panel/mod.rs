@@ -1142,6 +1142,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("details-run-on", crate::chat::details::run_on::scene),
     ("composer-multiple-models", crate::chat::composer::fanout::scene),
+    ("composer-fanout-uncertain", crate::chat::composer::fanout::scene_uncertain),
+    ("composer-allow-retry", crate::chat::composer::fanout::scene_allow_retry),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);

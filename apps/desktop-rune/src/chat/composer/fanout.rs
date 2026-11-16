@@ -327,6 +327,32 @@ pub fn scene(s: &mut App) {
     s.ui.chat.details.menu = Some(crate::chat::details::Menu::RunContext);
 }
 
+/// The three-model send with its second launch dropped before the server answered.
+pub fn scene_uncertain(s: &mut App) {
+    scene(s);
+    s.ui.chat.details.menu = None;
+    let key = draft_key(s, s.frame_route());
+    let picks = picks(s).cloned().unwrap_or_default();
+    let Some(d) = draft(s) else { return };
+    let snapshot = stored_draft(d);
+    let threads = picks.iter().map(|_| s5_net::uuid()).collect();
+    let models = picks.into_iter().map(|m| (m, None)).collect();
+    s.ui.chat.composer.fanout.batches.push(Batch { id: 0, key, draft: snapshot, models, threads });
+    super::draft_mut(s).edit.clear();
+    let state = &mut s.ui.chat.composer.fanout;
+    settle(state, "fanout:0:0", Ok(()), true);
+    settle(state, "fanout:0:1", Err(&json!({"message": "The connection closed before the server answered."})), true);
+    settle(state, "fanout:0:2", Ok(()), true);
+    finish(s);
+}
+
+/// The "Allow retry" confirmation over that send.
+pub fn scene_allow_retry(s: &mut App) {
+    scene_uncertain(s);
+    let state = &mut s.ui.chat.composer.fanout;
+    state.retry = state.uncertain.iter().next().map(|(k, t)| (k.clone(), t.clone(), String::new()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
