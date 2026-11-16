@@ -4,7 +4,7 @@ pub mod confirm;
 pub mod sidebar;
 pub mod palette;
 pub mod quit;
-mod workspace;
+pub(crate) mod workspace;
 
 use rune::{Cx, El, KeyEvent, Tx, row};
 
