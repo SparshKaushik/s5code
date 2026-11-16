@@ -75,8 +75,19 @@ pub fn bubble_key(item: &str) -> String {
     format!("user-text-{item}")
 }
 
+/// The timeline's open popovers: a bubble chip's details, a quote chip's source, and the media
+/// actions menu (the lightbox draws its own).
+pub fn overlay(app: &App, t: &T) -> Vec<El> {
+    let mut out: Vec<El> = details(app, t).into_iter().collect();
+    out.extend(super::citation::popover(app, t));
+    if app.ui.chat.timeline.assets.open.is_none() {
+        super::media::menu(app, &crate::kit::theme(t), &mut out);
+    }
+    out
+}
+
 /// The open bubble chip's popover, under its message.
-pub fn overlay(app: &App, t: &T) -> Option<El> {
+fn details(app: &App, t: &T) -> Option<El> {
     let (item, id) = app.ui.chat.timeline.chip.as_ref()?;
     let Route::Thread(thread) = app.frame_route() else { return None };
     let view = app.state().thread_views.get(thread)?;

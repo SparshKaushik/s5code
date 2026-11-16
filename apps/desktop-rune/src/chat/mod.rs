@@ -6,6 +6,7 @@ pub mod composer;
 pub mod details;
 pub mod home;
 pub mod server_update;
+pub mod side;
 pub mod timeline;
 pub mod topbar;
 
@@ -22,6 +23,9 @@ pub struct Ui {
     pub details: details::Ui,
     pub topbar: topbar::Ui,
     pub server_update: server_update::State,
+    pub side: side::State,
+    /// The composer's notice stack (ComposerBannerStack).
+    pub banners: composer::banners::State,
     /// The remembered route was restored (or found stale) once the shell loaded.
     route_restored: bool,
 }
@@ -123,7 +127,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(timeline::chip::overlay(s, t))
         .children(timeline::attachments::lightbox(s));
     main.child(topbar::view(s, cx, t))
-        .child(stack)
+        .child(side::beside(s, cx, t, stack))
         .children(crate::panel::drawer::view(s, cx, t))
 }
 

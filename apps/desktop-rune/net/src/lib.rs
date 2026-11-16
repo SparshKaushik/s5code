@@ -133,6 +133,25 @@ impl Net {
             wake,
         }
     }
+    /// A client with no worker, for tests: each request is answered at once that the worker stopped.
+    #[doc(hidden)]
+    pub fn offline() -> Net {
+        let (tx, _) = mpsc::channel();
+        let (incoming_tx, rx) = mpsc::channel();
+        Self {
+            state: State::default(),
+            tx,
+            rx,
+            replies: HashMap::new(),
+            chunks: HashMap::new(),
+            resources: HashMap::new(),
+            resource_events: HashMap::new(),
+            base_url: String::new(),
+            bearer: String::new(),
+            incoming_tx,
+            wake: Arc::new(|| {}),
+        }
+    }
     /// Folds decoded messages without waiting for network I/O.
     pub fn drain(&mut self) -> bool {
         let mut changed = false;

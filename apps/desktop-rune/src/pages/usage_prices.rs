@@ -616,7 +616,7 @@ fn read_sessions(s: &mut App) -> bool {
             continue;
         }
         if let Some(id) = ui(s).sessions.get(&key).and_then(|x| x.pending) {
-            let Some(reply) = env_net(s, &key).and_then(|n| n.take_reply(id)) else { continue };
+            let Some(reply) = super::pull_requests::take(s, &key, id) else { continue };
             let session = ui(s).sessions.entry(key).or_default();
             session.pending = None;
             match reply {
@@ -644,7 +644,7 @@ pub fn poll(s: &mut App) -> bool {
     let sessions = read_sessions(s);
     let mut landed = false;
     for (key, id) in ui(s).pending.clone() {
-        let Some(reply) = env_net(s, &key).and_then(|n| n.take_reply(id)) else { continue };
+        let Some(reply) = super::pull_requests::take(s, &key, id) else { continue };
         let ok = reply.is_ok();
         let u = ui(s);
         u.pending.retain(|p| p.1 != id);
