@@ -21,15 +21,14 @@ pub struct Ui {
 }
 
 impl Ui {
+    pub fn is_open(&self) -> bool {
+        !self.queue.is_empty()
+    }
+}
 
 /// `requestConfirmDialog`: asks `message`, running `on_confirm` only if it is confirmed.
 pub fn request(s: &mut App, message: impl Into<String>, destructive: bool, on_confirm: impl Fn(&mut App) + 'static) {
     s.ui.shell.confirm.queue.push_back(Pending { message: message.into(), destructive, on_confirm: Rc::new(on_confirm) });
-}
-
-pub fn is_open(&self) -> bool {
-        !self.queue.is_empty()
-    }
 }
 
 /// The question on screen, for tests and callers that must not stack a second one.
