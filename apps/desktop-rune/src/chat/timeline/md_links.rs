@@ -400,8 +400,8 @@ fn inline(app: &App, src: &str, key: &str, t: &T, ink: rune::Color, font: TextSt
                         spans.retain(|s| (s.start as usize) < start);
                         shown.truncate(start);
                         shown.push_str(&label);
-                        let accent = super::citation::accent();
-                        pills.push((start..shown.len(), PillStyle::new().bg(rune::Color::TRANSPARENT).fg(accent).icon(&icons::QUOTE)));
+                        let accent = crate::chat::composer::chips::look("citation", None).map_or(ink, |(a, _)| a);
+                        pills.push((start..shown.len(), crate::chat::composer::chips::style("citation", None)));
                         links.push(Link::new(start..shown.len(), url).role("button").hover(LinkPaint::new().underline(accent)));
                         continue;
                     }

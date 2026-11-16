@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::provider_icons::STAR_FILLED;
 use super::search::{self, Searchable};
-use super::{ModeOption, draft_mut, provider, provider_icon, providers, selection, set_runtime_mode};
+use super::{ModeOption, act, draft_mut, provider, provider_icon, providers, selection, set_runtime_mode};
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
@@ -76,7 +76,7 @@ pub fn open_permissions(s: &mut App) {
 fn close(s: &mut App) {
     s.ui.chat.composer.picker.open = false;
     s.ui.chat.composer.picker.runtime_open = false;
-    let key = super::draft_key(s, s.frame_route());
+    let key = super::draft_key(s, &super::route(s));
     if let Some(d) = s.ui.chat.composer.drafts.get_mut(&key) {
         d.edit.focused = true;
     }
@@ -340,7 +340,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
                 .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
                 .on_edit(|s: &mut App| &mut s.ui.chat.composer.picker.query)
                 .on_input_change(|s: &mut App, _| s.ui.chat.composer.picker.active = None)
-                .on_input_key(on_key),
+                .on_input_key(super::act_key(s, on_key)),
         );
     let mut header = col().w_full().px(13.0).pt(9.0).pb(8.0).child(search);
     if p.query.focused {
@@ -453,7 +453,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             r = r.fill(t.c.accent);
         }
         let (i2, m2) = (m.instance.clone(), m.slug.clone());
-        models = models.child(r.on_press(move |s: &mut App| pick(s, i2.clone(), m2.clone())));
+        models = models.child(r.on_press(act(s, move |s: &mut App| pick(s, i2.clone(), m2.clone()))));
     }
     // A search spans every provider, so the rail steps aside (showSidebar).
     let middle = col()
@@ -498,7 +498,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             let id = data::s(d, "id").to_owned();
             let label = if value { "On" } else { "Off" };
             let r = column_row(t, format!("picker-effort-{id}-{label}"), label, on == value, false, "");
-            effort_body = effort_body.child(r.on_press(move |s: &mut App| super::set_option(s, &id, json!(value))));
+            effort_body = effort_body.child(r.on_press(act(s, move |s: &mut App| super::set_option(s, &id, json!(value)))));
         }
     }
     for o in efforts {
@@ -508,7 +508,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         effort_body = effort_body.child(if locked {
             r.opacity(0.64).cursor(Cursor::NotAllowed)
         } else {
-            r.on_press(move |s: &mut App| draft_mut(s).effort = Some(id.clone()))
+            r.on_press(act(s, move |s: &mut App| draft_mut(s).effort = Some(id.clone())))
         });
     }
     if !others.is_empty() {
@@ -537,7 +537,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
                         .child(text(data::s(d, "label").to_owned()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink())
                         .child(spacer())
                         .child(text(if on { "On" } else { "Off" }).font(theme::TEXT_XS).color(t.c.muted_foreground))
-                        .on_press(move |s: &mut App| super::set_option(s, &option, json!(next))),
+                        .on_press(act(s, move |s: &mut App| super::set_option(s, &option, json!(next)))),
                 );
                 continue;
             }
@@ -547,7 +547,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
                 let selected = value.as_str() == Some(choice_id.as_str());
                 let option = id.clone();
                 let r = column_row(t, format!("picker-option-{id}-{choice_id}"), data::s(choice, "label"), selected, choice["isDefault"] == true, data::s(choice, "description"));
-                group = group.child(r.on_press(move |s: &mut App| super::set_option(s, &option, json!(choice_id))));
+                group = group.child(r.on_press(act(s, move |s: &mut App| super::set_option(s, &option, json!(choice_id)))));
             }
         }
         effort_body = effort_body.child(group);
@@ -618,11 +618,11 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .padding(1.0)
         .child(body)
         .child(footer)
-        .anchored("composer-model-chip", Side::Top, Align::End, 4.0)
-        .modal(true, close);
+        .anchored(&super::keyed(s, "composer-model-chip"), Side::Top, Align::End, 4.0)
+        .modal(true, act(s, close));
     let mut layers = vec![card];
     if p.runtime_open {
-        layers.push(runtime_menu(t, &options, &mode, "picker-runtime-menu", "picker-permissions", Align::End));
+        layers.push(runtime_menu(s, t, &options, &mode, "picker-runtime-menu", "picker-permissions", Align::End));
     }
     layers
 }
@@ -655,7 +655,7 @@ fn speed_control(s: &App, t: &T) -> Option<El> {
             .radius(radius::MD)
             .cursor(Cursor::Pointer)
             .role("radio")
-            .on_press(move |s: &mut App| super::set_option(s, &option, v.clone()));
+            .on_press(act(s, move |s: &mut App| super::set_option(s, &option, v.clone())));
         let ink = if checked { t.c.foreground } else { t.c.muted_foreground };
         if checked {
             segment = segment.fill(t.c.input.alpha_mul(0.72));
@@ -670,8 +670,8 @@ fn speed_control(s: &App, t: &T) -> Option<El> {
 
 /// The permissions menu above `anchor`: the picker's footer toggle or the composer's chip. Modes
 /// above an administrator's ceiling stay listed, disabled with the reason.
-pub(super) fn runtime_menu(t: &T, options: &[ModeOption], mode: &str, key: &str, anchor: &str, align: Align) -> El {
-    menu_card(t, key).anchored(anchor, Side::Top, align, 4.0).children(runtime_rows(t, options, mode))
+pub(super) fn runtime_menu(s: &App, t: &T, options: &[ModeOption], mode: &str, key: &str, anchor: &str, align: Align) -> El {
+    menu_card(t, key).anchored(anchor, Side::Top, align, 4.0).children(runtime_rows(s, t, options, mode))
 }
 
 /// A composer popup menu's card.
@@ -680,7 +680,7 @@ pub(super) fn menu_card(t: &T, key: &str) -> El {
 }
 
 /// One row per runtime mode; a pick closes whichever menu holds them.
-pub(super) fn runtime_rows(t: &T, options: &[ModeOption], mode: &str) -> Vec<El> {
+pub(super) fn runtime_rows(s: &App, t: &T, options: &[ModeOption], mode: &str) -> Vec<El> {
     let mut rows = Vec::new();
     for option in options {
         let id = option.mode;
@@ -701,12 +701,12 @@ pub(super) fn runtime_rows(t: &T, options: &[ModeOption], mode: &str) -> Vec<El>
         item = if option.disabled.is_some() {
             item.opacity(0.4).cursor(Cursor::NotAllowed)
         } else {
-            item.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| {
+            item.hover(t.c.accent).cursor(Cursor::Pointer).on_press(act(s, move |s: &mut App| {
                 set_runtime_mode(s, id);
                 s.ui.chat.composer.picker.runtime_open = false;
                 s.ui.chat.composer.permissions_open = false;
                 s.ui.chat.composer.more_open = false;
-            })
+            }))
         };
         if id == mode {
             item = item.child(icon(&icons::CHECK, 14.0).color(t.c.foreground));

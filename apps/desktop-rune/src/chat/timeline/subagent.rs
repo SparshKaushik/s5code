@@ -149,6 +149,8 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
         .children(state.map(|state| el().absolute(17.0, 17.0).size(7.0, 7.0).radius(radius::FULL).fill(status(state, t).1).border(1.0, t.c.background)));
     let tone = if failed { t.c.destructive } else { t.c.muted_foreground };
     let name = title(if s(item, "title").is_empty() { "Subagent" } else { s(item, "title") });
+    // A task running in a linked environment names it.
+    let remote = [item, agent].into_iter().find(|v| v["remoteChild"].is_object()).map(|v| format!("on {}", s(&v["remoteChild"], "label")));
     let mut body = row()
         .key(format!("subagent-{id}"))
         .w_full()
@@ -165,7 +167,15 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
                 .grow(1.0)
                 .shrink()
                 .min_w(0.0)
-                .child(text(name.clone()).font(theme::weight(theme::TEXT_XS, 500.0)).color(t.c.foreground).truncate())
+                .child(
+                    row()
+                        .w_full()
+                        .min_w(0.0)
+                        .gap(8.0)
+                        .center_y()
+                        .child(text(name.clone()).font(theme::weight(theme::TEXT_XS, 500.0)).color(t.c.foreground).truncate().shrink().min_w(0.0))
+                        .children(remote.map(|on| text(on).font(theme::TEXT_XS).color(t.c.muted_foreground))),
+                )
                 .child(text(detail.clone().unwrap_or_else(|| label.to_owned())).font(theme::TEXT_2XS).color(tone).truncate()),
         );
     if detail.is_some() && (event.is_some() || state != Some("completed")) {

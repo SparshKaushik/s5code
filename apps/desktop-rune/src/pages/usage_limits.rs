@@ -132,7 +132,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent) -> bool {
 }
 
 /// useResetCredit's status line for a `provider.consumeResetCredit` reply.
-fn redeemed(reply: &Result<Value, Value>) -> String {
+pub(crate) fn redeemed(reply: &Result<Value, Value>) -> String {
     match reply {
         Ok(v) => v["warning"].as_str().map(str::to_string).unwrap_or_else(|| {
             match field(v, "outcome") {
@@ -807,7 +807,7 @@ fn credit_count(a: &Account) -> i64 {
 }
 
 /// resetCreditsSummary.
-fn credits_summary(credits: &Value, now: i64, compact: bool) -> String {
+pub(crate) fn credits_summary(credits: &Value, now: i64, compact: bool) -> String {
     let count = credits["availableCount"].as_i64().unwrap_or(0);
     let expires = credits["nextExpiresAt"].as_str().and_then(iso_ms).map(|at| duration(at - now));
     if count == 0 {
@@ -1388,18 +1388,24 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
     body
 }
 
-/// ResetCreditDialog: redemption spends a credit, so it asks first.
 fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, target)) = s.ui.pages.usage.limits.confirm.clone() else { return };
-    let cancel = kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| ui(s).confirm = None).build(t);
-    let confirm = kit::Button::new("Use credit").on_press(move |s: &mut App| redeem(s, &key, &target)).build(t);
+    reset_credit_dialog(t, overlays, |s: &mut App| ui(s).confirm = None, move |s: &mut App| redeem(s, &key, &target));
+}
+
+/// ResetCreditDialog: redemption spends a credit, so it asks first. The composer's
+/// `/usage-limits` panel asks with it too.
+pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, cancel: impl Fn(&mut App) + Clone + 'static, confirm: impl Fn(&mut App) + 'static) {
+    let close = cancel.clone();
+    let cancel = kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t);
+    let confirm = kit::Button::new("Use credit").on_press(confirm).build(t);
     kit::Dialog::new("usage-reset-credit", "Use a reset credit?")
         .alert()
         .width(448.0)
         .open(true)
         .description("This redeems one credit on your account and clears the current rate-limit windows. It cannot be undone.")
         .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
-        .on_close(|s: &mut App| ui(s).confirm = None)
+        .on_close(close)
         .build(t, overlays);
 }
 

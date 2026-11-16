@@ -42,6 +42,8 @@ pub use scenes::SCENES;
 pub struct Ui {
     assets: attachments::Assets,
     follow: Follow,
+    /// A side chat pane's own follow state, so its scrolling leaves the chat's alone.
+    side_follow: Follow,
     secrets: secret::State,
     links: link::State,
     banners: banners::State,
@@ -443,6 +445,9 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
+    if let Some(page) = crate::chat::details::html_render::row_view(item, t) {
+        return page;
+    }
     if kind == "assistant_message" {
         // The same inset as a top-level assistant row.
         return col().w_full().px(4.0).child(markdown::view(app, s(item, "text"), &id, t));
@@ -768,7 +773,7 @@ pub(crate) fn rpc_failure(cause: &Value) -> &Value {
 }
 
 pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
+    let mut changed = attachments::poll(app, tx) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
         | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | worktree_setup::poll(app)
         | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app);
     let Some(net) = app.src.net() else {
@@ -902,12 +907,27 @@ pub fn is_empty(app: &App, thread_id: &str) -> bool {
     app.state().thread_views.get(thread_id).is_some_and(|v| v.synchronized && rows::derive(&v.projection, app.now_ms).is_empty())
 }
 
+/// The list's follow state and the clearance its floating composer needs (composer, banners):
+/// the routed chat's, or a side chat pane's own, whose composer has no banner stack.
+fn pane<'a>(app: &'a App, cx: &mut Cx<App>, thread_id: &str) -> (&'a Follow, f32, f32) {
+    if in_side_pane(app, thread_id) {
+        let composer_h = cx.layout_with(crate::chat::composer::SIDE_LANE, |r| r[3].round()).unwrap_or(112.0);
+        return (&app.ui.chat.timeline.side_follow, composer_h, 0.0);
+    }
+    let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
+    (&app.ui.chat.timeline.follow, composer_h, banners::stack_h(cx))
+}
+
+fn in_side_pane(app: &App, thread_id: &str) -> bool {
+    crate::chat::side::open_beside(app) == Some(thread_id)
+}
+
 pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::chat::details::Lane) -> El {
     let Some(view) = app.state().thread_views.get(thread_id) else {
         return el().grow(1.0);
     };
-    let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
-    let rows = rows::derive(&view.projection, app.now_ms);
+    let (follow, composer_h, banner_h) = pane(app, cx, thread_id);
+    let (rows, meta) = rows::derive_with_meta(&view.projection, app.now_ms);
     let targets = rows::revert_targets(&view.projection);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
@@ -924,7 +944,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .virtualize(100.0)
         // The composer floats over the list's bottom. Scroll extent counts the stack's own
         // padding but not the viewport's, so the clearance lives here.
-        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banners::stack_h(cx));
+        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banner_h);
     if let Some(control) = history::view(app, thread_id, t) {
         stack = stack.child(col().key("timeline-row-history").w_full().child(control));
     }
@@ -1065,7 +1085,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         marks.as_ref(),
                     ))
                     .children(changes.get(s(item, "id")).map(|c| changed::card(app, c, t)))
-                    .children((!moved.contains(s(item, "id"))).then(|| row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0)))),
+                    .children((meta.contains(s(item, "id")) && !moved.contains(s(item, "id"))).then(|| row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0)))),
             ),
             // AssistantMetaTimelineRow: always shown, under the work it follows.
             Row::Meta { id, item } => (id, col().w_full().px(4.0).pb(8.0).child(row().child(actions::assistant(app, thread_id, item, t)))),
@@ -1208,7 +1228,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
         .on_scroll_offset({
-            let (opacity, offset) = (app.ui.chat.timeline.follow.opacity.clone(), app.ui.chat.timeline.follow.offset.clone());
+            let (opacity, offset) = (follow.opacity.clone(), follow.offset.clone());
             move |at: rune::ScrollPos| {
                 let away = at.max[1] - at.offset[1] > AWAY;
                 opacity.set(if away { 1.0 } else { 0.0 });
@@ -1229,6 +1249,18 @@ pub fn composer_requests(app: &App, t: &T) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::collapses;
+
+    #[test]
+    fn only_the_open_side_chat_lists_in_the_side_pane() {
+        let mut app = crate::App::new();
+        app.route = crate::Route::Thread("parent".into());
+        assert!(!super::in_side_pane(&app, "side"));
+        app.ui.chat.side.open.insert("parent".into(), "side".into());
+        assert!(super::in_side_pane(&app, "side"));
+        assert!(!super::in_side_pane(&app, "parent"), "the chat keeps its own follow state");
+        app.route = crate::Route::Thread("other".into());
+        assert!(!super::in_side_pane(&app, "side"));
+    }
 
     #[test]
     fn long_user_messages_fold() {

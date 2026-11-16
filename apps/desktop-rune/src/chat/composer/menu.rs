@@ -471,11 +471,11 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
             .radius(theme::layout::CONTROL_RADIUS)
             .cursor(Cursor::Pointer)
             .on_hover(move |s: &mut App| s.ui.chat.composer.menu_active = i)
-            .on_press_tx(move |s: &mut App, tx| {
+            .on_press_tx(super::act_tx(s, move |s: &mut App, tx: &mut Tx| {
                 if let Some(m) = open_menu(s) {
                     choose(s, &m, i, tx);
                 }
-            });
+            }));
         if i == active {
             r = r.fill(t.c.accent);
         }

@@ -125,8 +125,8 @@ fn usage_color(t: &T, percent: f64) -> Color {
 }
 
 fn current(app: &App) -> Option<Usage> {
-    let Route::Thread(id) = app.frame_route() else { return None };
-    usage(&app.state().thread_views.get(id)?.projection)
+    let Route::Thread(id) = super::route(app) else { return None };
+    usage(&app.state().thread_views.get(&id)?.projection)
 }
 
 /// Why "Compact context" is off (ChatView's compactDisabledReason), or `None` when it can run.
@@ -138,7 +138,7 @@ pub(super) fn compact_state(app: &App) -> Option<Option<&'static str>> {
     if !supported {
         return None;
     }
-    let busy = super::running(app) || !super::approvals(app).is_empty() || crate::chat::timeline::question::active(app).is_some();
+    let busy = super::running(app) || !super::approvals(app).is_empty() || super::asking(app);
     Some(busy.then_some("Compacting is unavailable right now"))
 }
 
@@ -147,7 +147,7 @@ fn compact(app: &mut App) {
     if !matches!(compact_state(app), Some(None)) {
         return;
     }
-    let Route::Thread(thread) = app.frame_route().clone() else { return };
+    let Route::Thread(thread) = super::route(app) else { return };
     let model = super::model_selection(app);
     let Some(net) = app.src.net() else { return };
     let mut cmd = json!({
@@ -218,7 +218,7 @@ pub fn popover(app: &App, t: &T) -> Option<El> {
                 .size("xs")
                 .icon(&icons::MINIMIZE_2)
                 .disabled(reason.is_some())
-                .on_press(compact)
+                .on_press(super::act(app, compact))
                 .build(t)
                 .w_full()
                 .justify_center()
@@ -239,7 +239,7 @@ pub fn popover(app: &App, t: &T) -> Option<El> {
             .shadow(8.0, 24.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.08 }))
             .on_hover_change(|app: &mut App, inside, _| app.ui.chat.composer.context.card = inside)
             .child(body)
-            .anchored("composer-context", rune::Side::Top, rune::Align::End, 8.0),
+            .anchored(&super::keyed(app, "composer-context"), rune::Side::Top, rune::Align::End, 8.0),
     )
 }
 
@@ -270,8 +270,9 @@ pub fn meter(app: &App, t: &T) -> Option<El> {
     if fraction > 0.0 {
         shape = shape.stroke_with(circle(0.0, fraction), false, 3.0, LineCap::Round, color);
     }
+    let at = super::drawing(app);
     Some(
-        el().key("composer-context")
+        el().key(super::keyed(app, "composer-context"))
             .size(28.0, 28.0)
             .center()
             .radius(crate::theme::layout::CONTROL_RADIUS)
@@ -279,7 +280,7 @@ pub fn meter(app: &App, t: &T) -> Option<El> {
             .cursor(Cursor::Default)
             .label(label)
             .hover_delays(std::time::Duration::from_millis(150), std::time::Duration::from_millis(150))
-            .on_hover_change(|app: &mut App, inside, _| app.ui.chat.composer.context.trigger = inside)
+            .on_hover_change(move |app: &mut App, inside, _| super::acting(app, at.clone(), |app| app.ui.chat.composer.context.trigger = inside))
             .child(canvas(shape).size(20.0, 20.0)),
     )
 }

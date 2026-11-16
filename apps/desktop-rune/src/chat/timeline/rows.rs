@@ -2,12 +2,13 @@ use crate::data::{s, ts};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Item kinds that join a tool group.
+/// Item kinds that join a tool group. A rendered HTML page is its own row (session-logic.ts
+/// "html-render" entries), not tool work.
 pub fn groupable(item: &Value) -> bool {
     matches!(
         s(item, "type"),
         "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "reasoning" | "thread_created"
-    )
+    ) && crate::chat::details::html_render::reference(item).is_none()
 }
 
 pub fn item_active(item: &Value) -> bool {
@@ -254,12 +255,23 @@ pub fn fold_attempts(p: &Value) -> HashMap<String, String> {
 }
 
 pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
+    derive_with_meta(p, now).0
+}
+
+/// The rows, and the replies that show their meta (showAssistantMeta): each turn's last reply
+/// once the turn has settled. Other replies, such as a stopped turn's earlier ones, show none.
+pub fn derive_with_meta(p: &Value, now: i64) -> (Vec<Row<'_>>, HashSet<&str>) {
     let mut items = ordered(p);
     if items.is_empty() && !p["visibleTurnItems"].is_array() && !array(p, "messages").is_empty() {
-        return array(p, "messages")
+        let messages = array(p, "messages");
+        let meta: HashSet<&str> = messages
             .iter()
-            .map(|m| if s(m, "role") == "user" { Row::User(m) } else { Row::Assistant(m) })
+            .enumerate()
+            .filter(|(at, m)| s(m, "role") == "assistant" && messages.get(at + 1).is_none_or(|next| s(next, "role") == "user"))
+            .map(|(_, m)| s(m, "id"))
             .collect();
+        let rows: Vec<Row> = messages.iter().map(|m| if s(m, "role") == "user" { Row::User(m) } else { Row::Assistant(m) }).collect();
+        return (rows, meta);
     }
     let pending: HashMap<_, _> = array(p, "runtimeRequests")
         .iter()
@@ -292,6 +304,13 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
     for (item, key) in items.iter().zip(&keys) {
         if s(item, "type") == "assistant_message" {
             terminal.insert(key.as_str(), s(item, "id"));
+        }
+    }
+    let mut meta = HashSet::new();
+    for (&item, key) in items.iter().zip(&keys) {
+        let run = s(item, "runId");
+        if s(item, "type") == "assistant_message" && terminal.get(key.as_str()) == Some(&s(item, "id")) && (run.is_empty() || !active(run)) {
+            meta.insert(s(item, "id"));
         }
     }
     let (cut, replies) = superseded(p, &items);
@@ -436,7 +455,7 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
             rows.push(Row::Thinking { id: format!("thinking:{id}") });
         }
     }
-    rows
+    (rows, meta)
 }
 
 /// Runs of two or more groupable items of one turn, outside any fold, become one tool group;
@@ -1056,6 +1075,31 @@ mod tests {
         let mut live = stopped.clone();
         live["runs"][0]["status"] = json!("running");
         assert!(!derive(&live, 0).iter().any(|r| matches!(r, Row::Meta { .. })));
+        assert!(derive_with_meta(&live, 0).1.is_empty());
+    }
+
+    #[test]
+    fn a_rendered_page_stays_out_of_tool_groups() {
+        let tool = |id: &str, at: i64| json!({"id":id,"type":"command_execution","runId":"r","status":"completed","ordinal":at});
+        let page = json!({"id":"page","type":"dynamic_tool","runId":"r","status":"completed","toolName":"mcp__t3-code__html_render","ordinal":2,
+            "output":{"structuredContent":{"htmlRender":{"attachmentId":"a","title":"Page","height":200}}}});
+        let p = json!({"runs":[{"id":"r","status":"running"}],"turnItems":[tool("t1", 1), page, tool("t2", 3)]});
+        assert!(matches!(derive(&p, 0).as_slice(),
+            [Row::Working { .. }, Row::Item(_), Row::Item(page), Row::Item(_), Row::Thinking { .. }] if s(page, "id") == "page"));
+    }
+
+    #[test]
+    fn only_a_settled_turns_last_reply_shows_its_meta() {
+        let reply = |id: &str, at: i64| json!({"id":id,"type":"assistant_message","runId":"r","status":"completed","ordinal":at});
+        let stopped = json!({"runs":[{"id":"r","status":"interrupted"}],"turnItems":[
+            {"id":"u","type":"user_message","runId":"r","ordinal":1}, reply("a", 2),
+            {"id":"t","type":"command_execution","runId":"r","ordinal":3}, reply("b", 4),
+            {"id":"x","type":"run_interrupt_result","runId":"r","ordinal":5}]});
+        let (rows, meta) = derive_with_meta(&stopped, 0);
+        assert_eq!(rows.iter().filter(|r| matches!(r, Row::Assistant(_))).count(), 2);
+        assert_eq!(meta, HashSet::from(["b"]));
+        let legacy = json!({"messages":[{"id":"q","role":"user"},{"id":"m1","role":"assistant"},{"id":"m2","role":"assistant"},{"id":"q2","role":"user"}]});
+        assert_eq!(derive_with_meta(&legacy, 0).1, HashSet::from(["m2"]));
     }
 
     #[test]

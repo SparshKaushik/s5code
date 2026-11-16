@@ -198,7 +198,7 @@ impl Thread {
             actionable_plan: v["hasActionableProposedPlan"] == true,
             goal_active: v["goal"]["status"] == "active",
             archived: !v["archivedAt"].is_null() || !v["deletedAt"].is_null(),
-            hidden: rel == Some("subagent") || rel == Some("sideChat"),
+            hidden: rel == Some("subagent") || rel == Some("sideChat") || v["lineage"]["sideChat"] == true,
             settled: v["settledOverride"] == "settled",
             settled_at: opt_ts(&v["settledAt"]),
             unsettled_at: opt_ts(&v["unsettledAt"]),

@@ -9,6 +9,8 @@ pub enum View {
     Files(String),
     Diff,
     Browser(String),
+    /// A side chat closed beside its thread (the web's `side-chat:` tab): the side chat's id.
+    SideChat(String),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -33,6 +35,7 @@ fn encode(entries: &[Closed]) -> Value {
             View::Files(path) => json!({"thread": c.thread, "kind": "files", "path": path}),
             View::Diff => json!({"thread": c.thread, "kind": "diff"}),
             View::Browser(url) => json!({"thread": c.thread, "kind": "browser", "url": url}),
+            View::SideChat(side) => json!({"thread": c.thread, "kind": "side-chat", "threadId": side}),
         })
         .collect();
     json!({"version": 1, "entries": rows})
@@ -50,6 +53,7 @@ fn decode(v: &Value) -> Vec<Closed> {
                 "files" => View::Files(row["path"].as_str()?.to_owned()),
                 "diff" => View::Diff,
                 "browser" => View::Browser(row["url"].as_str()?.to_owned()),
+                "side-chat" => View::SideChat(row["threadId"].as_str().filter(|t| !t.is_empty())?.to_owned()),
                 _ => return None,
             };
             Some(Closed { thread, view })
@@ -149,7 +153,12 @@ mod tests {
 
     #[test]
     fn saved_views_read_back_and_unknown_rows_drop() {
-        let entries = vec![closed("a", View::Files("src/lib.rs".into())), closed("b", View::Diff), closed("c", View::Browser("http://localhost:5173/".into()))];
+        let entries = vec![
+            closed("a", View::Files("src/lib.rs".into())),
+            closed("b", View::Diff),
+            closed("c", View::Browser("http://localhost:5173/".into())),
+            closed("d", View::SideChat("side-1".into())),
+        ];
         assert_eq!(decode(&encode(&entries)), entries);
         let saved = json!({"entries": [
             {"thread": "a", "kind": "terminal"},

@@ -297,20 +297,23 @@ fn close(app: &mut App, surface: Surface) {
 fn reopen_closed(app: &mut App) -> bool {
     let mut store = std::mem::take(&mut app.ui.panel.closed);
     let current = context(app).map(|(id, _)| id);
-    let next = store.next(
-        |thread| app.state().threads.iter().any(|v| v["id"] == thread),
-        |c| {
+    let exists = |thread: &str| app.state().threads.iter().any(|v| v["id"] == thread);
+    let next = store.next(exists, |c| match &c.view {
+        // A deleted side chat drops too; an open one is open whatever the panel shows.
+        closed::View::SideChat(side) => !exists(side.as_str()) || (current.as_deref() == Some(c.thread.as_str()) && crate::chat::side::open_beside(app) == Some(side.as_str())),
+        view => {
             app.ui.shell.panel_open
                 && current.as_deref() == Some(c.thread.as_str())
-                && match &c.view {
+                && match view {
                     closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
                     closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
-                    closed::View::Browser(_) => false,
+                    closed::View::Browser(_) | closed::View::SideChat(_) => false,
                 }
-        },
-    );
+        }
+    });
     app.ui.panel.closed = store;
     let Some(c) = next else { return false };
+    let parent = c.thread.clone();
     if current.as_deref() != Some(c.thread.as_str()) {
         app.navigate(Route::Thread(c.thread.clone()));
         // Swap in that thread's panel and switch its thread now, so the next poll neither
@@ -325,8 +328,13 @@ fn reopen_closed(app: &mut App) -> bool {
         closed::View::Files(path) if path.is_empty() => activate(app, Surface::Files),
         closed::View::Files(path) => open_file(app, path),
         closed::View::Browser(url) => open_preview(app, &url),
+        closed::View::SideChat(side) => crate::chat::side::reopen(app, &parent, &side),
     }
     true
+}
+/// Records a side chat closed beside `thread`, for `view.reopenClosed`.
+pub fn record_closed_side_chat(app: &mut App, thread: &str, side: &str) {
+    app.ui.panel.closed.record(closed::Closed { thread: thread.to_owned(), view: closed::View::SideChat(side.to_owned()) });
 }
 fn remove_surface(app: &mut App, surface: Surface) {
     app.ui.panel.surfaces.retain(|v| *v != surface);

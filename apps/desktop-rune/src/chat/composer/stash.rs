@@ -216,7 +216,7 @@ pub fn badge(s: &App, t: &T) -> Option<El> {
             .child(icon(&icons::BOOKMARK, 14.0).color(ink))
             .child(text("Stash").font(theme::weight(theme::TEXT_XS, 500.0)).color(ink))
             .child(text(count.to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground))
-            .on_press(toggle),
+            .on_press(super::act(s, toggle)),
     )
 }
 
@@ -242,7 +242,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         .child(spacer())
         .child(text(stash.entries.len().to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(muted))
         .child(icon(&icons::CHEVRON_DOWN, 14.0).color(muted))
-        .on_press(toggle);
+        .on_press(super::act(s, toggle));
     let mut rows = col().w_full();
     if stash.entries.is_empty() {
         let shortcut = crate::shell::palette::shortcut_label(s, "composer.stash");
@@ -282,7 +282,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             .cursor(Cursor::Pointer)
             .label("Delete stashed prompt")
             .child(icon(&icons::X, 12.0).color(muted))
-            .on_press(move |s: &mut App| delete(s, i));
+            .on_press(super::act(s, move |s: &mut App| delete(s, i)));
         let mut r = row()
             .w_full()
             .pl(8.0)
@@ -291,7 +291,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             .center_y()
             .radius(theme::layout::CONTROL_RADIUS)
             .on_hover(move |s: &mut App| s.ui.chat.composer.stash.active = i)
-            .child(restore_target.on_press(move |s: &mut App| restore(s, i)))
+            .child(restore_target.on_press(super::act(s, move |s: &mut App| restore(s, i))))
             .child(delete_button);
         if i == active {
             r = r.fill(t.c.accent);

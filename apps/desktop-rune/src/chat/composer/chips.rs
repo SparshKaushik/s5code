@@ -1,19 +1,27 @@
 //! Context chips (ContextChip, composerContextPresentation, composerContextReferences.ts): what a
 //! message carries beside its text (a terminal selection, a picked element, a PR). The composer
 //! holds each as a pill and sends it as a `[label](t3-context://v1/kind/id)` link plus its record;
-//! a sent message shows those links as chips again.
+//! a sent message shows those links as chips again. Assistant quotes ride as
+//! `[Assistant quote](t3-citation://v1/…)` links and read as quote chips whose comment the
+//! composer edits (AssistantCitationChip, AssistantCitationCommentEditor).
 
 use std::ops::Range;
 
-use rune::{Color, Icon, PillStyle, TextEdit};
+use rune::{Align, Color, El, Icon, Key, KeyEvent, PillStyle, Side, TextEdit, Tx, auto_grow, col, row, text, text_input};
 use serde_json::{Value, json};
 
+use crate::App;
+use crate::chat::timeline::chip::{Citation, MAX_COMMENT, citation_card, citation_href, citation_label, parse_citation, with_comment};
 use crate::data::s;
 use crate::icons;
+use crate::theme::{self, AlphaMul, T, radius};
 
 const HREF: &str = "t3-context://v1/";
 /// Pill ids for context chips; other pills (path mentions) stay plain text when sent.
 pub const PILL: &str = "ctx:";
+/// Pill ids for quote chips: the prefix, then the quote's link as it was written.
+pub const CITE: &str = "cite:";
+const QUOTE_LINK: &str = "[Assistant quote](t3-citation://v1/";
 const LABEL_MAX: usize = 200;
 const TERMINAL_TEXT_MAX: usize = 64_000;
 
@@ -149,6 +157,10 @@ pub fn outgoing(edit: &TextEdit, contexts: &[Value]) -> (String, Vec<Value>) {
     for (range, id) in pills {
         out.push_str(&edit.text[at..range.start]);
         at = range.end;
+        if let Some(href) = id.strip_prefix(CITE) {
+            out.push_str(&format!("[Assistant quote]({href})"));
+            continue;
+        }
         if !id.starts_with(PILL) {
             out.push_str(&file_link(id));
             continue;
@@ -183,18 +195,54 @@ pub struct Shown {
     pub id: String,
 }
 
-/// Sent text with each context link and file link replaced by its label
-/// (parseComposerContextReferences, collectMentionTokens); a file link's id is its path.
+/// Sent text with each context link, file link and quote replaced by its label
+/// (parseComposerContextReferences, collectMentionTokens, collectAssistantCitations); a file
+/// link's id is its path and a quote's its link. Text whose only chips are quotes stays as
+/// written: it renders as Markdown, which draws its quotes itself.
 pub fn display(text: &str) -> (String, Vec<Shown>) {
+    let (out, all) = editable(text);
+    if all.iter().all(|c| c.kind == "citation") {
+        return (text.to_owned(), Vec::new());
+    }
+    (out, all)
+}
+
+/// [`display`], quotes always folded: the composer holds every one as a chip.
+pub fn editable(text: &str) -> (String, Vec<Shown>) {
     let (out, chips) = context_links(text);
     let (out, mentions) = file_links(&out);
     let mut all: Vec<Shown> = remap(chips, &mentions);
     all.extend(mentions.into_iter().map(|(m, _)| m));
+    let (out, quotes) = citation_links(&out);
+    let mut all = remap(all, &quotes);
+    all.extend(quotes.into_iter().map(|(q, _)| q));
     all.sort_by_key(|c| c.range.start);
     (out, all)
 }
 
-/// Context chip ranges moved past the file links folded before them.
+/// `[Assistant quote](t3-citation://v1/…)` links that parse, each with its range in the input;
+/// a malformed one stays text, as the web's CITATION_LINK match does.
+fn citation_links(text: &str) -> (String, Vec<(Shown, Range<usize>)>) {
+    let (mut out, mut found, mut at) = (String::new(), Vec::new(), 0);
+    while let Some(open) = text[at..].find(QUOTE_LINK).map(|i| at + i) {
+        let href = open + "[Assistant quote](".len();
+        let close = text[href..].find(|c: char| c == ')' || c.is_whitespace()).map(|i| href + i).filter(|&i| text.as_bytes()[i] == b')');
+        let Some((close, quote)) = close.and_then(|i| Some((i, parse_citation(&text[href..i])?))) else {
+            out.push_str(&text[at..open + 1]);
+            at = open + 1;
+            continue;
+        };
+        out.push_str(&text[at..open]);
+        let label = citation_label(&quote);
+        found.push((Shown { range: out.len()..out.len() + label.len(), kind: "citation".into(), id: text[href..close].to_owned() }, open..close + 1));
+        out.push_str(&label);
+        at = close + 1;
+    }
+    out.push_str(&text[at..]);
+    (out, found)
+}
+
+/// Chip ranges moved past the links a later pass folded before them.
 fn remap(chips: Vec<Shown>, mentions: &[(Shown, Range<usize>)]) -> Vec<Shown> {
     chips
         .into_iter()
@@ -310,6 +358,7 @@ pub fn look(kind: &str, record: Option<&Value>) -> Option<(Color, &'static Icon)
         "element" | "preview-annotation" => (accent(0.134, 70.0), &icons::MOUSE_POINTER_CLICK),
         "thread" => (accent(0.12, 190.0), &icons::MESSAGES_SQUARE),
         "environment" => (accent(0.11, 145.0), &icons::SERVER),
+        "citation" => (accent(0.16, 259.0), &icons::QUOTE),
         "review-comment" => match record.map(|r| &r["pullRequest"]).filter(|p| p.is_object()) {
             Some(pr) if pr["state"] == "merged" => (accent(0.16, 292.0), &icons::GIT_MERGE),
             Some(pr) if pr["state"] == "closed" => (accent(0.16, 16.0), &icons::GIT_PULL_REQUEST_CLOSED),
@@ -332,12 +381,239 @@ pub fn style(kind: &str, record: Option<&Value>) -> PillStyle {
 
 /// The composer's pill look by id: context pills by their record, path mentions as mentions.
 pub fn pill_style(id: &str, contexts: &[Value]) -> PillStyle {
+    if id.starts_with(CITE) {
+        return style("citation", None);
+    }
     match id.strip_prefix(PILL) {
         Some(rest) => {
             let kind = rest.split('/').next().unwrap_or("");
             style(kind, contexts.iter().find(|r| pill_id(r) == id))
         }
         None => style("mention", None),
+    }
+}
+
+/// The composer pill for the quote link `href`.
+pub fn citation_pill(href: &str) -> String {
+    format!("{CITE}{href}")
+}
+
+/// The quote chip whose comment is being edited (AssistantCitationCommentEditor): its draft,
+/// where its pill started, the pill id, and the comment as typed.
+pub struct CommentEditor {
+    target: Option<(String, usize, String)>,
+    edit: TextEdit,
+}
+
+impl Default for CommentEditor {
+    fn default() -> CommentEditor {
+        CommentEditor { target: None, edit: TextEdit::new("") }
+    }
+}
+
+/// The pill `pill` nearest `start`, as equal quotes share an id.
+fn find_pill(edit: &TextEdit, pill: &str, start: usize) -> Option<Range<usize>> {
+    edit.pills().filter(|(_, id)| *id == pill).map(|(r, _)| r).min_by_key(|r| r.start.abs_diff(start))
+}
+
+fn too_long(comment: &str) -> bool {
+    comment.encode_utf16().count() > MAX_COMMENT
+}
+
+/// The quote pill takes its link rewritten with `comment` (withAssistantCitationComment) and its
+/// new label. False when the pill is gone or the comment too long.
+fn recomment(edit: &mut TextEdit, pill: &str, start: usize, comment: &str) -> bool {
+    let quote = pill.strip_prefix(CITE).and_then(parse_citation);
+    let (Some(quote), Some(range)) = (quote, find_pill(edit, pill, start)) else { return false };
+    if too_long(comment) {
+        return false;
+    }
+    let next = with_comment(&quote, comment);
+    edit.replace_with_pill(range, citation_pill(&citation_href(&next)), &citation_label(&next));
+    true
+}
+
+#[derive(Debug, PartialEq)]
+enum Dismissal {
+    Commit,
+    Close,
+    KeepOpen,
+}
+
+/// resolveAssistantCitationCommentDismissal for a press outside: a changed comment saves, one
+/// too long to save keeps the editor open. Escape and Cancel always discard.
+fn dismissal(draft: &str, saved: Option<&str>) -> Dismissal {
+    if draft.trim() == saved.unwrap_or("").trim() {
+        Dismissal::Close
+    } else if too_long(draft) {
+        Dismissal::KeepOpen
+    } else {
+        Dismissal::Commit
+    }
+}
+
+fn open_comment(s: &mut App, start: usize, pill: &str) {
+    let saved = pill.strip_prefix(CITE).and_then(parse_citation).and_then(|c| c.comment).unwrap_or_default();
+    let key = super::active_key(s);
+    if let Some(d) = s.ui.chat.composer.drafts.get_mut(&key) {
+        d.edit.focused = false;
+    }
+    let mut edit = TextEdit::new(saved);
+    edit.focused = true;
+    s.ui.chat.composer.citation = CommentEditor { target: Some((key, start, pill.to_owned())), edit };
+}
+
+/// Closes the editor; `refocus` puts the caret back in the prompt (the chip's onRestoreFocus).
+fn close_comment(s: &mut App, refocus: bool) {
+    let ui = &mut s.ui.chat.composer;
+    ui.citation.edit.focused = false;
+    if let Some((key, ..)) = ui.citation.target.take()
+        && refocus
+        && let Some(d) = ui.drafts.get_mut(&key)
+    {
+        d.edit.focused = true;
+    }
+}
+
+fn save_comment(s: &mut App) -> bool {
+    let ui = &mut s.ui.chat.composer;
+    let Some((key, start, pill)) = ui.citation.target.clone() else { return false };
+    let comment = ui.citation.edit.text.clone();
+    let saved = ui.drafts.get_mut(&key).is_some_and(|d| recomment(&mut d.edit, &pill, start, &comment));
+    if saved {
+        close_comment(s, true);
+    }
+    saved
+}
+
+fn dismiss_comment(s: &mut App) {
+    let ui = &s.ui.chat.composer.citation;
+    let saved = ui.target.as_ref().and_then(|(_, _, pill)| parse_citation(pill.strip_prefix(CITE)?)).and_then(|c| c.comment);
+    match dismissal(&ui.edit.text, saved.as_deref()) {
+        Dismissal::Commit => {
+            if !save_comment(s) {
+                close_comment(s, false);
+            }
+        }
+        Dismissal::Close => close_comment(s, false),
+        Dismissal::KeepOpen => {}
+    }
+}
+
+/// Enter saves (the field's submit), Cmd/Ctrl+Enter saves and sends, Shift+Enter breaks the
+/// line, Escape discards.
+fn comment_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
+    match e.key {
+        Key::Escape => {
+            close_comment(s, true);
+            true
+        }
+        Key::Enter if !e.mods.shift && (e.mods.cmd || e.mods.ctrl) => {
+            if save_comment(s) {
+                super::send(s, false);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The composer's quote chip popovers: the comment editor while one is open, else the quote's
+/// card while the caret rests against its chip (a click on a chip lands the caret on its edge),
+/// with the pencil that opens the editor.
+pub fn citation_popover(s: &App, t: &T) -> Option<El> {
+    if s.ui.chat.composer.picker.open || super::menu::open_menu(s).is_some() {
+        return None;
+    }
+    let ui = &s.ui.chat.composer.citation;
+    let editing = ui.target.as_ref().and_then(|(key, start, pill)| {
+        find_pill(&s.ui.chat.composer.drafts.get(key)?.edit, pill, *start)?;
+        parse_citation(pill.strip_prefix(CITE)?)
+    });
+    if let Some(quote) = editing {
+        return Some(comment_editor(t, &quote, &ui.edit));
+    }
+    let d = super::draft(s)?;
+    if !d.edit.focused || d.edit.anchor != d.edit.focus {
+        return None;
+    }
+    let caret = d.edit.focus;
+    let touches = |r: &Range<usize>| r.start == caret || r.end == caret;
+    // A context chip's details take the spot.
+    if d.edit.pills().any(|(r, id)| id.starts_with(PILL) && touches(&r)) {
+        return None;
+    }
+    let (range, pill) = d.edit.pills().find(|(r, id)| id.starts_with(CITE) && touches(r))?;
+    let quote = parse_citation(&pill[CITE.len()..])?;
+    let label = if quote.comment.is_some() { "Edit citation comment" } else { "Add comment to citation" };
+    let (start, pill) = (range.start, pill.to_owned());
+    let pencil = crate::kit::icon_button(&icons::PENCIL, label).variant("outline").size("icon-sm").on_press(move |s: &mut App| open_comment(s, start, &pill)).build(t);
+    Some(citation_card(t, &quote, Some(pencil)).key("composer-citation-card").preserve_focus_on_press(true).anchored("composer", Side::Top, Align::Start, 8.0))
+}
+
+fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
+    let long = too_long(&edit.text);
+    let input = text_input(edit, theme::TEXT_SM.lh(20.0))
+        .key("citation-comment-input")
+        .role("textbox")
+        .label("Comment on selected text")
+        .placeholder("Add an optional comment...", t.c.placeholder)
+        .w_full()
+        .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut s.ui.chat.composer.citation.edit)
+        .on_submit(|s: &mut App, _| {
+            save_comment(s);
+        })
+        .on_input_key(comment_key);
+    let mut body = col().w_full().gap(8.0).child(auto_grow(input, 2, 6));
+    if long {
+        let limit = super::context::thousands(MAX_COMMENT as u64);
+        body = body.child(text(format!("Comments can contain up to {limit} characters.")).font(theme::TEXT_XS).color(t.c.destructive).role("status").wrap().w_full());
+    }
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").size("xs").on_press(|s: &mut App| close_comment(s, true)).build(t);
+    let save = crate::kit::Button::new(if long { "Shorten comment" } else { "Save" }).size("xs").disabled(long).on_press(|s: &mut App| {
+        save_comment(s);
+    });
+    let buttons = row().w_full().gap(8.0).justify_end().child(cancel).child(save.build(t));
+    col()
+        .key("citation-comment-editor")
+        .w(320.0)
+        .padding(8.0)
+        .radius(radius::LG)
+        .fill(t.c.popover)
+        .border(1.0, t.c.border)
+        .shadow(8.0, 24.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.08 }))
+        .role("dialog")
+        .label(format!("Edit citation comment: {}", citation_label(quote)))
+        .child(body.child(buttons))
+        .anchored("composer", Side::Top, Align::End, 8.0)
+        .modal(true, dismiss_comment)
+}
+
+/// The showcase composer holding a terminal chip and a commented quote, the quote's comment
+/// editor open.
+pub fn comment_scene(s: &mut App) {
+    super::on_replay_showcase(s);
+    let crate::Route::Thread(thread) = s.frame_route().clone() else { return };
+    let text = "Group tool calls under one header so a long turn reads as one step.";
+    let quote = Citation {
+        environment_id: "local".into(),
+        thread_id: thread,
+        message_id: "scene-message".into(),
+        text: text.into(),
+        comment: Some("Can we keep this but shorter?".into()),
+        start: 0,
+        end: text.encode_utf16().count() as u64,
+        prefix: String::new(),
+        suffix: String::new(),
+    };
+    let terminal = samples().remove(0);
+    let prompt = format!("Why does {} fail? Compare [Assistant quote]({}) ", link(&terminal), citation_href(&quote));
+    super::append_with_chips(s, &prompt, std::slice::from_ref(&terminal), "");
+    let pill = super::draft(s).and_then(|d| d.edit.pills().find(|(_, id)| id.starts_with(CITE)).map(|(r, id)| (r.start, id.to_owned())));
+    if let Some((start, pill)) = pill {
+        open_comment(s, start, &pill);
     }
 }
 
@@ -424,5 +700,71 @@ mod tests {
         assert!(!keeps_attachment("/x/preview-annotation-b2.png", &[pick]));
         assert!(!keeps_attachment("/x/preview-annotation-a1.png", &[]));
         assert!(keeps_attachment("/x/shot.png", &[]));
+    }
+
+    fn quote(comment: Option<&str>) -> Citation {
+        Citation {
+            environment_id: "env".into(),
+            thread_id: "thread-1".into(),
+            message_id: "msg-1".into(),
+            text: "Use a mutex\nand retry".into(),
+            comment: comment.map(str::to_owned),
+            start: 0,
+            end: 20,
+            prefix: String::new(),
+            suffix: String::new(),
+        }
+    }
+
+    #[test]
+    fn quotes_beside_context_chips_read_as_quote_chips() {
+        let term = terminal("t1", "Terminal 1", 3, 3, "ls");
+        let href = citation_href(&quote(Some("Why?")));
+        let text = format!("Fix {} per [Assistant quote]({href}) in [a.rs](src/a.rs)", link(&term));
+        let (shown, chips) = display(&text);
+        assert_eq!(shown, "Fix Terminal 1 line 3 per Why? in a.rs");
+        let kinds: Vec<(&str, &str)> = chips.iter().map(|c| (c.kind.as_str(), &shown[c.range.clone()])).collect();
+        assert_eq!(kinds, [("terminal", "Terminal 1 line 3"), ("citation", "Why?"), ("mention", "a.rs")]);
+        assert_eq!(chips[1].id, href);
+
+        // Quotes alone stay Markdown; the composer folds them anyway, and a broken one stays text.
+        let alone = format!("See [Assistant quote]({href})");
+        assert_eq!(display(&alone), (alone.clone(), Vec::new()));
+        let (folded, quotes) = editable(&alone);
+        assert_eq!((folded.as_str(), quotes.len()), ("See Why?", 1));
+        let broken = "[Assistant quote](t3-citation://v1/env/t/m?text=x) and [Assistant quote](t3-citation://v1/a b)";
+        assert_eq!(editable(broken), (broken.to_owned(), Vec::new()));
+    }
+
+    #[test]
+    fn quote_chip_comments_round_trip_through_the_sent_link() {
+        let href = citation_href(&quote(None));
+        let pill = citation_pill(&href);
+        let mut edit = TextEdit::new("");
+        edit.insert("see ");
+        edit.insert_pill(pill.clone(), &citation_label(&quote(None)));
+        edit.insert(" ok");
+        assert_eq!(outgoing(&edit, &[]).0, format!("see [Assistant quote]({href}) ok"));
+
+        assert!(recomment(&mut edit, &pill, 4, "  Shorter?  "));
+        let (sent, _) = outgoing(&edit, &[]);
+        let (shown, chips) = editable(&sent);
+        assert_eq!(shown, "see Shorter? ok");
+        assert_eq!(parse_citation(&chips[0].id), Some(quote(Some("Shorter?"))));
+
+        let (_, id) = edit.pills().next().map(|(r, id)| (r, id.to_owned())).unwrap();
+        assert!(!recomment(&mut edit, &id, 4, &"x".repeat(MAX_COMMENT + 1)));
+        assert!(recomment(&mut edit, &id, 4, " "));
+        assert_eq!(outgoing(&edit, &[]).0, format!("see [Assistant quote]({href}) ok"));
+        assert!(!recomment(&mut edit, &id, 4, "gone"), "the old pill id no longer names a chip");
+    }
+
+    #[test]
+    fn a_press_outside_saves_a_changed_comment() {
+        assert_eq!(dismissal(" same ", Some("same")), Dismissal::Close);
+        assert_eq!(dismissal("", None), Dismissal::Close);
+        assert_eq!(dismissal("new", Some("old")), Dismissal::Commit);
+        assert_eq!(dismissal("", Some("old")), Dismissal::Commit);
+        assert_eq!(dismissal(&"x".repeat(MAX_COMMENT + 1), None), Dismissal::KeepOpen);
     }
 }
