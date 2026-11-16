@@ -288,11 +288,15 @@ jobs:
   # Web browser tests time out when they share a runner with the other package
   # suites: Chromium gets too little CPU and diff workers miss their 10s start budget.
   test_web:
-    name: Release web tests
+    name: Release web tests ${{ matrix.shard }}
     needs: [preflight]
     if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -314,14 +318,16 @@ jobs:
       # The file preview suite renders large documents against short waits. On
       # 4-vCPU GitHub runners it starves beside other files, so it runs alone.
       - name: Test
-        run: vp run --filter @t3tools/web test --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
+        run: vp run --filter @t3tools/web test --exclude src/components/files/AttachmentFilePreview.browser.test.tsx --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Test file previews
+        if: matrix.shard == 1
         working-directory: apps/web
         run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
 
       # Browser tests run source modules; this boots the production chunk graph.
       - name: Boot the built web client
+        if: matrix.shard == 1
         run: |
           vp run --filter @t3tools/web build
           node apps/web/scripts/verify-built-boot.ts
