@@ -3983,7 +3983,7 @@ mod tests {
     fn a_tab_opened_here_binds_to_its_own_session_instead_of_opening_twice() {
         let mut app = App::new();
         let thread = data::s(&app.state().threads[0], "id").to_string();
-        let mine = open_tab(&mut app);
+        let mine = open_tab(&mut app, browser::DEFAULT_PROFILE);
         app.ui.panel.browser.opening.push((7, mine, thread.clone(), crate::env::LOCAL.to_owned()));
         let opened = json!({ "type": "opened", "threadId": thread, "tabId": "s", "snapshot": { "runtime": "server" } });
         session_event(&mut app, crate::env::LOCAL, opened.clone());
@@ -4002,7 +4002,7 @@ mod tests {
         use super::super::Surface;
         let mut app = App::new();
         let thread = data::s(&app.state().threads[0], "id").to_string();
-        let popup = open_tab(&mut app);
+        let popup = open_tab(&mut app, browser::DEFAULT_PROFILE);
         app.ui.panel.browser.tabs.get_mut(&popup).unwrap().adopting = Some(((thread.clone(), "opener".into()), "P1".into()));
 
         // `adoptPopup` opens it as the agent's hidden tab: no new tab, and none on the panel.
@@ -4019,7 +4019,7 @@ mod tests {
     fn a_new_server_process_takes_every_tab_off_its_old_session() {
         let mut app = App::new();
         let thread = data::s(&app.state().threads[0], "id").to_string();
-        let (a, b) = (open_tab(&mut app), open_tab(&mut app));
+        let (a, b) = (open_tab(&mut app, browser::DEFAULT_PROFILE), open_tab(&mut app, browser::DEFAULT_PROFILE));
         for (tab, session) in [(a, "s1"), (b, "s2")] {
             let t = app.ui.panel.browser.tabs.get_mut(&tab).unwrap();
             t.session = Some((thread.clone(), session.into()));
