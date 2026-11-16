@@ -616,7 +616,8 @@ fn checks_freshness(entry: Option<&Value>, d: &Value) -> (Option<&'static str>, 
     (state, state != own)
 }
 
-fn freshness(s: &App, d: &Value) -> (Option<&'static str>, bool) {
+/// [`checks_freshness`] against the open pull request's row as the list holds it now.
+fn checks_rollup(s: &App, d: &Value) -> (Option<&'static str>, bool) {
     let entry = selected_entry(s).or_else(|| s.ui.pages.detail.entry.clone());
     checks_freshness(entry.as_ref(), d)
 }
@@ -1351,7 +1352,7 @@ fn tab_bar(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         .build(&k);
     let mut bar = row().w_full().px(16.0).py(8.0).gap(8.0).center_y().role("navigation").label("Pull request tabs").child(tabs).child(spacer());
     let checks = d["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let (state, stale) = latest_checks(listed(s).and_then(|e| e.get("checksState")), checks);
+    let (state, stale) = checks_rollup(s, d);
     match u.tab {
         0 if super::pr_actions::shows_approve(d) && !stale => {
             let pending = u.pending_action.as_ref().map(|(_, a)| a.as_str());
@@ -1417,25 +1418,6 @@ fn order_toggle(t: &T, oldest: bool, (to_oldest, to_newest): (&str, &str), flip:
         .on_press(flip)
         .build(t)
         .label(next)
-}
-
-/// The open pull request's row as the list holds it now.
-fn listed(s: &App) -> Option<&Value> {
-    let url = s.ui.pages.pull_requests.selected.as_deref()?;
-    s.ui.pages.pull_requests.result.as_ref()?["entries"].as_array()?.iter().find(|e| field(e, "url") == url)
-}
-
-/// The panel's checksState and checksStale: the list's rollup, refreshed more often than this
-/// detail, leads when it has one; a workflow awaiting approval keeps it pending, since the list
-/// can leave those out. Stale when the detail's own checks say otherwise.
-pub(super) fn latest_checks(listed: Option<&Value>, checks: &[Value]) -> (Option<&'static str>, bool) {
-    let detail = checks_state(checks);
-    let latest = match listed {
-        Some(v) => v.as_str().and_then(|st| ["failing", "pending", "passing"].into_iter().find(|known| *known == st)),
-        None => detail,
-    };
-    let state = if latest != Some("failing") && checks.iter().any(|c| field(c, "status") == "action-required") { Some("pending") } else { latest };
-    (state, state != detail)
 }
 
 /// PullRequestChecksPopover on the Summary bar: the state, its summary and each check, or a note
@@ -1569,7 +1551,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         super::pr_edit::description(s, t, d, markdown(t, if body.is_empty() { "_No description provided._" } else { &body }))
     }));
     let checks = d["checks"].as_array().cloned().unwrap_or_default();
-    let stale = freshness(s, d).1;
+    let stale = checks_rollup(s, d).1;
     out = out.child(rule(t)).child(section(t, "checks", "Checks".into(), u.checks_open, |s| ui(s).checks_open = !ui(s).checks_open, None, || {
         if stale {
             return row()
@@ -2287,14 +2269,16 @@ mod tests {
     #[test]
     fn the_list_rollup_leads_the_checks_and_marks_the_detail_stale() {
         let c = |st: &str| json!({"name": st, "status": st});
-        let running = [c("success"), c("pending")];
-        assert_eq!(latest_checks(None, &running), (Some("pending"), false), "no rollup: the detail's own");
-        assert_eq!(latest_checks(Some(&json!("pending")), &running), (Some("pending"), false));
-        assert_eq!(latest_checks(Some(&json!("passing")), &running), (Some("passing"), true), "the list saw them finish");
-        assert_eq!(latest_checks(Some(&Value::Null), &running), (None, true), "the list saw none");
-        let approval = [c("success"), c("action-required")];
-        assert_eq!(latest_checks(Some(&json!("passing")), &approval), (Some("pending"), false), "a workflow awaiting approval stays pending");
-        assert_eq!(latest_checks(Some(&json!("failing")), &approval), (Some("failing"), true));
+        let detail = |checks: Value| json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checks": checks});
+        let row = |rollup: Value| json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checksState": rollup});
+        let running = detail(json!([c("success"), c("pending")]));
+        assert_eq!(checks_freshness(None, &running), (Some("pending"), false), "no rollup: the detail's own");
+        assert_eq!(checks_freshness(Some(&row(json!("pending"))), &running), (Some("pending"), false));
+        assert_eq!(checks_freshness(Some(&row(json!("passing"))), &running), (Some("passing"), true), "the list saw them finish");
+        assert_eq!(checks_freshness(Some(&row(Value::Null)), &running), (None, true), "the list saw none");
+        let approval = detail(json!([c("success"), c("action-required")]));
+        assert_eq!(checks_freshness(Some(&row(json!("passing"))), &approval), (Some("pending"), false), "a workflow awaiting approval stays pending");
+        assert_eq!(checks_freshness(Some(&row(json!("failing"))), &approval), (Some("failing"), true));
     }
 
     #[test]
