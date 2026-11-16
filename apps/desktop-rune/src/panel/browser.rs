@@ -321,7 +321,8 @@ impl Browser {
                 }
             }
             Cmd::StopRecording(_) => {
-                let profile = route(self, self.recording.take());
+                let recording = self.recording.take();
+                let profile = route(self, recording);
                 if let Some(tx) = self.workers.get(&profile) {
                     let _ = tx.send(cmd);
                 }

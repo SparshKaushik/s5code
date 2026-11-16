@@ -1662,7 +1662,7 @@ fn session_event(app: &mut App, env: &str, event: Value) {
                     return;
                 }
             }
-            let tab = open_tab(app);
+            let tab = open_tab(app, browser::DEFAULT_PROFILE);
             if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
                 t.session = Some(key);
             }
@@ -3867,15 +3867,18 @@ fn move_tab(app: &mut App, tab: TabId) {
     let Some(remote) = app.ui.panel.browser.tabs.get(&tab).map(|t| t.remote.is_some()) else { return };
     let url = app.ui.panel.browser.browser.status(tab).url;
     let moved = if remote {
-        let fresh = open_tab(app);
+        let profile = tab_profile(app, tab);
+        let fresh = open_tab(app, &profile);
         register(app, fresh);
         fresh
     } else {
         let Some(env) = server_env(app) else { return };
+        let profile = tab_profile(app, tab);
         let ui = &mut app.ui.panel.browser;
         ui.next += 1;
         let mut fresh = Tab::new(Pixels::new());
         fresh.remote = Some(env);
+        fresh.profile = profile;
         ui.tabs.insert(ui.next, fresh);
         ui.next
     };
