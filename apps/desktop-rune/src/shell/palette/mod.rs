@@ -1495,6 +1495,8 @@ fn one_edit(a: &[char], b: &[char], swap_only: bool) -> bool {
 fn execute(s: &mut App, action: Action, tx: &mut Tx) {
     match action {
         Action::Page(page) => return push_page(s, page, ""),
+        // From the commands, nothing connected goes straight to Connections.
+        Action::AddProject if !add_project::any_connected(s) => crate::shell::sidebar::go(s, Route::Settings("connections".into())),
         Action::AddProject => return add_project::open(s),
         Action::AddProjectIn(key) => return add_project::open_in(s, &key),
         Action::NewProject => return add_project::choose(s, add_project::Source::New),
@@ -1784,6 +1786,8 @@ fn placeholder(s: &App) -> String {
             None => "Enter Git clone URL".into(),
             Some(i) => format!("Enter {} repository ({})", add_project::PROVIDERS[i].label, add_project::PROVIDERS[i].hint),
         }
+    } else if add_project::browsing(s) && ui.page.is_empty() {
+        "Enter project path (e.g. ~/projects/my-app)".into()
     } else if add_project::browsing(s) {
         "Enter path (e.g. ~/projects/my-app)".into()
     } else if !ui.page.is_empty() {
@@ -1893,38 +1897,39 @@ fn summary(s: &App, t: &T) -> Option<El> {
     )
 }
 /// What an empty raw view says instead of rows.
-fn empty_text(s: &App) -> Option<String> {
+fn empty_text(s: &App) -> String {
     let ui = &s.ui.shell.palette;
     if ui.page == "files" {
-        return Some(ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into()));
+        return ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into());
     }
     if add_project::repository_step(s) {
         let url = ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none());
-        return Some(if url {
+        return if url {
             "Enter a Git clone URL and press Enter to continue."
         } else {
             "Enter a repository path and press Enter to look it up."
         }
-        .into());
+        .into();
     }
     if add_project::browsing(s) {
         let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
-        return Some(if confirm {
+        return if confirm {
             "Choose a destination path and press Enter to clone."
         } else if add_project::will_create(s) {
             "Press Enter to create this folder and add it as a project."
         } else {
             "No matching commands, projects, or threads."
         }
-        .into());
+        .into();
     }
     if actions_filter(ui).0 {
-        return Some("No matching actions.".into());
+        return "No matching actions.".into();
     }
     if searching_messages(ui) {
-        return Some("Searching thread messages…".into());
+        return "Searching thread messages…".into();
     }
-    (ui.page.is_empty() || add_project::page_is_flow(&ui.page)).then(|| "No matching commands, projects, or threads.".into())
+    // `CommandPaletteEmptyState`'s default, in submenus too.
+    "No matching commands, projects, or threads.".into()
 }
 fn note(label: String, t: &T) -> El {
     row().w_full().px(16.).py(12.).child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
@@ -1975,10 +1980,10 @@ fn footer(s: &App, rows: &[Item], t: &T) -> El {
         .border(1., t.c.contrast_foreground.alpha_mul(0.07))
         .child(hints)
         .child(el().grow(1.));
-    if !rows.is_empty() && searching_messages(ui) && !add_project::browsing(s) {
+    if searching_messages(ui) && !add_project::browsing(s) {
         bar = bar.child(text("Searching messages…").font(theme::TEXT_XS).color(t.c.muted_foreground));
     }
-    if add_project::browsing(s) {
+    if add_project::browsing(s) && add_project::can_pick_locally(s) {
         let manager = if cfg!(target_os = "macos") {
             "Finder"
         } else if cfg!(target_os = "windows") {
@@ -2204,14 +2209,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     } else if add_project::browsing(s) && add_project::browse_pending(s) {
         list = list.child(note("Loading folders...".into(), t));
     } else if rows.is_empty() {
-        list = list.child(match empty_text(s) {
-            Some(label) => col()
-                .w_full()
-                .py(40.)
-                .center()
-                .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground)),
-            None => kit::empty("No results found.", "", t),
-        });
+        list = list.child(col().w_full().py(40.).center().child(text(empty_text(s)).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground)));
     }
     let tall = ui.page == "files";
     let list = kit::scroll_area(

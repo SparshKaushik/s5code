@@ -305,13 +305,15 @@ fn readiness(s: &App, provider: usize) -> (bool, String) {
         d["sourceControlProviders"].as_array().and_then(|v| v.iter().find(|v| v["kind"] == p.kind)).cloned()
     });
     let Some(entry) = entry else {
-        return (false, "Provider status unavailable. Open Settings -> Source control and rescan.".into());
+        // `buildAddProjectRemoteSourceReadiness`'s wording; web's case-sensitive rewrite below
+        // leaves it and the unauthenticated fallback as they are.
+        return (false, "Provider status unavailable. Open Source Control settings and rescan.".into());
     };
     let hint = if entry["status"] != "available" {
         data::s(&entry, "installHint").to_owned()
     } else if entry["auth"]["status"] == "unauthenticated" {
         option(&entry["auth"]["detail"]).unwrap_or_else(|| {
-            format!("{} is not authenticated. Open source control settings for setup guidance.", data::s(&entry, "label"))
+            format!("{} is not authenticated. Open Source Control settings for setup guidance.", data::s(&entry, "label"))
         })
     } else {
         return (true, String::new());
@@ -576,29 +578,49 @@ pub fn open_in(s: &mut App, key: &str) {
     push_page(s, "add-project", "");
     request_discovery(s);
 }
-/// The environments "Add project" can target, as the web's `buildEnvironmentItem`.
+/// Whether any environment can take a new project (`canCreateProjectInEnvironment`).
+pub fn any_connected(s: &App) -> bool {
+    crate::env::keys(s).iter().any(|k| crate::env::connected(s, k))
+}
+
+/// `resolveEnvironmentOptionLabel`: this device's own label unless it is a generic one, else the
+/// environment's runtime label, else its saved name.
+fn option_label(s: &App, key: &str) -> String {
+    let runtime = crate::env::source(s, key).and_then(|src| src.state().config.as_ref()).and_then(|c| c["environment"]["label"].as_str()).map(str::trim).filter(|l| !l.is_empty());
+    if key == crate::env::LOCAL {
+        let generic = |l: &&str| matches!(l.to_lowercase().as_str(), "local" | "local environment");
+        return runtime.filter(|l| !generic(l)).unwrap_or("This device").to_owned();
+    }
+    runtime.map(str::to_owned).unwrap_or_else(|| Some(crate::env::label(s, key)).filter(|l| !l.is_empty()).unwrap_or_else(|| key.to_owned()))
+}
+
+/// The connected environments "Add project" can target, this device first, then by label, as
+/// the web's `buildEnvironmentItem` rows.
 pub fn environment_items(s: &App) -> Vec<Item> {
-    let keys = crate::env::keys(s);
-    if !keys.iter().any(|k| crate::env::connected(s, k)) {
-        let mut v = item("Connect an environment", "Environments", &crate::icons::SETTINGS, "", Action::Navigate(crate::Route::Settings("connections".into())));
+    let mut keys: Vec<String> = crate::env::keys(s).into_iter().filter(|k| crate::env::connected(s, k)).collect();
+    if keys.is_empty() {
+        let mut v = item("Connect an environment", "", &crate::icons::SETTINGS, "", Action::Navigate(crate::Route::Settings("connections".into())));
         v.description = Some("No connected environment can add a project".into());
         v.fields = keywords(&["connect", "environment", "connection", "settings"]);
         return vec![v];
     }
-    keys
-        .into_iter()
+    keys.sort_by_key(|k| (k != crate::env::LOCAL, option_label(s, k)));
+    keys.into_iter()
         .map(|key| {
             let local = key == crate::env::LOCAL;
-            let label = crate::env::label(s, &key);
-            let connected = crate::env::connected(s, &key);
-            let glyph = if local { &crate::icons::LAPTOP } else { &crate::icons::SERVER };
-            let mut v = item(label.clone(), "Environments", glyph, "", Action::AddProjectIn(key.clone()));
-            v.description = Some(if !connected { crate::env::status(s, &key) } else if local { "This device".into() } else { key.clone() });
-            v.disabled = !connected;
+            let label = option_label(s, &key);
+            let mut v = item(label.clone(), "Environments", crate::settings::env_machine_icon(s, &key), "", Action::AddProjectIn(key.clone()));
+            v.description = Some(if local { "This device".into() } else { key.clone() });
             v.fields = keywords(&[label.as_str(), key.as_str(), if local { "this device" } else { "" }]);
             v
         })
         .collect()
+}
+
+/// Whether picked folders can come from this device's file manager: only for this device's
+/// own environment (`CP:2394`).
+pub fn can_pick_locally(s: &App) -> bool {
+    target(s) == crate::env::LOCAL
 }
 pub fn choose(s: &mut App, source: Source) {
     s.ui.shell.palette.add.clone = None;
@@ -693,12 +715,26 @@ pub fn submit(s: &mut App) -> bool {
         return true;
     }
     let path = resolved_path(s);
+    if !target_connected(s) {
+        return true;
+    }
     if confirm_step(s) {
         start_clone(s, &path);
     } else {
         add(s, &path);
     }
     true
+}
+
+/// The picked environment is still connected, else web's "Environment unavailable" toast.
+fn target_connected(s: &mut App) -> bool {
+    let key = target(s);
+    if crate::env::connected(s, &key) {
+        return true;
+    }
+    let label = option_label(s, &key);
+    super::toast_error_brief(s, "Environment unavailable", Some(&format!("{label} is not connected.")));
+    false
 }
 fn add(s: &mut App, raw: &str) {
     if busy(s) {
@@ -731,6 +767,9 @@ fn add(s: &mut App, raw: &str) {
         s.ui.shell.palette.open = false;
         crate::shell::sidebar::go(s, route);
         return;
+    }
+    if !crate::shell::sidebar::grants_on(s, &key, "orchestration:operate") {
+        return super::toast_error_brief(s, "Cannot add project", Some("This connection cannot add projects."));
     }
     let project_id = s5_net::uuid();
     let command = json!({
@@ -784,10 +823,17 @@ pub fn confirm(s: &mut App, confirm: Confirm) {
     sync_browse(s);
 }
 fn start_clone(s: &mut App, destination: &str) {
-    let Some(confirm) = s.ui.shell.palette.add.clone.as_ref().and_then(|c| c.confirm.as_ref()) else { return };
+    if s.ui.shell.palette.add.clone.as_ref().and_then(|c| c.confirm.as_ref()).is_none() {
+        return;
+    }
     if busy(s) || destination.trim().is_empty() {
         return;
     }
+    let key = target(s);
+    if !crate::shell::sidebar::grants_on(s, &key, "source-control:write") || !crate::shell::sidebar::grants_on(s, &key, "orchestration:operate") {
+        return super::toast_error_brief(s, "Clone unavailable", Some("This connection needs permission to write source control and add projects."));
+    }
+    let Some(confirm) = s.ui.shell.palette.add.clone.as_ref().and_then(|c| c.confirm.as_ref()) else { return };
     let project_id = s5_net::uuid();
     let title = confirm.name_with_owner.as_deref()
         .and_then(|v| v.rsplit('/').next())
@@ -997,7 +1043,7 @@ mod tests {
         crate::shell::palette::open_add_project(&mut s);
         assert_eq!(s.ui.shell.palette.page, "add-project", "one connected environment skips the list");
         assert_eq!(new_projects_root(&s).as_deref(), Some("/home/me/new"));
-        assert!(environment_items(&s)[1].disabled, "a disconnected environment is listed but cannot be picked");
+        assert_eq!(environment_items(&s).len(), 1, "FAILED: a disconnected environment is not listed, as on web");
         s.ui.shell.palette.query = rune::TextEdit::new("~/projects/");
         assert_eq!(browse_error(&s), None);
         crate::settings::permissions::set_session(&mut s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
