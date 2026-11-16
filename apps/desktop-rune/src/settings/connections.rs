@@ -110,7 +110,7 @@ pub(super) fn reason(error: &Value) -> String {
 }
 
 /// Web `resolveEnvironmentMachineKind`: the chosen icon, else the detected machine, else a server.
-pub(super) fn machine_kind<'a>(chosen: Option<&'a str>, detected: Option<&'a str>) -> &'a str {
+pub(crate) fn machine_kind<'a>(chosen: Option<&'a str>, detected: Option<&'a str>) -> &'a str {
     chosen.filter(|kind| KINDS.iter().any(|(k, _)| k == kind)).or(detected).unwrap_or("server")
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn env_machine_icon(s: &App, key: &str) -> &'static Icon {
     ))
 }
 
-pub(super) fn machine_icon(kind: &str) -> &'static Icon {
+pub(crate) fn machine_icon(kind: &str) -> &'static Icon {
     match kind {
         "cloud" => &icons::CLOUD,
         "linux" => &icons::TERMINAL,
@@ -1226,7 +1226,7 @@ fn ssh_fields(s: &App, t: &T) -> El {
 }
 
 /// Web `offersLinkedEnvironments`.
-fn offers_links(s: &App) -> bool {
+pub(super) fn offers_links(s: &App) -> bool {
     s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["peerLinks"] == true)
         && super::server_settings(s)["linkedEnvironmentsEnabled"] == true
 }

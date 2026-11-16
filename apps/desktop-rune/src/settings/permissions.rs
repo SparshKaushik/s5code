@@ -38,8 +38,10 @@ fn fetch(s: &mut App, key: &str) {
 pub fn poll(s: &mut App) -> bool {
     // An environment switched to, or connected since, is asked once.
     let target = target(s);
-    if !s.ui.settings.session.by_env.contains_key(&target) {
-        fetch(s, &target);
+    for key in crate::env::keys(s) {
+        if !s.ui.settings.session.by_env.contains_key(&key) && (key == target || crate::env::connected(s, &key)) {
+            fetch(s, &key);
+        }
     }
     let pending: Vec<(String, u64)> = s.ui.settings.session.by_env.iter().filter_map(|(k, e)| Some((k.clone(), e.pending?))).collect();
     let mut changed = false;
@@ -83,6 +85,27 @@ pub fn can_on(s: &App, key: &str, scope: &str) -> bool {
         Some(crate::data::Source::Live(_)) => reply_on(s, key).and_then(|r| r.as_ref().ok()).is_some_and(|session| grants(session, scope)),
         None => false,
     }
+}
+
+/// Web `resolveFilesystemReadAccess`, for any scope: `None` while the session check runs, else
+/// granted, or why not (`Err(None)`: denied, in the caller's own words).
+pub fn access_on(s: &App, key: &str, scope: &str) -> Option<Result<(), Option<String>>> {
+    const OFFLINE: &str = "This environment is not connected.";
+    match crate::env::source(s, key) {
+        Some(crate::data::Source::Fixture(_)) => Some(Ok(())),
+        Some(crate::data::Source::Live(_)) => match reply_on(s, key) {
+            Some(Ok(session)) => Some(if grants(session, scope) { Ok(()) } else { Err(None) }),
+            Some(Err(cause)) => Some(Err(Some(crate::shell::palette::error_message(cause, OFFLINE)))),
+            None if crate::env::connected(s, key) => None,
+            None => Some(Err(Some(OFFLINE.into()))),
+        },
+        None => Some(Err(Some(OFFLINE.into()))),
+    }
+}
+
+/// `access_on` with the caller's denial copy: `None` while checking.
+pub fn access_or(s: &App, key: &str, scope: &str, denied: &str) -> Option<Result<(), String>> {
+    access_on(s, key, scope).map(|r| r.map_err(|reason| reason.unwrap_or_else(|| denied.to_owned())))
 }
 
 /// Every scope `method` needs (contracts `clientRpcRequiredScopes`) is granted.

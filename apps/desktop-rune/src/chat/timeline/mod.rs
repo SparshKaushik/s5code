@@ -4,7 +4,7 @@ pub mod chip;
 mod changed;
 pub mod error_banner;
 pub mod find;
-mod markdown;
+pub(crate) mod markdown;
 
 mod language_icons;
 pub mod plan;
@@ -22,6 +22,8 @@ mod worktree_setup;
 mod inspector;
 mod history;
 mod md_links;
+mod citation;
+mod media;
 mod work;
 mod lifecycle;
 pub mod now;
@@ -83,7 +85,8 @@ pub(super) fn row_keys(rows: &[Row]) -> Vec<String> {
                 | Row::Tools { id, .. }
                 | Row::Thinking { id, .. }
                 | Row::Attempt { id, .. }
-                | Row::Subagents { id, .. } => id.as_str(),
+                | Row::Subagents { id, .. }
+                | Row::Meta { id, .. } => id.as_str(),
                 Row::Request { request, .. } => s(request, "id"),
             };
             let key = format!("timeline-row-{id}");
@@ -517,6 +520,12 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     if kind == "subagent" {
         return subagent::view(app, item, t);
     }
+    // A subagent's notice reads as its task's card once the task is known.
+    if kind == "notification"
+        && let Some(card) = subagent::notification(app, item, t)
+    {
+        return card;
+    }
     let glyph = match kind {
         // workEntryIconName: a notification's icon names its source.
         "notification" if s(item, "outcome") == "failed" => &icons::CIRCLE_ALERT,
@@ -527,52 +536,46 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             "system" => &T3_MARK,
             _ => &icons::ZAP,
         },
-        "approval_request" | "user_input_request" => &icons::MESSAGE_CIRCLE,
-        "reasoning" => &icons::BRAIN,
-        "command_execution" => &icons::TERMINAL,
-        "file_change" => &icons::SQUARE_PEN,
-        "todo_list" => &icons::LIST_TODO,
-        _ => &icons::WRENCH,
+        _ => work::entry_icon(item),
     };
     let head_key = format!("item-head-{id}");
-    let path_label = rows::workspace_path(s(item, "fileName"), workspace_root(app).as_deref());
-    let thought = s(item, "text").split_whitespace().collect::<Vec<_>>().join(" ");
-    let todo = (kind == "todo_list").then(|| rows::todo_label(item));
-    let fallback = rows::label(item);
-    let title = if let Some(label) = &todo {
-        label.as_str()
-    } else if kind == "reasoning" && !thought.is_empty() {
-        thought.as_str()
-    } else if kind == "reasoning" {
-        "Thought"
-    } else if kind == "command_execution" && !s(item, "input").is_empty() {
-        s(item, "input")
-    } else if kind == "file_change" {
-        path_label.as_str()
-    } else {
-        fallback.as_str()
-    };
+    let root = workspace_root(app);
+    let path_label = rows::workspace_path(s(item, "fileName"), root.as_deref());
+    let todo = kind == "todo_list";
+    let title = work::entry_title(item, root.as_deref(), expanded);
+    // canExpandProjectedItem: an empty reasoning block has nothing to open.
+    let opens = kind != "reasoning" || !s(item, "text").trim().is_empty();
     // failedToolIconClassName: a failed tool call tints its icon and says so to screen readers.
     let failed = s(item, "status") == "failed" && kind != "notification";
-    let glyph_color = if failed { t.c.destructive.alpha_mul(0.4) } else { t.c.muted_foreground };
-    let spoken = if failed { format!("{title}, tool call failed") } else { title.to_owned() };
+    let glyph_color = if failed { t.c.destructive.alpha_mul(0.4) } else { t.c.icon_muted };
+    let spoken = if failed { format!("{title}, tool call failed") } else { title.clone() };
+    // workLogEntryIsToolLike: tool rows read in the secondary label colour, notices brighter.
+    let title_color = if kind == "notification" { t.c.foreground.alpha_mul(0.8) } else { t.c.secondary_label };
     let ask = inspector::ask(app, item);
     // notificationChildThreadId: a subagent's or delegated task's notice opens its thread.
     let child_thread = Some(s(&item["source"], "childThreadId"))
         .filter(|c| kind == "notification" && !c.is_empty() && matches!(s(&item["source"], "kind"), "subagent" | "delegated_task"))
         .map(str::to_owned);
     let mut out = col().w_full().gap(4.0);
-    let head = row()
+    let mut head = row()
         .gap(8.0)
         .py(4.0)
         .px(4.0)
+        .center_y()
         .radius(6.0)
-        .hover(t.c.muted.alpha_mul(0.4))
-        .focusable(true)
-        .role("button")
         .label(spoken)
         .key(head_key.clone())
-        .on_press_tx(move |app: &mut App, tx| {
+        .child(if failed { icon(glyph, 16.0).color(glyph_color).help("Tool call failed") } else { icon(glyph, 16.0).color(glyph_color) })
+        .child(text(title).font(theme::TEXT_SM).color(title_color).truncate().grow(1.0).min_w(0.0))
+        .child(
+            row().size(16.0, 16.0).center().opacity(if opens { 1.0 } else { 0.0 }).child(
+                icon(&icons::CHEVRON_RIGHT, 12.0)
+                    .color(t.c.icon_muted.alpha_mul(0.7))
+                    .rotate(if expanded { std::f32::consts::FRAC_PI_2 } else { 0.0 }),
+            ),
+        );
+    if opens {
+        head = head.hover(t.c.muted.alpha_mul(0.4)).focusable(true).role("button").expanded(expanded).on_press_tx(move |app: &mut App, tx| {
             tx.keep_on_screen(head_key.clone());
             toggle(app, &id);
             if let Some(ask) = &ask
@@ -580,27 +583,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             {
                 inspector::fetch(app, ask);
             }
-        })
-        .child(if failed { icon(glyph, 16.0).color(glyph_color).help("Tool call failed") } else { icon(glyph, 16.0).color(glyph_color) })
-        .child(
-            text(title)
-                .font(theme::TEXT_SM)
-                .color(t.c.muted_foreground)
-                .truncate()
-                .grow(1.0)
-                .min_w(0.0),
-        )
-        .child(
-            icon(
-                if expanded {
-                    &icons::CHEVRON_DOWN
-                } else {
-                    &icons::CHEVRON_RIGHT
-                },
-                12.0,
-            )
-            .color(t.c.muted_foreground),
-        );
+        });
+    }
     out = out.child(match child_thread {
         Some(child) => row().w_full().gap(8.0).center_y().child(head.grow(1.0).min_w(0.0)).child(
             inline_button("Open subagent", false, t)
@@ -609,8 +593,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         ),
         None => head.w_full(),
     });
-    let inspected = (expanded && todo.is_none() && !matches!(kind, "reasoning" | "notification")).then(|| inspector::view(app, item, t)).flatten();
-    if expanded && todo.is_some() {
+    let inspected = (expanded && !todo && !matches!(kind, "reasoning" | "notification")).then(|| inspector::view(app, item, t)).flatten();
+    if expanded && todo {
         let mut steps = col().w_full().gap(6.0).px(28.0);
         for step in array(item, "steps") {
             steps = steps.child(
@@ -927,6 +911,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     let targets = rows::revert_targets(&view.projection);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
+    // Replies whose meta row moved below their trailing work.
+    let moved: HashSet<String> = rows.iter().filter_map(|r| if let Row::Meta { item, .. } = r { Some(s(item, "id").to_owned()) } else { None }).collect();
+    // Superseded attempts inside finished turns' folds, found once a fold is open.
+    let mut nested: Option<HashMap<String, String>> = None;
     let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
     // A run of steers shows the marker once (continuesSteer).
     let mut prev_steer = false;
@@ -1077,8 +1065,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         marks.as_ref(),
                     ))
                     .children(changes.get(s(item, "id")).map(|c| changed::card(app, c, t)))
-                    .child(row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0))),
+                    .children((!moved.contains(s(item, "id"))).then(|| row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0)))),
             ),
+            // AssistantMetaTimelineRow: always shown, under the work it follows.
+            Row::Meta { id, item } => (id, col().w_full().px(4.0).pb(8.0).child(row().child(actions::assistant(app, thread_id, item, t)))),
             Row::Working { id, label, compacting } => (id, work::working_view(label, compacting, t)),
             Row::Work { id, label, items } => {
                 let expanded = app.ui.chat.timeline.expanded.contains(&id);
@@ -1127,14 +1117,24 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     body = body.child(history::work_skeleton(t));
                 }
                 if expanded {
-                    for entry in work::group(&items) {
-                        body = body.child(match entry {
-                            work::Entry::One(item) if s(item, "type") == "assistant_message" => {
-                                col().w_full().px(4.0).child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
+                    let attempts = nested.get_or_insert_with(|| rows::fold_attempts(&view.projection));
+                    for part in work::nest(&items, attempts) {
+                        let plain = match part {
+                            work::Part::Attempt(fold, members) => {
+                                body = body.child(work::attempt_view(app, &fold, &members, t));
+                                continue;
                             }
-                            work::Entry::One(item) => item_view(app, item, t),
-                            work::Entry::Group(id, items) => work::group_view(app, &id, &items, t),
-                        });
+                            work::Part::Plain(plain) => plain,
+                        };
+                        for entry in work::group(&plain) {
+                            body = body.child(match entry {
+                                work::Entry::One(item) if s(item, "type") == "assistant_message" => {
+                                    col().w_full().px(4.0).child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
+                                }
+                                work::Entry::One(item) => item_view(app, item, t),
+                                work::Entry::Group(id, items) => work::group_view(app, &id, &items, t),
+                            });
+                        }
                     }
                 }
                 (

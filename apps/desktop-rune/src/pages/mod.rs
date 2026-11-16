@@ -347,6 +347,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-guide-empty", |s| pr_guide::scene(s, "empty")),
     ("pull-requests-detail-guide-ready", |s| pr_guide::scene(s, "ready")),
     ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
+    ("pull-requests-detail-guide-finish", |s| pr_guide::scene(s, "finish")),
+    ("pull-requests-detail-guide-excerpt-comment", |s| pr_guide::scene(s, "comment")),
+    ("pull-requests-detail-menu-guide", |s| pr_guide::scene(s, "menu")),
     ("pull-requests-detail-code", |s| {
         open_detail(s, 2, |_| {});
         pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
@@ -362,6 +365,29 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-code-line-comment", |s| {
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "line-comment");
+    }),
+    ("pull-requests-detail-code-inline-threads", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "threads");
+    }),
+    ("pull-requests-detail-code-options-menu", |s| {
+        open_detail(s, 2, |_| {});
+        pr_tabs::scene(s, 1, Some(4000.0));
+        pr_code::scene(s, "options");
+    }),
+    ("pull-requests-detail-code-more-files", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "more-files");
+    }),
+    ("pull-requests-detail-code-pending-review", |s| {
+        open_detail(s, 0, |u| {
+            pr_edit::scene_caps(u);
+            u.description_closed = true;
+            u.comments_closed = true;
+            u.edit.composer.review = true;
+            u.edit.composer.open = true;
+        });
+        pr_code::scene(s, "pending-review");
     }),
     ("pull-requests-detail-checks", |s| {
         open_detail(s, 0, |_| {});
@@ -411,6 +437,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             }
         })
     }),
+    ("pull-requests-detail-timeline-threads", |s| {
+        open_detail(s, 1, |u| {
+            let Some(a) = &mut u.activity else { return };
+            if let Some(list) = a["comments"].as_array_mut() {
+                list.push(json!({"id": "c3", "kind": "issue-comment", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": "Ship it once CI is green.", "createdAt": "2026-11-06T09:52:00.000Z", "url": null, "path": null, "reviewState": null}));
+            }
+            if let Some(threads) = a["reviewThreads"].as_array_mut() {
+                if let Some(first) = threads.first_mut() {
+                    first["commentCount"] = json!(6);
+                }
+                let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+                threads.push(json!({"id": "t-resolved", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": true, "comments": [{"id": "tr1", "author": julius, "body": "Nit: rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": null}]}));
+            }
+            u.open_comments.insert("comments:c3".into());
+        })
+    }),
     ("pull-requests-detail-commit-scope", |s| {
         open_detail(s, 1, |_| {});
         pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
@@ -433,6 +475,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-linked-threads", |s| {
         open_detail(s, 0, |_| {});
         pr_meta::scene(s, "linked");
+    }),
+    ("pull-requests-detail-link-thread", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "link-thread");
+    }),
+    ("pull-requests-detail-stacked-on", |s| {
+        open_detail(s, 0, |_| {});
+        pr_meta::scene(s, "stacked");
     }),
     ("pull-requests-detail-stack-menu", |s| {
         open_detail(s, 0, |_| {});
@@ -498,6 +548,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             }
         });
     }),
+    ("pull-requests-detail-diff-error-details", |s| {
+        open_detail(s, 2, |u| {
+            u.files = None;
+            u.diff_error = Some("Pull request operation diff failed: gh pr diff 2481 exited with code 1: HTTP 502: Bad Gateway (https://api.github.com/repos/s5labs/s5code/pulls/2481)".into());
+            u.diff_details = true;
+        })
+    }),
+    ("pull-requests-detail-summary-comment-failed", |s| {
+        open_detail(s, 0, |u| {
+            u.description_closed = true;
+            u.activity = None;
+            u.activity_error = Some("The environment request failed.".into());
+        })
+    }),
     ("pull-requests-detail-light", |s| {
         open_detail(s, 0, |_| {});
         light(s);
@@ -529,6 +593,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             u.description_closed = true;
             u.comments_closed = true;
             u.edit.composer.comment = rune::TextEdit::new("Superseded by #2490, which carries these pages forward.");
+            u.edit.composer.open = true;
         })
     }),
     ("pull-requests-detail-review-composer", |s| {
@@ -537,6 +602,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             u.description_closed = true;
             u.comments_closed = true;
             let c = &mut u.edit.composer;
+            c.open = true;
             c.review = true;
             c.verdict = Some("request-changes");
             c.verdict_menu = true;
@@ -565,6 +631,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-tabs", |s| {
         open_detail(s, 0, |_| {});
         pr_tabs::scene(s, 3, None);
+    }),
+    ("pull-requests-narrow", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 3, Some(4000.0));
+    }),
+    ("pull-requests-tabs-overflow", |s| {
+        open_detail(s, 0, |_| {});
+        pr_tabs::scene(s, 8, Some(360.0));
     }),
     ("pull-requests-panel-resized", |s| {
         open_detail(s, 0, |_| {});
@@ -616,6 +690,23 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-server-menu", |s| {
         open_prs(s, |_| {});
         pull_requests::environments_scene(s);
+        let u = &mut s.ui.pages.pull_requests;
+        u.menu = Some("filters");
+        u.submenu = Some("server");
+    }),
+    ("pull-requests-server-menu-machines", |s| {
+        open_prs(s, |_| {});
+        pull_requests::environments_scene(s);
+        if let Some(crate::data::Source::Fixture(state)) = crate::env::source_mut(s, "studio")
+            && let Some(config) = &mut state.config
+        {
+            config["settings"]["environmentIcon"] = json!("mac-studio");
+        }
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = &mut state.config
+        {
+            config["environment"]["platform"]["machine"] = json!("laptop");
+        }
         let u = &mut s.ui.pages.pull_requests;
         u.menu = Some("filters");
         u.submenu = Some("server");

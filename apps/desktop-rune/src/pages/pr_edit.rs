@@ -15,16 +15,17 @@ use crate::icons as i;
 use crate::kit::{self, Menu, MenuItem, Placement, ToggleGroup};
 use crate::theme::{self, AlphaMul, T, radius};
 
-/// PULL_REQUEST_REACTION_ORDER, with each reaction's emoji and name.
+/// PULL_REQUEST_REACTION_ORDER, with each reaction's emoji and name. Each emoji carries U+FE0F,
+/// which routes it to the system's colour emoji font ahead of text fonts with a plain glyph.
 const REACTIONS: [(&str, &str, &str); 8] = [
-    ("thumbs-up", "👍", "thumbs up"),
-    ("thumbs-down", "👎", "thumbs down"),
-    ("laugh", "😄", "laugh"),
-    ("hooray", "🎉", "hooray"),
-    ("confused", "😕", "confused"),
-    ("heart", "❤️", "heart"),
-    ("rocket", "🚀", "rocket"),
-    ("eyes", "👀", "eyes"),
+    ("thumbs-up", "\u{1F44D}\u{FE0F}", "thumbs up"),
+    ("thumbs-down", "\u{1F44E}\u{FE0F}", "thumbs down"),
+    ("laugh", "\u{1F604}\u{FE0F}", "laugh"),
+    ("hooray", "\u{1F389}\u{FE0F}", "hooray"),
+    ("confused", "\u{1F615}\u{FE0F}", "confused"),
+    ("heart", "\u{2764}\u{FE0F}", "heart"),
+    ("rocket", "\u{1F680}\u{FE0F}", "rocket"),
+    ("eyes", "\u{1F440}\u{FE0F}", "eyes"),
 ];
 
 /// The review form's VERDICTS, in its order.
@@ -57,6 +58,8 @@ pub struct CommentDraft {
 
 #[derive(Default)]
 pub struct Composer {
+    /// The composer's popover is open.
+    pub open: bool,
     /// Review was picked over Comment (requestedMode).
     pub review: bool,
     pub comment: TextEdit,
@@ -167,9 +170,20 @@ pub fn comment_update(entry: &Value, id: &str, kind: &str, body: &str) -> Option
     matches!(kind, "issue-comment" | "review-comment").then(|| payload(entry, json!({"commentId": id, "kind": kind, "body": body})))
 }
 
-/// PullRequestSubmitReviewInput, without line comments: this panel has no pending ones.
-pub fn review_payload(entry: &Value, verdict: &str, body: &str) -> Value {
-    payload(entry, json!({"verdict": verdict, "body": body, "comments": []}))
+/// PullRequestSubmitReviewInput: the summary and the Code tab's pending line comments, each a
+/// PullRequestReviewCommentDraft without the id the pending list keys it by.
+pub fn review_payload(entry: &Value, verdict: &str, body: &str, pending: &[Value]) -> Value {
+    let comments: Vec<Value> = pending
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if let Some(o) = c.as_object_mut() {
+                o.remove("id");
+            }
+            c
+        })
+        .collect();
+    payload(entry, json!({"verdict": verdict, "body": body, "comments": comments}))
 }
 
 pub fn reaction_payload(entry: &Value, subject: &str, content: &str, reacted: bool) -> Value {
@@ -210,14 +224,14 @@ fn summary_required(d: &Value, verdict: &str) -> bool {
     verdict == "request-changes" && field(d, "provider") == "forgejo"
 }
 
-/// canSubmit: approving needs nothing, the other verdicts a summary.
-pub fn can_submit(verdict: &str, summary: &str, required: bool) -> bool {
+/// canSubmit: approving needs nothing, the other verdicts a summary or line comments.
+pub fn can_submit(verdict: &str, summary: &str, required: bool, comments: bool) -> bool {
     let written = !summary.trim().is_empty();
-    if verdict == "request-changes" && required { written } else { verdict == "approve" || written }
+    if verdict == "request-changes" && required { written } else { verdict == "approve" || written || comments }
 }
 
-pub fn review_placeholder(verdict: &str, required: bool) -> &'static str {
-    if can_submit(verdict, "", required) {
+pub fn review_placeholder(verdict: &str, required: bool, comments: bool) -> &'static str {
+    if can_submit(verdict, "", required, comments) {
         "Summarize your review (optional)"
     } else if verdict == "request-changes" && required {
         "Summarize your review (required to request changes)"
@@ -385,6 +399,9 @@ fn finish(s: &mut App, pending: Pending, reply: Result<Value, Value>) {
         return;
     }
     let e = edit(s);
+    if matches!(pending, Pending::Post(_) | Pending::Review { .. }) {
+        e.composer.open = false;
+    }
     match pending {
         Pending::Title => e.title = None,
         Pending::Body => e.body = None,
@@ -406,6 +423,7 @@ fn finish(s: &mut App, pending: Pending, reply: Result<Value, Value>) {
             if e.composer.summary.text == body {
                 e.composer.summary.clear();
             }
+            super::pr_code::review_submitted(s);
             crate::shell::palette::toast(s, &verdict_sent(verdict, word), None);
         }
         Pending::Reaction { .. } => {}
@@ -511,11 +529,14 @@ fn submit_review(s: &mut App) {
     let (Some(entry), Some(d)) = (&u.entry, &u.detail) else { return };
     let Some(verdict) = selected_verdict(&verdicts(d), u.edit.composer.verdict) else { return };
     let body = u.edit.composer.summary.text.clone();
-    if !can_submit(verdict, &body, summary_required(d, verdict)) {
+    let lines = super::pr_code::pending(s, entry).to_vec();
+    if !can_submit(verdict, &body, summary_required(d, verdict), !lines.is_empty()) {
         return;
     }
-    let input = review_payload(entry, verdict, &body);
-    send(s, "pullRequests.submitReview", input, Pending::Review { verdict, body });
+    let input = review_payload(entry, verdict, &body, &lines);
+    if send(s, "pullRequests.submitReview", input, Pending::Review { verdict, body }) {
+        super::pr_code::hold_submitted(s, &lines);
+    }
 }
 
 /// The reaction bar's toggle: shown at once, dropped again if the host refuses it.
@@ -686,16 +707,29 @@ pub fn comment_body(s: &App, t: &T, c: &Value, shown: Option<El>) -> Option<El> 
     Some(line)
 }
 
-/// PullRequestReactionBar for a comment: its reactions, then the picker where the host takes them.
+/// A subject's reactions as shown, the ones sent laid over the host's, and the host's signature.
+fn layered(e: &Edit, subject: &str, c: Option<&Value>) -> (String, Vec<Value>) {
+    let host = c.and_then(|c| c["reactions"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
+    let sig = signature(host);
+    let overlay = e.reactions.get(subject).filter(|(at, _)| *at == sig).map_or(&[][..], |(_, wanted)| wanted.as_slice());
+    let shown = apply_pending(host, overlay);
+    (sig, shown)
+}
+
+/// A comment in the activity, among the conversation or a review thread's.
+fn find_comment<'a>(activity: &'a Value, id: &str) -> Option<&'a Value> {
+    let threads = activity["reviewThreads"].as_array().into_iter().flatten().flat_map(|th| th["comments"].as_array().into_iter().flatten());
+    activity["comments"].as_array().into_iter().flatten().chain(threads).find(|c| field(c, "id") == id)
+}
+
+/// PullRequestReactionBar for a comment: its reactions, then the button opening the picker where
+/// the host takes them.
 pub fn reaction_bar(s: &App, t: &T, c: &Value) -> Option<El> {
     let u = &s.ui.pages.detail;
     let d = u.detail.as_ref()?;
     let can_react = d["capabilities"]["reactions"] == true && writable(s);
     let subject = field(c, "id").to_string();
-    let host = c["reactions"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let sig = signature(host);
-    let overlay = u.edit.reactions.get(&subject).filter(|(at, _)| *at == sig).map_or(&[][..], |(_, wanted)| wanted.as_slice());
-    let shown = apply_pending(host, overlay);
+    let (sig, shown) = layered(&u.edit, &subject, Some(c));
     if shown.is_empty() && !can_react {
         return None;
     }
@@ -743,32 +777,50 @@ pub fn reaction_bar(s: &App, t: &T, c: &Value) -> Option<El> {
             .label("Add a reaction")
             .help("Add a reaction")
             .child(icon(&i::SMILE_PLUS, 14.0).color(t.c.muted_foreground))
+            .expanded(u.edit.picker.as_deref() == Some(subject.as_str()))
             .on_press(move |s: &mut App| {
                 let picker = &mut edit(s).picker;
                 *picker = if picker.as_deref() == Some(toggle.as_str()) { None } else { Some(toggle.clone()) };
             }),
     );
-    if u.edit.picker.as_deref() == Some(subject.as_str()) {
-        let mut picker = row().key(format!("pr-reaction-picker-{subject}")).gap(2.0).padding(2.0).center_y().radius(radius::MD).border(1.0, t.c.border).fill(t.c.background);
-        for (content, emoji, name) in REACTIONS {
-            let reacted = shown.iter().any(|r| field(r, "content") == content && r["viewerHasReacted"] == true);
-            let (subject, sig) = (subject.clone(), sig.clone());
-            let mut option = row().key(format!("pr-reaction-pick-{content}")).size(28.0, 28.0).center().radius(radius::MD).hover(t.c.accent).cursor(Cursor::Pointer).role("button").label(name).help(name).child(text(emoji).font(theme::TEXT_BASE));
-            if reacted {
-                option = option.fill(t.c.primary.alpha_mul(0.1));
-            }
-            picker = picker.child(option.on_press(move |s: &mut App| {
-                edit(s).picker = None;
-                toggle_reaction(s, &subject, &sig, content, !reacted);
-            }));
-        }
-        bar = bar.child(picker);
-    }
     Some(bar)
 }
 
-/// PullRequestComposer, at the end of the Summary: Comment and Review where both are allowed,
-/// else whichever one is.
+/// The reaction bar's picker, a popover above the open subject's add button (side top, align
+/// start); mounted beside the panel because the bars sit in rows that hold no overlay layer.
+pub fn reaction_picker(s: &App, t: &T, overlays: &mut Vec<El>) {
+    let u = &s.ui.pages.detail;
+    let Some(subject) = u.edit.picker.clone() else { return };
+    if !matches!(u.tab, 0 | 1) {
+        return;
+    }
+    let (sig, shown) = layered(&u.edit, &subject, u.activity.as_ref().and_then(|a| find_comment(a, &subject)));
+    let mut options = row().key(format!("pr-reaction-picker-{subject}")).gap(2.0).px(7.0).py(3.0).center_y();
+    for (content, emoji, name) in REACTIONS {
+        let reacted = shown.iter().any(|r| field(r, "content") == content && r["viewerHasReacted"] == true);
+        let (subject, sig) = (subject.clone(), sig.clone());
+        let mut option = row().key(format!("pr-reaction-pick-{content}")).size(28.0, 28.0).center().radius(radius::MD).hover(t.c.accent).cursor(Cursor::Pointer).role("button").label(name).checked(reacted).child(text(emoji).font(theme::TEXT_BASE));
+        if reacted {
+            option = option.fill(t.c.primary.alpha_mul(0.1));
+        }
+        options = options.child(option.on_press(move |s: &mut App| {
+            edit(s).picker = None;
+            toggle_reaction(s, &subject, &sig, content, !reacted);
+        }));
+    }
+    Menu::new(format!("pr-reaction-popover-{subject}"))
+        .role("dialog")
+        .anchor(format!("pr-reaction-add-{subject}"))
+        .placement(Placement::TopStart)
+        .min_width(0.0)
+        .open(true)
+        .on_close(|s: &mut App| edit(s).picker = None)
+        .row(options)
+        .overlay(&kit::theme(t), overlays);
+}
+
+/// PullRequestComposer: a glass button in the panel's corner opening, above it, Comment and Review
+/// where both are allowed, else whichever one is.
 pub fn composer(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> Option<El> {
     let c = &s.ui.pages.detail.edit.composer;
     let commenting = can_comment(d);
@@ -778,23 +830,63 @@ pub fn composer(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> Option<El>
     }
     let review = review_mode(commenting, offered.len(), c.review);
     let word = term(d);
+    let lines = s.ui.pages.detail.entry.as_ref().map_or(0, |e| super::pr_code::pending(s, e).len());
+    let modes = [COMPOSER_MODES[0].to_string(), if lines > 0 { format!("Review ({lines})") } else { COMPOSER_MODES[1].to_string() }];
+    let discard = (review && lines > 0).then(|| {
+        let label = "Discard pending line comments";
+        let sending = busy(&s.ui.pages.detail.edit, |p| matches!(p, Pending::Review { .. }));
+        kit::Button::new(label).icon(&i::TRASH_2).variant("ghost").size("icon-xs").disabled(sending).on_press(super::pr_code::discard_all).build(t).help(label)
+    });
     let head = if commenting && !offered.is_empty() {
-        ToggleGroup::new(&COMPOSER_MODES, &[usize::from(review)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| edit(s).composer.review = n == 1).build(&kit::theme(t)).label("Composer mode")
+        ToggleGroup::new(&modes, &[usize::from(review)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| edit(s).composer.review = n == 1).build(&kit::theme(t)).label("Composer mode")
     } else {
         text(if review { format!("Review {word}") } else { format!("Comment on {word}") }).font(theme::SM_MEDIUM).color(t.c.foreground)
     };
-    let form = if review { review_form(s, t, d, &offered, overlays) } else { comment_form(s, t, d) };
-    let card = col()
-        .w_full()
-        .gap(12.0)
-        .padding(12.0)
-        .radius(radius::LG)
-        .border(1.0, t.c.border.alpha_mul(0.6))
-        .role("group")
+    let started = lines > 0 || !c.summary.text.trim().is_empty();
+    let opens_review = review_mode(commenting, offered.len(), started);
+    let label = match lines {
+        0 if started || !commenting => format!("Review {word}"),
+        0 => format!("Comment on {word}"),
+        n => format!("Review {word}, {n} {} pending", if n == 1 { "comment" } else { "comments" }),
+    };
+    let mut trigger = kit::Button::new("").variant("glass").size("icon").icon(&i::MESSAGE_SQUARE).on_press(move |s: &mut App| toggle_composer(s, started, opens_review)).build(t).label(label);
+    if lines > 0 {
+        let count = text(lines.to_string()).font(theme::weight(theme::TEXT_3XS, theme::SEMIBOLD).features("'tnum' 1")).color(rune::Color::WHITE);
+        trigger = trigger.child(row().h(14.0).min_w(14.0).px(4.0).center().radius(radius::FULL).fill(t.c.info).child(count).pin(None, Some(-4.0), Some(-4.0), None));
+    }
+    let mut popover = kit::Popover::new("pr-composer")
+        .trigger(trigger)
+        .placement(Placement::TopEnd)
+        .gutter(8.0)
+        .width("lg")
         .label(format!("{} composer", capitalized(word)))
-        .child(row().child(head))
-        .child(form);
-    Some(col().key("pr-composer").w_full().px(16.0).pt(16.0).child(card))
+        .open(c.open)
+        .on_close(|s: &mut App| edit(s).composer.open = false);
+    // The verdict menu mounts after the popover so it draws above it.
+    let mut menus = Vec::new();
+    if c.open {
+        let form = if review { review_form(s, t, d, &offered, &mut menus) } else { comment_form(s, t, d) };
+        let close = kit::Button::new("").variant("ghost").size("icon-xs").icon(&i::X).on_press(|s: &mut App| edit(s).composer.open = false).build(t).label("Close composer");
+        popover = popover.child(row().w_full().gap(8.0).mb(4.0).center_y().child(head).child(spacer()).children(discard).child(close)).child(form);
+    }
+    let built = popover.build(&kit::theme(t), overlays);
+    overlays.extend(menus);
+    Some(built.pin(None, None, Some(16.0), Some(12.0)))
+}
+
+/// Opens the composer on Review once a review is started, else on Comment, its field focused.
+fn toggle_composer(s: &mut App, started: bool, review: bool) {
+    let c = &mut edit(s).composer;
+    c.open = !c.open;
+    if !c.open {
+        return;
+    }
+    c.review = started;
+    if review {
+        c.summary.focused = true;
+    } else {
+        c.comment.focused = true;
+    }
 }
 
 /// PullRequestCommentForm: the comment, with closing or reopening it alongside where allowed.
@@ -846,7 +938,8 @@ fn review_form(s: &App, t: &T, d: &Value, offered: &[&'static str], overlays: &m
     let c = &s.ui.pages.detail.edit.composer;
     let pending = busy(&s.ui.pages.detail.edit, |p| matches!(p, Pending::Review { .. }));
     let selected = selected_verdict(offered, c.verdict);
-    let placeholder = selected.map_or("Summarize your review (optional)", |v| review_placeholder(v, summary_required(d, v)));
+    let lines = s.ui.pages.detail.entry.as_ref().is_some_and(|e| !super::pr_code::pending(s, e).is_empty());
+    let placeholder = selected.map_or("Summarize your review (optional)", |v| review_placeholder(v, summary_required(d, v), lines));
     let input = area(t, "pr-composer-review".into(), &c.summary, 3.0, "Review summary".into(), placeholder).on_edit(|s: &mut App| &mut edit(s).composer.summary);
     let mut footer = row().w_full().gap(8.0).center_y();
     if offered.len() > 1
@@ -873,7 +966,7 @@ fn review_form(s: &App, t: &T, d: &Value, offered: &[&'static str], overlays: &m
         }
         footer = footer.child(menu.build(&kit::theme(t), overlays));
     }
-    let ready = selected.is_some_and(|v| can_submit(v, &c.summary.text, summary_required(d, v)));
+    let ready = selected.is_some_and(|v| can_submit(v, &c.summary.text, summary_required(d, v), lines));
     let submit = kit::Button::new(if pending { "Submitting..." } else { "Submit review" }).size("xs").disabled(pending || !ready || !writable(s)).on_press(submit_review).build(t);
     col().w_full().gap(8.0).child(input).child(footer.child(spacer()).child(submit))
 }
@@ -939,7 +1032,19 @@ mod tests {
         assert_eq!(title_save(&d, &e, "   "), None, "an empty title only closes");
         assert_eq!(comment_update(&e, "c1", "issue-comment", "  edited\n"), Some(base(json!({"commentId": "c1", "kind": "issue-comment", "body": "  edited\n"}))));
         assert_eq!(comment_update(&e, "r1", "review", "x"), None, "review summaries have no endpoint");
-        assert_eq!(review_payload(&e, "approve", ""), base(json!({"verdict": "approve", "body": "", "comments": []})));
+        assert_eq!(review_payload(&e, "approve", "", &[]), base(json!({"verdict": "approve", "body": "", "comments": []})));
+        let pending = [
+            json!({"id": "pending-review-comment-1", "path": "a.rs", "position": {"kind": "added", "newLine": 3}, "body": "Rename."}),
+            json!({"id": "pending-review-comment-2", "path": "b.rs", "oldPath": "c.rs", "position": {"kind": "context", "oldLine": 8, "newLine": 9, "side": "left"}, "startPosition": {"kind": "deleted", "oldLine": 7}, "body": "Split."}),
+        ];
+        assert_eq!(
+            review_payload(&e, "comment", "Two things.", &pending),
+            base(json!({"verdict": "comment", "body": "Two things.", "comments": [
+                {"path": "a.rs", "position": {"kind": "added", "newLine": 3}, "body": "Rename."},
+                {"path": "b.rs", "oldPath": "c.rs", "position": {"kind": "context", "oldLine": 8, "newLine": 9, "side": "left"}, "startPosition": {"kind": "deleted", "oldLine": 7}, "body": "Split."},
+            ]})),
+            "each pending comment goes as its draft, without the local id"
+        );
         assert_eq!(reaction_payload(&e, "c2", "rocket", false), base(json!({"subjectId": "c2", "content": "rocket", "reacted": false})));
     }
 
@@ -1031,14 +1136,17 @@ mod tests {
         assert_eq!(selected_verdict(&["comment", "approve"], Some("approve")), Some("approve"));
         assert_eq!(selected_verdict(&[], None), None);
 
-        assert!(can_submit("approve", "", false));
-        assert!(!can_submit("comment", "  ", false) && can_submit("comment", "ok", false));
-        assert!(!can_submit("request-changes", "", true) && can_submit("request-changes", "fix", true));
+        assert!(can_submit("approve", "", false, false));
+        assert!(!can_submit("comment", "  ", false, false) && can_submit("comment", "ok", false, false));
+        assert!(!can_submit("request-changes", "", true, false) && can_submit("request-changes", "fix", true, false));
+        assert!(can_submit("comment", "", false, true) && can_submit("request-changes", "", false, true), "line comments stand in for a summary");
+        assert!(!can_submit("request-changes", "", true, true), "but not where the host wants one to request changes");
         assert!(summary_required(&pr(json!({"provider": "forgejo"})), "request-changes"));
         assert!(!summary_required(&d, "request-changes"));
-        assert_eq!(review_placeholder("approve", false), "Summarize your review (optional)");
-        assert_eq!(review_placeholder("request-changes", true), "Summarize your review (required to request changes)");
-        assert_eq!(review_placeholder("comment", false), "Summarize your review or add line comments");
+        assert_eq!(review_placeholder("approve", false, false), "Summarize your review (optional)");
+        assert_eq!(review_placeholder("request-changes", true, true), "Summarize your review (required to request changes)");
+        assert_eq!(review_placeholder("comment", false, false), "Summarize your review or add line comments");
+        assert_eq!(review_placeholder("comment", false, true), "Summarize your review (optional)");
         assert_eq!(verdict_sent("approve", "merge request"), "Merge request approved");
         assert_eq!(verdict_sent("request-changes", "pull request"), "Changes requested");
         assert_eq!(verdict_sent("comment", "pull request"), "Review submitted");
@@ -1084,5 +1192,24 @@ mod tests {
         s.ui.pages.detail.edit.reactions.insert("c1".into(), ("sig".into(), vec![("heart", true), ("rocket", false)]));
         finish(&mut s, Pending::Reaction { subject: "c1".into(), content: "heart" }, Err(json!({})));
         assert_eq!(s.ui.pages.detail.edit.reactions["c1"].1, vec![("rocket", false)], "a refused reaction drops back to the host's");
+        assert!(REACTIONS.iter().all(|r| r.1.ends_with('\u{FE0F}')), "every reaction asks for the colour emoji font");
+    }
+
+    #[test]
+    fn the_composer_opens_on_a_started_review_and_closes_once_sent() {
+        let mut s = app(pr(json!({})), true);
+        s.ui.pages.detail.entry = None;
+        toggle_composer(&mut s, false, false);
+        let c = &s.ui.pages.detail.edit.composer;
+        assert!(c.open && !c.review && c.comment.focused);
+        toggle_composer(&mut s, false, false);
+        assert!(!s.ui.pages.detail.edit.composer.open);
+        toggle_composer(&mut s, true, true);
+        let c = &s.ui.pages.detail.edit.composer;
+        assert!(c.open && c.review && c.summary.focused, "a started review opens on Review");
+        finish(&mut s, Pending::Post("comment"), Err(json!({})));
+        assert!(s.ui.pages.detail.edit.composer.open, "a refusal keeps it open over the draft");
+        finish(&mut s, Pending::Post("comment"), Ok(json!({})));
+        assert!(!s.ui.pages.detail.edit.composer.open, "a posted comment closes it");
     }
 }
