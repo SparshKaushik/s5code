@@ -79,6 +79,8 @@ pub enum Cmd {
     Erase(TabId, f32, f32),
     /// The PNG of every mark's union, as `Event::Marked`.
     CaptureMarks(TabId),
+    /// The elements a region drag encloses, in viewport CSS pixels, as `Event::Enclosed`.
+    Enclosed(TabId, [f32; 4]),
     /// Stops this profile's Chrome; `wipe` deletes the profile's data after.
     Quit { wipe: bool },
 }
@@ -86,7 +88,7 @@ pub enum Cmd {
 /// Which tab a command acts on, when it names one.
 fn cmd_tab(cmd: &Cmd) -> Option<TabId> {
     match cmd {
-        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) => Some(*tab),
+        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) | Cmd::Enclosed(tab, _) => Some(*tab),
         _ => None,
     }
 }
@@ -153,6 +155,8 @@ pub enum Event {
     Download(Result<PathBuf, String>),
     /// The mark `Cmd::Erase` removed, by the order marks were added.
     Erased(TabId, Option<usize>),
+    /// What a region drag enclosed: each element as a pick reports it, none for a bare region.
+    Enclosed(TabId, [f32; 4], Vec<Value>),
     /// The annotation's screenshot, cropped to its marks.
     Marked(TabId, Option<Vec<u8>>),
 }
@@ -446,6 +450,8 @@ fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), S
 
 enum Reply {
     Erased(TabId),
+    Enclosed(TabId, [f32; 4]),
+    PdfViewer(String),
     MarksBounds(TabId),
     MarksShot(TabId),
     Created(TabId),
@@ -533,6 +539,8 @@ struct Worker {
     agent_downloads: HashMap<String, (String, String)>,
     /// When each tab's renderer last crashed, for web's three remounts in 30 s.
     crashes: HashMap<TabId, Vec<std::time::Instant>>,
+    /// Whether this Chrome has its own PDF viewer, once a page has said.
+    native_pdf: Option<bool>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
@@ -580,6 +588,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
         downloads: HashMap::new(),
         agent_downloads: HashMap::new(),
         crashes: HashMap::new(),
+        native_pdf: None,
         shared,
         waker,
     };
@@ -652,6 +661,13 @@ impl Worker {
             s.generation += 1;
             drop(s);
             (self.waker)();
+        }
+    }
+
+    /// Without Chrome's own viewer, a PDF page's response is replaced with the bundled one.
+    fn pdf_viewer(&mut self, session: &str, native: bool) {
+        if !native {
+            self.send(Some(session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
         }
     }
 
@@ -945,6 +961,10 @@ impl Worker {
             }
             Cmd::Erase(tab, x, y) => {
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.erase({x}, {y})"), "returnByValue": true }), Some(Reply::Erased(tab)));
+            }
+            Cmd::Enclosed(tab, r) => {
+                let expression = format!("({ENCLOSED_JS})({}, {}, {}, {}, {PICK_JS})", r[0], r[1], r[2], r[3]);
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Enclosed(tab, r)));
             }
             Cmd::CaptureMarks(tab) => {
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.bounds()"), "returnByValue": true }), Some(Reply::MarksBounds(tab)));
@@ -1254,8 +1274,12 @@ impl Worker {
                 self.send(Some(&session), "Runtime.enable", json!({}), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
-                // Chrome's headless shell has no PDF viewer, so a PDF page arrives as pdf.js.
-                self.send(Some(&session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
+                // A Chrome with its own PDF viewer shows PDFs itself; the headless shell has none,
+                // so there a PDF page arrives as the bundled pdf.js.
+                match self.native_pdf {
+                    Some(native) => self.pdf_viewer(&session, native),
+                    None => self.send(Some(&session), "Runtime.evaluate", json!({ "expression": "navigator.pdfViewerEnabled === true", "returnByValue": true }), Some(Reply::PdfViewer(session.clone()))),
+                }
                 self.metrics(tab);
                 let scheme = self.tabs.get(&tab).map_or("", |t| t.scheme);
                 if !scheme.is_empty() {
@@ -1447,6 +1471,15 @@ impl Worker {
                 let index = r["result"]["value"].as_u64().map(|i| i as usize);
                 self.event(Event::Erased(tab, index));
             }
+            Reply::PdfViewer(session) => {
+                let native = r["result"]["value"].as_bool().unwrap_or(false);
+                self.native_pdf = Some(native);
+                self.pdf_viewer(&session, native);
+            }
+            Reply::Enclosed(tab, rect) => {
+                let elements = r["result"]["value"].as_str().and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok()).unwrap_or_default();
+                self.event(Event::Enclosed(tab, rect, elements));
+            }
             Reply::MarksBounds(tab) => match marks_clip(&r["result"]["value"]) {
                 Some(clip) => self.call(tab, "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::MarksShot(tab))),
                 None => self.event(Event::Marked(tab, None)),
@@ -1600,6 +1633,24 @@ const PICK_JS: &str = r##"function () {
     rect: { x: r.x, y: r.y, width: r.width, height: r.height },
     doc: { x: r.x + scrollX, y: r.y + scrollY },
   });
+}"##;
+
+/// Desktop's `selectElementsInRect`: the leaves, buttons and links whose centre the region holds,
+/// smallest first and at most `MAX_MARQUEE_ELEMENTS`, each described as a pick describes it.
+const ENCLOSED_JS: &str = r##"(x, y, w, h, pick) => {
+  const marks = document.querySelector("[data-s5-annotation]");
+  const found = [...document.querySelectorAll("body *")]
+    .filter((el) => !(marks && marks.contains(el)))
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ r }) => r.width >= 2 && r.height >= 2 && !(r.right < x || r.left > x + w || r.bottom < y || r.top > y + h))
+    .filter(({ el, r }) => {
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      return cx >= x && cx <= x + w && cy >= y && cy <= y + h &&
+        (el.children.length === 0 || el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement || el.getAttribute("role") === "button");
+    })
+    .sort((a, b) => a.r.width * a.r.height - b.r.width * b.r.height)
+    .slice(0, 20);
+  return JSON.stringify(found.map(({ el }) => JSON.parse(pick.call(el))));
 }"##;
 
 /// `recordingKeyLabel` for an unmodified key: arrows and symbols for named keys, letters upper.
@@ -1767,8 +1818,14 @@ fn pdf_viewer(url: &str) -> String {
     let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
     let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
     let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    PDF_VIEWER.replace("{title}", &escape(&name))
+    // pdf.js last, so its text is never searched for the placeholders.
+    PDF_VIEWER.replace("{title}", &escape(&name)).replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
 }
+
+// pdf.js 3.11.174 (Apache-2.0, `assets/pdfjs/LICENSE`), bundled as Electron bundles its viewer so
+// PDFs show offline. The `.txt` names keep the repo's JS lint and formatter off minified code.
+const PDFJS: &str = include_str!("../../assets/pdfjs/pdf.min.js.txt");
+const PDFJS_WORKER: &str = include_str!("../../assets/pdfjs/pdf.worker.min.js.txt");
 
 const PDF_VIEWER: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
@@ -1778,14 +1835,16 @@ html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
 canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
 #status{padding:16px;text-align:center}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>{pdfjs}</script>
+<script type="text/plain" id="pdfjs-worker">{worker}</script>
 </head><body><div id="status">Loading PDF…</div><div id="pages"></div>
 <script>
 (async () => {
   const status = document.getElementById("status");
   const lib = window.pdfjsLib;
-  if (!lib) { status.textContent = "The PDF viewer could not load. Check the connection and reload."; return; }
-  lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  if (!lib) { status.textContent = "The PDF viewer could not load."; return; }
+  const worker = new Blob([document.getElementById("pdfjs-worker").textContent], { type: "text/javascript" });
+  lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(worker);
   try {
     const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
     status.remove();
@@ -2119,6 +2178,9 @@ mod tests {
         let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
         assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
         assert!(page.contains("getDocument({ url: location.href"));
+        // Offline: pdf.js and its worker come with the app, not from a CDN.
+        assert!(!page.contains("https://"), "the page loads nothing from the network");
+        assert!(page.contains("pdfjsLib") && page.contains(PDFJS_WORKER) && page.matches("{pdfjs}").count() == 0);
     }
 
     #[test]

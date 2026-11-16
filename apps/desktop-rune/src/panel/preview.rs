@@ -1091,6 +1091,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
             browser::Event::Picked { tab, element, image } => pick(app, tab, element, image),
+            browser::Event::Enclosed(tab, rect, elements) => enclosed(app, tab, rect, elements),
             browser::Event::DevTools(Ok(url)) => {
                 if let Err(e) = tx.open_url(&url) {
                     crate::shell::palette::toast(app, "Unable to open DevTools", Some(&e.to_string()));
@@ -2022,11 +2023,10 @@ fn mark_drag(s: &mut App, d: &rune::Drag, tab: TabId, scale: f32) {
         _ => {
             let Some(drag) = a.drag.take() else { return };
             match tool {
+                // As desktop's marquee: the elements inside it, or the region when it holds none.
                 Tool::Region if !d.cancelled() => {
                     if let Some(rect) = region_rect(drag.start, drag.last) {
-                        a.targets.push(Target::Region);
-                        a.anchor = Some(rect);
-                        calls.push(format!("region({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3]));
+                        send(s, Cmd::Enclosed(tab, rect));
                     }
                 }
                 Tool::Draw => {
@@ -2043,6 +2043,27 @@ fn mark_drag(s: &mut App, d: &rune::Drag, tab: TabId, scale: f32) {
     }
     for call in calls {
         send(s, Cmd::Mark(tab, call));
+    }
+}
+
+/// What a region drag enclosed becomes the annotation's elements, or one region.
+fn enclosed(app: &mut App, tab: TabId, rect: [f32; 4], elements: Vec<Value>) {
+    let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| a.tab == tab && a.capturing.is_none()) else { return };
+    let mut calls = vec![];
+    if elements.is_empty() {
+        a.targets.push(Target::Region);
+        calls.push(format!("region({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3]));
+    }
+    for element in elements {
+        let r = &element["rect"];
+        let [x, y, w, h] = [&r["x"], &r["y"], &r["width"], &r["height"]].map(|v| v.as_f64().unwrap_or(0.) as f32);
+        calls.push(format!("element({x}, {y}, {w}, {h})"));
+        a.targets.push(Target::Element(element));
+    }
+    a.anchor = Some(rect);
+    app.ui.panel.browser.comment.focused = true;
+    for call in calls {
+        send(app, Cmd::Mark(tab, call));
     }
 }
 
@@ -4160,6 +4181,23 @@ mod tests {
         assert_eq!(viewport_size(&json!({ "_tag": "freeform", "width": 800, "height": 600 })), Some(Some((800, 600))));
         assert_eq!(viewport_size(&json!({ "_tag": "fill" })), Some(None));
         assert_eq!(viewport_size(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_region_drag_selects_the_elements_inside_it_or_marks_the_region() {
+        let mut app = App::new();
+        app.ui.panel.browser.tabs.insert(1, Tab::new(Pixels::new()));
+        app.ui.panel.browser.annotation = Some(Annotation { tab: 1, tool: Tool::Region, targets: vec![], anchor: None, drag: None, capturing: None });
+        let button = json!({ "tagName": "button", "rect": { "x": 10, "y": 10, "width": 40, "height": 20 } });
+        let link = json!({ "tagName": "a", "rect": { "x": 60, "y": 10, "width": 30, "height": 12 } });
+        enclosed(&mut app, 1, [0., 0., 100., 50.], vec![button, link]);
+        enclosed(&mut app, 1, [200., 200., 40., 40.], vec![]);
+        // Another tab's answer, or one after the annotation closed, adds nothing.
+        enclosed(&mut app, 2, [0., 0., 10., 10.], vec![]);
+        let a = app.ui.panel.browser.annotation.as_ref().unwrap();
+        assert!(matches!(&a.targets[..], [Target::Element(b), Target::Element(l), Target::Region] if b["tagName"] == "button" && l["tagName"] == "a"));
+        assert_eq!(a.anchor, Some([200., 200., 40., 40.]));
+        assert_eq!(annotation("m", ("http://a/", "A"), &a.targets, "")["targetSummary"], "2 selected elements, 1 marked region");
     }
 
     #[test]
