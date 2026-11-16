@@ -1009,7 +1009,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
 const PREFERRED_EDITOR: &str = "preferredEditor";
 
 /// `usePreferredEditor`: the editor last picked, while it is still installed, else the first.
-fn preferred_editor(s: &App) -> Option<(String, String)> {
+pub(crate) fn preferred_editor(s: &App) -> Option<(String, String)> {
     let stored = s.client_settings.values.get(PREFERRED_EDITOR).and_then(|v| v.as_str());
     pick_editor(editors(s), stored)
 }

@@ -42,6 +42,9 @@ struct Notice {
     until: i64,
     actions: Vec<ToastAction>,
     error: bool,
+    warning: bool,
+    /// Actions shown disabled, by label.
+    disabled: Vec<String>,
     /// Actions reading "Copied!" until their deadline, as web updates a toast after a copy.
     copied: Vec<(String, i64)>,
 }
@@ -351,8 +354,19 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         until: data::now_ms() + 4000,
         actions,
         error: false,
+        warning: false,
+        disabled: Vec::new(),
         copied: Vec::new(),
     });
+}
+/// A `type: "warning"` toast; `disabled` greys out its actions.
+pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>, disabled: bool) {
+    let labels = if disabled { actions.iter().map(|a| a.0.clone()).collect() } else { Vec::new() };
+    toast_with(s, title, description, actions);
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.warning = true;
+        notice.disabled = labels;
+    }
 }
 #[cfg(test)]
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
@@ -376,6 +390,8 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
         until: i64::MAX,
         actions: Vec::new(),
         error: true,
+        warning: false,
+        disabled: Vec::new(),
         copied: Vec::new(),
     });
 }
@@ -2051,12 +2067,16 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         for (label, primary, run) in &notice.actions {
             let run = run.clone();
             let copied = notice.copied.iter().any(|(l, _)| l == label);
+            let off = notice.disabled.contains(label);
             let button = kit::Button::new(if copied { "Copied!".to_string() } else { label.clone() })
                 .variant(if *primary { "default" } else { "outline" })
                 .size("xs")
-                .disabled(copied)
+                .disabled(copied || off)
                 .build(t);
-            toast = toast.button(*primary, if copied { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
+            toast = toast.button(*primary, if copied || off { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
+        }
+        if notice.warning {
+            toast = toast.lead(icon(&icons::TRIANGLE_ALERT, 16.).color(t.c.warning));
         }
         if notice.error {
             toast = toast
