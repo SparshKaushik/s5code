@@ -432,6 +432,13 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
         copied: Vec::new(),
     });
 }
+/// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
+pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
+    toast(s, title, description);
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.until = i64::MAX;
+    }
+}
 /// An error toast that times out like a plain one (web's `type: "error"` without `timeout: 0`).
 pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&str>) {
     toast_error(s, title, description);
@@ -2147,9 +2154,11 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             toast = toast.lead(icon(&icons::TRIANGLE_ALERT, 16.).color(t.c.warning));
         }
         if notice.error {
-            toast = toast
-                .lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive))
-                .on_close(|s: &mut App| s.ui.shell.palette.notice = None);
+            toast = toast.lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive));
+        }
+        // A toast that never times out needs a way to go.
+        if notice.error || notice.until == i64::MAX {
+            toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }
