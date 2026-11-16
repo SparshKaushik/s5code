@@ -1214,6 +1214,26 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
     Value::Object(out)
 }
 
+/// `composerDraftHasUserContent`: something typed or attached, not just picked settings.
+pub fn has_user_content(d: &Draft) -> bool {
+    !d.edit.text.trim().is_empty() || !d.attachments.is_empty() || !d.contexts.is_empty()
+}
+
+/// Removes the draft at `key`, returning it as stored so `put_draft` can bring it back.
+pub fn take_draft(s: &mut App, key: &str) -> Option<Value> {
+    s.ui.chat.composer.drafts.remove(key).map(|d| stored_draft(&d))
+}
+
+/// Puts a taken draft back, unless a new one with content was started there since.
+pub fn put_draft(s: &mut App, key: &str, stored: &Value) -> bool {
+    if s.ui.chat.composer.drafts.get(key).is_some_and(has_user_content) {
+        return false;
+    }
+    let Some(draft) = restored(&json!({ "draft": stored })).remove("draft") else { return false };
+    s.ui.chat.composer.drafts.insert(key.to_owned(), draft);
+    true
+}
+
 fn stored_draft(d: &Draft) -> Value {
     let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
     let contexts: Vec<&Value> = d.contexts.iter().filter(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))).collect();

@@ -50,6 +50,18 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         push_page(s, "add-browse", "~/projects/");
         browse(s, "~/projects/", "/home/ubuntu/projects", &["billing-api", "rune-site", "s5code", "widgets", ".cache"]);
     }),
+    ("palette-browse-denied", |s| {
+        open_thread(s);
+        deny_files(s);
+        open(s);
+        push_page(s, "add-project", "");
+        push_page(s, "add-browse", "~/projects/");
+    }),
+    ("content-search-denied", |s| {
+        open_thread(s);
+        deny_files(s);
+        crate::search::open(s);
+    }),
     ("palette-browse-filter", |s| {
         open_thread(s);
         open(s);
@@ -130,6 +142,11 @@ fn open_thread(s: &mut App) {
     if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_owned()) {
         s.navigate(Route::Thread(id));
     }
+}
+/// A session without `filesystem:read`, as a connection paired with read-only access has.
+fn deny_files(s: &mut App) {
+    let key = s.ui.env.active.clone();
+    crate::settings::permissions::set_session(s, &key, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
 }
 fn current(s: &App) -> String {
     match &s.route {

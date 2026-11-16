@@ -91,6 +91,11 @@ const SESSION_STALE_MS: i64 = 5 * 60_000;
 
 /// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
 /// leaves it to the server; a failed read denies, as web's guards do.
+#[cfg(test)]
+pub(crate) fn set_session(s: &mut App, session: Option<Result<Value, ()>>) {
+    s.ui.chat.details.session = session;
+}
+
 pub fn grants(s: &App, scope: &str) -> bool {
     match &s.ui.chat.details.session {
         Some(Ok(session)) => crate::settings::session_grants(session, scope),
@@ -789,7 +794,7 @@ fn set_thread_branch(s: &mut App, branch: &str, worktree: Option<String>) {
 
 /// `resolveLocalCheckoutBranchMismatch`: a local-checkout thread whose branch is no longer the
 /// one checked out, as `(thread branch, current branch)`.
-fn branch_mismatch(thread_branch: &str, worktree: &str, current: &str) -> Option<(String, String)> {
+pub(crate) fn branch_mismatch(thread_branch: &str, worktree: &str, current: &str) -> Option<(String, String)> {
     (worktree.is_empty() && !thread_branch.is_empty() && !current.is_empty() && thread_branch != current).then(|| (thread_branch.to_string(), current.to_string()))
 }
 

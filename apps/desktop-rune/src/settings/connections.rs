@@ -114,6 +114,15 @@ pub(crate) fn machine_kind<'a>(chosen: Option<&'a str>, detected: Option<&'a str
     chosen.filter(|kind| KINDS.iter().any(|(k, _)| k == kind)).or(detected).unwrap_or("server")
 }
 
+/// `EnvironmentMachineIcon` for an environment: its chosen icon, else its detected machine.
+pub(crate) fn env_machine_icon(s: &App, key: &str) -> &'static Icon {
+    let config = env::source(s, key).and_then(|src| src.state().config.as_ref());
+    machine_icon(machine_kind(
+        config.and_then(|c| c["settings"]["environmentIcon"].as_str()),
+        config.and_then(|c| c["environment"]["platform"]["machine"].as_str()),
+    ))
+}
+
 pub(crate) fn machine_icon(kind: &str) -> &'static Icon {
     match kind {
         "cloud" => &icons::CLOUD,

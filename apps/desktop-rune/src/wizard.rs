@@ -1,7 +1,7 @@
 //! The setup wizard (components/onboarding/WelcomeWizard.tsx): Connect, Agents, Projects. It
 //! opens once, on a fresh workspace whose client settings have no `onboardingCompletedAt`, and
-//! closing it or finishing records that, as `completeOnboarding` does. It sets up the active
-//! environment; the web sets up several selected computers at once.
+//! closing it or finishing records that, as `completeOnboarding` does. Like the web it sets up
+//! every computer ticked on the Connect step that is connected.
 
 use std::collections::HashSet;
 
@@ -21,8 +21,11 @@ const DEFAULT_SELECTION_MIN_THREADS: u64 = 3;
 /// `AgentSessionSource.literals`, each with its `IMPORT_SOURCE_NAMES` label.
 const SOURCES: [(&str, &str); 3] = [("claudeAgent", "Claude Code"), ("codex", "Codex"), ("pi", "Pi")];
 const SCAN_LIMIT_MESSAGE: &str = "Scan limit reached. Some projects or conversations may be missing.";
-/// The "Other folders" section's key in `Ui::toggled`.
-const OTHER: &str = "other";
+const IMPORT_PERMISSION_MESSAGE: &str = "This connection cannot import projects or thread history.";
+const OPERATE: &str = "orchestration:operate";
+/// Fields a scanned candidate gains: the computer it was found on and its `onboardingProjectKey`.
+const ENV: &str = "_environment";
+const KEY: &str = "_key";
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 enum Step {
@@ -37,6 +40,12 @@ pub struct Ui {
     decided: bool,
     pub open: bool,
     step: Step,
+    /// Computers ticked on the Connect step, and every computer listed so far: each is ticked
+    /// once when it first appears and is on (`autoSelectedComputers`), so unticking one sticks.
+    chosen: HashSet<String>,
+    seen: HashSet<String>,
+    /// The connected computers Continue set up (`setupIds`), in list order.
+    setup: Vec<String>,
     pairing_open: bool,
     /// The pairing link field, whether this wizard started the pairing in flight (so its
     /// result and error are the wizard's), and the "Need a pairing link?" help.
@@ -45,44 +54,90 @@ pub struct Ui {
     /// Show the pairing error under the field: the wizard's last pairing failed.
     pairing_failed: bool,
     pairing_help: bool,
-    scan: Option<u64>,
-    /// The environment scanned, so the import lands there whatever is focused by then.
-    scan_env: String,
-    candidates: Option<Vec<Value>>,
-    truncated: bool,
-    scan_error: Option<String>,
-    /// Candidate paths to import.
+    /// One project scan per computer set up (`useProjectScans`).
+    scans: Vec<Scan>,
+    /// Candidate keys to import.
     selected: HashSet<String>,
     /// Import sections opened or closed away from their default (groups open, other folders closed).
     toggled: HashSet<String>,
     import: Option<Import>,
 }
 
+struct Scan {
+    env: String,
+    pending: Option<u64>,
+    candidates: Option<Vec<Value>>,
+    truncated: bool,
+    error: Option<String>,
+}
+
+impl Scan {
+    fn loading(&self) -> bool {
+        self.candidates.is_none() && self.error.is_none()
+    }
+}
+
 /// One candidate at a time: create its project when it has none, then import its history.
 struct Import {
-    env: String,
-    queue: Vec<(Value, Option<String>)>,
+    queue: Vec<Item>,
     stage: Option<Stage>,
-    first_project: Option<String>,
+    /// `resolveOnboardingLandingProject`: the first selected project that gained history, else
+    /// the first imported in full, with its computer.
+    with_history: Option<(String, String)>,
+    completed: Option<(String, String)>,
     imported: u64,
     skipped: u64,
     failed: u64,
 }
 
-enum Stage {
-    Create(u64, String, String),
-    History(u64, String),
+struct Item {
+    env: String,
+    candidate: Value,
+    project: Option<String>,
 }
 
-const IMPORT_PERMISSION_MESSAGE: &str = "This connection cannot import projects or thread history.";
+/// Each holds its request, the computer, and the project.
+enum Stage {
+    Create(u64, String, String, String),
+    History(u64, String, String),
+}
+
+/// A connection the way `resolveOnboardingSetup` weighs it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Phase {
+    Connected,
+    Connecting,
+    /// Off, failed, or retrying: setup skips it rather than wait.
+    Other,
+}
 
 fn completed(s: &App) -> bool {
     s.client_settings.values.get("onboardingCompletedAt").is_some_and(|v| !v.is_null())
 }
 
-/// `isFreshFirstRunWorkspace`: nothing beyond the server's own bootstrap project and thread.
+/// `isFreshFirstRunWorkspace`, without the welcome's bootstrap ids: at most this computer's
+/// project at the server's cwd, and one untouched thread in it.
 fn fresh(st: &s5_net::State) -> bool {
-    st.projects.len() <= 1 && st.threads.len() <= 1
+    if st.projects.len() > 1 || st.threads.len() > 1 {
+        return false;
+    }
+    let same = |a: &str, b: &str| a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\']);
+    let cwd = st.config.as_ref().and_then(|c| c["cwd"].as_str());
+    let project = st.projects.first();
+    if let Some(p) = project
+        && (p.get(crate::env::TAG).is_some() || !cwd.is_some_and(|cwd| same(data::s(p, "workspaceRoot"), cwd)))
+    {
+        return false;
+    }
+    match st.threads.first() {
+        None => true,
+        Some(t) => {
+            project.is_some_and(|p| data::s(t, "projectId") == data::s(p, "id"))
+                && t["latestRun"].is_null()
+                && t["latestUserMessageAt"].is_null()
+                && t["runtime"].is_null()
+        }
+    }
 }
 
 fn complete(s: &mut App) {
@@ -108,29 +163,162 @@ fn provider_state(p: Option<&Value>) -> &'static str {
     }
 }
 
-/// `getProviderSummary`'s headline and detail for a provider that is not ready.
-fn summary(p: Option<&Value>) -> String {
-    let Some(p) = p else { return "Checking provider status".into() };
-    let message = p["message"].as_str().filter(|m| !m.is_empty());
-    let (headline, fallback) = if p["installed"] == false {
-        ("Not found", Some("CLI not detected on PATH."))
-    } else if p["auth"]["status"] == "unauthenticated" {
-        ("Not authenticated", None)
-    } else if p["status"] == "error" {
-        ("Unavailable", Some("The provider failed its startup checks."))
-    } else {
-        ("Needs attention", Some("The provider is installed, but the server could not fully verify it."))
+/// `getProviderSummary`: a headline, and its detail when there is one.
+fn summary(p: Option<&Value>) -> (String, Option<String>) {
+    let Some(p) = p else {
+        return ("Checking provider status".into(), Some("Waiting for the server to report installation and authentication details.".into()));
     };
-    match message.or(fallback) {
-        Some(detail) => format!("{headline} · {detail}"),
-        None => headline.into(),
+    let message = p["message"].as_str().map(str::to_owned);
+    let or = |fallback: &str| Some(p["message"].as_str().unwrap_or(fallback).to_owned());
+    let auth_label = p["auth"]["label"].as_str().or(p["auth"]["type"].as_str()).filter(|l| !l.is_empty());
+    let labelled = |headline: &str| auth_label.map_or_else(|| headline.to_owned(), |label| format!("{headline} · {label}"));
+    if p["enabled"] == false || p["status"] == "disabled" {
+        ("Disabled".into(), or("This provider is installed but disabled for new sessions in T3 Code."))
+    } else if p["installed"] == false {
+        ("Not found".into(), or("CLI not detected on PATH."))
+    } else if p["auth"]["status"] == "unauthenticated" {
+        (labelled("Not authenticated"), message)
+    } else if p["status"] == "warning" {
+        ("Needs attention".into(), or("The provider is installed, but the server could not fully verify it."))
+    } else if p["status"] == "error" {
+        ("Unavailable".into(), or("The provider failed its startup checks."))
+    } else if p["auth"]["status"] == "authenticated" {
+        (labelled("Authenticated"), message)
+    } else {
+        ("Available".into(), message)
     }
 }
 
-/// `selectOnboardingProvidersByDriver`: the most ready instance of each driver.
-fn provider<'a>(s: &'a App, driver: &str) -> Option<&'a Value> {
-    let rank = |p: &Value| ["checking", "disabled", "install", "attention", "signIn", "ready"].iter().position(|k| *k == provider_state(Some(p))).unwrap_or(0);
-    crate::chat::composer::providers(s).iter().filter(|p| data::s(p, "driver") == driver).max_by_key(|p| rank(p))
+/// `AgentCard`'s line under a provider that is not ready: the headline, then its detail.
+fn summary_line(p: Option<&Value>) -> String {
+    let (headline, detail) = summary(p);
+    match detail.filter(|d| !d.is_empty()) {
+        Some(detail) => format!("{headline} · {detail}"),
+        None => headline,
+    }
+}
+
+fn rank(p: &Value) -> usize {
+    ["checking", "disabled", "install", "attention", "signIn", "ready"].iter().position(|k| *k == provider_state(Some(p))).unwrap_or(0)
+}
+
+/// `selectOnboardingProvidersByDriver`: the most ready instance of each driver, the first on a tie.
+fn best<'a>(providers: &'a [Value], driver: &str) -> Option<&'a Value> {
+    providers.iter().filter(|p| data::s(p, "driver") == driver).rev().max_by_key(|p| rank(p))
+}
+
+/// `ConnectedAgentsStep`'s cards: every Codex instance (or its placeholder) and the best Claude
+/// one, for the drivers the managed policy allows (`isManagedDriverAllowed`).
+fn agent_cards<'a>(providers: &'a [Value], policy: &Value) -> Vec<(&'static str, &'static str, Option<&'a Value>)> {
+    let allowed = |driver: &str| policy["limits"]["providers"]["allowedDrivers"].as_array().is_none_or(|list| list.iter().any(|d| d == driver));
+    let mut cards = vec![];
+    for (driver, name) in AGENTS {
+        if !allowed(driver) {
+            continue;
+        }
+        let instances: Vec<&Value> = if driver == "codex" { providers.iter().filter(|p| data::s(p, "driver") == driver).collect() } else { vec![] };
+        if instances.is_empty() {
+            cards.push((driver, name, best(providers, driver)));
+        } else {
+            cards.extend(instances.into_iter().map(|p| (driver, name, Some(p))));
+        }
+    }
+    cards
+}
+
+fn config<'a>(s: &'a App, key: &str) -> Option<&'a Value> {
+    crate::env::source(s, key)?.state().config.as_ref()
+}
+
+fn providers_on<'a>(s: &'a App, key: &str) -> &'a [Value] {
+    config(s, key).and_then(|c| c["providers"].as_array()).map_or(&[], |v| v.as_slice())
+}
+
+/// `managedTelemetryOffMessage` for the primary environment, this computer's.
+fn telemetry_off(s: &App) -> Option<String> {
+    let policy = &config(s, crate::env::LOCAL)?["managedPolicy"];
+    (policy["limits"]["telemetry"] == false).then(|| format!("{} turned off anonymous usage data.", policy["organization"].as_str().unwrap_or_default()))
+}
+
+/// The Connect step's privacy line.
+fn privacy_copy(telemetry_off: Option<&str>) -> String {
+    match telemetry_off {
+        Some(off) => format!("{off} To read more about how your data is used, see our privacy policy."),
+        None => "T3 Code collects anonymous usage data to help us improve it. To read more about how your data is used and how to opt out, see our privacy policy.".into(),
+    }
+}
+
+fn phase(s: &App, key: &str) -> Phase {
+    let Some(src) = crate::env::source(s, key) else { return Phase::Other };
+    let st = src.state();
+    match &st.conn {
+        s5_net::Conn::Open if st.shell_ready => Phase::Connected,
+        s5_net::Conn::Open | s5_net::Conn::Connecting => Phase::Connecting,
+        s5_net::Conn::Closed(_) => Phase::Other,
+    }
+}
+
+/// `resolveOnboardingSetup`: the ticked computers that are connected, and those skipped. It waits
+/// only while one is still making its first connection.
+fn resolve_setup(envs: &[(String, Phase)], chosen: &HashSet<String>) -> (bool, Vec<String>, Vec<String>) {
+    let picked: Vec<&(String, Phase)> = envs.iter().filter(|(key, _)| chosen.contains(key)).collect();
+    let keys = |want: Phase| picked.iter().filter(|(_, p)| *p == want).map(|(key, _)| key.clone()).collect::<Vec<_>>();
+    let ready = keys(Phase::Connected);
+    let settling = picked.iter().any(|(_, p)| *p == Phase::Connecting);
+    (!ready.is_empty() && !settling, ready, keys(Phase::Other))
+}
+
+fn setup_of(s: &App) -> (bool, Vec<String>, Vec<String>) {
+    let envs: Vec<(String, Phase)> = crate::env::keys(s).into_iter().map(|key| (key.clone(), phase(s, &key))).collect();
+    resolve_setup(&envs, &s.ui.wizard.chosen)
+}
+
+/// The note under the computers when some ticked ones are not connected.
+fn skipped_note(labels: &[String]) -> Option<String> {
+    (!labels.is_empty()).then(|| format!("Not connected, so setup skips {}. You can set {} up later from Settings.", labels.join(", "), if labels.len() == 1 { "it" } else { "them" }))
+}
+
+/// `onboardingProjectKey`.
+fn key(env: &str, path: &str) -> String {
+    json!([env, path]).to_string()
+}
+
+/// Each candidate with the computer it was found on and its key.
+fn tag_candidates(env: &str, list: Vec<Value>) -> Vec<Value> {
+    list.into_iter()
+        .map(|mut c| {
+            let k = key(env, data::s(&c, "path"));
+            c[ENV] = Value::String(env.to_owned());
+            c[KEY] = Value::String(k);
+            c
+        })
+        .collect()
+}
+
+fn selected_candidates(ui: &Ui) -> impl Iterator<Item = &Value> + '_ {
+    ui.scans.iter().flat_map(|scan| scan.candidates.iter().flatten()).filter(|c| ui.selected.contains(data::s(c, KEY)))
+}
+
+/// Web's `canImport`: every computer holding a selected project lets this connection operate.
+fn can_import(s: &App) -> bool {
+    selected_candidates(&s.ui.wizard).all(|c| crate::settings::permissions::can_on(s, data::s(c, ENV), OPERATE))
+}
+
+/// The warning toast after an import that left something behind.
+fn import_warning(imported: u64, skipped: u64, failed: u64) -> Option<String> {
+    if skipped == 0 && failed == 0 {
+        return None;
+    }
+    let threads = |n: u64| if n == 1 { "thread" } else { "threads" };
+    Some(if imported > 0 && skipped > 0 {
+        format!("Imported {imported} {}. {skipped} {} could not be imported.", threads(imported), threads(skipped))
+    } else if skipped > 0 {
+        format!("{skipped} {} not be imported.", if skipped == 1 { "thread could" } else { "threads could" })
+    } else if imported > 0 {
+        format!("Imported {imported} {}. Some thread history could not be imported.", threads(imported))
+    } else {
+        "Could not import thread history.".into()
+    })
 }
 
 pub fn poll(s: &mut App) -> bool {
@@ -151,12 +339,19 @@ pub fn poll(s: &mut App) -> bool {
     if !s.ui.wizard.open {
         return changed;
     }
-    // `onPaired`: the new computer is the one set up, and the form folds away.
+    for key in crate::env::keys(s) {
+        if s.ui.wizard.seen.insert(key.clone()) && !s.ui.env.off.contains(&key) {
+            s.ui.wizard.chosen.insert(key);
+            changed = true;
+        }
+    }
+    // `onPaired`: the new computer is ticked, and the form folds away.
     if s.ui.wizard.paired_here && !crate::env::pairing(s) {
         s.ui.wizard.paired_here = false;
         match s.ui.env.last_paired.take() {
             Some(id) => {
-                crate::env::switch(s, &id);
+                s.ui.wizard.seen.insert(id.clone());
+                s.ui.wizard.chosen.insert(id);
                 s.ui.wizard.pairing_open = false;
                 s.ui.wizard.link.clear();
             }
@@ -164,20 +359,21 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
-    if let Some(id) = s.ui.wizard.scan
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
-    {
+    for i in 0..s.ui.wizard.scans.len() {
+        let Some(id) = s.ui.wizard.scans[i].pending else { continue };
+        let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) else { continue };
+        let now = data::now_ms();
         let ui = &mut s.ui.wizard;
-        ui.scan = None;
+        let scan = &mut ui.scans[i];
+        scan.pending = None;
         match reply {
             Ok(v) => {
-                let candidates = v["candidates"].as_array().cloned().unwrap_or_default();
-                let now = data::now_ms();
-                ui.selected = candidates.iter().filter(|c| recent(c, now)).map(|c| data::s(c, "path").to_owned()).collect();
-                ui.truncated = v["truncated"] == true;
-                ui.candidates = Some(candidates);
+                let candidates = tag_candidates(&scan.env, v["candidates"].as_array().cloned().unwrap_or_default());
+                ui.selected.extend(candidates.iter().filter(|c| recent(c, now)).map(|c| data::s(c, KEY).to_owned()));
+                scan.truncated = v["truncated"] == true;
+                scan.candidates = Some(candidates);
             }
-            Err(e) => ui.scan_error = Some(crate::shell::palette::error_message(&e, "Could not look for projects.")),
+            Err(e) => scan.error = Some(crate::shell::palette::error_message(&e, "Could not look for projects.")),
         }
         changed = true;
     }
@@ -192,39 +388,49 @@ fn poll_import(s: &mut App) -> bool {
     let history = |s: &mut App, env: &str, project: &str, path: &str| send(s, env, "agentSessions.import", json!({"projectId": project, "expectedWorkspaceRoot": path}));
     loop {
         match import.stage.take() {
-            Some(Stage::Create(id, project, path)) => match reply(s, id) {
+            Some(Stage::Create(id, env, project, path)) => match reply(s, id) {
                 None => {
-                    import.stage = Some(Stage::Create(id, project, path));
+                    import.stage = Some(Stage::Create(id, env, project, path));
                     break;
                 }
-                Some(Ok(_)) => match history(s, &import.env, &project, &path) {
-                    Some(id) => import.stage = Some(Stage::History(id, project)),
+                Some(Ok(_)) => match history(s, &env, &project, &path) {
+                    Some(id) => import.stage = Some(Stage::History(id, env, project)),
                     None => import.failed += 1,
                 },
                 Some(Err(_)) => import.failed += 1,
             },
-            Some(Stage::History(id, project)) => match reply(s, id) {
+            Some(Stage::History(id, env, project)) => match reply(s, id) {
                 None => {
-                    import.stage = Some(Stage::History(id, project));
+                    import.stage = Some(Stage::History(id, env, project));
                     break;
                 }
                 Some(reply) => {
                     changed = true;
                     match reply {
                         Ok(v) => {
-                            import.imported += v["importedCount"].as_u64().unwrap_or(0);
-                            import.skipped += v["skippedCount"].as_u64().unwrap_or(0);
+                            let (imported, skipped) = (v["importedCount"].as_u64().unwrap_or(0), v["skippedCount"].as_u64().unwrap_or(0));
+                            import.imported += imported;
+                            import.skipped += skipped;
+                            if imported > 0 && import.with_history.is_none() {
+                                import.with_history = Some((env.clone(), project.clone()));
+                            }
+                            if skipped == 0 && import.completed.is_none() {
+                                import.completed = Some((env, project));
+                            }
                         }
                         Err(_) => import.failed += 1,
                     }
-                    import.first_project.get_or_insert(project);
                 }
             },
             None => {
-                let Some((candidate, project)) = import.queue.pop() else { break };
+                let Some(Item { env, candidate, project }) = import.queue.pop() else { break };
+                // `stopForDeniedAccess`: access withdrawn mid-import stops it, and the step says why.
+                if !crate::settings::permissions::can_on(s, &env, OPERATE) {
+                    return true;
+                }
                 let path = data::s(&candidate, "path").to_owned();
                 let stage = match project {
-                    Some(project) => history(s, &import.env, &project, &path).map(|id| Stage::History(id, project)),
+                    Some(project) => history(s, &env, &project, &path).map(|id| Stage::History(id, env.clone(), project)),
                     None => {
                         let project = s5_net::uuid();
                         let command = json!({
@@ -236,8 +442,8 @@ fn poll_import(s: &mut App) -> bool {
                             "createWorkspaceRootIfMissing": false,
                             "defaultModelSelection": null,
                         });
-                        crate::env::adopt(s, &project, &import.env);
-                        send(s, &import.env, "projects.mutate", command).map(|id| Stage::Create(id, project, path))
+                        crate::env::adopt(s, &project, &env);
+                        send(s, &env, "projects.mutate", command).map(|id| Stage::Create(id, env.clone(), project, path))
                     }
                 };
                 match stage {
@@ -248,26 +454,16 @@ fn poll_import(s: &mut App) -> bool {
         }
     }
     if import.stage.is_none() && import.queue.is_empty() {
-        let Import { env, first_project, imported, skipped, failed, .. } = import;
-        if let Some(project) = &first_project {
-            crate::env::adopt(s, project, &env);
+        let Import { with_history, completed, imported, skipped, failed, .. } = import;
+        let landing = with_history.or(completed);
+        if let Some((env, project)) = &landing {
+            crate::env::adopt(s, project, env);
         }
-        let plural = |n: u64| if n == 1 { "thread" } else { "threads" };
-        let warning = if skipped > 0 || failed > 0 {
-            Some(if imported > 0 && skipped > 0 {
-                format!("Imported {imported} {}. {skipped} {} could not be imported.", plural(imported), plural(skipped))
-            } else if imported > 0 {
-                format!("Imported {imported} {}. Some thread history could not be imported.", plural(imported))
-            } else {
-                "Some projects or thread history could not be imported.".into()
-            })
-        } else {
-            None
-        };
-        finish(s, first_project);
+        let warning = import_warning(imported, skipped, failed);
+        finish(s, landing.map(|(_, project)| project));
         match warning {
             Some(warning) => crate::shell::palette::toast(s, "Some history was not imported", Some(&warning)),
-            None if imported > 0 => crate::shell::palette::toast(s, &format!("Imported {imported} {}", plural(imported)), None),
+            None if imported > 0 => crate::shell::palette::toast(s, &format!("Imported {imported} {}", if imported == 1 { "thread" } else { "threads" }), None),
             None => {}
         }
         return true;
@@ -281,7 +477,7 @@ fn finish(s: &mut App, project: Option<String>) {
     // Web keeps the wizard open on this failure; here an unreadable settings file would trap
     // the person in it, so it closes and says the choice wasn't saved.
     if s.client_settings.error.is_some() {
-        crate::shell::palette::toast_error(s, "Could not finish setup", Some("Your settings could not be saved. Try again."));
+        crate::shell::palette::toast_error_brief(s, "Could not finish setup", Some("Your settings could not be saved. Try again."));
     }
     s.ui.wizard.open = false;
     s.ui.wizard.import = None;
@@ -298,15 +494,39 @@ fn close(s: &mut App) {
 
 fn go(s: &mut App, step: Step) {
     s.ui.wizard.step = step;
-    if step == Step::Projects && s.ui.wizard.candidates.is_none() && s.ui.wizard.scan.is_none() {
-        scan(s);
+    match step {
+        // `refreshProviders` on mount, so a CLI installed a moment ago shows.
+        Step::Agents => {
+            for env in s.ui.wizard.setup.clone() {
+                if let Some(net) = crate::env::net_of(s, &env) {
+                    net.request("server.refreshProviders", json!({}));
+                }
+            }
+        }
+        Step::Projects => sync_scans(s),
+        Step::Connect => {}
     }
 }
 
-fn scan(s: &mut App) {
-    s.ui.wizard.scan_error = None;
-    s.ui.wizard.scan = s.src.net().map(|n| n.request("agentSessions.scan", json!({})));
-    s.ui.wizard.scan_env = s.ui.env.active.clone();
+/// One scan per computer set up, kept across visits; a computer added later is scanned then.
+fn sync_scans(s: &mut App) {
+    let setup = s.ui.wizard.setup.clone();
+    s.ui.wizard.scans.retain(|scan| setup.contains(&scan.env));
+    for env in &setup {
+        if !s.ui.wizard.scans.iter().any(|scan| scan.env == *env) {
+            s.ui.wizard.scans.push(Scan { env: env.clone(), pending: None, candidates: None, truncated: false, error: None });
+            scan(s, env);
+        }
+    }
+    s.ui.wizard.scans.sort_by_key(|scan| setup.iter().position(|env| *env == scan.env));
+}
+
+fn scan(s: &mut App, env: &str) {
+    let id = crate::env::net_of(s, env).map(|n| n.request("agentSessions.scan", json!({})));
+    if let Some(scan) = s.ui.wizard.scans.iter_mut().find(|scan| scan.env == env) {
+        scan.error = None;
+        scan.pending = id;
+    }
 }
 
 /// `partitionOnboardingProjects`' `recent`, which starts selected: a git repository with a few
@@ -367,10 +587,18 @@ fn groups(candidates: &[Value]) -> (Vec<Group>, Vec<usize>) {
     (groups, other)
 }
 
-/// `splitOnboardingProjectPath`: the folder name and the path before it.
+/// `splitOnboardingProjectPath`: the folder name and the path before it. A drive root or a
+/// network share is a name of its own.
 fn split_path(path: &str) -> (&str, &str) {
+    let b = path.as_bytes();
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2..].iter().all(|&c| sep(c));
+    let share = b.len() > 2 && sep(b[0]) && sep(b[1]) && {
+        let parts: Vec<&str> = path[2..].trim_end_matches(['/', '\\']).split(['/', '\\']).collect();
+        parts.len() == 2 && parts.iter().all(|p| !p.is_empty())
+    };
     let trimmed = path.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
+    if drive || share || trimmed.is_empty() {
         return ("", path);
     }
     match trimmed.rfind(['/', '\\']) {
@@ -379,15 +607,15 @@ fn split_path(path: &str) -> (&str, &str) {
     }
 }
 
-fn set_selected(s: &mut App, paths: &[String], on: bool) {
+fn set_selected(s: &mut App, keys: &[String], on: bool) {
     if s.ui.wizard.import.is_some() {
         return;
     }
-    for path in paths {
+    for k in keys {
         if on {
-            s.ui.wizard.selected.insert(path.clone());
+            s.ui.wizard.selected.insert(k.clone());
         } else {
-            s.ui.wizard.selected.remove(path);
+            s.ui.wizard.selected.remove(k);
         }
     }
 }
@@ -421,8 +649,8 @@ fn candidate_row(c: &Value, label: Option<&str>, nested: bool, ui: &Ui, t: &T) -
         info = info.child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.));
     }
     info = info.child(row().shrink().min_w(0.).child(text(parent.to_owned()).font(font).color(ink).truncate().shrink().min_w(0.)).child(text(name.to_owned()).font(font).color(ink).truncate()));
-    let checked = ui.selected.contains(&path);
-    let toggle = path.clone();
+    let checked = ui.selected.contains(data::s(c, KEY));
+    let toggle = data::s(c, KEY).to_owned();
     row()
         .w_full()
         .gap(10.)
@@ -439,10 +667,10 @@ fn candidate_row(c: &Value, label: Option<&str>, nested: bool, ui: &Ui, t: &T) -
 }
 
 /// A collapsible section's header: its checkbox selects every member, the rest opens or closes it.
-fn section_header(key: &str, open: bool, paths: Vec<String>, ui: &Ui, title: El, meta: El, t: &T) -> El {
-    let chosen = paths.iter().filter(|p| ui.selected.contains(*p)).count();
-    let all = chosen == paths.len();
-    let key = key.to_owned();
+fn section_header(section: &str, open: bool, keys: Vec<String>, ui: &Ui, title: El, meta: El, t: &T) -> El {
+    let chosen = keys.iter().filter(|k| ui.selected.contains(*k)).count();
+    let all = chosen == keys.len();
+    let section = section.to_owned();
     row()
         .w_full()
         .gap(10.)
@@ -457,7 +685,7 @@ fn section_header(key: &str, open: bool, paths: Vec<String>, ui: &Ui, title: El,
                 .hide_label()
                 .label("Select section")
                 .disabled(ui.import.is_some())
-                .on_toggle(move |s: &mut App| set_selected(s, &paths, !all))
+                .on_toggle(move |s: &mut App| set_selected(s, &keys, !all))
                 .build(&kit::theme(t)),
         )
         .child(
@@ -473,21 +701,22 @@ fn section_header(key: &str, open: bool, paths: Vec<String>, ui: &Ui, title: El,
                 .child(title.shrink().min_w(0.))
                 .child(rune::el().grow(1.))
                 .child(meta)
-                .on_press(move |s: &mut App| toggle_section(s, &key)),
+                .on_press(move |s: &mut App| toggle_section(s, &section)),
         )
 }
 
-/// `ImportCandidateList`.
-fn import_list(candidates: &[Value], ui: &Ui, t: &T) -> El {
+/// `ImportCandidateList` for one computer's candidates; its sections' keys start with `env`.
+fn import_list(env: &str, candidates: &[Value], ui: &Ui, t: &T) -> El {
     let (repositories, other) = groups(candidates);
-    let paths = |members: &[usize]| members.iter().map(|&i| data::s(&candidates[i], "path").to_owned()).collect::<Vec<_>>();
+    let keys = |members: &[usize]| members.iter().map(|&i| data::s(&candidates[i], KEY).to_owned()).collect::<Vec<_>>();
     let mut list = col().w_full().gap(2.);
     for group in &repositories {
         if let [only] = group.members[..] {
             list = list.child(candidate_row(&candidates[only], Some(&group.label), false, ui, t));
             continue;
         }
-        let open = !ui.toggled.contains(&group.key);
+        let section = format!("{env}\n{}", group.key);
+        let open = !ui.toggled.contains(&section);
         let mut sources: Vec<Value> = vec![];
         for &i in &group.members {
             for source in candidates[i]["sources"].as_array().into_iter().flatten() {
@@ -497,7 +726,7 @@ fn import_list(candidates: &[Value], ui: &Ui, t: &T) -> El {
             }
         }
         let title = text(group.label.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate();
-        list = list.child(section_header(&group.key, open, paths(&group.members), ui, title, row_meta(Some(&Value::Array(sources)), group.threads, group.last_active, t), t));
+        list = list.child(section_header(&section, open, keys(&group.members), ui, title, row_meta(Some(&Value::Array(sources)), group.threads, group.last_active, t), t));
         if open {
             for &i in &group.members {
                 list = list.child(candidate_row(&candidates[i], None, true, ui, t));
@@ -505,10 +734,11 @@ fn import_list(candidates: &[Value], ui: &Ui, t: &T) -> El {
         }
     }
     if !other.is_empty() {
-        let open = ui.toggled.contains(OTHER);
+        let section = format!("{env}\nother");
+        let open = ui.toggled.contains(&section);
         let count = format!("{} {}", other.len(), if other.len() == 1 { "folder" } else { "folders" });
         let title = text("Other folders").font(theme::TEXT_SM).color(t.c.muted_foreground).truncate();
-        list = list.child(section_header(OTHER, open, paths(&other), ui, title, text(count).font(theme::TEXT_XS).color(t.c.muted_foreground), t));
+        list = list.child(section_header(&section, open, keys(&other), ui, title, text(count).font(theme::TEXT_XS).color(t.c.muted_foreground), t));
         if open {
             for &i in &other {
                 list = list.child(candidate_row(&candidates[i], None, true, ui, t));
@@ -519,26 +749,30 @@ fn import_list(candidates: &[Value], ui: &Ui, t: &T) -> El {
 }
 
 fn start_import(s: &mut App) {
-    let ui = &s.ui.wizard;
-    let selected: Vec<Value> = ui.candidates.iter().flatten().filter(|c| ui.selected.contains(data::s(c, "path"))).cloned().collect();
+    if s.ui.wizard.import.is_some() || !can_import(s) {
+        return;
+    }
+    let selected: Vec<Value> = selected_candidates(&s.ui.wizard).cloned().collect();
     if selected.is_empty() {
         return finish(s, None);
     }
     let queue = selected
         .into_iter()
         .rev()
-        .map(|c| {
-            let existing = c["projectId"].as_str().map(str::to_owned).or_else(|| {
+        .map(|candidate| {
+            let env = data::s(&candidate, ENV).to_owned();
+            // `resolveOnboardingProjectId`: the server's match first, then this computer's projects.
+            let project = candidate["projectId"].as_str().map(str::to_owned).or_else(|| {
                 s.state()
                     .projects
                     .iter()
-                    .find(|p| data::s(p, "workspaceRoot") == data::s(&c, "path") && p["archivedAt"].is_null() && crate::env::owner(s, data::s(p, "id")) == ui.scan_env)
+                    .find(|p| data::s(p, "workspaceRoot") == data::s(&candidate, "path") && p["archivedAt"].is_null() && crate::env::owner(s, data::s(p, "id")) == env)
                     .map(|p| data::s(p, "id").to_owned())
             });
-            (c, existing)
+            Item { env, candidate, project }
         })
         .collect();
-    s.ui.wizard.import = Some(Import { env: s.ui.wizard.scan_env.clone(), queue, stage: None, first_project: None, imported: 0, skipped: 0, failed: 0 });
+    s.ui.wizard.import = Some(Import { queue, stage: None, with_history: None, completed: None, imported: 0, skipped: 0, failed: 0 });
 }
 
 fn heading(title: &str, description: Option<&str>, t: &T) -> El {
@@ -557,29 +791,36 @@ fn continue_button(t: &T, label: &str, disabled: bool, f: impl Fn(&mut App) + 's
     kit::Button::new(label).icon(&icons::ARROW_RIGHT).disabled(disabled).on_press(f).build(t)
 }
 
+fn toggle_computer(s: &mut App, env: &str) {
+    if !s.ui.wizard.chosen.remove(env) {
+        s.ui.wizard.chosen.insert(env.to_owned());
+    }
+}
+
 fn connect(s: &App, t: &T) -> El {
     let mut body = col().w_full().gap(8.).child(heading("Connect your computers", Some("Choose one or more computers. We’ll set up agents and projects on each."), t)).child(rune::el().h(12.));
-    for key in crate::env::keys(s) {
-        let active = s.ui.env.active == key;
-        let mut line = card(t)
-            .child(icon(&icons::MONITOR, 16.).color(t.c.muted_foreground))
-            .child(
-                col()
-                    .grow(1.)
-                    .shrink()
-                    .min_w(0.)
-                    .gap(2.)
-                    .child(text(crate::env::label(s, &key)).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
-                    .children(crate::env::base_url(s, &key).map(|url| text(url).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate())),
-            )
-            .child(text(crate::env::short_status(s, &key)).font(theme::TEXT_XS).color(t.c.muted_foreground).help(crate::env::status(s, &key)));
-        if active {
-            line = line.child(text("Setting up").font(theme::XS_MEDIUM).color(t.c.success_foreground));
-        } else {
-            let target = key.clone();
-            line = line.child(kit::Button::new("Set up").variant("outline").size("xs").on_press(move |s: &mut App| crate::env::switch(s, &target)).build(t));
-        }
-        body = body.child(line);
+    for env in crate::env::keys(s) {
+        let checked = s.ui.wizard.chosen.contains(&env);
+        let label = crate::env::label(s, &env);
+        let state = if s.ui.env.off.contains(&env) { "Off" } else { crate::env::short_status(s, &env) };
+        let toggle = env.clone();
+        body = body.child(
+            card(t)
+                .cursor(rune::Cursor::Pointer)
+                .child(kit::Checkbox::new(checked).hide_label().label(label.clone()).build(&kit::theme(t)))
+                .child(icon(&icons::MONITOR, 16.).color(t.c.muted_foreground))
+                .child(
+                    col()
+                        .grow(1.)
+                        .shrink()
+                        .min_w(0.)
+                        .gap(2.)
+                        .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
+                        .children(crate::env::base_url(s, &env).map(|url| text(url).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate())),
+                )
+                .child(text(state).font(theme::TEXT_XS).color(t.c.muted_foreground).help(crate::env::status(s, &env)))
+                .on_press(move |s: &mut App| toggle_computer(s, &toggle)),
+        );
     }
     let open = s.ui.wizard.pairing_open;
     let mut pairing = col().w_full().radius(8.).border(1., t.c.border).fill(t.c.background).child(
@@ -605,15 +846,20 @@ fn connect(s: &App, t: &T) -> El {
     if open {
         pairing = pairing.child(pairing_form(s, t));
     }
-    let pairing_now = crate::env::pairing(s);
-    let ready = crate::env::status(s, &s.ui.env.active) == "Connected" && !pairing_now;
-    body.child(rune::el().h(8.)).child(pairing).child(rune::el().h(16.)).child(
+    let (ready, _, skipped) = setup_of(s);
+    let labels: Vec<String> = skipped.iter().map(|env| crate::env::label(s, env)).collect();
+    body = body.child(rune::el().h(8.)).child(pairing);
+    if let Some(note) = skipped_note(&labels) {
+        body = body.child(text(note).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().mt(8.));
+    }
+    let off = telemetry_off(s);
+    body.child(rune::el().h(16.)).child(
         row()
             .w_full()
             .gap(24.)
             .center_y()
             .child(
-                text("T3 Code collects anonymous usage data to help us improve it. To read more about how your data is used and how to opt out, see our privacy policy.")
+                text(privacy_copy(off.as_deref()))
                     .font(theme::TEXT_XS)
                     .color(t.c.muted_foreground)
                     .wrap()
@@ -626,7 +872,13 @@ fn connect(s: &App, t: &T) -> El {
                         let _ = tx.open_url(PRIVACY_POLICY_URL);
                     }),
             )
-            .child(continue_button(t, "Continue", !ready, |s: &mut App| go(s, Step::Agents))),
+            .child(continue_button(t, "Continue", !ready || crate::env::pairing(s), |s: &mut App| {
+                let (ready, setup, _) = setup_of(s);
+                if ready && !crate::env::pairing(s) {
+                    s.ui.wizard.setup = setup;
+                    go(s, Step::Agents);
+                }
+            })),
     )
 }
 
@@ -759,23 +1011,28 @@ fn command_block(command: &'static str, t: &T) -> El {
         )
 }
 
-fn agents(s: &App, t: &T) -> El {
-    let mut list = col().w_full().gap(8.).child(text(crate::env::label(s, &s.ui.env.active)).font(theme::SM_MEDIUM).color(t.c.foreground));
-    for (driver, name) in AGENTS {
-        let p = provider(s, driver);
+/// `ConnectedAgentsStep`: one computer's agents.
+fn agent_section(s: &App, env: &str, t: &T) -> El {
+    let label = Some(crate::env::label(s, env)).filter(|l| !l.is_empty()).unwrap_or_else(|| "Computer".into());
+    let mut list = col().w_full().gap(6.).child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground).mb(2.));
+    let policy = config(s, env).map_or(&Value::Null, |c| &c["managedPolicy"]);
+    for (driver, name, p) in agent_cards(providers_on(s, env), policy) {
         let state = provider_state(p);
         let display = p.map(|p| data::s(p, "displayName")).filter(|n| !n.is_empty()).unwrap_or(name).to_owned();
         let status: El = match state {
             "ready" => row().gap(6.).center_y().child(icon(&icons::CHECK, 14.).color(t.c.success_foreground)).child(text("Ready").font(theme::XS_MEDIUM).color(t.c.success_foreground)),
             "checking" => text("Checking...").font(theme::TEXT_XS).color(t.c.muted_foreground),
             "disabled" => text("Disabled").font(theme::TEXT_XS).color(t.c.muted_foreground),
-            "attention" => text("Needs attention").font(theme::TEXT_XS).color(t.c.muted_foreground),
+            "attention" => text(summary(p).0).font(theme::TEXT_XS).color(t.c.muted_foreground),
             // The web runs the install or login command in an embedded terminal; Rune hands
-            // off to Settings > Providers, which has the same checks (see `overlays`).
+            // off to Settings > Providers, which has the same checks (see `overlays`). Settings
+            // there act on this computer, so another computer's button is unavailable, as the
+            // web's is where its terminal is.
             _ => kit::Button::new(if state == "signIn" { "Sign in" } else { "Install" })
                 .icon(&icons::TERMINAL)
                 .variant("ghost")
                 .size("xs")
+                .disabled(env != crate::env::LOCAL)
                 .on_press(|s: &mut App| s.navigate(Route::Settings("providers".into())))
                 .build(t),
         };
@@ -791,24 +1048,70 @@ fn agents(s: &App, t: &T) -> El {
                         .min_w(0.)
                         .gap(2.)
                         .child(text(display).font(theme::SM_MEDIUM).color(t.c.foreground))
-                        .child(text(if state == "ready" { "Ready to code.".to_owned() } else { summary(p) }).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
+                        .child(text(if state == "ready" { "Ready to code.".to_owned() } else { summary_line(p) }).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
                 )
                 .child(status),
         );
+    }
+    list
+}
+
+fn agents(s: &App, t: &T) -> El {
+    let mut sections = col().w_full().gap(20.);
+    for env in &s.ui.wizard.setup {
+        sections = sections.child(agent_section(s, env, t));
     }
     col()
         .w_full()
         .gap(20.)
         .child(heading("Connect your agents", Some("Choose an agent to start coding. You can add more later."), t))
-        .child(list)
+        .child(kit::scroll_area("wizard-agents", sections.scroll(rune::ScrollSpec { stick_bottom: false }), t).max_h(512.))
         .child(row().w_full().child(rune::el().grow(1.)).child(continue_button(t, "Continue", false, |s: &mut App| go(s, Step::Projects))))
+}
+
+/// One computer's part of the Projects step: its scan's state, then its candidates.
+fn scan_section(s: &App, found: &Scan, legend: bool, t: &T) -> El {
+    let ui = &s.ui.wizard;
+    let mut list = col().w_full().gap(2.);
+    if legend {
+        let label = Some(crate::env::label(s, &found.env)).filter(|l| !l.is_empty()).unwrap_or_else(|| "Computer".into());
+        list = list.child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground).mb(6.));
+    }
+    let candidates = found.candidates.as_deref().unwrap_or_default();
+    if found.loading() {
+        list = list.child(
+            row()
+                .w_full()
+                .gap(8.)
+                .py(12.)
+                .center_y()
+                .child(kit::Spinner::new().size("md").build(&kit::theme(t)))
+                .child(text("Looking for projects…").font(theme::TEXT_SM).color(t.c.muted_foreground)),
+        );
+    } else if let Some(error) = &found.error {
+        let env = found.env.clone();
+        list = list.child(
+            row()
+                .w_full()
+                .gap(12.)
+                .center_y()
+                .child(text(format!("Could not check projects. {error}")).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().grow(1.).shrink().min_w(0.))
+                .child(kit::Button::new("Retry").variant("ghost").size("sm").on_press(move |s: &mut App| scan(s, &env)).build(t)),
+        );
+    } else if candidates.is_empty() {
+        list = list.child(text("No existing Claude Code or Codex projects found.").font(theme::TEXT_SM).color(t.c.muted_foreground).py(8.));
+    }
+    if found.truncated {
+        list = list.child(text(SCAN_LIMIT_MESSAGE).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
+    list.child(import_list(&found.env, candidates, ui, t))
 }
 
 fn projects(s: &App, t: &T) -> El {
     let ui = &s.ui.wizard;
     let importing = ui.import.is_some();
     let skip = kit::Button::new("Do not import projects").variant("ghost-muted").disabled(importing).on_press(|s: &mut App| finish(s, None)).build(t);
-    if ui.candidates.is_none() && ui.scan_error.is_none() {
+    if ui.scans.iter().all(Scan::loading) {
         return col()
             .w_full()
             .min_h(160.)
@@ -824,11 +1127,10 @@ fn projects(s: &App, t: &T) -> El {
             )
             .child(row().w_full().child(rune::el().grow(1.)).child(skip));
     }
-    let candidates = ui.candidates.as_deref().unwrap_or_default();
     let mut body = col().w_full().gap(12.).child(heading("Import your projects", Some("Import projects and conversations from Claude Code and Codex on your selected computers."), t));
-    let chosen = candidates.iter().filter(|c| ui.selected.contains(data::s(c, "path"))).count();
-    if !candidates.is_empty() {
-        let total = candidates.len();
+    let total = ui.scans.iter().map(|scan| scan.candidates.as_ref().map_or(0, Vec::len)).sum::<usize>();
+    let chosen = selected_candidates(ui).count();
+    if total > 0 {
         body = body.child(
             row()
                 .w_full()
@@ -841,35 +1143,32 @@ fn projects(s: &App, t: &T) -> El {
                         .size("xs")
                         .disabled(importing || chosen == total)
                         .on_press(|s: &mut App| {
-                            let paths: Vec<String> = s.ui.wizard.candidates.iter().flatten().map(|c| data::s(c, "path").to_owned()).collect();
-                            set_selected(s, &paths, true);
+                            let keys: Vec<String> = s.ui.wizard.scans.iter().flat_map(|scan| scan.candidates.iter().flatten()).map(|c| data::s(c, KEY).to_owned()).collect();
+                            set_selected(s, &keys, true);
                         })
                         .build(t),
                 )
-                .child(kit::Button::new("Select none").variant("ghost").size("xs").disabled(importing || chosen == 0).on_press(|s: &mut App| s.ui.wizard.selected.clear()).build(t)),
+                .child(
+                    kit::Button::new("Select none")
+                        .variant("ghost")
+                        .size("xs")
+                        .disabled(importing || chosen == 0)
+                        .on_press(|s: &mut App| {
+                            if s.ui.wizard.import.is_none() {
+                                s.ui.wizard.selected.clear();
+                            }
+                        })
+                        .build(t),
+                ),
         );
     }
-    let mut list = col().w_full().gap(2.);
-    if let Some(error) = &ui.scan_error {
-        list = list.child(
-            row()
-                .w_full()
-                .gap(12.)
-                .center_y()
-                .child(text(format!("Could not check projects. {error}")).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().grow(1.).shrink().min_w(0.))
-                .child(kit::Button::new("Retry").variant("ghost").size("sm").on_press(scan).build(t)),
-        );
-    } else if candidates.is_empty() {
-        list = list.child(text("No existing Claude Code or Codex projects found.").font(theme::TEXT_SM).color(t.c.muted_foreground).py(8.));
+    let mut list = col().w_full().gap(20.);
+    for scan in &ui.scans {
+        list = list.child(scan_section(s, scan, ui.scans.len() > 1, t));
     }
-    if ui.truncated {
-        list = list.child(text(SCAN_LIMIT_MESSAGE).font(theme::TEXT_XS).color(t.c.muted_foreground));
-    }
-    list = list.child(import_list(candidates, ui, t));
     body = body.child(kit::scroll_area("wizard-import-list", list.scroll(rune::ScrollSpec { stick_bottom: false }), t).max_h(320.));
     let label = if importing { "Importing…".into() } else { format!("Import {chosen} {}", if chosen == 1 { "project" } else { "projects" }) };
-    // Web's `canImport`: every selected computer grants operate (denied until its session answers).
-    let can_import = chosen == 0 || crate::settings::permissions::can_on(s, &ui.scan_env, "orchestration:operate");
+    let can_import = can_import(s);
     if !can_import {
         body = body.child(text(IMPORT_PERMISSION_MESSAGE).font(theme::TEXT_SM).color(t.c.destructive).wrap());
     }
@@ -929,6 +1228,35 @@ pub(crate) fn scene_pairing(s: &mut App) {
     ui.pairing_help = true;
 }
 
+/// Headless scene: every listed computer ticked, so those not connected are named as skipped.
+pub(crate) fn scene_computers(s: &mut App) {
+    for env in crate::env::keys(s) {
+        s.ui.wizard.seen.insert(env.clone());
+        s.ui.wizard.chosen.insert(env);
+    }
+    s.ui.wizard.open = true;
+}
+
+/// Headless scene: the Projects step on a computer whose connection may read but not operate.
+pub(crate) fn scene_import_denied(s: &mut App) {
+    crate::scene_clock(s);
+    let env = s.ui.env.active.clone();
+    let candidates = tag_candidates(
+        &env,
+        vec![
+            json!({"path": "/Users/me/code/app", "title": "app", "git": {"remoteKey": "github.com/me/app", "repository": "me/app"}, "sources": ["claudeAgent", "codex"], "threadCount": 12, "lastActiveAt": "2026-11-08T10:00:00.000Z"}),
+            json!({"path": "/Users/me/notes", "title": "notes", "git": null, "sources": ["codex"], "threadCount": 2, "lastActiveAt": "2026-10-01T10:00:00.000Z"}),
+        ],
+    );
+    let ui = &mut s.ui.wizard;
+    ui.selected.insert(data::s(&candidates[0], KEY).to_owned());
+    ui.scans = vec![Scan { env: env.clone(), pending: None, candidates: Some(candidates), truncated: false, error: None }];
+    ui.setup = vec![env.clone()];
+    ui.step = Step::Projects;
+    ui.open = true;
+    crate::settings::permissions::set_session(s, &env, json!({"authenticated": true, "scopes": ["orchestration:read"]}));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,7 +1271,89 @@ mod tests {
         assert_eq!(p(json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "unauthenticated"}})), "signIn");
         assert_eq!(p(json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "authenticated"}})), "ready");
         assert_eq!(p(json!({"enabled": true, "installed": true, "status": "warning", "auth": {"status": "authenticated"}})), "attention");
-        assert_eq!(summary(Some(&json!({"installed": false}))), "Not found · CLI not detected on PATH.");
+        assert_eq!(summary_line(Some(&json!({"installed": false}))), "Not found · CLI not detected on PATH.");
+    }
+
+    #[test]
+    fn agent_cards_read_like_the_web_summary() {
+        assert_eq!(summary_line(None), "Checking provider status · Waiting for the server to report installation and authentication details.");
+        let line = |v: Value| summary_line(Some(&v));
+        assert_eq!(line(json!({"enabled": false, "installed": true})), "Disabled · This provider is installed but disabled for new sessions in T3 Code.");
+        assert_eq!(line(json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "unauthenticated", "type": "apiKey"}})), "Not authenticated · apiKey");
+        assert_eq!(line(json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "unauthenticated", "label": ""}})), "Not authenticated");
+        let failing = json!({"enabled": true, "installed": true, "status": "error", "auth": {"status": "authenticated"}, "message": "Exited with 1"});
+        assert_eq!(provider_state(Some(&failing)), "attention");
+        assert_eq!(summary(Some(&failing)).0, "Unavailable", "the badge names the trouble, not a generic label");
+        assert_eq!(summary_line(Some(&failing)), "Unavailable · Exited with 1");
+
+        let codex = |id: &str, status: &str| json!({"instanceId": id, "driver": "codex", "enabled": true, "installed": true, "status": status, "auth": {"status": "authenticated"}});
+        let claude = |id: &str, status: &str| json!({"instanceId": id, "driver": "claudeAgent", "enabled": true, "installed": true, "status": status, "auth": {"status": "authenticated"}});
+        let providers = [codex("codex", "ready"), codex("codex_work", "warning"), claude("claude_a", "warning"), claude("claude_b", "ready"), claude("claude_c", "ready")];
+        fn ids(cards: Vec<(&str, &str, Option<&Value>)>) -> Vec<String> {
+            cards.into_iter().map(|(driver, _, p)| p.map_or(driver.to_owned(), |p| data::s(p, "instanceId").to_owned())).collect()
+        }
+        assert_eq!(ids(agent_cards(&providers, &Value::Null)), ["codex", "codex_work", "claude_b"], "every Codex account, and the first ready Claude");
+        assert_eq!(ids(agent_cards(&[], &Value::Null)), ["codex", "claudeAgent"], "placeholders while the server reports");
+        let policy = json!({"limits": {"providers": {"allowedDrivers": ["claudeAgent"]}}});
+        assert_eq!(ids(agent_cards(&providers, &policy)), ["claude_b"]);
+    }
+
+    #[test]
+    fn setup_takes_connected_computers_and_names_the_ones_it_skips() {
+        let envs = [("".to_owned(), Phase::Connected), ("box".to_owned(), Phase::Other), ("lab".to_owned(), Phase::Connecting)];
+        fn chosen(keys: &[&str]) -> HashSet<String> {
+            keys.iter().map(|k| (*k).to_owned()).collect()
+        }
+        assert_eq!(resolve_setup(&envs, &chosen(&["", "box"])), (true, vec!["".to_owned()], vec!["box".to_owned()]));
+        assert_eq!(resolve_setup(&envs, &chosen(&["", "lab"])), (false, vec!["".to_owned()], Vec::<String>::new()), "a first connection is waited for");
+        assert_eq!(resolve_setup(&envs, &chosen(&["box"])), (false, Vec::<String>::new(), vec!["box".to_owned()]));
+        assert_eq!(skipped_note(&[]), None);
+        assert_eq!(skipped_note(&["Build box".into()]).unwrap(), "Not connected, so setup skips Build box. You can set it up later from Settings.");
+        assert_eq!(skipped_note(&["Build box".into(), "Lab".into()]).unwrap(), "Not connected, so setup skips Build box, Lab. You can set them up later from Settings.");
+        assert_eq!(privacy_copy(Some("Acme turned off anonymous usage data.")), "Acme turned off anonymous usage data. To read more about how your data is used, see our privacy policy.");
+    }
+
+    #[test]
+    fn import_results_read_like_the_web() {
+        assert_eq!(import_warning(3, 0, 0), None);
+        assert_eq!(import_warning(3, 2, 0).unwrap(), "Imported 3 threads. 2 threads could not be imported.");
+        assert_eq!(import_warning(1, 1, 0).unwrap(), "Imported 1 thread. 1 thread could not be imported.");
+        assert_eq!(import_warning(0, 1, 0).unwrap(), "1 thread could not be imported.");
+        assert_eq!(import_warning(0, 4, 1).unwrap(), "4 threads could not be imported.");
+        assert_eq!(import_warning(2, 0, 1).unwrap(), "Imported 2 threads. Some thread history could not be imported.");
+        assert_eq!(import_warning(0, 0, 1).unwrap(), "Could not import thread history.");
+    }
+
+    #[test]
+    fn importing_needs_operate_on_every_computer_with_a_selected_project() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        let env = crate::env::LOCAL;
+        let candidates = tag_candidates(env, vec![json!({"path": "/w/app", "title": "app"})]);
+        s.ui.wizard.scans.push(Scan { env: env.into(), pending: None, candidates: Some(candidates), truncated: false, error: None });
+        crate::settings::permissions::set_session(&mut s, env, json!({"authenticated": true, "scopes": ["orchestration:read"]}));
+        assert!(can_import(&s), "with nothing selected there is nothing to refuse");
+        s.ui.wizard.selected.insert(key(env, "/w/app"));
+        assert!(!can_import(&s), "a read-only session shows the permission message");
+        start_import(&mut s);
+        assert!(s.ui.wizard.import.is_none());
+        crate::settings::permissions::set_session(&mut s, env, json!({"authenticated": true, "scopes": ["orchestration:operate"]}));
+        assert!(can_import(&s));
+    }
+
+    #[test]
+    fn only_the_servers_own_untouched_project_counts_as_fresh() {
+        let mut st = data::empty_state();
+        st.config = Some(json!({"cwd": "/home/me/app"}));
+        assert!(fresh(&st));
+        st.projects = vec![json!({"id": "p", "workspaceRoot": "/home/me/app/"})];
+        st.threads = vec![json!({"id": "t", "projectId": "p", "latestUserMessageAt": null})];
+        assert!(fresh(&st), "the server's cwd project and its bootstrap thread");
+        st.threads[0]["latestUserMessageAt"] = json!("2026-11-01T00:00:00.000Z");
+        assert!(!fresh(&st), "a thread someone wrote in");
+        st.threads.clear();
+        st.projects[0]["workspaceRoot"] = json!("/home/me/other");
+        assert!(!fresh(&st), "a project the person added");
     }
 
     #[test]
@@ -974,6 +1384,9 @@ mod tests {
         assert_eq!(other, [4]);
         assert_eq!(split_path("/w/app/"), ("/w/", "app"));
         assert_eq!(split_path("app"), ("", "app"));
+        assert_eq!(split_path("C:\\"), ("", "C:\\"));
+        assert_eq!(split_path("\\\\server\\share\\"), ("", "\\\\server\\share\\"));
+        assert_eq!(split_path("\\\\server\\share\\repo"), ("\\\\server\\share\\", "repo"));
     }
 
     #[test]
@@ -1010,15 +1423,22 @@ mod tests {
         s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example".into(), bearer: "t".into() });
         crate::env::park(&mut s, "box", crate::data::Source::Fixture(crate::data::empty_state()));
 
+        s.ui.env.saved.push(crate::env::Saved { id: "off".into(), label: "Off".into(), base: "https://off.example".into(), bearer: "t".into() });
+        s.ui.env.off.push("off".into());
+
         s.ui.wizard.paired_here = true;
         poll(&mut s);
         assert!(s.ui.wizard.pairing_failed, "a pairing that added nothing shows its error");
         assert!(s.ui.wizard.pairing_open);
+        assert!(s.ui.wizard.chosen.contains("box") && !s.ui.wizard.chosen.contains("off"), "listed computers start ticked unless they are off");
+        toggle_computer(&mut s, "box");
+        poll(&mut s);
+        assert!(!s.ui.wizard.chosen.contains("box"), "an unticked computer stays unticked");
 
         s.ui.wizard.paired_here = true;
         s.ui.env.last_paired = Some("box".into());
         poll(&mut s);
-        assert_eq!(s.ui.env.active, "box");
+        assert!(s.ui.wizard.chosen.contains("box"), "the computer just paired is ticked");
         assert!(!s.ui.wizard.pairing_open && s.ui.wizard.link.text.is_empty());
     }
 }
