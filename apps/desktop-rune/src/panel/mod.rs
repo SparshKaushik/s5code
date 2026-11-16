@@ -3,6 +3,7 @@ pub(crate) mod agent;
 pub(crate) mod stream;
 pub mod browser;
 mod closed;
+mod device;
 pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
@@ -31,6 +32,7 @@ pub enum Surface {
     Files,
     Diff,
     PullRequests,
+    Device,
 }
 impl Surface {
     fn title(self) -> &'static str {
@@ -40,6 +42,7 @@ impl Surface {
             Self::Files => "Files",
             Self::Diff => "Diff",
             Self::PullRequests => "Pull requests",
+            Self::Device => "Device",
         }
     }
     fn glyph(self) -> &'static rune::Icon {
@@ -49,6 +52,7 @@ impl Surface {
             Self::Files => &icons::FILES,
             Self::Diff => &icons::FILE_DIFF,
             Self::PullRequests => &icons::LINK,
+            Self::Device => &icons::SMARTPHONE,
         }
     }
 }
@@ -59,6 +63,7 @@ pub struct Ui {
     pub diff: diff::Ui,
     pub(crate) pull_requests: pull_requests::Ui,
     files: files::Ui,
+    device: device::Ui,
     terminal: terminal::Ui,
     drawer: drawer::Ui,
     browser: preview::Ui,
@@ -93,6 +98,7 @@ impl Default for Ui {
             diff: Default::default(),
             pull_requests: Default::default(),
             files: Default::default(),
+            device: Default::default(),
             terminal: Default::default(),
             drawer: Default::default(),
             browser: Default::default(),
@@ -173,12 +179,13 @@ fn workspace(app: &App) -> Option<String> {
     crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
 }
 /// The launcher's entries; Browser always opens a new tab, as web's.
-const LAUNCH: [(Surface, &str); 5] = [
+const LAUNCH: [(Surface, &str); 6] = [
     (Surface::Browser(0), "B"),
     (Surface::Terminal, "T"),
     (Surface::Files, "F"),
     (Surface::Diff, "D"),
     (Surface::PullRequests, "L"),
+    (Surface::Device, "M"),
 ];
 fn add(app: &mut App, surface: Surface) {
     match surface {
@@ -229,6 +236,10 @@ pub fn showing_pull_requests(app: &App) -> bool {
 pub fn showing_browser(app: &App) -> bool {
     app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_)))
 }
+/// The device state subscription, while a thread's panel has its Device surface.
+pub fn device_wanted(app: &App) -> Option<(String, Value)> {
+    app.ui.panel.surfaces.contains(&Surface::Device).then(|| (device::STATE.to_owned(), json!({})))
+}
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
     let tab = preview::open(app);
@@ -267,7 +278,7 @@ fn field(app: &App, region: Region) -> Option<Field> {
             Surface::Browser(tab) => Some(Field::Bar(tab)),
             Surface::Files => files::field_focused(app).map(|_| Field::Files),
             Surface::Terminal => terminal(drawer::Owner::Panel),
-            Surface::Diff | Surface::PullRequests => None,
+            Surface::Diff | Surface::PullRequests | Surface::Device => None,
         },
     }
 }
@@ -306,7 +317,7 @@ fn close(app: &mut App, surface: Surface) {
         Surface::Diff => Some(closed::View::Diff),
         Surface::PullRequests => Some(closed::View::PullRequests),
         Surface::Browser(tab) => preview::url(app, tab).map(closed::View::Browser),
-        Surface::Terminal => None,
+        Surface::Terminal | Surface::Device => None,
     };
     if let (Some(view), Some((thread, _))) = (view, context(app)) {
         app.ui.panel.closed.record(closed::Closed { thread, view });
@@ -442,7 +453,7 @@ impl Surface {
             Self::Files => Some("files"),
             Self::Diff => Some("diff"),
             Self::PullRequests => Some("pull-requests"),
-            Self::Browser(_) => None,
+            Self::Browser(_) | Self::Device => None,
         }
     }
     fn from_saved_id(id: &str) -> Option<Self> {
@@ -601,6 +612,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let changed = diff::poll(app)
         | diff::reveal(app, tx)
         | files::poll(app, tx)
+        | device::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)
         | preview::poll(app, tx);
@@ -830,7 +842,6 @@ fn picker(app: &App, t: &T) -> El {
                 .on_press(move |s: &mut App| add(s, surface)),
         );
     }
-    list = list.child(unported("Device", &icons::SMARTPHONE, "M"));
     col()
         .key("panel-launcher")
         .focus_group()
@@ -964,8 +975,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
-        Some(Surface::Files) => files::view(app, t),
+        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
+        Some(Surface::Device) => device::view(app, t),
         Some(Surface::Terminal) => col()
             .grow(1.)
             .min_h(0.)
@@ -1062,6 +1074,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-file-no-preview", |s| {
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "docs/spec.pdf", "", false);
+    }),
+    ("panel-device-list", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([]));
+    }),
+    ("panel-device-h264", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1283,7 +1303,6 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
                 }),
         );
     }
-    menu = menu.item(kit::MenuItem::new("Device").icon(&icons::SMARTPHONE).shortcut("M").disabled(true));
     menu.overlay(&kit::theme(t), out);
 }
 

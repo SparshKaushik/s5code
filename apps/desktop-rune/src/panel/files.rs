@@ -53,6 +53,10 @@ pub struct Ui {
     sent: String,
     truncated: bool,
     numbers: String,
+    /// Bumped on every text change, for the wrapped gutter's cache.
+    rev: u64,
+    /// `numbers` laid out beside wrapped lines, for (rev, width, cell width).
+    gutter: std::cell::RefCell<Option<((u64, u32, u32), String)>>,
     columns: usize,
     due: Option<Instant>,
     writes: Vec<Write>,
@@ -164,6 +168,8 @@ impl Default for Ui {
             sent: String::new(),
             truncated: false,
             numbers: String::new(),
+            rev: 0,
+            gutter: Default::default(),
             columns: 0,
             due: None,
             writes: vec![],
@@ -500,6 +506,7 @@ fn show(ui: &mut Ui, contents: String, truncated: bool) {
 }
 
 fn measure(ui: &mut Ui) {
+    ui.rev += 1;
     let text = &ui.editor.text;
     let lines = text.split('\n').count();
     let digits = lines.to_string().len();
@@ -838,7 +845,8 @@ fn image_view(image: &Image, t: &T) -> El {
     col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
 }
 
-fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
+/// `laid_out` is the editor's width from the last frame, for the wrapped gutter.
+fn editor(ui: &Ui, t: &T, wrap: bool, laid_out: Option<f32>) -> El {
     let lang = ui.selected.rsplit('.').next();
     let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark)
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
@@ -848,6 +856,7 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
     let mark = ui.line.and_then(|n| line_range(&ui.editor.text, n)).map(|range| rune::TextHighlight::new(range, t.c.primary.alpha_mul(0.25)).key("file-line"));
     let code = if ui.truncated {
         text(&ui.editor.text)
+            .key("file-editor")
             .font(font)
             .color(t.c.contrast_foreground)
             .spans(spans)
@@ -867,9 +876,19 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
             .on_input_key(on_key)
     };
     let code = code.text_highlights(mark);
-    // Wrapped lines can't keep the gutter's numbers beside them, so wrapping drops it.
     if wrap {
-        return scroll(code.wrap().w_full().px(12.).py(8.));
+        // The editor's right padding is not text.
+        let numbers = match laid_out.map(|w| w - 12.) {
+            Some(width) if width > cell => wrapped_gutter(ui, font, cell, width),
+            _ => ui.numbers.clone(),
+        };
+        return scroll(
+            row()
+                .w_full()
+                .py(8.)
+                .child(text(numbers).font(font).color(t.c.muted_foreground).pl(12.).pr(16.))
+                .child(code.wrap().grow(1.).min_w(0.).pr(12.)),
+        );
     }
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(
         row()
@@ -883,6 +902,47 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
             )
             .child(code.min_w(width).grow(1.).pr(12.)),
     )
+}
+
+/// CodeMirror's gutter under lineWrapping: each line's number on its first visual row, blank
+/// rows beside its continuations.
+fn wrapped_numbers(text: &str, rows: impl Fn(&str) -> usize) -> String {
+    let digits = text.split('\n').count().to_string().len();
+    let mut out = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{:>digits$}", i + 1));
+        for _ in 1..rows(line).max(1) {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// How many 20 px rows `line` wraps to at `width`. Lines that fit by their cell count skip
+/// shaping; the rest measure as the editor lays them out.
+fn visual_rows(line: &str, font: TextStyle, cell: f32, width: f32) -> usize {
+    let cells: usize = line.chars().map(|c| if c == '\t' { 8 } else { 1 }).sum();
+    if cells as f32 * cell <= width {
+        return 1;
+    }
+    let (_, height) = rune::text::measure(line, &[], font, Some(width));
+    (height / 20.).round().max(1.) as usize
+}
+
+fn wrapped_gutter(ui: &Ui, font: TextStyle, cell: f32, width: f32) -> String {
+    let key = (ui.rev, width.to_bits(), cell.to_bits());
+    let mut cache = ui.gutter.borrow_mut();
+    if let Some((k, numbers)) = cache.as_ref()
+        && *k == key
+    {
+        return numbers.clone();
+    }
+    let numbers = wrapped_numbers(&ui.editor.text, |line| visual_rows(line, font, cell, width));
+    *cache = Some((key, numbers.clone()));
+    numbers
 }
 
 /// The field `workspace.focusNext` lands on: the search, or the open file's editor. `None`
@@ -1066,7 +1126,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .overlay(&kit::theme(t), out);
 }
 
-pub fn view(app: &App, t: &T) -> El {
+/// `editor_width` is the "file-editor" field's width on the last frame.
+pub fn view(app: &App, t: &T, editor_width: Option<f32>) -> El {
     let ui = &app.ui.panel.files;
     let wrap = wrap_on(app);
     let header = header(ui, wrap, t);
@@ -1088,7 +1149,7 @@ pub fn view(app: &App, t: &T) -> El {
     } else if let Some(image) = &ui.image {
         image_view(image, t)
     } else if !ui.selected.is_empty() {
-        file_body(app, ui, wrap, t)
+        file_body(app, ui, wrap, editor_width, t)
     } else {
         tree(ui, t)
     };
@@ -1124,10 +1185,10 @@ pub fn view(app: &App, t: &T) -> El {
 }
 
 /// The open file: its rendered view, the editor, or "No preview" for what Rune can't draw.
-fn file_body(app: &App, ui: &Ui, wrap: bool, t: &T) -> El {
+fn file_body(app: &App, ui: &Ui, wrap: bool, width: Option<f32>, t: &T) -> El {
     let kind = fp::kind(&ui.selected);
     if ui.reading.is_some() {
-        return editor(ui, t, wrap);
+        return editor(ui, t, wrap, width);
     }
     let no_preview = |reason: Option<&str>| {
         fp::no_preview(fp::file_name(&ui.selected), reason, t, |s: &mut App| use_asset(s, AssetUse::External), save_as)
@@ -1140,7 +1201,7 @@ fn file_body(app: &App, ui: &Ui, wrap: bool, t: &T) -> El {
         (Kind::Notebook, _, Some(Err(e))) => no_preview(Some(e.as_str())),
         (Kind::Markdown, ..) if rendered_on(ui) => fp::markdown(app, &ui.selected, &ui.editor.text, t),
         (Kind::Table(_), Some(table), _) if rendered_on(ui) => fp::table(table, t),
-        _ => editor(ui, t, wrap),
+        _ => editor(ui, t, wrap, width),
     }
 }
 
@@ -1217,6 +1278,14 @@ mod tests {
         assert_eq!(line_range(text, 3), Some(14..14));
         assert_eq!(&text[line_range(text, 4).unwrap()], "last");
         assert_eq!(line_range(text, 5), None);
+    }
+
+    #[test]
+    fn the_wrapped_gutter_numbers_each_lines_first_row() {
+        let rows = |line: &str| line.len().div_ceil(4);
+        assert_eq!(wrapped_numbers("ab\nabcdefghij\n\nxyz", rows), "1\n2\n\n\n3\n4");
+        let long = (0..12).map(|_| "x").collect::<Vec<_>>().join("\n");
+        assert_eq!(wrapped_numbers(&long, |_| 1).lines().next(), Some(" 1"), "numbers right-align to the widest");
     }
 
     #[test]

@@ -656,7 +656,9 @@ fn remove_project(s: &mut App, key: &str, project: &str) {
 }
 
 /// The banner docked on the composer's shoulder, as `mismatch_banner` is.
-pub fn banner(s: &App, t: &T) -> Option<El> {
+/// `detached` is web's draft-hero notice: a whole card below the composer, not a tab tucked
+/// under its top edge.
+pub fn banner(s: &App, t: &T, detached: bool) -> Option<El> {
     use crate::theme::radius;
     let (project, key) = composer_project(s)?;
     let clone = clone_of(s, &project, &key);
@@ -691,13 +693,13 @@ pub fn banner(s: &App, t: &T) -> Option<El> {
         row()
             .key("project-clone-banner")
             .w_full()
-            .corners([radius::XL2, radius::XL2, 0.0, 0.0])
+            .corners(if detached { [radius::XL2; 4] } else { [radius::XL2, radius::XL2, 0.0, 0.0] })
             .fill(if t.dark { t.c.surface_raised } else { t.c.card })
             .border(1.0, if t.dark { rune::Color::WHITE.alpha(0.05) } else { rune::Color::BLACK.alpha(0.08) })
             .pl(16.0)
             .pr(8.0)
             .pt(4.0)
-            .pb(17.0 + 4.0)
+            .pb(if detached { 4.0 } else { 17.0 + 4.0 })
             .gap(8.0)
             .center_y()
             .role("alert")
@@ -945,7 +947,17 @@ fn scene_copy_failed(s: &mut App) {
     s.ui.add_to_machine.copy_failed.insert(id, (copy_failure_title(failures.len(), "Build box"), failures));
 }
 
-pub const SCENES: &[(&str, fn(&mut App))] = &[("add-to-machine", scene_dialog), ("project-copy-failed", scene_copy_failed)];
+/// The same failure on a new draft, where web shows the notice below the centred composer.
+fn scene_draft_banner(s: &mut App) {
+    s.navigate(Route::Home { project_id: None });
+    crate::scene_clock(s);
+    let Some(id) = crate::chat::home::default_project(s).map(|p| data::s(p, "id").to_owned()) else { return };
+    let failures = vec![".env: Permission denied (os error 13)".to_owned()];
+    s.ui.add_to_machine.copy_failed.insert(id, (copy_failure_title(failures.len(), "Build box"), failures));
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] =
+    &[("add-to-machine", scene_dialog), ("project-copy-failed", scene_copy_failed), ("project-clone-draft", scene_draft_banner)];
 
 #[cfg(test)]
 mod tests {

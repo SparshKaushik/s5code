@@ -66,10 +66,6 @@ impl Kind {
             _ => None,
         }
     }
-    /// Shown as "No preview for this file" with Open externally and Save.
-    pub fn unpreviewable(self) -> bool {
-        matches!(self, Kind::Audio | Kind::Video | Kind::Pdf | Kind::Office | Kind::Font | Kind::Archive)
-    }
 }
 
 /// `renderedToggleLabel`.
@@ -376,7 +372,6 @@ mod tests {
             assert_eq!(kind(path), want, "{path}");
         }
         assert!(Kind::Html.opens_in_browser() && Kind::Pdf.opens_in_browser() && !Kind::Markdown.opens_in_browser());
-        assert!(Kind::Pdf.unpreviewable() && Kind::Audio.unpreviewable() && !Kind::Image.unpreviewable() && !Kind::Notebook.unpreviewable());
         assert_eq!(toggle_label("markdown", false), "Show rendered markdown");
         assert_eq!(toggle_label("table", true), "Show source");
         assert_eq!(file_name("a/b/c.txt"), "c.txt");
