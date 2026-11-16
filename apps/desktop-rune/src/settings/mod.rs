@@ -18,13 +18,13 @@ pub(crate) mod connections;
 mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;
-mod thread_details;
+pub(crate) mod thread_details;
 mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
 mod keybindings;
-mod machines;
+pub(crate) mod machines;
 mod models;
 mod host_logos;
 mod icon_index;
@@ -46,7 +46,7 @@ mod diagnostics;
 mod resource_telemetry;
 mod licenses;
 mod secrets;
-mod tasks;
+pub(crate) mod tasks;
 pub(crate) mod themes;
 pub use themes::apply as apply_theme;
 
@@ -596,10 +596,14 @@ pub fn poll(s: &mut App) -> bool {
                     if method == "server.updateSettings" && std::mem::take(&mut s.ui.settings.source_control.rescan) {
                         source_control::scan(s);
                     }
-                    if method == "thread action" {
+                    if projects::failure_title(&method).is_some() {
                         request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
                     }
                     s.ui.settings.results.insert(method, result);
+                }
+                Err(error) if projects::failure_title(&method).is_some() => {
+                    let detail = crate::shell::palette::error_message(&error, "An error occurred.");
+                    crate::shell::palette::toast_error_brief(s, projects::failure_title(&method).unwrap_or_default(), Some(&detail));
                 }
                 Err(error) => {
                     let environment = s
@@ -1188,6 +1192,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "scheduled-tasks");
         tasks::scene(s, "deliveries");
     }),
+    ("settings-scheduled-tasks-base-branch", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "base-branch");
+    }),
+    ("settings-scheduled-tasks-model", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "model");
+    }),
+    ("settings-scheduled-tasks-link", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "link");
+    }),
+    ("settings-scheduled-tasks-unavailable", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "unavailable");
+    }),
     ("settings-projects", |s| scene(s, "projects")),
     ("settings-source-control", |s| scene(s, "source-control")),
     ("settings-worktrees", |s| scene(s, "worktrees")),
@@ -1357,6 +1377,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-providers-add-hub", |s| {
         scene(s, "providers");
         providers::scene_usage(s, "add");
+    }),
+    ("settings-providers-add-hub-secret", |s| {
+        scene(s, "providers");
+        providers::scene_usage(s, "add-secret");
+    }),
+    ("settings-providers-add-hub-secret-invalid", |s| {
+        scene(s, "providers");
+        providers::scene_usage(s, "add-secret-invalid");
     }),
     ("settings-providers-remove-hub", |s| {
         scene(s, "providers");
@@ -1754,7 +1782,7 @@ mod reveal_tests {
     }
 
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
-    const UNBUILT: &[&str] = &["Project defaults and overrides"];
+    const UNBUILT: &[&str] = &[];
     /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
     /// Linked environments behind its Labs flag, and Cursor's keychain usage on macOS.
     const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];

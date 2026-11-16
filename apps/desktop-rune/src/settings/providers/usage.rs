@@ -28,6 +28,12 @@ pub struct Ui {
     url: TextEdit,
     key: TextEdit,
     label: TextEdit,
+    /// Web `SecretSourceInput`: the secret provider the key is read from; `None` types a value.
+    key_source: Option<String>,
+    key_source_open: bool,
+    key_reference: TextEdit,
+    /// The reference was refused; editing it clears the message.
+    key_rejected: bool,
     /// The hub whose removal awaits confirmation.
     removing: Option<String>,
     /// The Cursor account usage switch's write is in flight; providers refresh once it lands.
@@ -164,7 +170,7 @@ pub fn section(s: &App, t: &T) -> El {
             .disabled(read_only || ui.cursor_updating)
             .on_toggle(move |s: &mut App| set_cursor_usage(s, !on))
             .build(&kit::theme(t));
-        rows.push(plain_row(t, "Cursor account usage", Some(CURSOR_USAGE.into()), Some(switch)));
+        rows.push(plain_row(t, "Cursor account usage", Some(CURSOR_USAGE.into()), Some(switch)).key(super::super::title_key("Cursor account usage")));
     }
     let hubs = sources(settings);
     if hubs.is_empty() {
@@ -195,6 +201,10 @@ pub fn open_add(s: &mut App) {
     ui.url = TextEdit::default();
     ui.key = TextEdit::new(String::new()).secure();
     ui.label = TextEdit::default();
+    ui.key_source = None;
+    ui.key_source_open = false;
+    ui.key_reference = TextEdit::default();
+    ui.key_rejected = false;
 }
 
 fn close_add(s: &mut App) {
@@ -204,12 +214,85 @@ fn close_add(s: &mut App) {
     ui.key = TextEdit::default();
 }
 
+/// The key the dialog saves: the typed value, or `{provider, reference}` from a secret provider.
+fn management_key(ui: &Ui) -> Value {
+    match &ui.key_source {
+        Some(provider) => json!({"provider": provider, "reference": ui.key_reference.text.trim()}),
+        None => json!(ui.key.text.trim()),
+    }
+}
+
+/// A refused reference blocks saving until it is edited; an unchecked one is checked on save.
 fn can_save(ui: &Ui) -> bool {
-    !ui.url.text.trim().is_empty() && !ui.key.text.trim().is_empty()
+    let key = if ui.key_source.is_some() { &ui.key_reference } else { &ui.key };
+    !ui.url.text.trim().is_empty() && !key.text.trim().is_empty() && !ui.key_rejected
+}
+
+/// `useSecretSources`: 1Password accounts as `(id, label)`, when this environment reads secret
+/// references. Fixtures show them as the Secrets page does.
+fn secret_sources(s: &App) -> Vec<(String, String)> {
+    let feature = super::super::secrets::enabled() || !matches!(s.src, crate::data::Source::Live(_));
+    let supported = s.state().config.as_ref().is_some_and(|c| c["secretReferences"] == true);
+    if !feature || !supported {
+        return Vec::new();
+    }
+    server_settings(s)["secretProviders"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, p)| super::super::secrets::account(p).is_some())
+        .map(|(id, p)| (id.clone(), p["label"].as_str().unwrap_or(id).to_owned()))
+        .collect()
+}
+
+const VALUE_SOURCE: &str = "__stored__";
+const REFERENCE_PLACEHOLDER: &str = "op://vault/item/field";
+const INVALID_REFERENCE: &str = "Use a 1Password reference like op://vault/item/field.";
+
+/// Contracts `SecretReference` (provider slug, one trimmed line) and 1Password's `isReference`.
+fn valid_reference(provider: &str, reference: &str) -> bool {
+    let mut chars = provider.chars();
+    let slug = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        && provider.len() <= 64;
+    let reference = reference.trim();
+    slug && !reference.is_empty() && !reference.contains(['\r', '\n']) && is_op_reference(reference)
+}
+
+/// `^op://NAME(?:/NAME){2,3}(?:\?[a-z-]+=[A-Za-z0-9_-]+)?$`, at most 1024 long.
+fn is_op_reference(reference: &str) -> bool {
+    let Some(rest) = reference.strip_prefix("op://") else { return false };
+    if reference.len() > 1024 {
+        return false;
+    }
+    let (path, query) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (rest, None),
+    };
+    if let Some(query) = query {
+        let Some((name, value)) = query.split_once('=') else { return false };
+        let name_ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '-');
+        let value_ok = !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+        if !name_ok || !value_ok {
+            return false;
+        }
+    }
+    let edge = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    let segments: Vec<&str> = path.split('/').collect();
+    (3..=4).contains(&segments.len())
+        && segments.iter().all(|n| !n.is_empty() && n.chars().all(|c| edge(c) || c == ' ') && n.starts_with(edge) && n.ends_with(edge))
+}
+
+fn pick_source(s: &mut App, value: &str) {
+    let ui = &mut s.ui.settings.providers_ui.usage;
+    ui.key_source_open = false;
+    ui.key_rejected = false;
+    ui.key_reference = TextEdit::default();
+    ui.key_source = (value != VALUE_SOURCE).then(|| value.to_owned());
 }
 
 /// The `usageLimitSources` patch the Add hub dialog sends; the key goes to server secret storage.
-fn hub_patch(sources: &Value, url: &str, key: &str, label: &str) -> Value {
+fn hub_patch(sources: &Value, url: &str, key: Value, label: &str) -> Value {
     let mut entry = json!({"kind": "cliproxy", "url": url, "managementKey": key, "enabled": true});
     if !label.is_empty() {
         entry["label"] = json!(label);
@@ -223,7 +306,11 @@ fn save(s: &mut App) {
     if !can_save(ui) {
         return;
     }
-    let patch = hub_patch(&server_settings(s)["usageLimitSources"], ui.url.text.trim(), ui.key.text.trim(), ui.label.text.trim());
+    if ui.key_source.as_deref().is_some_and(|p| !valid_reference(p, &ui.key_reference.text)) {
+        s.ui.settings.providers_ui.usage.key_rejected = true;
+        return;
+    }
+    let patch = hub_patch(&server_settings(s)["usageLimitSources"], ui.url.text.trim(), management_key(ui), ui.label.text.trim());
     update(s, "usageLimitSources", patch);
     close_add(s);
 }
@@ -236,12 +323,75 @@ fn remove(s: &mut App) {
 
 /// Escape closes the Add hub or Remove hub dialog first.
 pub fn escape(s: &mut App) -> bool {
-    let ui = &s.ui.settings.providers_ui.usage;
+    let ui = &mut s.ui.settings.providers_ui.usage;
+    if std::mem::take(&mut ui.key_source_open) {
+        return true;
+    }
     if ui.adding {
         close_add(s);
         return true;
     }
     s.ui.settings.providers_ui.usage.removing.take().is_some()
+}
+
+/// `SecretSourceInput` for the management key: a source select before the value when secret
+/// providers exist, and a reference field while one is picked.
+fn key_field(s: &App, t: &T, popups: &mut Vec<El>) -> El {
+    let ui = &s.ui.settings.providers_ui.usage;
+    let sources = secret_sources(s);
+    let value = match &ui.key_source {
+        None => kit::Input::new(&ui.key)
+            .placeholder("Management key")
+            .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.usage.key)
+            .on_submit(|s: &mut App, _| save(s))
+            .build(t)
+            .single_line()
+            .secure()
+            .label("Management key"),
+        Some(_) => {
+            let input = kit::Input::new(&ui.key_reference)
+                .placeholder(REFERENCE_PLACEHOLDER)
+                .font("mono")
+                .invalid(ui.key_rejected)
+                .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.usage.key_reference)
+                .on_change(|s: &mut App, _| s.ui.settings.providers_ui.usage.key_rejected = false)
+                .on_submit(|s: &mut App, _| save(s))
+                .build(t)
+                .single_line()
+                .label("Management key reference");
+            let mut column = col().grow(1.0).min_w(0.0).gap(4.0).child(input);
+            if ui.key_rejected {
+                column = column.child(text(INVALID_REFERENCE).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+            }
+            column
+        }
+    };
+    if sources.is_empty() && ui.key_source.is_none() {
+        return value;
+    }
+    let mut values = vec![VALUE_SOURCE.to_owned()];
+    values.extend(sources.iter().map(|(id, _)| id.clone()));
+    let mut select = kit::Select::new("usage-hub-key-source", &values)
+        .current(Some(ui.key_source.as_deref().unwrap_or(VALUE_SOURCE)))
+        .label("Management key source")
+        .size("sm")
+        .width(0.0)
+        .display("")
+        .leading(
+            rune::icon(if ui.key_source.is_some() { &super::super::secrets::ONE_PASSWORD } else { &icons::TYPE }, 14.0)
+                .color(t.c.foreground),
+            14.0,
+        )
+        .option_detail(VALUE_SOURCE, &icons::TYPE, "")
+        .option_name(VALUE_SOURCE, "Value")
+        .open(ui.key_source_open)
+        .on_toggle(|s: &mut App| s.ui.settings.providers_ui.usage.key_source_open ^= true)
+        .on_close(|s: &mut App| s.ui.settings.providers_ui.usage.key_source_open = false)
+        .on_choose(|s: &mut App, value: &str, _: &mut rune::Tx| pick_source(s, value));
+    for (id, label) in &sources {
+        select = select.option_detail(id.clone(), &super::super::secrets::ONE_PASSWORD, "").option_name(id.clone(), label.clone());
+    }
+    row().w_full().gap(6.0).child(select.build(&kit::theme(t), popups)).child(col().grow(1.0).min_w(0.0).child(value))
 }
 
 fn field(label: &str, input: El, t: &T) -> El {
@@ -261,13 +411,8 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             .on_submit(|s: &mut App, _| save(s))
             .build(t)
             .single_line();
-        let key = kit::Input::new(&ui.key)
-            .placeholder("Management key")
-            .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.usage.key)
-            .on_submit(|s: &mut App, _| save(s))
-            .build(t)
-            .single_line()
-            .secure();
+        let mut popups = Vec::new();
+        let key = key_field(s, t, &mut popups);
         let label = kit::Input::new(&ui.label)
             .placeholder("Defaults to the hub's host name")
             .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.usage.label)
@@ -292,6 +437,7 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             .child(form)
             .child(footer)
             .build(t, layers);
+        layers.extend(popups);
     }
     if let Some(id) = &ui.removing {
         let settings = server_settings(s);
@@ -456,6 +602,23 @@ pub fn scene(s: &mut App, open: &str) {
             s.ui.settings.providers_ui.usage.url = TextEdit::new("https://hub.example.ts.net:8318".to_owned());
         }
         "remove" => s.ui.settings.providers_ui.usage.removing = Some("cliproxy-hub.example.ts.net-8318".into()),
+        // The key's source menu open, and a refused 1Password reference.
+        "add-secret" | "add-secret-invalid" => {
+            stage(s, json!({"secretProviders": {"personal": {"kind": "one_password", "label": "Personal", "config": {"account": "my.1password.com"}}}}));
+            if let crate::data::Source::Fixture(state) = &mut s.src {
+                state.config.get_or_insert_with(|| json!({}))["secretReferences"] = json!(true);
+            }
+            open_add(s);
+            let ui = &mut s.ui.settings.providers_ui.usage;
+            ui.url = TextEdit::new("https://hub.example.ts.net:8318".to_owned());
+            if open == "add-secret" {
+                ui.key_source_open = true;
+            } else {
+                ui.key_source = Some("personal".into());
+                ui.key_reference = TextEdit::new("op://vault/item".to_owned());
+                ui.key_rejected = true;
+            }
+        }
         _ => {}
     }
 }
@@ -476,9 +639,29 @@ mod tests {
         let saved = json!({"cliproxy-hub.example.com": {"url": "https://hub.example.com/a"}});
         assert_eq!(source_id("https://hub.example.com/a", &saved), "cliproxy-hub.example.com");
         assert_eq!(source_id("https://hub.example.com/b", &saved), "cliproxy-hub.example.com-2");
-        let patch = hub_patch(&none, "https://h.ts.net", "k", "");
+        let patch = hub_patch(&none, "https://h.ts.net", json!("k"), "");
         assert_eq!(patch, json!({"cliproxy-h.ts.net": {"kind": "cliproxy", "url": "https://h.ts.net", "managementKey": "k", "enabled": true}}));
-        assert_eq!(hub_patch(&none, "https://h.ts.net", "k", "Mine")["cliproxy-h.ts.net"]["label"], "Mine");
+        assert_eq!(hub_patch(&none, "https://h.ts.net", json!("k"), "Mine")["cliproxy-h.ts.net"]["label"], "Mine");
+    }
+
+    #[test]
+    fn hub_keys_from_a_secret_provider_save_web_secret_references() {
+        for valid in ["op://vault/item/field", "op://My Vault/item/section/field", "op://v/i/f?attribute=otp", " op://v/i/f "] {
+            assert!(valid_reference("personal", valid), "{valid}");
+        }
+        for invalid in ["op://vault/item", "op://v/i/s/f/x", "op:// v/i/f", "op://v//f", "vault/item/field", "op://v/i/f?Attr=x", "op://v/i/f?a=", "op://v/i/f\nx", ""] {
+            assert!(!valid_reference("personal", invalid), "{invalid}");
+        }
+        assert!(!valid_reference("-bad", "op://v/i/f"));
+        assert!(!valid_reference("personal", &format!("op://v/i/{}", "f".repeat(1020))));
+        let ui = Ui { key_source: Some("personal".into()), key_reference: TextEdit::new(" op://v/i/f ".to_owned()), ..Ui::default() };
+        assert_eq!(management_key(&ui), json!({"provider": "personal", "reference": "op://v/i/f"}));
+        let patch = hub_patch(&json!({}), "https://h.ts.net", management_key(&ui), "");
+        assert_eq!(patch["cliproxy-h.ts.net"]["managementKey"], json!({"provider": "personal", "reference": "op://v/i/f"}));
+        let typed = Ui { key: TextEdit::new(" k ".to_owned()), url: TextEdit::new("https://h".to_owned()), ..Ui::default() };
+        assert_eq!(management_key(&typed), json!("k"));
+        assert!(can_save(&typed));
+        assert!(!can_save(&Ui { key_rejected: true, ..typed }));
     }
 
     #[test]
