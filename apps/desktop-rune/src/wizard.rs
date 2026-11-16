@@ -61,6 +61,23 @@ pub struct Ui {
     /// Import sections opened or closed away from their default (groups open, other folders closed).
     toggled: HashSet<String>,
     import: Option<Import>,
+    terminal: Option<Setup>,
+}
+
+/// `AGENT_ONBOARDING_THREAD_ID`: setup terminals belong to no real thread.
+const SETUP_THREAD: &str = "onboarding-agent-setup";
+
+/// `AgentInstallTerminal`: an agent's login or install command typed into a terminal on its
+/// computer, for the person to read and run. Terminals live on the focused connection, so a
+/// computer not in focus is brought up for it and `back` is restored on close.
+struct Setup {
+    env: String,
+    driver: &'static str,
+    instance: String,
+    id: String,
+    cwd: String,
+    command: String,
+    back: Option<String>,
 }
 
 struct Scan {
@@ -161,6 +178,145 @@ fn provider_state(p: Option<&Value>) -> &'static str {
     } else {
         "attention"
     }
+}
+
+/// `quoteProviderBinary`.
+fn quote_binary(path: &str, fallback: &str, os: &str) -> String {
+    let safe = !path.is_empty() && path.chars().all(|c| c.is_ascii_alphanumeric() || "_./:\\-".contains(c));
+    if safe && (os == "windows" || !path.contains('\\')) {
+        return path.to_owned();
+    }
+    match os {
+        "windows" => format!("& '{}'", path.replace('\'', "''")),
+        "darwin" | "linux" => match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+            Some(rest) => format!("~/'{}'", rest.replace('\'', "'\"'\"'")),
+            None => format!("'{}'", path.replace('\'', "'\"'\"'")),
+        },
+        _ => fallback.to_owned(),
+    }
+}
+
+/// `resolveOnboardingProviderLoginCommand` for an installed agent, else
+/// `resolveOnboardingProviderInstallCommand`.
+fn setup_command(provider: &Value, config: &Value) -> String {
+    let os = data::s(&config["environment"]["platform"], "os");
+    let driver = data::s(provider, "driver");
+    if provider["installed"] == false {
+        let (windows, posix) = if driver == "claudeAgent" {
+            ("irm https://claude.ai/install.ps1 | iex", "curl -fsSL https://claude.ai/install.sh | bash")
+        } else {
+            ("irm https://chatgpt.com/codex/install.ps1 | iex", "curl -fsSL https://chatgpt.com/codex/install.sh | sh")
+        };
+        return if os == "windows" { windows } else { posix }.to_owned();
+    }
+    let (fallback, verb) = match driver {
+        "claudeAgent" => ("claude", "auth login"),
+        "codex" => ("codex", "login"),
+        other => return other.to_owned(),
+    };
+    let instance = &config["settings"]["providerInstances"][data::s(provider, "instanceId")]["config"];
+    let binary = instance["binaryPath"].as_str().map(str::trim).filter(|p| !p.is_empty()).unwrap_or(fallback);
+    format!("{} {verb}", quote_binary(binary, fallback, os))
+}
+
+fn can_operate_terminal(s: &App, env: &str) -> bool {
+    crate::settings::permissions::can_on(s, env, "terminal:operate")
+}
+
+fn open_setup(s: &mut App, env: &str, driver: &'static str, instance: &str) {
+    if !can_operate_terminal(s, env) {
+        return;
+    }
+    let Some(config) = config(s, env).cloned() else { return };
+    let Some(provider) = config["providers"].as_array().and_then(|list| list.iter().find(|p| data::s(p, "instanceId") == instance)) else { return };
+    let cwd = data::s(&config, "cwd").to_owned();
+    if cwd.is_empty() {
+        return;
+    }
+    let command = setup_command(provider, &config);
+    close_setup(s);
+    let back = (s.ui.env.active != env).then(|| s.ui.env.active.clone());
+    if back.is_some() {
+        crate::env::switch(s, env);
+    }
+    let setup = Setup { env: env.to_owned(), driver, instance: instance.to_owned(), id: setup_id(driver), cwd, command, back };
+    start_setup(s, &setup);
+    s.ui.wizard.terminal = Some(setup);
+}
+
+fn setup_id(driver: &str) -> String {
+    format!("onboarding-{driver}-{}", s5_net::uuid())
+}
+
+/// Opens the terminal and types the command without Enter, so nothing runs unread.
+fn start_setup(s: &mut App, setup: &Setup) {
+    use crate::panel::terminal;
+    let payload = json!({"threadId": SETUP_THREAD, "terminalId": setup.id, "cwd": setup.cwd, "providerInstanceId": setup.instance});
+    terminal::attach(s, SETUP_THREAD, &setup.id, payload);
+    terminal::run(s, SETUP_THREAD, &setup.id, &terminal::Launch { cwd: &setup.cwd, worktree: None, root: None }, setup.command.clone());
+    terminal::focus(s, SETUP_THREAD, &setup.id);
+}
+
+fn retry_setup(s: &mut App) {
+    let Some(mut setup) = s.ui.wizard.terminal.take() else { return };
+    if !can_operate_terminal(s, &setup.env) {
+        s.ui.wizard.terminal = Some(setup);
+        return;
+    }
+    crate::panel::terminal::close(s, SETUP_THREAD, &setup.id);
+    setup.id = setup_id(setup.driver);
+    start_setup(s, &setup);
+    s.ui.wizard.terminal = Some(setup);
+}
+
+/// Closes the terminal (left running when access was withdrawn), asks the computer for its
+/// agents again, and puts back the computer that was in focus.
+fn close_setup(s: &mut App) {
+    let Some(setup) = s.ui.wizard.terminal.take() else { return };
+    let here = s.ui.env.active == setup.env;
+    if here && can_operate_terminal(s, &setup.env) {
+        crate::panel::terminal::close(s, SETUP_THREAD, &setup.id);
+    }
+    if let Some(net) = crate::env::net_of(s, &setup.env) {
+        net.request("server.refreshProviders", json!({}));
+    }
+    if let Some(back) = setup.back.filter(|_| here) {
+        crate::env::switch(s, &back);
+    }
+}
+
+/// The setup terminal's header line, and whether opening it failed (offering Retry).
+fn setup_status(s: &App, setup: &Setup) -> (String, bool) {
+    let session = crate::panel::terminal::session(s, SETUP_THREAD, &setup.id);
+    match session {
+        _ if !can_operate_terminal(s, &setup.env) => ("This connection cannot control terminals.".into(), false),
+        Some(session) if session.attached() => ("Review the command, then press Enter to run it.".into(), false),
+        Some(session) if !session.status.is_empty() => ("Could not open the setup terminal.".into(), true),
+        _ => ("Preparing command...".into(), false),
+    }
+}
+
+fn setup_terminal(s: &App, setup: &Setup, t: &T) -> El {
+    let (status, failed) = setup_status(s, setup);
+    let mut buttons = row().gap(4.).center_y();
+    if failed {
+        buttons = buttons.child(kit::Button::new("Retry").variant("ghost").size("xs").disabled(!can_operate_terminal(s, &setup.env)).on_press(retry_setup).build(t));
+    }
+    buttons = buttons.child(kit::Button::new("Close").variant("ghost-muted").size("xs").on_press(close_setup).build(t));
+    let header = row()
+        .w_full()
+        .px(12.)
+        .py(6.)
+        .gap(8.)
+        .center_y()
+        .child(text(status).font(theme::XS_MEDIUM).color(t.c.muted_foreground).grow(1.).shrink().min_w(0.).wrap())
+        .child(buttons);
+    let ready = crate::panel::terminal::session(s, SETUP_THREAD, &setup.id).is_some_and(|session| session.attached());
+    let mut body = col().key("wizard-setup-terminal").w_full().h(256.);
+    if ready {
+        body = body.child(crate::panel::terminal::viewport(s, t, SETUP_THREAD, &setup.id));
+    }
+    col().w_full().mt(16.).radius(8.).clip_rounded(8.).border(1., t.c.border.alpha_mul(0.7)).fill(t.c.background).child(header).child(rune::el().w_full().h(1.).fill(t.c.border.alpha_mul(0.6))).child(body)
 }
 
 /// `getProviderSummary`: a headline, and its detail when there is one.
@@ -339,6 +495,13 @@ pub fn poll(s: &mut App) -> bool {
     if !s.ui.wizard.open {
         return changed;
     }
+    // `onSessionExited`: the login or install finished.
+    if let Some(setup) = &s.ui.wizard.terminal
+        && crate::panel::terminal::session(s, SETUP_THREAD, &setup.id).is_some_and(|session| session.ended)
+    {
+        close_setup(s);
+        changed = true;
+    }
     for key in crate::env::keys(s) {
         if s.ui.wizard.seen.insert(key.clone()) && !s.ui.env.off.contains(&key) {
             s.ui.wizard.chosen.insert(key);
@@ -462,7 +625,7 @@ fn poll_import(s: &mut App) -> bool {
         let warning = import_warning(imported, skipped, failed);
         finish(s, landing.map(|(_, project)| project));
         match warning {
-            Some(warning) => crate::shell::palette::toast(s, "Some history was not imported", Some(&warning)),
+            Some(warning) => crate::shell::palette::toast_sticky(s, "Some history was not imported", Some(&warning)),
             None if imported > 0 => crate::shell::palette::toast(s, &format!("Imported {imported} {}", if imported == 1 { "thread" } else { "threads" }), None),
             None => {}
         }
@@ -479,6 +642,7 @@ fn finish(s: &mut App, project: Option<String>) {
     if s.client_settings.error.is_some() {
         crate::shell::palette::toast_error_brief(s, "Could not finish setup", Some("Your settings could not be saved. Try again."));
     }
+    close_setup(s);
     s.ui.wizard.open = false;
     s.ui.wizard.import = None;
     if project.is_some() {
@@ -493,6 +657,8 @@ fn close(s: &mut App) {
 }
 
 fn go(s: &mut App, step: Step) {
+    // The terminal belongs to the Agents step, as web's unmounts with it.
+    close_setup(s);
     s.ui.wizard.step = step;
     match step {
         // `refreshProviders` on mount, so a CLI installed a moment ago shows.
@@ -1015,6 +1181,11 @@ fn command_block(command: &'static str, t: &T) -> El {
 fn agent_section(s: &App, env: &str, t: &T) -> El {
     let label = Some(crate::env::label(s, env)).filter(|l| !l.is_empty()).unwrap_or_else(|| "Computer".into());
     let mut list = col().w_full().gap(6.).child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground).mb(2.));
+    let can_operate = can_operate_terminal(s, env);
+    if !can_operate {
+        list = list.child(text("This connection cannot control terminals.").font(theme::TEXT_SM).color(t.c.muted_foreground).mb(2.));
+    }
+    let open = s.ui.wizard.terminal.as_ref().filter(|setup| setup.env == env).map(|setup| setup.driver);
     let policy = config(s, env).map_or(&Value::Null, |c| &c["managedPolicy"]);
     for (driver, name, p) in agent_cards(providers_on(s, env), policy) {
         let state = provider_state(p);
@@ -1024,17 +1195,16 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
             "checking" => text("Checking...").font(theme::TEXT_XS).color(t.c.muted_foreground),
             "disabled" => text("Disabled").font(theme::TEXT_XS).color(t.c.muted_foreground),
             "attention" => text(summary(p).0).font(theme::TEXT_XS).color(t.c.muted_foreground),
-            // The web runs the install or login command in an embedded terminal; Rune hands
-            // off to Settings > Providers, which has the same checks (see `overlays`). Settings
-            // there act on this computer, so another computer's button is unavailable, as the
-            // web's is where its terminal is.
-            _ => kit::Button::new(if state == "signIn" { "Sign in" } else { "Install" })
-                .icon(&icons::TERMINAL)
-                .variant("ghost")
-                .size("xs")
-                .disabled(env != crate::env::LOCAL)
-                .on_press(|s: &mut App| s.navigate(Route::Settings("providers".into())))
-                .build(t),
+            _ => {
+                let (env, instance) = (env.to_owned(), p.map(|p| data::s(p, "instanceId").to_owned()).unwrap_or_default());
+                kit::Button::new(if state == "signIn" { "Sign in" } else { "Install" })
+                    .icon(&icons::TERMINAL)
+                    .variant("ghost")
+                    .size("xs")
+                    .disabled(open == Some(driver) || config(s, &env).is_none() || !can_operate)
+                    .on_press(move |s: &mut App| open_setup(s, &env, driver, &instance))
+                    .build(t)
+            }
         };
         list = list.child(
             card(t)
@@ -1052,6 +1222,9 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
                 )
                 .child(status),
         );
+    }
+    if let Some(setup) = s.ui.wizard.terminal.as_ref().filter(|setup| setup.env == env) {
+        list = list.child(setup_terminal(s, setup, t));
     }
     list
 }
@@ -1177,9 +1350,7 @@ fn projects(s: &App, t: &T) -> El {
 
 pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
     let ui = &s.ui.wizard;
-    // Sign in / Install hand off to Settings > Providers; the wizard steps aside there and
-    // comes back on the Agents step when the person leaves.
-    if !ui.open || matches!(&s.route, Route::Settings(p) if p == "providers") {
+    if !ui.open {
         return;
     }
     let current = match ui.step {
@@ -1339,6 +1510,50 @@ mod tests {
         assert!(s.ui.wizard.import.is_none());
         crate::settings::permissions::set_session(&mut s, env, json!({"authenticated": true, "scopes": ["orchestration:operate"]}));
         assert!(can_import(&s));
+    }
+
+    #[test]
+    fn setup_commands_follow_the_web() {
+        let linux = json!({"environment": {"platform": {"os": "linux"}}, "settings": {"providerInstances": {}}});
+        let claude = json!({"driver": "claudeAgent", "instanceId": "claudeAgent", "installed": true});
+        assert_eq!(setup_command(&claude, &linux), "claude auth login");
+        assert_eq!(setup_command(&json!({"driver": "codex", "instanceId": "codex", "installed": false}), &linux), "curl -fsSL https://chatgpt.com/codex/install.sh | sh");
+        let windows = json!({"environment": {"platform": {"os": "windows"}}});
+        assert_eq!(setup_command(&json!({"driver": "claudeAgent", "installed": false}), &windows), "irm https://claude.ai/install.ps1 | iex");
+        let custom = json!({"environment": {"platform": {"os": "darwin"}}, "settings": {"providerInstances": {"work": {"config": {"binaryPath": "~/My Tools/codex"}}}}});
+        assert_eq!(setup_command(&json!({"driver": "codex", "instanceId": "work", "installed": true}), &custom), "~/'My Tools/codex' login");
+        // `quoteProviderBinary`.
+        assert_eq!(quote_binary("/usr/bin/claude", "claude", "linux"), "/usr/bin/claude");
+        assert_eq!(quote_binary("it's", "claude", "linux"), "'it'\"'\"'s'");
+        assert_eq!(quote_binary("C:\\Program Files\\codex.exe", "codex", "windows"), "& 'C:\\Program Files\\codex.exe'");
+        assert_eq!(quote_binary("C:\\tools\\codex.exe", "codex", "windows"), "C:\\tools\\codex.exe");
+        assert_eq!(quote_binary("a b", "codex", "freebsd"), "codex");
+    }
+
+    #[test]
+    fn the_setup_terminal_opens_on_its_computer_and_puts_focus_back() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        let mut remote = crate::data::empty_state();
+        remote.config = Some(json!({"cwd": "/srv", "environment": {"platform": {"os": "linux"}}, "providers": [{"driver": "codex", "instanceId": "codex", "installed": true}]}));
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example".into(), bearer: "t".into() });
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(remote));
+        s.ui.wizard.open = true;
+
+        open_setup(&mut s, "box", "codex", "codex");
+        assert_eq!(s.ui.env.active, "box", "FAILED: the terminal runs on the computer whose agent it sets up");
+        let setup = s.ui.wizard.terminal.as_ref().expect("a setup terminal");
+        assert_eq!((setup.command.as_str(), setup.cwd.as_str(), setup.back.as_deref()), ("codex login", "/srv", Some(crate::env::LOCAL)));
+        assert_eq!(setup_status(&s, setup), ("Preparing command...".to_owned(), false));
+        assert!(crate::panel::terminal::session(&s, SETUP_THREAD, &setup.id).is_some());
+
+        close_setup(&mut s);
+        assert_eq!(s.ui.env.active, crate::env::LOCAL, "FAILED: closing puts back the computer that was in focus");
+        assert!(s.ui.wizard.terminal.is_none());
+
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        open_setup(&mut s, "box", "codex", "codex");
+        assert!(s.ui.wizard.terminal.is_none() && s.ui.env.active == crate::env::LOCAL, "FAILED: a connection that cannot control terminals opens none");
     }
 
     #[test]
