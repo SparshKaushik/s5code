@@ -10,6 +10,7 @@ pub mod pr_edit;
 pub mod pr_filters;
 pub mod pr_meta;
 pub mod pr_guide;
+pub mod pr_route;
 pub mod pr_row;
 pub mod pr_tabs;
 pub mod pull_requests;
@@ -34,12 +35,13 @@ pub struct Ui {
     pub guide: pr_guide::Ui,
     pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
+    pub route: pr_route::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
     pub main_route: Option<Route>,
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
+    let changed = pr_route::pump(s) | pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }

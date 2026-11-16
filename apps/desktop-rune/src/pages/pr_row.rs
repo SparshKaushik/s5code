@@ -128,9 +128,8 @@ pub(super) fn want(s: &mut App, kind: Kind, e: &Value) {
         Kind::Checks => "pullRequests.detail",
         Kind::Breakdown => "pullRequests.changeBreakdown",
     };
-    match super::pull_requests::net_for(s, e) {
-        Some(net) => {
-            let id = net.request(method, reference(e));
+    match super::pull_requests::request_for(s, e, method, reference(e)) {
+        Some(id) => {
             reads(ui(s), kind).entry(key).or_default().pending = Some(id);
         }
         None if !crate::host::live() => {
@@ -491,8 +490,7 @@ fn close_batch(s: &mut App, entries: Vec<Value>) {
     }
     let mut sent = Vec::new();
     for e in batch {
-        if let Some(net) = super::pull_requests::net_for(s, &e) {
-            let id = net.request("pullRequests.runAction", action_payload(&e, "close", None));
+        if let Some(id) = super::pull_requests::request_for(s, &e, "pullRequests.runAction", action_payload(&e, "close", None)) {
             sent.push(Acting { key: row_key(&e), entry: e, action: "close", step: Step::Run, id, batch: None });
         }
     }
@@ -556,9 +554,9 @@ fn perform(s: &mut App, e: &Value, action: &'static str) {
 }
 
 fn send(s: &mut App, mut a: Acting, step: Step, method: &str, payload: Value) {
-    match super::pull_requests::net_for(s, &a.entry) {
-        Some(net) => {
-            a.id = net.request(method, payload);
+    match super::pull_requests::request_for(s, &a.entry, method, payload) {
+        Some(id) => {
+            a.id = id;
             a.step = step;
             ui(s).acting.push(a);
         }

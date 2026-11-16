@@ -103,7 +103,7 @@ pub fn actors(u: &Ui) -> impl Iterator<Item = &Value> {
 fn send(s: &mut App, method: &str, input: Value) -> Option<(String, u64)> {
     let entry = s.ui.pages.detail.entry.clone()?;
     let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
-    let id = super::pull_requests::net_for(s, &entry)?.request(method, input);
+    let id = super::pull_requests::request_for(s, &entry, method, input)?;
     Some((env, id))
 }
 

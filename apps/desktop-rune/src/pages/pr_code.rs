@@ -702,13 +702,12 @@ fn sync_viewed(s: &mut App, entry: &Value) -> bool {
         // Leaving a pull request sends its last presses to it.
         let old = std::mem::take(&mut s.ui.pages.code.viewed);
         let mut leaving = old.leaving;
-        if let Some(prev) = old.entry.filter(|_| !old.queued.is_empty())
-            && let Some(net) = super::pull_requests::net_for(s, &prev)
-        {
+        if let Some(prev) = old.entry.filter(|_| !old.queued.is_empty()) {
             let mut batch: Vec<(String, bool)> = old.queued.into_iter().collect();
             batch.sort();
-            let id = net.request("pullRequests.setFilesViewed", set_viewed_input(&prev, &batch));
-            leaving.push((prev, id));
+            if let Some(id) = super::pull_requests::request_for(s, &prev, "pullRequests.setFilesViewed", set_viewed_input(&prev, &batch)) {
+                leaving.push((prev, id));
+            }
         }
         s.ui.pages.code.viewed = Viewed { key, entry: Some(entry.clone()), leaving, ..Viewed::default() };
     }
@@ -765,18 +764,16 @@ fn sync_viewed(s: &mut App, entry: &Value) -> bool {
     let v = &mut s.ui.pages.code.viewed;
     let read = v.reading.is_none() && (v.refresh || (v.answer.is_none() && v.error.is_none()));
     let batch = v.take_batch(crate::data::now_ms());
-    if let Some(net) = super::pull_requests::net_for(s, entry) {
-        let read_id = read.then(|| net.request("pullRequests.filesViewed", reference(entry)));
-        let write_id = batch.as_ref().map(|b| net.request("pullRequests.setFilesViewed", set_viewed_input(entry, b)));
-        let v = &mut s.ui.pages.code.viewed;
-        if let Some(id) = read_id {
-            v.reading = Some((id, v.reads));
-            v.reads += 1;
-            v.refresh = false;
-        }
-        if let (Some(id), Some(b)) = (write_id, batch) {
-            v.sending = Some((id, b));
-        }
+    let read_id = if read { super::pull_requests::request_for(s, entry, "pullRequests.filesViewed", reference(entry)) } else { None };
+    let write_id = batch.as_ref().and_then(|b| super::pull_requests::request_for(s, entry, "pullRequests.setFilesViewed", set_viewed_input(entry, b)));
+    let v = &mut s.ui.pages.code.viewed;
+    if let Some(id) = read_id {
+        v.reading = Some((id, v.reads));
+        v.reads += 1;
+        v.refresh = false;
+    }
+    if let (Some(id), Some(b)) = (write_id, batch) {
+        v.sending = Some((id, b));
     }
     changed
 }
@@ -908,9 +905,8 @@ fn thread_command(s: &mut App, method: &str, fields: Value, failure: &'static st
     if let (Some(p), Value::Object(f)) = (input.as_object_mut(), fields) {
         p.extend(f);
     }
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let id = net.request(method, input);
+    match super::pull_requests::request_for(s, &entry, method, input) {
+        Some(id) => {
             s.ui.pages.code.thread_pending = Some((id, failure));
         }
         None => crate::shell::palette::toast_error(s, failure, None),
@@ -981,9 +977,8 @@ fn load_comments(s: &mut App, thread: &str, cursor: &str) {
     input["threadId"] = json!(thread);
     input["cursor"] = json!(cursor);
     let scope = s.ui.pages.code.scope.clone();
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let id = net.request("pullRequests.threadComments", input);
+    match super::pull_requests::request_for(s, &entry, "pullRequests.threadComments", input) {
+        Some(id) => {
             s.ui.pages.code.comment_pages.push((id, thread.to_owned(), scope));
         }
         None => crate::shell::palette::toast_error(s, COMMENTS_FAILED, None),

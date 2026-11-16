@@ -413,6 +413,14 @@ impl Net {
         }
         id
     }
+    /// An id no server will answer, for a reply this client is handed instead (see [`Net::put_reply`]).
+    pub fn reserve_id(&self) -> u64 {
+        next_id()
+    }
+    /// Answers `id` as the server would, for a request that other clients carried.
+    pub fn put_reply(&mut self, id: u64, reply: Reply) {
+        self.replies.insert(id, reply);
+    }
     pub fn take_reply(&mut self, id: u64) -> Option<Reply> {
         self.replies.remove(&id)
     }

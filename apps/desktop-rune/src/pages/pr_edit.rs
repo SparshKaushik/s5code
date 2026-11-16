@@ -348,9 +348,8 @@ fn failure_title(p: &Pending) -> &'static str {
 /// Sends through the environment that listed the open pull request.
 fn send(s: &mut App, method: &str, input: Value, pending: Pending) -> bool {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let id = net.request(method, input);
+    match super::pull_requests::request_for(s, &entry, method, input) {
+        Some(id) => {
             edit(s).pending.push((id, pending));
             true
         }

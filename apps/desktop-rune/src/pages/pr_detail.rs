@@ -222,13 +222,12 @@ fn message(e: &Value, fallback: &str) -> String {
 fn load(s: &mut App) {
     let Some(entry) = ui(s).entry.clone() else { return };
     let r = reference(&entry);
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let d = net.request("pullRequests.detail", r.clone());
-            let a = net.request("pullRequests.activity", r);
+    match super::pull_requests::request_for(s, &entry, "pullRequests.detail", r.clone()) {
+        Some(d) => {
+            let a = super::pull_requests::request_for(s, &entry, "pullRequests.activity", r);
             let u = ui(s);
             u.pending_detail = Some(d);
-            u.pending_activity = Some(a);
+            u.pending_activity = a;
         }
         None if !crate::host::live() => {
             let recording = super::fixture("pull-request-detail.json").unwrap_or(Value::Null);
@@ -314,9 +313,8 @@ pub(super) fn run(s: &mut App, action: &'static str) {
     u.menu_confirm = None;
     u.menu = false;
     let payload = action_payload(&entry, action, method.as_deref());
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let id = net.request("pullRequests.runAction", payload);
+    match super::pull_requests::request_for(s, &entry, "pullRequests.runAction", payload) {
+        Some(id) => {
             ui(s).pending_action = Some((id, action.to_string()));
         }
         None => {
@@ -2046,8 +2044,7 @@ fn refresh_detail(s: &mut App) {
 /// activityQuery.refresh.
 fn retry_activity(s: &mut App) {
     let Some(entry) = ui(s).entry.clone() else { return };
-    if let Some(net) = super::pull_requests::net_for(s, &entry) {
-        let id = net.request("pullRequests.activity", reference(&entry));
+    if let Some(id) = super::pull_requests::request_for(s, &entry, "pullRequests.activity", reference(&entry)) {
         let u = ui(s);
         u.pending_activity = Some(id);
         u.activity_error = None;

@@ -587,6 +587,12 @@ pub(super) fn take(s: &mut App, env: &str, id: u64) -> Option<Result<Value, Valu
     crate::env::net_of(s, env).and_then(|n| n.take_reply(id))
 }
 
+/// Sends `method` for `entry` from the environment that listed it, through the pull request router.
+pub(crate) fn request_for(s: &mut App, entry: &Value, method: &str, input: Value) -> Option<u64> {
+    let env = entry[TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_owned);
+    super::pr_route::send(s, &env, method, input)
+}
+
 /// The client of the environment that listed `entry`, where its actions and detail go.
 pub(super) fn net_for<'a>(s: &'a mut App, entry: &Value) -> Option<&'a mut s5_net::Net> {
     match entry[TAG].as_str() {
