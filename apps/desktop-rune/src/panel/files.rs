@@ -55,8 +55,6 @@ pub struct Ui {
     numbers: String,
     /// Bumped on every text change, for the wrapped gutter's cache.
     rev: u64,
-    /// The wrapped editor's text width, from its last layout.
-    wrap_width: f32,
     /// `numbers` laid out beside wrapped lines, for (rev, width, cell width).
     gutter: std::cell::RefCell<Option<((u64, u32, u32), String)>>,
     columns: usize,
@@ -172,7 +170,6 @@ impl Default for Ui {
             truncated: false,
             numbers: String::new(),
             rev: 0,
-            wrap_width: 0.,
             gutter: Default::default(),
             columns: 0,
             due: None,
@@ -853,7 +850,8 @@ fn image_view(image: &Image, t: &T) -> El {
     col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
 }
 
-fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
+/// `width` is the editor's laid-out width from the last frame, for the wrapped gutter.
+fn editor(ui: &Ui, t: &T, wrap: bool, width: Option<f32>) -> El {
     let lang = ui.selected.rsplit('.').next();
     let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark)
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
@@ -863,6 +861,7 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
     let mark = ui.line.and_then(|n| line_range(&ui.editor.text, n)).map(|range| rune::TextHighlight::new(range, t.c.primary.alpha_mul(0.25)).key("file-line"));
     let code = if ui.truncated {
         text(&ui.editor.text)
+            .key("file-editor")
             .font(font)
             .color(t.c.contrast_foreground)
             .spans(spans)
@@ -883,18 +882,17 @@ fn editor(ui: &Ui, t: &T, wrap: bool) -> El {
     };
     let code = code.text_highlights(mark);
     if wrap {
-        let numbers = if ui.wrap_width > cell { wrapped_gutter(ui, font, cell) } else { ui.numbers.clone() };
+        // The editor's right padding is not text.
+        let numbers = match width.map(|w| w - 12.) {
+            Some(width) if width > cell => wrapped_gutter(ui, font, cell, width),
+            _ => ui.numbers.clone(),
+        };
         return scroll(
             row()
                 .w_full()
                 .py(8.)
                 .child(text(numbers).font(font).color(t.c.muted_foreground).pl(12.).pr(16.))
-                .child(code.wrap().grow(1.).min_w(0.).pr(12.).on_layout(|s: &mut App, r| {
-                    let ui = &mut s.ui.panel.files;
-                    if (ui.wrap_width - (r[2] - 12.)).abs() > 0.5 {
-                        ui.wrap_width = r[2] - 12.;
-                    }
-                })),
+                .child(code.wrap().grow(1.).min_w(0.).pr(12.)),
         );
     }
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(
@@ -939,15 +937,15 @@ fn visual_rows(line: &str, font: TextStyle, cell: f32, width: f32) -> usize {
     (height / 20.).round().max(1.) as usize
 }
 
-fn wrapped_gutter(ui: &Ui, font: TextStyle, cell: f32) -> String {
-    let key = (ui.rev, ui.wrap_width.to_bits(), cell.to_bits());
+fn wrapped_gutter(ui: &Ui, font: TextStyle, cell: f32, width: f32) -> String {
+    let key = (ui.rev, width.to_bits(), cell.to_bits());
     let mut cache = ui.gutter.borrow_mut();
     if let Some((k, numbers)) = cache.as_ref()
         && *k == key
     {
         return numbers.clone();
     }
-    let numbers = wrapped_numbers(&ui.editor.text, |line| visual_rows(line, font, cell, ui.wrap_width));
+    let numbers = wrapped_numbers(&ui.editor.text, |line| visual_rows(line, font, cell, width));
     *cache = Some((key, numbers.clone()));
     numbers
 }
@@ -1132,7 +1130,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .overlay(&kit::theme(t), out);
 }
 
-pub fn view(app: &App, t: &T) -> El {
+/// `editor_width` is the "file-editor" field's width on the last frame.
+pub fn view(app: &App, t: &T, editor_width: Option<f32>) -> El {
     let ui = &app.ui.panel.files;
     let wrap = wrap_on(app);
     let header = header(ui, wrap, t);
@@ -1154,7 +1153,7 @@ pub fn view(app: &App, t: &T) -> El {
     } else if let Some(image) = &ui.image {
         image_view(image, t)
     } else if !ui.selected.is_empty() {
-        file_body(app, ui, wrap, t)
+        file_body(app, ui, wrap, editor_width, t)
     } else {
         tree(ui, t)
     };
@@ -1190,10 +1189,10 @@ pub fn view(app: &App, t: &T) -> El {
 }
 
 /// The open file: its rendered view, the editor, or "No preview" for what Rune can't draw.
-fn file_body(app: &App, ui: &Ui, wrap: bool, t: &T) -> El {
+fn file_body(app: &App, ui: &Ui, wrap: bool, width: Option<f32>, t: &T) -> El {
     let kind = fp::kind(&ui.selected);
     if ui.reading.is_some() {
-        return editor(ui, t, wrap);
+        return editor(ui, t, wrap, width);
     }
     let no_preview = |reason: Option<&str>| {
         fp::no_preview(fp::file_name(&ui.selected), reason, t, |s: &mut App| use_asset(s, AssetUse::External), save_as)
@@ -1206,7 +1205,7 @@ fn file_body(app: &App, ui: &Ui, wrap: bool, t: &T) -> El {
         (Kind::Notebook, _, Some(Err(e))) => no_preview(Some(e.as_str())),
         (Kind::Markdown, ..) if rendered_on(ui) => fp::markdown(app, &ui.selected, &ui.editor.text, t),
         (Kind::Table(_), Some(table), _) if rendered_on(ui) => fp::table(table, t),
-        _ => editor(ui, t, wrap),
+        _ => editor(ui, t, wrap, width),
     }
 }
 

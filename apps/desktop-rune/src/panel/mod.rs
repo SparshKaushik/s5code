@@ -930,7 +930,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
-        Some(Surface::Files) => files::view(app, t),
+        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
         Some(Surface::Device) => device::view(app, t),
         Some(Surface::Terminal) => col()
             .grow(1.)
