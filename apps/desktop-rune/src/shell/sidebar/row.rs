@@ -974,7 +974,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let s_all = &model.sections;
     let nothing = [&s_all.pinned, &s_all.active, &s_all.working, &s_all.snoozed, &s_all.settled].iter().all(|v| v.is_empty());
     let drafts = super::drafts::view(s, t);
-    if nothing && model.folders.is_empty() && drafts.is_none() {
+    if nothing && model.folders.is_empty() && !super::drafts::any_with_content(s) {
         let muted = t.sb.muted_foreground.alpha_mul(0.6);
         let mut empty = col().w_full().px(8.0).py(24.0).gap(8.0).center();
         if s.state().projects.is_empty() {

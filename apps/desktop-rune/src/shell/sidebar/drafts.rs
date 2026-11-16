@@ -53,20 +53,29 @@ pub fn poll(s: &mut App) {
     });
 }
 
+/// In-scope new-thread drafts on a listed project.
+fn in_scope<'a>(s: &'a App) -> impl Iterator<Item = (&'a String, &'a str, &'a crate::chat::composer::Draft)> + 'a {
+    let scope = &s.ui.shell.sidebar.project_scope;
+    s.ui.chat.composer.drafts.iter().filter_map(move |(key, d)| {
+        let project = key.strip_prefix("home:")?;
+        let listed = s.state().projects.iter().any(|p| p["id"] == project);
+        (listed && (scope.is_empty() || scope.iter().any(|p| p == project))).then_some((key, project, d))
+    })
+}
+
+/// `visibleDraftSessionCount > 0`: a draft with content, even the open one whose row is frozen
+/// out, hides the empty state.
+pub fn any_with_content(s: &App) -> bool {
+    in_scope(s).any(|(_, _, d)| crate::chat::composer::has_user_content(d))
+}
+
 /// The rows, honouring the project scope; the open draft's only as it was frozen.
 pub fn rows(s: &App) -> Vec<Row> {
     let ui = &s.ui.shell.sidebar;
     let (groups, by_project) = super::folders::group_of(s);
     let route = route_key(s);
     let mut out = Vec::new();
-    for (key, d) in &s.ui.chat.composer.drafts {
-        let Some(project) = key.strip_prefix("home:") else { continue };
-        if !s.state().projects.iter().any(|p| p["id"] == project) {
-            continue;
-        }
-        if !ui.project_scope.is_empty() && !ui.project_scope.iter().any(|p| p == project) {
-            continue;
-        }
+    for (key, project, d) in in_scope(s) {
         let active = route.as_ref() == Some(key);
         let preview = if active {
             match ui.drafts.frozen.as_ref().filter(|(k, _)| k == key).and_then(|(_, p)| p.clone()) {
@@ -258,6 +267,25 @@ mod tests {
 
         s.ui.shell.sidebar.project_scope = vec![a.clone()];
         assert_eq!(rows(&s).iter().map(|r| r.key.clone()).collect::<Vec<_>>(), vec![ka.clone()], "FAILED: the project scope filters drafts");
+    }
+
+    #[test]
+    fn a_project_without_threads_shows_its_draft_like_the_web() {
+        let mut s = App::new();
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!("App::new runs on fixtures") };
+        state.threads.clear();
+        state.projects.push(serde_json::json!({"id": "demo", "title": "demo", "workspaceRoot": "/work/demo"}));
+        let key = crate::chat::composer::home_key("demo");
+        s.route = Route::Home { project_id: Some("demo".into()) };
+        poll(&mut s);
+        s.ui.chat.composer.drafts.entry(key.clone()).or_default();
+        assert!(rows(&s).is_empty() && !any_with_content(&s), "FAILED: an empty open draft leaves web's \"No threads yet\"");
+        type_into(&mut s, &key, "hello");
+        assert!(rows(&s).is_empty(), "FAILED: the open draft's row waits for the next navigation");
+        assert!(any_with_content(&s), "FAILED: but its content already hides the empty state");
+        s.route = Route::Settings("general".into());
+        poll(&mut s);
+        assert_eq!(rows(&s).iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), vec!["demo"], "FAILED: away from it, the draft lists under its project");
     }
 
     #[test]
