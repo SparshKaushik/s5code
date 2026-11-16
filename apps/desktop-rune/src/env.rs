@@ -986,8 +986,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("wizard-connect-environments", |s| {
         scene_failing(s);
-        s.ui.wizard.open = true;
+        crate::wizard::scene_computers(s);
     }),
+    ("wizard-import-denied", crate::wizard::scene_import_denied),
     ("wizard-pairing-link", |s| {
         scene_failing(s);
         crate::wizard::scene_pairing(s);

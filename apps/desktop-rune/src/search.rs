@@ -439,4 +439,12 @@ mod tests {
         assert!(byte_ranges(line, &json!([{"start": 3, "end": 3}])).is_empty());
         assert_eq!(byte_ranges("abc", &json!([{"start": 1, "end": 99}])), vec![(1, 3)]);
     }
+
+    #[test]
+    fn a_connection_without_file_access_cannot_search() {
+        let mut s = App::new();
+        assert_eq!(access(&s), Some(Ok(())), "FAILED: a fixture without a session grants everything");
+        crate::settings::permissions::set_session(&mut s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert_eq!(access(&s), Some(Err("This connection cannot search host files.".into())));
+    }
 }
