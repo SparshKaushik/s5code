@@ -25,6 +25,7 @@ pub struct Row {
     pub label: String,
     pub preview: String,
     pub active: bool,
+    pub created_at: i64,
 }
 
 /// The new-thread draft the route shows, if it shows one.
@@ -89,9 +90,9 @@ pub fn rows(s: &App) -> Vec<Row> {
             continue;
         };
         let label = by_project.get(project).map_or_else(|| project.to_string(), |n| groups[*n].label.clone());
-        out.push(Row { key: key.clone(), project: project.to_string(), label, preview, active });
+        out.push(Row { key: key.clone(), project: project.to_string(), label, preview, active, created_at: d.created_at });
     }
-    out.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key)));
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.key.cmp(&b.key)));
     out
 }
 
@@ -183,9 +184,8 @@ fn draft_row(s: &App, t: &T, r: Row) -> El {
 pub fn entries(s: &App, key: &str) -> Vec<MenuEntry> {
     let close = |s: &mut App| s.ui.shell.sidebar.drafts.menu = None;
     let project = key.strip_prefix("home:").unwrap_or("").to_string();
-    // The branch and worktree this draft was started on (`start_on_branch`).
     let strategy = s.ui.chat.home.workspace.as_ref().filter(|(p, _)| *p == project).map(|(_, w)| w);
-    let branch = strategy.and_then(|w| w["branch"].as_str()).filter(|b| !b.is_empty()).map(str::to_owned);
+    let branch = crate::chat::details::draft_branch(s, key);
     let root = s.state().projects.iter().find(|p| p["id"] == project.as_str()).and_then(|p| p["workspaceRoot"].as_str());
     let path = strategy.and_then(|w| w["worktreePath"].as_str()).or(root).filter(|p| !p.is_empty()).map(str::to_owned);
     let copy = |label: &str, value: String, toast: &'static str| {
@@ -286,6 +286,26 @@ mod tests {
         s.route = Route::Settings("general".into());
         poll(&mut s);
         assert_eq!(rows(&s).iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), vec!["demo"], "FAILED: away from it, the draft lists under its project");
+    }
+
+    #[test]
+    fn draft_rows_list_newest_first_and_copy_their_effective_branch() {
+        let mut s = App::new();
+        s.route = Route::Settings("general".into());
+        let projects: Vec<(String, String)> = s.state().projects.iter().map(|p| (crate::data::s(p, "id").to_string(), crate::data::s(p, "workspaceRoot").to_string())).collect();
+        let ((a, root), (b, _)) = (projects[0].clone(), projects[1].clone());
+        let (ka, kb) = (crate::chat::composer::home_key(&a), crate::chat::composer::home_key(&b));
+        type_into(&mut s, &ka, "older");
+        type_into(&mut s, &kb, "newer");
+        s.ui.chat.composer.drafts.get_mut(&ka).unwrap().created_at = 1;
+        s.ui.chat.composer.drafts.get_mut(&kb).unwrap().created_at = 2;
+        assert_eq!(rows(&s).iter().map(|r| r.key.clone()).collect::<Vec<_>>(), vec![kb, ka.clone()], "FAILED: newest draft first");
+
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!("App::new runs on fixtures") };
+        state.vcs.insert(root, serde_json::json!({"local": {"isRepo": true, "refName": "main"}}));
+        assert_eq!(crate::chat::details::draft_branch(&s, &ka).as_deref(), Some("main"), "FAILED: a plain draft starts on the checkout's branch");
+        s.ui.chat.home.workspace = Some((a, serde_json::json!({"type": "existing_worktree", "worktreePath": "/w/feat", "branch": "feat"})));
+        assert_eq!(crate::chat::details::draft_branch(&s, &ka).as_deref(), Some("feat"), "FAILED: a picked worktree's branch wins");
     }
 
     #[test]
