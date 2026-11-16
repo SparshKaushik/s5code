@@ -81,7 +81,7 @@ pub fn shows(d: &Value, primary: Option<Primary>, single_merge: bool) -> Shows {
     }
 }
 
-/// showsApproveWorkflows, without the list's fresher checks rollup, which this panel doesn't read.
+/// showsApproveWorkflows, before the tab bar checks the detail's checks are not stale.
 pub fn shows_approve(d: &Value) -> bool {
     field(d, "state") == "open" && d["workflowApprovalsRequired"].as_u64().unwrap_or(0) > 0 && can(d, "approve-workflows")
 }
@@ -171,6 +171,21 @@ pub fn success_title(action: &str, term: &str) -> Option<String> {
         "revert" => Some(format!("Revert {term} opened")),
         "delete-branch" => Some("Branch deleted".into()),
         _ => None,
+    }
+}
+
+/// checkoutFailureDescription's hint, for a failure with no words of its own.
+pub const CHECKOUT_HINT: &str = "Check that the branch still exists and is not checked out elsewhere, then try again.";
+
+/// The toast a prepared checkout raises (startHandoff with no task, offHeadPullRequestCheckoutToast).
+pub fn checkout_toast(mode: &str, term: &str, on_head: bool) -> (String, String) {
+    match (on_head, mode) {
+        (false, _) => (
+            "Checked out, but not confirmed on the latest commit".into(),
+            format!("This checkout could not be confirmed at the {term}'s latest commit, so its code may differ. Local commits or uncommitted work keep a checkout where it is."),
+        ),
+        (true, "local") => ("Checked out here".into(), format!("This repository is on the {term}'s branch, with a thread open on it.")),
+        _ => ("Checked out".into(), format!("The {term} is in its own worktree, with a thread open on it.")),
     }
 }
 
@@ -332,6 +347,9 @@ mod tests {
         assert_eq!(success_title("revert", "pull request").as_deref(), Some("Revert pull request opened"));
         assert_eq!(success_title("delete-branch", "pull request").as_deref(), Some("Branch deleted"));
         assert_eq!(success_title("merge", "pull request"), None);
+        assert_eq!(checkout_toast("local", "merge request", true), ("Checked out here".to_string(), "This repository is on the merge request's branch, with a thread open on it.".to_string()));
+        assert_eq!(checkout_toast("worktree", "pull request", true).1, "The pull request is in its own worktree, with a thread open on it.");
+        assert_eq!(checkout_toast("local", "pull request", false).0, "Checked out, but not confirmed on the latest commit", "off the head, either mode warns");
         assert!(ALL.iter().all(|a| needs_host_refresh(a) == (*a == "approve-workflows")), "only approving workflows rereads the host");
 
         let missing = json!({"cause": {"_tag": "Fail", "error": {"_tag": "PullRequestOperationError", "operation": "detail", "detail": "Not found", "reason": "not-found"}}});

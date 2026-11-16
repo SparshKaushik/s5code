@@ -476,7 +476,7 @@ fn allowed(origin: &str, destination: &str, write: bool) -> bool {
 }
 
 /// Web `isLocal`: a connection to this machine's loopback.
-fn loopback(s: &App, key: &str) -> bool {
+pub(crate) fn loopback(s: &App, key: &str) -> bool {
     if key == env::LOCAL {
         return true;
     }
