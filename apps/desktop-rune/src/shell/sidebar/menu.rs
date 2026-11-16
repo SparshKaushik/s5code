@@ -155,17 +155,22 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     let count = ids.len();
     let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
     let leaf = |i: MenuItem| MenuEntry::item(i.on_hover(|s: &mut App| set_sub(s, None)));
+    // `canOperateThreads` over the threads each item acts on.
+    let operate = |of: &[&Thread]| super::can_operate(s, of);
     let mut out = Vec::new();
-    let pinned: Vec<String> = threads.iter().filter(|t| t.pinned).map(|t| t.id.clone()).collect();
+    let pinned_rows: Vec<&Thread> = threads.iter().copied().filter(|t| t.pinned).collect();
+    let pinned: Vec<String> = pinned_rows.iter().map(|t| t.id.clone()).collect();
     if !pinned.is_empty() {
         out.push(leaf(item(format!("Unpin ({})", pinned.len()), move |s, _| {
             close(s);
             super::request_unpin_many(s, pinned.clone());
             s.ui.shell.sidebar.selected.clear();
-        })));
+        })
+        .disabled(!operate(&pinned_rows))));
     }
     let settle = format!("Settle ({count})");
-    out.push(leaf(if threads.iter().all(|t| t.settled) {
+    let settling: Vec<&Thread> = threads.iter().copied().filter(|t| !t.settled).collect();
+    out.push(leaf(if settling.is_empty() || !operate(&settling) {
         todo(settle)
     } else {
         let ids = ids.clone();
@@ -178,14 +183,18 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
         out.push(MenuEntry::item(
             MenuItem::new(format!("Snooze ({count})"))
                 .submenu(bulk_entries(s, model, Some(Sub::Snooze)), open == Some(Sub::Snooze))
-                .on_submenu_change(|s: &mut App, on| set_sub(s, on.then_some(Sub::Snooze))),
+                .on_submenu_change(|s: &mut App, on| set_sub(s, on.then_some(Sub::Snooze)))
+                .disabled(!operate(&threads)),
         ));
     }
     let shells = &s.state().threads;
     let regenerating = |id: &str| shells.iter().any(|t| t["id"] == id && !t["titleRegeneration"].is_null());
     let fresh: Vec<String> = ids.iter().filter(|id| !regenerating(id.as_str())).cloned().collect();
+    let fresh_rows: Vec<&Thread> = threads.iter().copied().filter(|t| fresh.contains(&t.id)).collect();
     out.push(leaf(if fresh.is_empty() {
         todo(format!("Regenerating… ({count})"))
+    } else if !operate(&fresh_rows) {
+        todo(format!("Regenerate titles ({})", fresh.len()))
     } else {
         item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
             close(s);
@@ -207,7 +216,8 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
         item(format!("Delete ({count})"), move |s, _| {
             close(s);
             super::request_delete_many(s, ids.clone());
-        }),
+        })
+        .disabled(!operate(&threads)),
     ));
     out
 }
@@ -283,6 +293,17 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
                 .on_submenu_change(move |s: &mut App, on| set_sub(s, on.then_some(sub))),
         )
     };
+    // Without `orchestration:operate` the actions that change the thread are disabled; navigation,
+    // read markers, sharing and copying stay (`threadActionRequiresOperate`).
+    let operate = super::can_operate(s, &[th]);
+    let op = |i: MenuItem| i.disabled(!operate);
+    let sub_item = |label: &str, sub: Sub| match sub_item(label, sub) {
+        MenuEntry::Item(i) if !operate && sub != Sub::Copy => MenuEntry::item(i.disabled(true)),
+        other => other,
+    };
+    // Pin, settle, snooze and title regeneration wait for the row's server config.
+    let config = super::config_of(s, th);
+    let loaded = config.is_some();
     let mut out = Vec::new();
     let header = s.ui.shell.sidebar.menu.as_ref().is_some_and(|m| m.header);
     if header {
@@ -299,18 +320,19 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             crate::chat::home::start_on_branch(s, &project, &branch, worktree.as_deref());
         })));
     }
-    if th.pinned {
-        out.push(leaf(item("Unpin thread", with(super::request_unpin))));
-    } else {
-        out.push(leaf(item("Pin thread", with(|s, id| super::pin(s, id, None)))));
+    if loaded && th.pinned {
+        out.push(leaf(op(item("Unpin thread", with(super::request_unpin)))));
+    } else if loaded {
+        out.push(leaf(op(item("Pin thread", with(|s, id| super::pin(s, id, None))))));
     }
-    if th.settled {
-        out.push(leaf(item("Un-settle thread", with(super::unsettle))));
-    } else {
-        out.push(leaf(item("Settle thread", with(super::settle))));
+    if loaded && th.settled {
+        out.push(leaf(op(item("Un-settle thread", with(super::unsettle)))));
+    } else if loaded {
+        out.push(leaf(op(item("Settle thread", with(super::settle)))));
     }
-    if th.snoozed(model.now) {
-        out.push(leaf(item("Wake thread", with(super::unsnooze))));
+    if !loaded {
+    } else if th.snoozed(model.now) {
+        out.push(leaf(op(item("Wake thread", with(super::unsnooze)))));
     } else if th.can_snooze() {
         out.push(sub_item("Snooze", Sub::Snooze));
     } else {
@@ -325,10 +347,12 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     } else {
         item("Rename thread", with(super::start_rename))
     };
-    out.push(leaf(rename));
-    out.push(leaf(
-        item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))),
-    ));
+    out.push(leaf(op(rename)));
+    if loaded && th.title_regenerating {
+        out.push(leaf(todo("Regenerating…")));
+    } else if loaded {
+        out.push(leaf(op(item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))))));
+    }
     out.push(leaf(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}))))));
     if super::share::can_share_with_guest(s) {
         out.push(leaf(item("Share with guest", with(super::share::open_guest))));
@@ -339,10 +363,10 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         let members = group.members.clone();
         let scoped = members.iter().all(|m| s.ui.shell.sidebar.project_scope.contains(m));
         let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", group.label) };
-        out.push(leaf(item(filter, move |s, _| {
+        out.push(leaf(op(item(filter, move |s, _| {
             s.ui.shell.sidebar.project_scope = if scoped { Vec::new() } else { members.clone() };
             close(s);
-        })));
+        }))));
     }
     if super::share::can_turn_into_project(s, th) {
         let (thread, title) = (th.id.clone(), th.title.clone());
@@ -350,9 +374,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             close(s);
             super::share::turn_into_project(s, &thread, &title);
         });
-        out.push(leaf(if th.running() { todo("Turn into project") } else { turn }));
+        out.push(leaf(if th.running() { todo("Turn into project") } else { op(turn) }));
     }
-    if s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["threadAutoSettleOptOut"] == true) {
+    if config.is_some_and(|c| c["environment"]["capabilities"]["threadAutoSettleOptOut"] == true) {
         out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
     }
     out.push(MenuEntry::Separator);
@@ -366,9 +390,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         }),
     ));
     out.push(MenuEntry::Separator);
-    let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::request_archive)) };
+    let archive = if th.running() { todo("Archive thread") } else { op(item("Archive thread", with(super::request_archive))) };
     out.push(leaf(archive));
-    out.push(leaf(item("Delete", with(super::request_delete))));
+    out.push(leaf(op(item("Delete", with(super::request_delete)))));
     out
 }
 
@@ -433,5 +457,25 @@ mod tests {
 
         th.worktree = None;
         assert_eq!(labels(&entries(&s, &model, &th, Some(Sub::Copy)))[0], "Path", "FAILED: Copy keeps Path without one, as web toasts");
+
+        th.title_regenerating = true;
+        let shown = entries(&s, &model, &th, None);
+        let regen = shown.iter().find_map(|e| match e { MenuEntry::Item(i) if i.label_text() == "Regenerating…" => Some(i), _ => None });
+        assert!(regen.is_some_and(|i| i.is_disabled()), "FAILED: a regenerating title shows a disabled Regenerating…: {:?}", labels(&shown));
+
+        let config = state(&mut s).config.take();
+        let shown = labels(&entries(&s, &model, &th, None));
+        for gated in ["Pin thread", "Unpin thread", "Settle thread", "Un-settle thread", "Snooze", "Wake thread", "Regenerating…", "Regenerate title"] {
+            assert!(!shown.iter().any(|l| l == gated), "FAILED: {gated} waits for the server config: {shown:?}");
+        }
+        state(&mut s).config = config;
+
+        // A session without `orchestration:operate` keeps the menu but disables what changes threads.
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        let shown = entries(&s, &model, &th, None);
+        let disabled = |label: &str| shown.iter().any(|e| matches!(e, MenuEntry::Item(i) if i.label_text().starts_with(label) && i.is_disabled()));
+        for label in ["Rename", "Archive", "Delete"] {
+            assert!(disabled(label), "FAILED: {label} needs operate: {:?}", labels(&shown));
+        }
     }
 }

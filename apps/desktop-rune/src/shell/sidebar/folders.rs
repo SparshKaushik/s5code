@@ -34,9 +34,17 @@ pub struct Grouping {
     environment: String,
     /// This machine's environment id: groups that span environments are represented by its member.
     local: String,
+    /// Every known server's `scratchWorkspaceRoot`, normalized (web derives `isScratch` from it).
+    scratch_roots: Vec<String>,
 }
 
 const SCRATCH_KEY: &str = "\0no-project";
+
+fn scratch_roots(s: &App) -> Vec<String> {
+    let root = |config: &Value| normalize(field(config, "scratchWorkspaceRoot"));
+    let others = crate::env::keys(s).into_iter().filter_map(|key| crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()).map(root));
+    s.state().config.as_ref().map(root).into_iter().chain(others).filter(|r| !r.is_empty()).collect()
+}
 
 impl Grouping {
     pub fn read(s: &App) -> Grouping {
@@ -47,7 +55,19 @@ impl Grouping {
             overrides: crate::settings::value(s, "sidebarProjectGroupingOverrides"),
             environment,
             local,
+            scratch_roots: scratch_roots(s),
         }
+    }
+
+    /// `isScratchProject` against the project's server.
+    pub fn is_scratch(&self, project: &Value) -> bool {
+        let root = normalize(field(project, "workspaceRoot"));
+        !root.is_empty() && self.scratch_roots.contains(&root)
+    }
+
+    /// `derivePhysicalProjectKey`: the checkout's environment and normalized root.
+    fn physical(&self, project: &Value) -> String {
+        format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")))
     }
 
     /// The environment id a project row belongs to (`project.environmentId` on the web).
@@ -62,10 +82,10 @@ impl Grouping {
     /// `deriveLogicalProjectKey` with the project's override, if any.
     pub fn key(&self, project: &Value) -> String {
         // `groupScratchProjects`: scratch projects share one "No project" group.
-        if project["isScratch"] == true {
+        if self.is_scratch(project) {
             return SCRATCH_KEY.to_string();
         }
-        let physical = format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")));
+        let physical = self.physical(project);
         let mode = self.overrides[&physical].as_str().unwrap_or(&self.mode);
         if mode == "separate" {
             return physical;
@@ -463,6 +483,21 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
 }
 
 /// The folder's right-click menu (`SidebarProjectFolderHeader`'s context menu).
+/// A checkout's grouping override key.
+pub fn physical_key(s: &App, project: &Value) -> String {
+    Grouping::read(s).physical(project)
+}
+
+/// `canPinProjectGroup`: every member's server organizes projects and its session lets this
+/// client change it.
+pub fn can_pin(s: &App, members: &[String]) -> bool {
+    members.iter().all(|m| {
+        let key = s.state().projects.iter().find(|p| crate::data::s(p, "id") == m).map_or_else(|| s.ui.env.active.clone(), |p| crate::env::of(s, p));
+        let config = if key == s.ui.env.active { s.state().config.as_ref() } else { crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()) };
+        config.is_some_and(|c| c["environment"]["capabilities"]["projectOrganization"] == true) && super::grants_on(s, &key, "orchestration:operate")
+    })
+}
+
 pub fn menu(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, x, y)) = s.ui.shell.sidebar.folders.menu.clone() else { return };
     let (groups, _) = group_of(s);
@@ -485,7 +520,7 @@ pub fn menu(s: &App, t: &T, overlays: &mut Vec<El>) {
         tx.copy(root.clone());
         crate::shell::palette::toast(s, "Path copied", Some(&root));
     }));
-    if crate::shell::palette::actions::can_organize_projects(s) {
+    if can_pin(s, &g.members) {
         let (members, pinned) = (g.members.clone(), g.pinned);
         menu = menu.item(MenuItem::new(if pinned { "Unpin project" } else { "Pin project" }).on_select(move |s: &mut App| {
             close(s);
@@ -524,7 +559,7 @@ mod tests {
     use super::*;
 
     fn grouping(mode: &str) -> Grouping {
-        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into(), local: "env".into() }
+        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into(), local: "env".into(), scratch_roots: vec!["/scratch".into()] }
     }
 
     fn project(id: &str, title: &str, root: &str, identity: Value) -> Value {
@@ -564,6 +599,20 @@ mod tests {
     }
 
     #[test]
+    fn pinning_a_project_needs_its_server_to_organize_and_its_session_to_operate() {
+        let mut s = App::new();
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!("App::new runs on fixtures") };
+        let members = vec![crate::data::s(&state.projects[0], "id").to_string()];
+        state.config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["projectOrganization"] = json!(false);
+        assert!(!can_pin(&s, &members), "FAILED: an older server cannot pin");
+        let crate::data::Source::Fixture(state) = &mut s.src else { unreachable!() };
+        state.config.as_mut().unwrap()["environment"]["capabilities"]["projectOrganization"] = json!(true);
+        assert!(can_pin(&s, &members));
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        assert!(!can_pin(&s, &members), "FAILED: a read-only session hides Pin project");
+    }
+
+    #[test]
     fn a_folded_folders_dot_reads_only_the_threads_it_hides() {
         let t = crate::theme::theme(true);
         let mut model = super::super::Model::build(&crate::App::new());
@@ -577,12 +626,13 @@ mod tests {
 
     #[test]
     fn scratch_projects_share_one_no_project_group() {
-        let scratch = |id: &str, root: &str| {
-            let mut p = project(id, id, root, Value::Null);
-            p["isScratch"] = json!(true);
+        // Each server's scratch project sits at its `scratchWorkspaceRoot`.
+        let scratch = |id: &str, env: &str| {
+            let mut p = project(id, id, "/scratch/", Value::Null);
+            p[crate::env::TAG] = json!(env);
             p
         };
-        let projects = vec![scratch("a", "/tmp/a"), project("o", "Other", "/other", Value::Null), scratch("b", "/tmp/b")];
+        let projects = vec![scratch("a", "box"), project("o", "Other", "/other", Value::Null), scratch("b", "studio")];
         let built = groups(&projects, &grouping("separate"));
         assert_eq!(built.len(), 2, "FAILED: scratch projects fold into one group");
         assert_eq!((built[0].label.as_str(), built[0].members.clone()), ("No project", vec!["a".to_string(), "b".to_string()]));

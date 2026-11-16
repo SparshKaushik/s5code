@@ -9,6 +9,7 @@ use super::{Dragging, Model, Shelf, brand};
 use crate::icons as i;
 use crate::theme::{self, AlphaMul, BOLD, T, mono, radius, tw};
 use crate::App;
+use serde_json::Value;
 
 fn hue(index: usize, dark: bool) -> Color {
     const DARK: [Color; 18] = [
@@ -204,6 +205,8 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
                 }
                 // The boring sidebar's rows don't drag.
                 Phase::Move if super::boring(s) => {}
+                // `useSortable({ disabled: !canOperateThread })`: a read-only row doesn't drag.
+                Phase::Move if s.ui.shell.sidebar.drag.is_none() && !super::can_operate_id(s, &id) => {}
                 Phase::Move => {
                     let ui = &mut s.ui.shell.sidebar;
                     if ui.drag.is_some() || far {
@@ -299,22 +302,74 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
     if let Some(raw) = raw.filter(|_| crate::env::spans(s)) {
         rows = rows.child(detail(icon(&i::SERVER, 12.0).color(t.c.muted_foreground).shrink(), crate::env::label(s, &crate::env::of(s, raw))));
     }
+    // The row's own server: its projects, checkouts and providers.
+    let state = th.env.as_deref().and_then(|key| crate::env::source(s, key)).map_or(s.state(), |src| src.state());
+    let warn = |glyph: &'static rune::Icon, label: &str, color: rune::Color| {
+        row().gap(8.0).items_start().min_w(0.0)
+            .child(icon(glyph, 12.0).color(color).mt(2.0).shrink())
+            .child(text(label.to_string()).font(theme::TEXT_XS).color(color).wrap().grow(1.0).min_w(0.0))
+    };
     if let Some(branch) = &th.branch {
         rows = rows.child(detail(icon(&i::GIT_BRANCH, 12.0).color(t.c.muted_foreground).shrink(), branch.clone()));
+        // `resolveLocalCheckoutBranchMismatch` against the project checkout's current branch.
+        let root = state.projects.iter().find(|p| crate::data::s(p, "id") == th.project_id).map(|p| crate::data::s(p, "workspaceRoot")).unwrap_or("");
+        let current = state.vcs.get(root).map(|v| crate::data::s(&v["local"], "refName")).unwrap_or("");
+        if crate::chat::details::branch_mismatch(branch, th.worktree.as_deref().unwrap_or(""), current).is_some() {
+            rows = rows.child(warn(&i::CIRCLE_ALERT, "You're currently checked out on another branch.", t.sb.warning_foreground));
+        }
     }
+    let config = super::config_of(s, th);
+    let providers = config.and_then(|c| c["providers"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
+    // `modelInstanceId`: the running instance, else the one the thread selected.
+    let instance = raw.and_then(|v| v["runtime"]["providerInstanceId"].as_str().or(v["modelSelection"]["instanceId"].as_str())).unwrap_or(&th.provider).to_string();
     let slug = raw.map(|v| crate::data::s(&v["modelSelection"], "model").to_string()).unwrap_or_default();
     if let Some(driver) = model.drivers.get(&th.provider).filter(|_| !slug.is_empty()) {
-        let label = crate::chat::composer::model_name(s, &th.provider, &slug);
+        let mut label = crate::chat::composer::model_name(s, &th.provider, &slug);
+        let entry = providers.iter().find(|p| p["instanceId"] == instance.as_str());
+        if let Some(entry) = entry.filter(|_| logic::shows_instance_badge(&instance, providers, &config.map_or(Value::Null, |c| c["settings"]["providerInstances"].clone()))) {
+            label = format!("{label} · {}", entry["displayName"].as_str().unwrap_or(&instance));
+        }
         rows = rows.child(detail(crate::chat::composer::provider_icon(t, driver, 12.0).shrink().opacity(0.6), label));
+    }
+    if let Some(raw) = raw {
+        let earlier = logic::handed_off_from(raw, &instance, providers);
+        if !earlier.is_empty() {
+            rows = rows.child(detail(icon(&i::ARROW_RIGHT_LEFT, 12.0).color(t.c.muted_foreground).shrink(), format!("Handed off from {}", earlier.join(", "))));
+        }
     }
     let terminals = crate::panel::terminal::running(s, id);
     if terminals > 0 {
         let label = format!("{terminals} terminal {} running", if terminals == 1 { "process" } else { "processes" });
         rows = rows.child(detail(icon(&i::TERMINAL, 12.0).color(if t.dark { tw::TEAL_300.alpha_mul(0.9) } else { tw::TEAL_600 }).shrink(), label));
     }
-    let body = col().max_w(346.0).padding(13.0).gap(8.0)
+    let runtime = raw.map_or(&Value::Null, |v| &v["runtime"]);
+    if runtime["lastError"].as_str().is_some_and(|e| !e.is_empty()) {
+        rows = rows.child(if runtime["lastErrorClass"] == "usage_limit" {
+            warn(&i::CIRCLE_ALERT, "Usage limit reached", t.sb.warning_foreground)
+        } else {
+            warn(&i::CIRCLE_ALERT, "Error occurred", t.c.destructive)
+        });
+    }
+    let mut body = col().max_w(346.0).padding(13.0).gap(8.0)
         .child(text(th.title.clone()).font(theme::XS_MEDIUM.lh(15.0)).color(t.c.foreground).truncate())
         .child(rows);
+    // `ThreadPullRequestsMiniList`, once the row's server config has loaded.
+    let lines = raw.filter(|_| config.is_some()).map(|v| logic::pr_lines(v["pullRequests"].as_array().map(Vec::as_slice).unwrap_or(&[]))).unwrap_or_default();
+    if !lines.is_empty() {
+        let mut list = col().gap(4.0).pt(8.0).pl(2.0);
+        for line in lines {
+            let (glyph, tone) = pr_glyph(t, line.state.as_deref());
+            let mut entry = row().gap(8.0).center_y().min_w(0.0).pl(line.depth.min(3) as f32 * 12.0)
+                .child(icon(glyph, 12.0).color(tone).shrink())
+                .child(text(format!("#{}", line.number)).font(theme::MONO_XS.features("'tnum' 1")).color(t.c.muted_foreground).shrink())
+                .child(text(line.title).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.75)).truncate().shrink());
+            if let Some((kind, size)) = line.stack {
+                entry = entry.child(spacer()).child(text(format!("{} · {size}", if kind == "native" { "stack" } else { "chain" })).font(theme::TEXT_2XS).color(t.c.muted_foreground).shrink());
+            }
+            list = list.child(entry);
+        }
+        body = body.child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(list);
+    }
     let surface = crate::kit::menu::glass(body.key("sb-card"), &k, false).radius(6.0);
     overlays.push(crate::kit::motion::popup(rune_kit::popover::anchored(&k, surface, &format!("sb-row-{id}"), rune_kit::Placement::RightStart, 4.0)));
 }
@@ -419,7 +474,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered { 0.0 } else { 1.0 }));
         if hovered {
             let mut actions = row().h_full();
-            if th.can_snooze() {
+            // `showSnoozeButton`: operate access, a loaded config, and a thread that can snooze.
+            if th.can_snooze() && super::can_operate(s, &[th]) && super::config_of(s, th).is_some() {
                 let id = th.id.clone();
                 actions = actions.child(hover_action(t, format!("sb-snooze-{}", th.id), &i::CLOCK, 12.0, None, 6.0).on_press_tx(move |s: &mut App, tx: &mut Tx| {
                     let _ = tx;
@@ -429,7 +485,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
                 }));
             }
             let id = th.id.clone();
-            actions = actions.child(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0).on_press(move |s: &mut App| super::settle(s, &id)));
+            actions = actions.child(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)));
             slot = slot.child(actions.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }
         line1 = line1.child(slot);
@@ -475,16 +531,21 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
+/// A pull request state's glyph and tone (`resolvePullRequestState` presentation).
+fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
+    let dark = t.dark;
+    match state {
+        Some("draft") => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
+        Some("merged") => (&i::GIT_MERGE, if dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }),
+        Some("closed") => (&i::GIT_PULL_REQUEST_CLOSED, if dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }),
+        Some("open") => (&i::GIT_PULL_REQUEST_ARROW, if dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }),
+        _ => (&i::GIT_PULL_REQUEST_ARROW, t.sb.muted_foreground),
+    }
+}
+
 /// `PullRequestBadge`: the state glyph in its tone, then the number, "+N" or a stack's layer count.
 fn pr_badge(t: &T, thread: &str, pr: &logic::PrBadge) -> El {
-    let dark = t.dark;
-    let (glyph, tone) = match pr.state {
-        "draft" => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
-        "merged" => (&i::GIT_MERGE, if dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }),
-        "closed" => (&i::GIT_PULL_REQUEST_CLOSED, if dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }),
-        "open" => (&i::GIT_PULL_REQUEST_ARROW, if dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }),
-        _ => (&i::GIT_PULL_REQUEST_ARROW, t.sb.muted_foreground),
-    };
+    let (glyph, tone) = pr_glyph(t, Some(pr.state));
     let glyph = if pr.stack { &i::LAYERS } else { glyph };
     let (id, url, list) = (thread.to_string(), pr.url.clone(), pr.opens_list);
     row()
@@ -544,16 +605,24 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         t.sb.secondary_label.alpha_mul(0.7)
     };
-    // `boringSidebarMultilineRows`: a folder row moves its branch and PR onto a second line.
-    let two_line = rc.folder && (th.branch.is_some() || th.pr.is_some()) && crate::settings::value(s, "boringSidebarMultilineRows") == true;
+    // `boringSidebarMultilineRows`: a folder row moves its branch and PR onto a second line, and
+    // without them its remote and provider icons onto the title line.
+    let two_line = rc.folder && crate::settings::value(s, "boringSidebarMultilineRows") == true;
+    let meta = two_line.then(|| Meta::of(s, th)).flatten();
     let mut r = if two_line { row().h(24.0).gap(10.0).center_y() } else { row().h(36.0).px(10.0).gap(10.0).center_y() };
     r = if rc.folder {
         if two_line { r } else { r.pl(36.0) }.child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
     } else {
         r.child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0)).child(title(s, th, t, theme::TEXT_SM, title_color))
     };
+    if two_line && meta.is_none() {
+        r = r.child(trailing_icons(s, t, model, th, false));
+    }
     if th.pinned {
         r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
+    }
+    if !two_line && crate::panel::terminal::running(s, &th.id) > 0 {
+        r = r.child(terminal_glyph(t));
     }
     if let Some((_, verb)) = rc.dragging {
         if let Some(v) = verb {
@@ -573,38 +642,86 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         if hovered {
             let id = th.id.clone();
             let action = match rc.section {
-                Section::Snoozed => hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0).on_press(move |s: &mut App| super::unsnooze(s, &id)),
-                Section::Settled => hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0).on_press(move |s: &mut App| super::unsettle(s, &id)),
-                _ => hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0).on_press(move |s: &mut App| super::settle(s, &id)),
+                Section::Snoozed => hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsnooze)),
+                Section::Settled => hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsettle)),
+                _ => hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)),
             };
             slot = slot.child(action.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }
         r = r.child(slot);
     }
-    let body = if two_line { col().px(10.0).py(6.0).pl(36.0).child(r.w_full()).child(meta_line(t, model, th)) } else { r };
+    let body = match meta {
+        Some(meta) => col().px(10.0).py(6.0).pl(36.0).child(r.w_full()).child(meta_line(s, t, model, th, meta)),
+        None if two_line => col().px(10.0).py(6.0).pl(36.0).child(r.w_full()),
+        None => r,
+    };
     let e = surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some());
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
-/// The two-line folder row's second line: worktree branch, PR badge, then the provider.
-fn meta_line(t: &T, model: &Model, th: &Thread) -> El {
+/// What a two-line folder row's second line shows; `None` when only its trailing icons would.
+#[derive(Debug, PartialEq)]
+struct Meta {
+    /// The machine a scratch thread runs on, named when projects span environments.
+    machine: Option<String>,
+    terminals: bool,
+}
+
+impl Meta {
+    fn of(s: &App, th: &Thread) -> Option<Meta> {
+        let key = super::env_key(s, th);
+        let scratch = || {
+            let project = s.state().projects.iter().find(|p| crate::data::s(p, "id") == th.project_id);
+            project.is_some_and(|p| super::folders::Grouping::read(s).is_scratch(p))
+        };
+        let machine = (th.branch.is_none() && crate::env::spans(s) && scratch()).then(|| crate::env::label(s, key));
+        let terminals = crate::panel::terminal::running(s, &th.id) > 0;
+        // `latestRunDiff` has no source yet, so the web shows no diff counts either.
+        (th.branch.is_some() || machine.is_some() || th.pr.is_some() || terminals).then_some(Meta { machine, terminals })
+    }
+}
+
+fn terminal_glyph(t: &T) -> El {
+    icon(&i::TERMINAL, 12.0).color(if t.dark { tw::TEAL_300.alpha_mul(0.9) } else { tw::TEAL_600 }).shrink().help("Terminal process running")
+}
+
+/// The remote machine (unless the meta line names it) and the provider.
+fn trailing_icons(s: &App, t: &T, model: &Model, th: &Thread, named: bool) -> El {
+    let key = super::env_key(s, th);
+    let mut out = row().gap(4.0).center_y().shrink();
+    if key != s.ui.env.active && !named {
+        out = out.child(icon(crate::settings::env_machine_icon(s, key), 14.0).color(t.sb.sidebar_muted_foreground.alpha_mul(0.7)));
+    }
+    if let Some(p) = provider_icon(t, model, th, t.sb.secondary_label) {
+        out = out.child(p);
+    }
+    out
+}
+
+/// The two-line folder row's second line: worktree branch or scratch machine, terminals, PR
+/// badge, then the remote machine and provider.
+fn meta_line(s: &App, t: &T, model: &Model, th: &Thread, m: Meta) -> El {
     let mut meta = row().mt(2.0).h(16.0).gap(6.0).center_y();
     if let Some(branch) = &th.branch {
         if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
             meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
         }
         meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
+    } else if let Some(machine) = m.machine.clone() {
+        meta = meta
+            .child(icon(crate::settings::env_machine_icon(s, super::env_key(s, th)), 12.0).color(t.sb.secondary_label).shrink())
+            .child(text(machine).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
     } else {
         meta = meta.child(spacer());
+    }
+    if m.terminals {
+        meta = meta.child(terminal_glyph(t));
     }
     if let Some(pr) = &th.pr {
         meta = meta.child(pr_badge(t, &th.id, pr));
     }
-    if let Some(p) = provider_icon(t, model, th, t.sb.secondary_label) {
-        meta = meta.child(p);
-    }
-    meta
+    meta.child(trailing_icons(s, t, model, th, m.machine.is_some()))
 }
 
 /// `SidebarDragBoundary` hysteresis: crossing between Pinned and Active waits until the row
@@ -856,7 +973,8 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 
     let s_all = &model.sections;
     let nothing = [&s_all.pinned, &s_all.active, &s_all.working, &s_all.snoozed, &s_all.settled].iter().all(|v| v.is_empty());
-    if nothing && model.folders.is_empty() {
+    let drafts = super::drafts::view(s, t);
+    if nothing && model.folders.is_empty() && !super::drafts::any_with_content(s) {
         let muted = t.sb.muted_foreground.alpha_mul(0.6);
         let mut empty = col().w_full().px(8.0).py(24.0).gap(8.0).center();
         if s.state().projects.is_empty() {
@@ -891,6 +1009,9 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 
     // `sidebarTree`: Up/Down, Home and End move focus between rows without opening them.
     let mut content = col().key("sb-list").role("list").label("Threads").focus_group().w_full().min_h(viewport).px(8.0).py(8.0);
+    if let Some(drafts) = drafts {
+        content = content.child(drafts);
+    }
     let mut first = true;
     for (n, it) in items.iter().enumerate() {
         let shift = shifts.as_ref().map_or(Some(0.0), |v| v[n]);
@@ -1010,6 +1131,20 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_two_line_rows_meta_line_shows_only_with_something_to_say() {
+        let s = App::new();
+        let th = |v: serde_json::Value| Thread::from_shell(&v);
+        let plain = th(serde_json::json!({"id": "no-such-thread", "projectId": "p", "title": "t"}));
+        assert_eq!(Meta::of(&s, &plain), None, "FAILED: without a branch, PR or terminal the icons move to the title line");
+        let branched = th(serde_json::json!({"id": "no-such-thread", "projectId": "p", "title": "t", "branch": "feature"}));
+        assert_eq!(Meta::of(&s, &branched), Some(Meta { machine: None, terminals: false }));
+        // One environment: a scratch thread names no machine.
+        let project = crate::data::s(&s.state().projects[0], "id").to_string();
+        let scratch = th(serde_json::json!({"id": "no-such-thread", "projectId": project, "title": "t"}));
+        assert_eq!(Meta::of(&s, &scratch), None);
+    }
 
     #[test]
     fn crossing_between_pinned_and_active_waits_for_the_label() {

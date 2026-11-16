@@ -86,7 +86,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(new_threads(s, cx, t))
         .child(actions(s, t, project));
 
-    let checkout = super::about::about_row(t, &environment, &root, el());
+    let checkout = super::about::about_row(t, &environment, &root, super::checkout_grouping::trigger(s, t, project));
     let remove = (id.clone(), title.clone());
     let danger = super::about::about_row(
         t,

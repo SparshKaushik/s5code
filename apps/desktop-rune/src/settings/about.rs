@@ -29,7 +29,7 @@ const STORES: &[(&str, &str, &str)] = &[
 ];
 
 /// Shared `cliReleaseChannelOf`: `X-nightly.YYYYMMDD.N` and `X-preview.YYYYMMDD.N`, else stable.
-fn release_channel(version: &str) -> &'static str {
+pub(crate) fn release_channel(version: &str) -> &'static str {
     let Some((base, rest)) = version.split_once('-') else { return "stable" };
     if base.is_empty() || base.contains('+') {
         return "stable";

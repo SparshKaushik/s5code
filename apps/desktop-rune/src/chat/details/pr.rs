@@ -641,10 +641,21 @@ fn start_handoff(s: &mut App, kind: &'static str, d: &Value) {
         return;
     }
     let prompt = if kind == "conflicts" { crate::pages::pr_detail::resolve_text(d) } else { fix_prompt(d) };
+    prepare(s, kind, data::s(d, "url"), prompt);
+}
+
+/// A `/new?pr=` link's "Check out", for the project on screen; an empty prompt is no task.
+pub(crate) fn start_link_handoff(s: &mut App, url: &str, prompt: &str) {
+    if s.ui.chat.details.handoff.is_none() {
+        prepare(s, "prompt-link", url, prompt.to_owned());
+    }
+}
+
+fn prepare(s: &mut App, kind: &'static str, url: &str, prompt: String) {
     let Some(project) = super::composer::ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return };
     let thread = crate::panel::drawer::draft_thread(s, &project);
     let (Some(cwd), Some(net)) = (super::cwd(s), s.src.net()) else { return };
-    let id = net.request("git.preparePullRequestThread", json!({"cwd": cwd, "reference": data::s(d, "url"), "mode": "worktree", "threadId": thread}));
+    let id = net.request("git.preparePullRequestThread", json!({"cwd": cwd, "reference": url, "mode": "worktree", "threadId": thread}));
     s.ui.chat.details.handoff = Some((id, kind, prompt));
     palette::toast(s, &format!("Preparing the {} checkout...", singular(s)), None);
 }
@@ -655,6 +666,12 @@ fn poll_handoff(s: &mut App) -> bool {
     let Some((_, _, prompt)) = s.ui.chat.details.handoff.take() else { return false };
     let singular = singular(s);
     match reply {
+        Ok(v) if prompt.is_empty() => {
+            prepared(s, &v);
+            if v["isOnPullRequestHead"] != false {
+                palette::toast(s, "Checked out", Some(&format!("The {singular} is in its own worktree, with a thread open on it.")));
+            }
+        }
         Ok(v) => {
             prepared(s, &v);
             let key = super::composer::draft_key(s, s.frame_route());
