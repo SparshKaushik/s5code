@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The night qualifier outranks v31 in resource selection, so without this
+      file a dark-mode API 31+ device resolves the launch theme's
+      windowBackground from values-night — the drawable splash — instead of the
+      plain colour the v31 variant intends. The platform splash icon carries the
+      mark on these releases; the window itself stays a flat colour, or the
+      wordmark bleeds through whenever a screen goes translucent (predictive
+      back's reveal, scrimmed sheets).
+    -->
+    <style name="Theme.S5Code.Launch" parent="Theme.S5Code">
+        <item name="android:windowSplashScreenBackground">@color/window_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+</resources>

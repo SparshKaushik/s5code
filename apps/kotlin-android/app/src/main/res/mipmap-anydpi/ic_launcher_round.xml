@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The `monochrome` layer is what Android 13+ themed icons and Nothing OS's icon
+  pack render. It intentionally points at the same foreground: that drawable is
+  alpha-only, so it tints to the wordmark rather than to a filled square.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: the S5 wordmark, sized to sit inside the 72dp safe
+  zone of the 108dp canvas.
+
+  The mark is an alpha-only PNG. That is the whole fix for themed and monochrome
+  launchers (Nothing OS's dot-matrix icons, Android 13+ themed icons): those
+  launchers tint a layer by its alpha channel, so an opaque source tints to a
+  solid filled shape and the wordmark disappears. Carrying the glyph in alpha
+  means the silhouette is the letters.
+
+  Width is set and height left to the aspect ratio; the mark is 16:9, so pinning
+  both would stretch it.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:drawable="@drawable/s5_mark_alpha"
+        android:gravity="center"
+        android:width="58dp"
+        android:height="33dp" />
+</layer-list>

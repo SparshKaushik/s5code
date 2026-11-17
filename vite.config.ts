@@ -200,6 +200,9 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      // Bundled by apps/kotlin-android/bridge/build.mts; the Kotlin app loads
+      // them verbatim, so reformatting is pure churn.
+      "apps/kotlin-android/app/src/main/assets/*.js",
       // Vendored and generated C.
       "apps/mobile/modules/t3-highlights/Vendor/**",
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
@@ -233,6 +236,8 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      // Bundled by apps/kotlin-android/bridge/build.mts.
+      "apps/kotlin-android/app/src/main/assets/*.js",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],

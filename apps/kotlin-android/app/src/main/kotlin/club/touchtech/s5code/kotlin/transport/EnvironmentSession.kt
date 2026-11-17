@@ -1,0 +1,1435 @@
+package club.touchtech.s5code.kotlin.transport
+
+import club.touchtech.s5code.kotlin.data.EnvironmentStore
+import club.touchtech.s5code.kotlin.data.SavedEnvironment
+import club.touchtech.s5code.kotlin.model.DeviceHubAccess
+import club.touchtech.s5code.kotlin.transport.wire.DeviceServiceStateDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneActionResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneSnapshotDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneStartResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigStreamEventDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerEventLoopStallDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
+import kotlin.random.Random
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import okhttp3.OkHttpClient
+
+/** Counts connects across every session, so reads that failed while unreachable can re-run. */
+object SessionConnects {
+    private val counter = MutableStateFlow(0)
+    val count: StateFlow<Int> = counter.asStateFlow()
+
+    fun connected() {
+        counter.update { it + 1 }
+    }
+}
+
+/**
+ * A read made while a retry recovers from a failure, or while offline, fails at
+ * once with that failure: a retry can take minutes, and a screen with nothing to
+ * show should stop loading (`createEnvironmentQueryAtomFamily` in client-runtime).
+ */
+internal fun SessionState.unreachableQueryError(): String? =
+    when (phase) {
+        SessionPhase.Offline -> lastError ?: "The device is offline."
+        SessionPhase.Connecting, SessionPhase.Backoff -> lastError
+        else -> null
+    }
+
+/** What the UI needs to know about one environment's connection. */
+enum class SessionPhase {
+    /** No attempt yet, or deliberately stopped. Not emitted for a newly paired session. */
+    Idle,
+    Connecting,
+    Connected,
+    /** Lost the connection and waiting out a backoff before retrying. */
+    Backoff,
+    /**
+     * The device has no usable network. The backoff ladder is parked rather than
+     * consumed, so a long offline stretch does not strand the session at the top
+     * rung when connectivity returns.
+     */
+    Offline,
+    /** The token was rejected. Retrying will not help; re-pairing will. */
+    Unauthorized,
+    /**
+     * The server speaks another orchestration protocol. Parked like
+     * [Unauthorized]: updating the app or the server is the fix.
+     */
+    Unsupported,
+}
+
+data class SessionState(
+    val phase: SessionPhase = SessionPhase.Idle,
+    val attempt: Int = 0,
+    val lastError: String? = null,
+    val serverVersion: String? = null,
+    /** `environment.platform.os` from the config — "darwin", "linux", "windows". */
+    val platformOs: String? = null,
+    /**
+     * `resolveEnvironmentMachineKind`: the user's `environmentIcon` setting, or
+     * `platform.machine` when unset. One of the ENVIRONMENT_MACHINE_KINDS
+     * literals, or null on servers that publish neither.
+     */
+    val machineKind: String? = null,
+    val capabilities: ServerCapabilities = ServerCapabilities(),
+    /**
+     * `GET /api/auth/session` after connect: whether the credential is valid
+     * and which scopes it carries. Maintenance actions (server update) need
+     * `orchestration:operate`; a token from a narrower pair is refused politely
+     * instead of killing the socket with an unauthorized write.
+     */
+    val authenticated: Boolean = false,
+    val scopes: List<String>? = null,
+    val permissions: List<String>? = null,
+    val serverUpdateScope: String? = null,
+    val sessionExpiresAt: String? = null,
+    /**
+     * Server settings the screens read: the add-project base directory and the
+     * auto-settle defaults Settings edits through `server.updateSettings`.
+     */
+    val addProjectBaseDirectory: String = "",
+    val scratchWorkspaceRoot: String? = null,
+    val autoSettleOnMerge: Boolean = true,
+    val autoSettleAfterDays: Int? = 3,
+    /** The user's `continueThreadsAfterServerUpdate` preference, from server settings. */
+    val continueThreadsAfterServerUpdate: Boolean = false,
+    /**
+     * The full server-settings snapshot the Settings → Server settings pages
+     * read and `server.updateSettings` writes back.
+     */
+    val serverSettings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+    /** The host's recent stall from the latest config; never cached past it. */
+    val lastEventLoopStall: ServerEventLoopStallDto? = null,
+)
+
+/**
+ * Server-advertised capabilities, defaulted off. A command the server does not
+ * understand comes back as a protocol defect that kills the socket, so these
+ * gate the write paths rather than merely hiding buttons.
+ */
+data class ServerCapabilities(
+    val serverBrowser: Boolean = false,
+    val serverResolvedCommandContext: Boolean = false,
+    val threadVisitedTracking: Boolean = false,
+    /** `thread.stop` stops the thread server-side without a client-resolved run. */
+    val threadStop: Boolean = false,
+    val threadSettlement: Boolean = false,
+    val threadSnooze: Boolean = false,
+    val threadPinning: Boolean = false,
+    /** `thread.pin.reorder` is accepted; without it Move up/down stays hidden. */
+    val threadPinReorder: Boolean = false,
+    /** `thread.active.reorder` is accepted. */
+    val threadActiveReorder: Boolean = false,
+    val threadTitleRegeneration: Boolean = false,
+    val pullRequests: Boolean = false,
+    /** `attachments.createUploadUrl`/`attachments.delete` exist. */
+    val attachmentUploads: Boolean = false,
+    /** `thread.user-input.respond` accepts `attachmentsByQuestionId`. */
+    val questionAttachments: Boolean = false,
+    /** Non-image upload ceiling; null means only image uploads are accepted. */
+    val fileAttachmentsMaxUploadBytes: Long? = null,
+    /** `server.probe` exists; cheaper than a full config fetch for wake checks. */
+    val connectionProbe: Boolean = false,
+    /** The shell stream can mark the end of an `afterSequence` catch-up replay. */
+    val shellResumeCompletionMarker: Boolean = false,
+    val threadResumeCompletionMarker: Boolean = false,
+    /** Thread reads accept `turnLimit`/`beforeCursor` windows and `page` metadata. */
+    val threadSnapshotPagination: Boolean = false,
+    /** Thread reads accept `reasoningMessages`, returning thought traces. */
+    val reasoningMessages: Boolean = false,
+    /** `server.updateSettings` accepts auto-settle writes (shared settings sync). */
+    val threadAutoSettlement: Boolean = false,
+    /** `thread.auto-settle.set` exists — the per-thread Auto-settle menu item. */
+    val threadAutoSettleOptOut: Boolean = false,
+    /**
+     * `serverSelfUpdate`: the update path to offer — boot-service, binary,
+     * respawn, desktop-managed. Null means the server cannot self-update.
+     */
+    val serverSelfUpdate: String? = null,
+    /** `subscribeProjectClones` exists — the new-task Start gate reads it. */
+    val projectCloneTracking: Boolean = false,
+    /** `continueRunningThreads` on `server.updateServer` is honored. */
+    val serverUpdateThreadContinuation: Boolean = false,
+    /** The supervising desktop app accepts `server.updateServer`. */
+    val desktopAppUpdate: Boolean = false,
+    /** `storageCleanup`/`worktreeCleanup` settings are honored. */
+    val storageCleanup: Boolean = false,
+    /** The server persists `continueThreadsAfterServerUpdate`. */
+    val threadRestartContinuation: Boolean = false,
+    /**
+     * The thread link array (`pullRequests`) and host snapshots exist. Absent
+     * means `linkedPullRequest` is the whole story: no stacks, no watches.
+     */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /** `pullRequests.checks` exists; PR screens read checks from their own method. */
+    val pullRequestChecks: Boolean = false,
+    /** Stack rebase/merge actions run through `pullRequests.runAction`. */
+    val pullRequestStackActions: Boolean = false,
+    /** `thread.pull-request.link`/`unlink` are understood. */
+    val threadPullRequestLinking: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings` and applies them to usage. */
+    val usageModelMappings: Boolean = false,
+    /**
+     * `capabilities.serverInstallation`: how this server was installed (npx-style
+     * runner vs. `npm-global` with a prefix), or null when it predates the field.
+     * A manual update hint needs it to say where the new binary must land.
+     */
+    val serverInstallation: ServerInstallationDto? = null,
+    /** Projects may turn provider instances on or off (`projectSettingsOverrides[p].providerInstances`). */
+    val projectProviderInstanceOverrides: Boolean = false,
+    /** `orchestration.subscribeCommandOutput` streams a running command's output. */
+    val commandOutputStreaming: Boolean = false,
+    /** `server.getDatabaseStorage` reports database size and reclaimable space. */
+    val databaseStorage: Boolean = false,
+    /** `worktreeSettledAfterDays` cleanup rules are honored. */
+    val settledWorktreeCleanup: Boolean = false,
+    /** `sidebarAutoSettleKeepPullRequests` is honored by the inactivity settle. */
+    val threadAutoSettlementScope: Boolean = false,
+)
+
+/**
+ * One supervised connection to one environment.
+ *
+ * The session owns reconnection, because everything above it is a projection
+ * that must not care whether the socket is on its first or fiftieth attempt.
+ * Two properties are what make that work:
+ *
+ * - **Subscriptions restart themselves.** [subscribe] re-issues its RPC on every
+ *   new connection, so a caller collects one flow for the lifetime of a screen
+ *   and receives a fresh snapshot after each reconnect instead of having to
+ *   re-subscribe.
+ * - **Unauthorized parks rather than loops.** A rejected token cannot be fixed
+ *   by waiting, so the loop stops — but the phase still answers a manual retry
+ *   or a foreground wake, matching RN's `blocked`: a relay credential may have
+ *   been refreshed while the app was away, and one retry is cheap.
+ */
+class EnvironmentSession(
+    val environmentId: String,
+    initialLabel: String,
+    private val scope: CoroutineScope,
+    private val http: EnvironmentHttp,
+    private val client: OkHttpClient,
+    private val authorizer: EnvironmentAuthorizer,
+    private val saved: () -> SavedEnvironment?,
+    /**
+     * Network reachability. When supplied, the supervisor parks in
+     * [SessionPhase.Offline] instead of spending backoff rungs failing sockets
+     * that cannot open, and a network restore interrupts the wait.
+     */
+    private val online: Flow<Boolean>? = null,
+    /** A paired environment is connecting from its first visible frame. */
+    initialPhase: SessionPhase = SessionPhase.Idle,
+    /**
+     * The `clientId` this device reports in `server.reportClientActivity`
+     * (`mobile-<deviceId>` in RN). Null disables reporting.
+     */
+    private val activityClientId: (() -> String)? = null,
+    /** Whether the app is in the foreground, for activity reports. */
+    private val appIsForegrounded: (() -> Boolean)? = null,
+) {
+    private val _state = MutableStateFlow(SessionState(phase = initialPhase))
+    val state: StateFlow<SessionState> = _state.asStateFlow()
+
+    private val _label = MutableStateFlow(initialLabel)
+    val label: StateFlow<String> = _label.asStateFlow()
+
+    /**
+     * The HTTP origin the live connection is using, or null while disconnected.
+     * Relay-managed endpoints are resolved per attempt, so anything building an
+     * absolute URL (a signed asset, say) has to read it from here rather than from
+     * the saved row.
+     */
+    @Volatile
+    var httpBaseUrl: String? = null
+        private set
+
+    /**
+     * The live connection, or null while disconnected. Emitting null explicitly
+     * (rather than simply not emitting) is what lets subscriptions clear their
+     * derived state when the socket drops.
+     */
+    private val connection = MutableStateFlow<RpcConnection?>(null)
+
+    /**
+     * The credential and origin from the in-flight (or live) authorize step.
+     * Snapshot prefetch over HTTP uses them: it must work while the socket is
+     * still opening, and must not outlive the attempt that minted them.
+     */
+    @Volatile private var authorized: EnvironmentAuthorizer.Authorized? = null
+
+    /**
+     * RN's `foregroundResubscriptions`: a foreground wake re-runs live
+     * subscriptions on the same socket, healing a stream the server ended
+     * while the app was away without needing a reconnect.
+     */
+    private val resubscribeSignals = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** `server.probe` support, learned from the config snapshot per connection. */
+    @Volatile private var probeSupported = false
+
+    private var supervisor: Job? = null
+
+    fun start() {
+        if (supervisor?.isActive == true) return
+        supervisor = scope.launch { supervise() }
+    }
+
+    fun stop() {
+        supervisor?.cancel()
+        supervisor = null
+        connection.value?.close()
+        connection.value = null
+        authorized = null
+        _state.value = SessionState(phase = SessionPhase.Idle)
+    }
+
+    /**
+     * React to Android returning from the background.
+     *
+     * Mirrors the RN client's probe-then-decide policy: the surviving socket is
+     * probed, and only a dead probe pays for a full authorize→ticket→socket
+     * restart. The socket may be half-open without a close frame after a network
+     * change, so the probe is capped by [probeTimeoutMs] and a timeout counts as
+     * dead. Beside it, [awaitSilentSocket] replaces a socket that stays silent
+     * while the host answers a fresh request, well before the probe times out.
+     */
+    fun refreshAfterForeground(backgroundedMillis: Long) {
+        if (saved() == null) return
+        // Re-arm live subscriptions on the surviving socket (RN's
+        // `foregroundResubscriptions`): a stream the server ended while the
+        // app was away does not need a reconnect to heal.
+        resubscribeSignals.tryEmit(Unit)
+        // Unauthorized is parked, not dead: RN's `blocked` phase retries when
+        // the app regains foreground, because the account behind a relay token
+        // may have been refreshed while the app was away. A still-dead token
+        // just lands back on Unauthorized — one attempt, not a loop.
+        // An unsupported server may have been updated while the app was away.
+        if (state.value.phase == SessionPhase.Unauthorized || state.value.phase == SessionPhase.Unsupported) {
+            retryNow()
+            return
+        }
+        val live = connection.value
+        val baseUrl = httpBaseUrl
+        if (live == null || baseUrl == null || backgroundedMillis < 0) {
+            retryNow()
+            return
+        }
+        val quickRoute = answersQuickly(baseUrl)
+        val timeoutMs = probeTimeoutMs(backgroundedMillis, quickRoute)
+        scope.launch {
+            val method = if (probeSupported) WsMethods.ServerProbe else WsMethods.ServerGetConfig
+            val answered =
+                coroutineScope {
+                    val probe =
+                        async {
+                            runCatching { withTimeout(timeoutMs) { live.request(method, JsonObject(emptyMap())) } }
+                                .isSuccess
+                        }
+                    val silent = async { awaitSilentSocket(live, baseUrl, quickRoute) }
+                    try {
+                        select<Boolean> {
+                            probe.onAwait { it }
+                            silent.onAwait { false }
+                        }
+                    } finally {
+                        probe.cancel()
+                        silent.cancel()
+                    }
+                }
+            // A newer connection may have replaced this one while the probe ran.
+            if (connection.value !== live) return@launch
+            if (answered) {
+                // The socket lived; tell the server the app is visible
+                // again so the background-activity lease does not lapse
+                // waiting for the next tick.
+                reportActivity(live)
+            } else {
+                retryNow()
+            }
+        }
+    }
+
+    /**
+     * Returns when [live] stays silent while the host answers a fresh descriptor
+     * request, as when Android kills a suspended socket without a close event.
+     * Never returns for a socket that delivers a frame or a host that does not answer.
+     */
+    private suspend fun awaitSilentSocket(live: RpcConnection, baseUrl: String, quickRoute: Boolean) {
+        val startedAt = System.nanoTime()
+        delay(SILENT_SOCKET_CHECK_AFTER_MS)
+        // An older host answers probes with its full config, which can be slow
+        // enough to lose to a fresh request on a healthy socket.
+        if (!probeSupported) awaitCancellation()
+        // Frames queued while the app was suspended have drained by now.
+        val framesBefore = live.inboundFrames
+        // A radio still waking up or a stale pooled connection can fail one check.
+        while (!hostAnswers(baseUrl)) {
+            if (live.inboundFrames != framesBefore) awaitCancellation()
+            delay(SILENT_SOCKET_RECHECK_MS)
+        }
+        if (!quickRoute) {
+            val remaining = REMOTE_SILENT_SOCKET_AFTER_MS - (System.nanoTime() - startedAt) / 1_000_000
+            if (remaining > 0) delay(remaining)
+        }
+        if (live.inboundFrames != framesBefore) awaitCancellation()
+    }
+
+    private suspend fun hostAnswers(baseUrl: String): Boolean =
+        try {
+            http.descriptor(baseUrl, ROUTE_CHECK_TIMEOUT_MS).environmentId == environmentId
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            false
+        }
+
+    /** Retries immediately, for the "Try again" affordance on a failed row. */
+    fun retryNow() {
+        restart()
+    }
+
+    private fun restart() {
+        val previous = supervisor
+        previous?.cancel()
+        connection.value?.close()
+        authorized = null
+        _state.value = _state.value.copy(phase = SessionPhase.Connecting)
+        supervisor =
+            scope.launch {
+                // connect() clears the old StateFlow entry in finally. Never let
+                // that stale cleanup race a replacement connection and erase it.
+                previous?.join()
+                supervise()
+            }
+    }
+
+    private suspend fun supervise() {
+        var attempt = 0
+        while (true) {
+            val environment = saved()
+            if (environment == null) {
+                _state.value = SessionState(phase = SessionPhase.Idle)
+                return
+            }
+            _label.value = environment.label
+
+            // Offline parking: spend no rung while the radio cannot reach
+            // anything, and leave the loop as soon as it can again.
+            val connectivity = online
+            if (connectivity != null && !connectivity.first()) {
+                _state.value = _state.value.copy(phase = SessionPhase.Offline, lastError = null)
+                connectivity.first { it }
+                _state.value = _state.value.copy(phase = SessionPhase.Connecting)
+            } else {
+                _state.value = _state.value.copy(phase = SessionPhase.Connecting, attempt = attempt)
+            }
+
+            val outcome = runCatching { connect(environment) }
+            val failure = outcome.exceptionOrNull()
+            // Only this loop's own cancellation ends it; a cancellation that
+            // leaked out of a child is one more failed attempt.
+            if (failure is CancellationException) currentCoroutineContext().ensureActive()
+
+            if (failure is EnvironmentHttpError &&
+                failure.kind == EnvironmentHttpErrorKind.Unauthorized
+            ) {
+                _state.value =
+                    _state.value.copy(phase = SessionPhase.Unauthorized, lastError = failure.message)
+                return
+            }
+            if (failure is EnvironmentUnsupportedError) {
+                _state.value =
+                    _state.value.copy(phase = SessionPhase.Unsupported, lastError = failure.message)
+                return
+            }
+
+            attempt = nextAttempt(attempt, outcome.getOrNull())
+            _state.value =
+                _state.value.copy(
+                    phase = SessionPhase.Backoff,
+                    attempt = attempt,
+                    // connect() returning means a session came up, and losing a
+                    // live session (say, a socket the OS killed while suspended)
+                    // is not a failed connection. RN renders the relay's trace
+                    // id beside a real failure so it can be found in relay logs.
+                    lastError =
+                        failure?.let {
+                            it.message +
+                                ((it as? club.touchtech.s5code.kotlin.cloud.RelayError)?.traceId
+                                    ?.let { trace -> " Trace ID: $trace" } ?: "")
+                        },
+                )
+            backoff(attempt)
+        }
+    }
+
+    /**
+     * Waits out one rung, but wakes early when connectivity returns. A screen
+     * full of "retrying in 27s" while the phone is already back on Wi-Fi reads
+     * as dead; the wait is interruptible for exactly that reason.
+     */
+    private suspend fun backoff(attempt: Int) {
+        // `attempt` is the failure count (1-based); the rung index is 0-based,
+        // so the first retry waits rung 0 like RN's retryDelayMs(failureCount-1).
+        val connectivity = online ?: run {
+            delay(backoffMillis(attempt - 1))
+            return
+        }
+        var remaining = backoffMillis(attempt - 1)
+        while (remaining > 0) {
+            val started = System.currentTimeMillis()
+            val wentOffline =
+                withTimeoutOrNull(remaining) {
+                    connectivity.first { !it }
+                    true
+                } == true
+            val waited = System.currentTimeMillis() - started
+            if (wentOffline) {
+                _state.value = _state.value.copy(phase = SessionPhase.Offline)
+                connectivity.first { it }
+                _state.value = _state.value.copy(phase = SessionPhase.Backoff, attempt = attempt)
+                // Back online: retry now instead of finishing the rung.
+                return
+            }
+            if (waited >= remaining) return
+            remaining -= waited
+        }
+    }
+
+    /**
+     * Authorizes, opens a socket, and keeps the server-config stream open for
+     * the session's life. Returns the millis the connection stayed up; throws
+     * when the attempt never got there.
+     *
+     * Config is a stream, not a unary fetch (`subscribeServerConfig`, matching
+     * `packages/client-runtime/src/rpc/session.ts`): the server pushes provider
+     * status changes and settings updates on it, and — load-bearing — the end
+     * of that stream means the session is half-dead even while the socket looks
+     * open, so it closes the connection to force a reconnect. Authorization
+     * happens per attempt rather than once per session: a relay-managed
+     * environment's credential expires in minutes, so reusing the one from the
+     * first attempt would make every reconnect fail.
+     */
+    /** The pieces of a landed attempt: socket, first config, and the config stream job. */
+    private class Established(
+        val opened: RpcConnection,
+        val config: ServerConfigDto,
+        val configJob: Job,
+        val configEnded: CompletableDeferred<RpcTransportClosed>,
+    )
+
+    private suspend fun connect(environment: SavedEnvironment): Long {
+        // [establish] bounds its own phases, matching RN's supervisor: setup
+        // gets the establishment timeout, synchronization its own longer one.
+        // A connectivity drop mid-attempt aborts it too, like RN's offline
+        // watchdog, rather than letting a dead attempt run out the clock.
+        val established =
+            coroutineScope {
+                val attempt = async { establish(environment) }
+                val wentOffline =
+                    online?.let { connectivity ->
+                        async {
+                            connectivity.first { !it }
+                            RpcTransportClosed("The network went offline.")
+                        }
+                    }
+                try {
+                    select<Established> {
+                        attempt.onAwait { it }
+                        wentOffline?.onAwait { throw it }
+                    }
+                } finally {
+                    wentOffline?.cancel()
+                }
+            }
+        val opened = established.opened
+        val config = established.config
+        val configJob = established.configJob
+        val configEnded = established.configEnded
+        var sessionAuthJob: Job? = null
+        try {
+            val descriptor = config.environment
+            _label.value = descriptor.label.ifBlank { environment.label }
+            orchestrationProtocolCompatibilityError(
+                descriptor.orchestrationProtocolVersion,
+                _label.value,
+            )?.let { throw EnvironmentUnsupportedError(it) }
+            _state.value =
+                SessionState(
+                    phase = SessionPhase.Connected,
+                    attempt = 0,
+                    lastError = null,
+                    serverVersion = descriptor.serverVersion.ifBlank { null },
+                    platformOs = descriptor.platform.os.ifBlank { null },
+                    machineKind =
+                        config.settings.environmentIcon ?: descriptor.platform.machine,
+                    capabilities =
+                        ServerCapabilities(
+                            serverBrowser = descriptor.capabilities.serverBrowser,
+                            serverResolvedCommandContext = descriptor.capabilities.serverResolvedCommandContext,
+                            threadVisitedTracking = descriptor.capabilities.threadVisitedTracking,
+                            threadStop = descriptor.capabilities.threadStop,
+                            threadSettlement = descriptor.capabilities.threadSettlement,
+                            threadSnooze = descriptor.capabilities.threadSnooze,
+                            threadPinning = descriptor.capabilities.threadPinning,
+                            threadPinReorder = descriptor.capabilities.threadPinReorder,
+                            threadActiveReorder = descriptor.capabilities.threadActiveReorder,
+                            threadTitleRegeneration = descriptor.capabilities.threadTitleRegeneration,
+                            pullRequests = descriptor.capabilities.pullRequests,
+                            attachmentUploads = descriptor.capabilities.attachmentUploads,
+                            questionAttachments = descriptor.capabilities.questionAttachments,
+                            fileAttachmentsMaxUploadBytes =
+                                descriptor.capabilities.fileAttachments?.maxUploadBytes,
+                            connectionProbe = descriptor.capabilities.connectionProbe,
+                            shellResumeCompletionMarker = config.shellResumeCompletionMarker,
+                            threadResumeCompletionMarker = config.threadResumeCompletionMarker,
+                            threadSnapshotPagination = config.threadSnapshotPagination,
+                            reasoningMessages = config.reasoningMessages,
+                            threadAutoSettlement = descriptor.capabilities.threadAutoSettlement,
+                            threadAutoSettleOptOut =
+                                descriptor.capabilities.threadAutoSettleOptOut,
+                            serverSelfUpdate = descriptor.capabilities.serverSelfUpdate,
+                            serverUpdateThreadContinuation =
+                                descriptor.capabilities.serverUpdateThreadContinuation == true,
+                            desktopAppUpdate = descriptor.capabilities.desktopAppUpdate == true,
+                            projectCloneTracking =
+                                descriptor.capabilities.projectCloneTracking == true,
+                            storageCleanup = descriptor.capabilities.storageCleanup,
+                            threadRestartContinuation =
+                                descriptor.capabilities.threadRestartContinuation,
+                            threadPullRequests = descriptor.capabilities.threadPullRequests,
+                            threadPullRequestWatch =
+                                descriptor.capabilities.threadPullRequestWatch,
+                            pullRequestChecks = descriptor.capabilities.pullRequestChecks,
+                            pullRequestStackActions =
+                                descriptor.capabilities.pullRequestStackActions,
+                            threadPullRequestLinking =
+                                descriptor.capabilities.threadPullRequestLinking,
+                            worktreesDirectory = descriptor.capabilities.worktreesDirectory,
+                            projectSettingsOverrides =
+                                descriptor.capabilities.projectSettingsOverrides,
+                            usageModelMappings = descriptor.capabilities.usageModelMappings,
+                            serverInstallation = descriptor.capabilities.serverInstallation,
+                            projectProviderInstanceOverrides =
+                                descriptor.capabilities.projectProviderInstanceOverrides,
+                            commandOutputStreaming = descriptor.capabilities.commandOutputStreaming,
+                            databaseStorage = descriptor.capabilities.databaseStorage,
+                            settledWorktreeCleanup = descriptor.capabilities.settledWorktreeCleanup,
+                            threadAutoSettlementScope = descriptor.capabilities.threadAutoSettlementScope,
+                        ),
+                    addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
+                    scratchWorkspaceRoot = config.scratchWorkspaceRoot,
+                    autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,
+                    autoSettleAfterDays = config.settings.sidebarAutoSettleAfterDays,
+                    continueThreadsAfterServerUpdate =
+                        config.settings.continueThreadsAfterServerUpdate == true,
+                    serverSettings = config.settings,
+                    lastEventLoopStall = config.lastEventLoopStall,
+                )
+            // `canMaintainEnvironment` asks the session record, not the
+            // credential store: a token minted before scopes existed would fail
+            // every maintenance write with a protocol error. The read is
+            // best-effort — a failed lookup leaves authenticated false, which
+            // merely hides the maintenance rows. It runs beside the connection
+            // because a slow host gets up to a minute to answer it.
+            _state.value = _state.value.copy(authenticated = false, scopes = null, permissions = null,
+                sessionExpiresAt = null, serverUpdateScope = config.auth?.serverUpdateScope)
+            sessionAuthJob = authorized?.let { auth -> scope.launch { loadSessionAuth(auth, config, opened) } }
+            probeSupported = descriptor.capabilities.connectionProbe
+            connection.value = opened
+            SessionConnects.connected()
+            _providers.value = config.providers
+            val activityJob = startActivityReporting(opened)
+            val connectedAt = System.currentTimeMillis()
+            val reason =
+                coroutineScope {
+                    // RN drops the lease the moment connectivity reports
+                    // offline rather than waiting for the dead socket to time
+                    // out; parking beats sitting on a dead connection for the
+                    // keepalive window.
+                    val wentOffline =
+                        online?.let { connectivity ->
+                            async {
+                                connectivity.first { !it }
+                                RpcTransportClosed("The network went offline.")
+                            }
+                        }
+                    try {
+                        select {
+                            opened.closed.onAwait { it }
+                            configEnded.onAwait { it }
+                            wentOffline?.onAwait { it }
+                        }
+                    } finally {
+                        wentOffline?.cancel()
+                    }
+                }
+            activityJob.cancel()
+            _state.value = _state.value.copy(phase = SessionPhase.Backoff, lastError = null)
+            return System.currentTimeMillis() - connectedAt
+        } finally {
+            sessionAuthJob?.cancel()
+            configJob.cancel()
+            connection.value = null
+            httpBaseUrl = null
+            this.authorized = null
+            opened.close()
+        }
+    }
+
+    /**
+     * Authorize, open the socket, and wait for the first server-config frame.
+     * Anything that throws before this returns has produced no visible session.
+     */
+    private suspend fun establish(environment: SavedEnvironment): Established {
+        // Authorize→open gets the short setup bound; once the socket is open
+        // the first config may take the synchronization bound on top of what
+        // setup left, since a cold server with a large database answers slowly.
+        val startedAt = System.currentTimeMillis()
+        val (authorized, opened) = withTransportTimeout(ESTABLISHMENT_TIMEOUT_MS, "Timed out connecting to the environment.") {
+            val authorized = authorizer.authorize(environment)
+            this@EnvironmentSession.authorized = authorized
+            val socketUrl =
+                http.resolveSocketUrl(
+                    authorized.httpBaseUrl,
+                    authorized.wsBaseUrl,
+                    authorized.credential,
+                    authorized.connectionMethod,
+                )
+            authorized to RpcConnection.open(client, socketUrl, scope)
+        }
+        httpBaseUrl = authorized.httpBaseUrl
+        val firstConfig = CompletableDeferred<ServerConfigDto>()
+        val configEnded = CompletableDeferred<RpcTransportClosed>()
+        val configJob =
+            scope.launch {
+                try {
+                    opened
+                        .stream(
+                            WsMethods.SubscribeServerConfig,
+                            buildJsonObject {
+                                // Opt-ins the server gates new events and
+                                // command injection on: sources ride their own
+                                // event (never the snapshot), and /usage-limits
+                                // is answered client-side from the same data.
+                                put("usageLimitSources", true)
+                                put("usageLimitsCommand", true)
+                            },
+                        )
+                        .collect { element ->
+                            val event =
+                                TransportJson.decodeFromJsonElement(
+                                    ServerConfigStreamEventDto.serializer(),
+                                    element,
+                                )
+                            when {
+                                event.type == "snapshot" && event.config != null -> {
+                                    val snapshot = event.config
+                                    if (!firstConfig.complete(snapshot)) {
+                                        // Later snapshots carry settings edits
+                                        // made elsewhere; refresh the session's
+                                        // read of them in place.
+                                        _state.value =
+                                            _state.value.copy(
+                                                machineKind =
+                                                    snapshot.settings.environmentIcon
+                                                        ?: snapshot.environment.platform.machine,
+                                                addProjectBaseDirectory =
+                                                    snapshot.settings.addProjectBaseDirectory,
+                                                scratchWorkspaceRoot = snapshot.scratchWorkspaceRoot,
+                                                autoSettleOnMerge =
+                                                    snapshot.settings.sidebarAutoSettleOnMerge,
+                                                autoSettleAfterDays =
+                                                    snapshot.settings.sidebarAutoSettleAfterDays,
+                                                continueThreadsAfterServerUpdate =
+                                                    snapshot.settings
+                                                        .continueThreadsAfterServerUpdate == true,
+                                                serverSettings = snapshot.settings,
+                                                lastEventLoopStall = snapshot.lastEventLoopStall,
+                                            )
+                                    }
+                                }
+                                event.type == "settingsUpdated" -> {
+                                    // The server pushes this after an
+                                    // updateSettings write instead of a fresh
+                                    // snapshot; without it the session's read
+                                    // of the settings goes stale until the
+                                    // next reconnect.
+                                    event.payload?.settings?.let { settings ->
+                                        _state.value =
+                                            _state.value.copy(
+                                                autoSettleOnMerge =
+                                                    settings.sidebarAutoSettleOnMerge,
+                                                autoSettleAfterDays =
+                                                    settings.sidebarAutoSettleAfterDays,
+                                                continueThreadsAfterServerUpdate =
+                                                    settings.continueThreadsAfterServerUpdate == true,
+                                                serverSettings = settings,
+                                            )
+                                    }
+                                }
+                                event.type == "providerStatuses" -> {
+                                    event.payload?.providers?.let { _providers.value = it }
+                                }
+                                event.type == "usageLimitSourcesUpdated" -> {
+                                    event.payload?.sources?.let {
+                                        _usageLimitSources.value = it
+                                    }
+                                }
+                                else -> Unit
+                            }
+                        }
+                    configEnded.complete(
+                        RpcTransportClosed("The server ended the config stream.")
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    firstConfig.completeExceptionally(error)
+                    configEnded.complete(
+                        error as? RpcTransportClosed
+                            ?: RpcTransportClosed(error.message ?: "The config stream failed.")
+                    )
+                }
+            }
+        val config =
+            try {
+                val setupLeft = (ESTABLISHMENT_TIMEOUT_MS - (System.currentTimeMillis() - startedAt)).coerceAtLeast(0)
+                withTransportTimeout(
+                    setupLeft + SYNCHRONIZATION_TIMEOUT_MS,
+                    "Timed out waiting for the environment to synchronize.",
+                ) { firstConfig.await() }
+            } catch (failure: Throwable) {
+                // A timed-out, cancelled, or offline-aborted attempt must not
+                // leave a socket and config stream running detached.
+                configJob.cancel()
+                opened.close()
+                this.authorized = null
+                httpBaseUrl = null
+                throw failure
+            }
+        return Established(
+            opened = opened,
+            config = config,
+            configJob = configJob,
+            configEnded = configEnded,
+        )
+    }
+
+    private suspend fun loadSessionAuth(
+        auth: EnvironmentAuthorizer.Authorized,
+        config: ServerConfigDto,
+        opened: RpcConnection,
+    ) {
+        val sessionAuth =
+            try {
+                http.session(auth.httpBaseUrl, auth.credential)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                return
+            }
+        // A slow answer can outlive its connection; the next connect resets these.
+        if (connection.value !== opened) return
+        _state.update {
+            it.copy(
+                authenticated = sessionAuth.authenticated,
+                scopes = sessionAuth.scopes,
+                permissions = sessionAuth.permissions,
+                sessionExpiresAt = sessionAuth.expiresAt,
+                serverUpdateScope = sessionAuth.auth?.serverUpdateScope ?: config.auth?.serverUpdateScope,
+            )
+        }
+    }
+
+    /**
+     * `server.reportClientActivity` on a cadence, matching
+     * `mobileBackgroundActivityReporterLayer` in the RN client: 25s between
+     * reports, 45s TTL, the baseline provider-status scope. The lease is what
+     * keeps this client's work counted on the server's background-activity
+     * snapshot while the app sits in the shade.
+     */
+    private fun startActivityReporting(opened: RpcConnection): Job =
+        scope.launch {
+            while (true) {
+                reportActivity(opened)
+                delay(ACTIVITY_REPORT_INTERVAL_MS)
+            }
+        }
+
+    private suspend fun reportActivity(opened: RpcConnection) {
+        val id = activityClientId?.invoke() ?: return
+        val active = appIsForegrounded?.invoke() ?: true
+        runCatching {
+            opened.request(
+                WsMethods.ServerReportClientActivity,
+                buildJsonObject {
+                    put("environmentId", environmentId)
+                    put("clientId", id)
+                    put("clientKind", "mobile")
+                    put("visible", active)
+                    put("focused", active)
+                    put("recentlyInteracted", active)
+                    put("appState", if (active) "active" else "background")
+                    // BackgroundScope is a tagged struct, not a bare string.
+                    putJsonArray("scopes") {
+                        add(buildJsonObject { put("type", "provider-status") })
+                    }
+                    put("ttlMs", ACTIVITY_LEASE_TTL_MS)
+                    put(
+                        "observedAt",
+                        java.time.Instant.ofEpochMilli(System.currentTimeMillis()).toString(),
+                    )
+                },
+            )
+        }
+    }
+
+    private val _providers = MutableStateFlow<List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>>(emptyList())
+
+    /** The environment's configured provider instances, empty while disconnected. */
+    val providers: StateFlow<List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>> =
+        _providers.asStateFlow()
+
+    /**
+     * Configured `usageLimitSources` as the hub reports them. Event-only on the
+     * wire — the config snapshot never carries sources — so this stays empty
+     * until the first `usageLimitSourcesUpdated` frame.
+     */
+    private val _usageLimitSources =
+        MutableStateFlow<List<club.touchtech.s5code.kotlin.transport.wire.UsageLimitSourceDto>>(
+            emptyList(),
+        )
+    val usageLimitSources:
+        StateFlow<List<club.touchtech.s5code.kotlin.transport.wire.UsageLimitSourceDto>> =
+        _usageLimitSources.asStateFlow()
+
+    /**
+     * Re-runs provider discovery on the server, including a fresh model list.
+     *
+     * The answer replaces [providers] in place — the picker reads this flow, so
+     * a refresh is a write to the source rather than a value handed back.
+     * `refreshModels` marks the request as user-driven, which is what lets the
+     * server open agent sessions for discovery instead of only rereading config.
+     */
+    suspend fun refreshProviders() {
+        val updated =
+            request(
+                WsMethods.ServerRefreshProviders,
+                buildJsonObject { put("refreshModels", true) },
+                ServerProvidersUpdatedDto.serializer(),
+            )
+        _providers.value = updated.providers
+    }
+
+    /**
+     * Scoped refresh: fills the per-workspace snapshot (skills and commands
+     * bound to one directory) without touching model discovery.
+     */
+    suspend fun refreshProviderWorkspace(instanceId: String, cwd: String) {
+        val updated =
+            request(
+                WsMethods.ServerRefreshProviders,
+                buildJsonObject {
+                    put("instanceId", instanceId)
+                    put("cwd", cwd)
+                },
+                ServerProvidersUpdatedDto.serializer(),
+            )
+        _providers.value = updated.providers
+    }
+
+    /* ── Devices ─────────────────────────────────────────────────────── */
+
+    /** `deviceEnvironment.state`: the live device inventory stream. */
+    fun subscribeDeviceState(): Flow<DeviceServiceStateDto> =
+        subscribe(
+            WsMethods.SubscribeDeviceState,
+            JsonObject(emptyMap()),
+            DeviceServiceStateDto.serializer(),
+        )
+
+    /**
+     * `resolveDeviceHubAccess`. Preview media (`img`, `EventSource`, the input
+     * socket) cannot send bearer or DPoP headers, so hub requests authenticate
+     * with a fresh WebSocket ticket in the query. Kotlin environments always
+     * carry a credential, so this never takes the cookie path.
+     */
+    suspend fun deviceHubAccess(hostId: String, hubBasePath: String): DeviceHubAccess {
+        val auth =
+            authorized
+                ?: throw IllegalStateException("Environment is not connected; hub access is unavailable.")
+        val httpBase = auth.httpBaseUrl.trimEnd('/') + hubBasePath
+        val wsBase = httpBase.replaceFirst(Regex("^http"), "ws")
+        val ticket = http.webSocketTicket(auth.httpBaseUrl, auth.credential).ticket
+        return DeviceHubAccess(
+            httpBase = httpBase,
+            wsBase = wsBase,
+            query = mapOf("hostId" to hostId, "wsTicket" to ticket),
+        )
+    }
+
+    /** The browser stream uses the same short-lived ticket mechanism as device media. */
+    suspend fun browserAccess(): DeviceHubAccess {
+        val auth = authorized ?: error("Environment is not connected.")
+        val base = auth.httpBaseUrl.trimEnd('/') + "/api/preview-stream"
+        return DeviceHubAccess(base, base.replaceFirst(Regex("^http"), "ws"),
+            mapOf("wsTicket" to http.webSocketTicket(auth.httpBaseUrl, auth.credential).ticket))
+    }
+
+    /** `device.list` — [retryHostId] retries a failed host like the RN menu does. */
+    suspend fun listDevices(
+        retryHostId: String? = null,
+        inspectOnly: Boolean = false,
+    ): DeviceServiceStateDto =
+        request(
+            WsMethods.DeviceList,
+            buildJsonObject {
+                retryHostId?.let { put("retryHostId", it) }
+                if (inspectOnly) put("inspectOnly", true)
+            },
+            DeviceServiceStateDto.serializer(),
+        )
+
+    /** `device.shutdown` — powers the device off; the session stream reflects it. */
+    suspend fun shutdownDevice(hostId: String, deviceId: String, platform: String) {
+        execute(
+            WsMethods.DeviceShutdown,
+            buildJsonObject {
+                put("hostId", hostId)
+                put("deviceId", deviceId)
+                put("platform", platform)
+            },
+        )
+    }
+
+    /* ── Project clones ──────────────────────────────────────────────── */
+
+    /** `sourceControlEnvironment.projectClones`: the full tracked list. */
+    fun subscribeProjectClones(): Flow<List<ProjectCloneSnapshotDto>> =
+        subscribe(
+            WsMethods.SubscribeProjectClones,
+            JsonObject(emptyMap()),
+            kotlinx.serialization.builtins.ListSerializer(ProjectCloneSnapshotDto.serializer()),
+        )
+
+    /**
+     * `projectClone.start`: the server creates the project and clones in the
+     * background, returning once the project exists; progress arrives on the
+     * subscription.
+     */
+    suspend fun startProjectClone(
+        projectId: String,
+        title: String,
+        remoteUrl: String,
+        destinationPath: String,
+    ): ProjectCloneStartResultDto =
+        request(
+            WsMethods.ProjectCloneStart,
+            buildJsonObject {
+                put("projectId", projectId)
+                put("title", title)
+                put("createdAt", java.time.Instant.now().toString())
+                put("remoteUrl", remoteUrl)
+                put("destinationPath", destinationPath)
+            },
+            ProjectCloneStartResultDto.serializer(),
+        )
+
+    /** `projectClone.cancel`/`retry`: `true` when the server applied it. */
+    suspend fun projectCloneAction(projectId: String, retry: Boolean): Boolean =
+        request(
+            if (retry) WsMethods.ProjectCloneRetry else WsMethods.ProjectCloneCancel,
+            buildJsonObject { put("projectId", projectId) },
+            ProjectCloneActionResultDto.serializer(),
+        ).applied
+
+    /**
+     * Issues a unary RPC on the current connection, waiting briefly for one if
+     * the socket is mid-reconnect. Waiting rather than failing immediately is
+     * what keeps a tap that lands during a reconnect from surfacing an error the
+     * user cannot act on.
+     */
+    suspend fun <T> request(
+        method: String,
+        payload: JsonElement,
+        serializer: KSerializer<T>,
+    ): T {
+        val live = awaitConnection()
+        state.value.requireRpcPermissions(method, payload)
+        return live.call(method, payload, serializer)
+    }
+
+    /**
+     * [request] for idempotent reads. A socket that hands off mid-call reruns
+     * the read on its replacement instead of surfacing the drop, like the
+     * client-runtime's `pendingOnceSessionReplaced`. Never use it for
+     * mutations: the outbox owns their retries.
+     */
+    suspend fun <T> query(
+        method: String,
+        payload: JsonElement,
+        serializer: KSerializer<T>,
+    ): T =
+        callAcrossHandoffs<RpcConnection, T>(
+            awaitConnection = { replacing ->
+                if (replacing == null && connection.value == null) {
+                    state.value.unreachableQueryError()?.let {
+                        throw EnvironmentHttpError(EnvironmentHttpErrorKind.Unreachable, it)
+                    }
+                }
+                awaitConnection(replacing)
+            },
+            // A stopped session (say, the environment was switched off) is not
+            // handing off; retrying would start() a socket nobody owns.
+            handedOff = { live ->
+                supervisor?.isActive == true &&
+                    (connection.value !== live || live.closed.isCompleted)
+            },
+        ) { live ->
+            state.value.requireRpcPermissions(method, payload)
+            live.call(method, payload, serializer)
+        }
+
+    /**
+     * Issues an RPC whose contract declares no success value.
+     *
+     * Effect encodes a `Schema.Void` success by omitting `value` from the exit, so
+     * decoding one of these into any struct fails on a response that actually
+     * succeeded. `terminal.write` and `terminal.resize` are both shaped this way.
+     */
+    suspend fun execute(method: String, payload: JsonElement) {
+        val live = awaitConnection()
+        state.value.requireRpcPermissions(method, payload)
+        live.request(method, payload)
+    }
+
+    /** Apply the authoritative acknowledgement before another settings action can read stale state. */
+    suspend fun updateSettings(patch: JsonObject) {
+        val live = awaitConnection()
+        val payload = buildJsonObject { put("patch", patch) }
+        state.value.requireRpcPermissions(WsMethods.ServerUpdateSettings, payload)
+        val previous = state.value.serverSettings
+        val settings = live.call(WsMethods.ServerUpdateSettings, payload, ServerConfigSettingsDto.serializer())
+        // An event may already contain another client's later write.
+        if (state.value.serverSettings !== previous) return
+        _state.value = _state.value.copy(serverSettings = settings,
+            addProjectBaseDirectory = settings.addProjectBaseDirectory,
+            autoSettleOnMerge = settings.sidebarAutoSettleOnMerge,
+            autoSettleAfterDays = settings.sidebarAutoSettleAfterDays,
+            continueThreadsAfterServerUpdate = settings.continueThreadsAfterServerUpdate == true)
+    }
+
+    /**
+     * A server-push subscription that survives reconnects. Each new connection
+     * re-issues the RPC, so the collector sees a fresh snapshot frame and can
+     * rebuild from it.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun <T> subscribe(
+        method: String,
+        payload: JsonElement,
+        serializer: KSerializer<T>,
+    ): Flow<T> = subscribe(method, { payload }, serializer)
+
+    /**
+     * Variant whose request body is built per connection. Resume subscriptions
+     * need this: the `afterSequence` cursor is read when each socket opens, so a
+     * fresh snapshot is only skipped when the local one is genuinely current.
+     * [prefetch], when supplied, runs once per connection before the stream
+     * opens — the HTTP snapshot fast-path from `state/shell.ts` /
+     * `state/threads.ts` in `packages/client-runtime`, which lets a reconnect
+     * resume over HTTP before the socket finishes.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun <T> subscribe(
+        method: String,
+        payload: suspend (RpcConnection) -> JsonElement,
+        serializer: KSerializer<T>,
+        prefetch: (suspend (EnvironmentSession) -> Unit)? = null,
+    ): Flow<T> {
+        // Prefetch once per connection instance, not per subscription: RN's
+        // `hasAuthoritativeSnapshot` keeps a foreground resubscribe on the
+        // in-memory cursor rather than re-fetching the whole snapshot.
+        var prefetchedFor: RpcConnection? = null
+        return merge(
+                connection,
+                resubscribeSignals.map { connection.value },
+            )
+            .transformLatest { live ->
+                if (live == null) return@transformLatest
+                if (prefetchedFor !== live) {
+                    prefetchedFor = live
+                    prefetch?.invoke(this@EnvironmentSession)
+                }
+                // RN's subscribeDynamic is durable on the same session: an RPC
+                // failure (the server answered Exit(Failure), e.g. a not-yet-
+                // materialized thread) resubscribes after 250ms rather than
+                // killing the collector until the next reconnect. Transport
+                // death and clean ends wait for the next connection, which
+                // transformLatest delivers for free.
+                while (true) {
+                    try {
+                        val input = payload(live)
+                        state.value.requireRpcPermissions(method, input)
+                        live.stream(method, input).collect { element ->
+                            val decoded = try {
+                                TransportJson.decodeFromJsonElement(serializer, element)
+                            } catch (_: kotlinx.serialization.SerializationException) {
+                                // An incompatible snapshot must fail this connection,
+                                // not crash the application from a background collector.
+                                // Do not include the frame or decoder message: either
+                                // may contain private transcript data.
+                                val reason = RpcTransportClosed("The server sent an incompatible $method response. Update the app or server.")
+                                live.close(reason)
+                                throw reason
+                            }
+                            emit(decoded)
+                        }
+                        return@transformLatest
+                    } catch (expected: RpcFailure) {
+                        delay(RESUBSCRIBE_DELAY_MS)
+                    } catch (_: RpcTransportClosed) {
+                        // The socket tore down mid-stream (manual retry,
+                        // reconnect, close). `RpcTransportClosed` is not an
+                        // `RpcFailure`, so without this it propagates out of
+                        // `transformLatest` and kills the collector. Wait for
+                        // the next connection instead.
+                        return@transformLatest
+                    }
+                }
+            }
+    }
+
+    /**
+     * Authenticated GET against the environment's HTTP API, using the credential
+     * the current (or most recent) connection attempt minted. This is the
+     * snapshot fast-path (`/api/orchestration/shell`, `/api/orchestration/
+     * threads/:id`); there is no response model on this side, callers decode.
+     */
+    suspend fun <T> getJson(path: String, serializer: KSerializer<T>): T {
+        val current =
+            authorized
+                ?: throw EnvironmentHttpError(
+                    EnvironmentHttpErrorKind.Unreachable,
+                    "Not connected.",
+                )
+        return http.getAuthenticated(current.httpBaseUrl, path, current.credential, serializer)
+    }
+
+    /** Authenticated JSON POST twin of [getJson] (`/api/pull-requests/diff`). */
+    suspend fun <T> postJson(path: String, payload: JsonObject, serializer: KSerializer<T>): T {
+        val current =
+            authorized
+                ?: throw EnvironmentHttpError(
+                    EnvironmentHttpErrorKind.Unreachable,
+                    "Not connected.",
+                )
+        return http.postAuthenticated(
+            current.httpBaseUrl, path, current.credential, payload, serializer,
+        )
+    }
+
+    val connected: Flow<Boolean> = connection.map { it != null }
+
+    /** [replacing] is a dead socket the caller must not be handed back before its cleanup runs. */
+    private suspend fun awaitConnection(replacing: RpcConnection? = null): RpcConnection {
+        connection.value?.takeIf { it !== replacing }?.let { return it }
+        start()
+        // A terminal phase means no connection is coming; waiting forever would
+        // hang the outbox drain and any direct write path behind a dead token.
+        val phase = state.value.phase
+        if (phase == SessionPhase.Unauthorized) {
+            throw EnvironmentHttpError(
+                EnvironmentHttpErrorKind.Unauthorized,
+                state.value.lastError ?: "This environment needs to be paired again.",
+            )
+        }
+        if (phase == SessionPhase.Unsupported) {
+            throw EnvironmentUnsupportedError(state.value.lastError ?: "Client not supported")
+        }
+        return withTransportTimeout(AWAIT_CONNECTION_MS, "The environment is not connected.") {
+            connection.first { it != null && it !== replacing }!!
+        }
+    }
+
+    internal companion object {
+        /**
+         * RN's rungs (`RETRY_DELAYS_MS` in `connection/supervisor.ts`) plus
+         * jitter, capped at the last rung. The jitter matters with several
+         * environments saved: without it a dropped Wi-Fi link makes every
+         * session retry in lockstep, and they all fail together on the same
+         * congested radio.
+         */
+        private val RETRY_RUNGS_MS = longArrayOf(3_000L, 4_000L, 8_000L, 16_000L)
+
+        /** Rung index 0..3 → base delay; jitter adds up to half on top. */
+        fun backoffMillis(rung: Int): Long {
+            val base = RETRY_RUNGS_MS[minOf(rung.coerceAtLeast(0), RETRY_RUNGS_MS.size - 1)]
+            return base + Random.nextLong(0, base / 2 + 1)
+        }
+
+        /** A connection this stable resets the backoff ladder, matching RN's 30s. */
+        const val STABLE_CONNECTION_MS = 30_000L
+
+        /**
+         * The failure count after an attempt; [connectedMillis] is null when it
+         * never came up. A stable session restarts the ladder, an hours-old
+         * connection must not inherit a deep rung, and its drop counts as the
+         * first retry so the row still reads "Reconnecting".
+         */
+        fun nextAttempt(attempt: Int, connectedMillis: Long?): Int =
+            if (connectedMillis != null && connectedMillis >= STABLE_CONNECTION_MS) 1
+            else attempt + 1
+
+        /**
+         * A read that keeps dying with its socket (say, one that crashes the
+         * server) must fail eventually instead of riding every reconnect.
+         */
+        const val MAX_QUERY_HANDOFFS = 3
+
+        /**
+         * Runs [call] on a connection, rerunning it on the next one when the
+         * transport closed because [handedOff] reports the socket was replaced.
+         * A transport failure on the socket that is still current is the caller's.
+         */
+        suspend fun <C : Any, T> callAcrossHandoffs(
+            awaitConnection: suspend (replacing: C?) -> C,
+            handedOff: (C) -> Boolean,
+            call: suspend (C) -> T,
+        ): T {
+            var replacing: C? = null
+            var handoffs = 0
+            while (true) {
+                val live = awaitConnection(replacing)
+                try {
+                    return call(live)
+                } catch (closed: RpcTransportClosed) {
+                    if (!handedOff(live) || ++handoffs > MAX_QUERY_HANDOFFS) throw closed
+                    replacing = live
+                }
+            }
+        }
+
+        /** Foreground wakes longer than this leave the data on screen stale (RN `application-active-long`). */
+        const val SHORT_WAKE_MS = 10_000L
+
+        /** RN's `QUICK_CONNECTION_PROBE_TIMEOUT`. */
+        const val PROBE_TIMEOUT_MS = 3_000L
+
+        /** RN's `CONNECTION_PROBE_TIMEOUT`, for a short wake on a route that can spike past 3s. */
+        const val REMOTE_PROBE_TIMEOUT_MS = 15_000L
+
+        const val SILENT_SOCKET_CHECK_AFTER_MS = 500L
+        const val SILENT_SOCKET_RECHECK_MS = 1_000L
+
+        /**
+         * Off the LAN one lost packet can stall a live socket for a second. Must
+         * end before [PROBE_TIMEOUT_MS] so a long resume replaces a silent socket
+         * instead of timing out.
+         */
+        const val REMOTE_SILENT_SOCKET_AFTER_MS = 2_500L
+
+        /** `ROUTE_CHECK_TIMEOUT_MS` in the RN connection driver. */
+        const val ROUTE_CHECK_TIMEOUT_MS = 2_500L
+
+        /**
+         * After a long suspension a slow answer reconnects as quickly as a missing
+         * one; a short wake allows a remote route the full probe window.
+         */
+        fun probeTimeoutMs(backgroundedMillis: Long, quickRoute: Boolean): Long =
+            if (backgroundedMillis > SHORT_WAKE_MS || quickRoute) PROBE_TIMEOUT_MS else REMOTE_PROBE_TIMEOUT_MS
+
+        /** How long a write waits for a socket before failing instead of hanging. */
+        const val AWAIT_CONNECTION_MS = 15_000L
+
+        /** Bound on authorize→socket open, matching RN's `CONNECTION_ESTABLISHMENT_TIMEOUT`. */
+        const val ESTABLISHMENT_TIMEOUT_MS = 15_000L
+
+        /** Once the socket is open, the first config frame's bound, matching RN's `synchronizationTimeout`. */
+        const val SYNCHRONIZATION_TIMEOUT_MS = 75_000L
+
+        /**
+         * Client-activity reporting cadence and lease, matching RN's
+         * `REPORT_INTERVAL_MS`/`LEASE_TTL_MS` in `connection/background-activity.ts`.
+         */
+        const val ACTIVITY_REPORT_INTERVAL_MS = 25_000L
+        const val ACTIVITY_LEASE_TTL_MS = 45_000L
+
+        /** Between a failed stream and the resubscribe, matching RN's 250ms. */
+        const val RESUBSCRIBE_DELAY_MS = 250L
+    }
+}
+
+/** Lenient decoder shared by every wire mapping. */
+internal val TransportJson: Json = Json {
+    ignoreUnknownKeys = true
+    explicitNulls = false
+    coerceInputValues = true
+    isLenient = true
+}
+
+/**
+ * [withTimeout] that fails with [RpcTransportClosed] instead of
+ * [TimeoutCancellationException]. A timeout is a transport failure, but as a
+ * `CancellationException` every `catch (CancellationException) { throw }` up
+ * the stack would mistake it for its own cancellation and quietly stop — a
+ * reconnect loop ending for good, a write vanishing without an error.
+ */
+internal suspend fun <T> withTransportTimeout(
+    millis: Long,
+    message: String,
+    block: suspend CoroutineScope.() -> T,
+): T =
+    try {
+        withTimeout(millis, block)
+    } catch (_: TimeoutCancellationException) {
+        throw RpcTransportClosed(message)
+    }
+
+internal suspend fun <T> RpcConnection.call(
+    method: String,
+    payload: JsonElement,
+    serializer: KSerializer<T>,
+): T = TransportJson.decodeFromJsonElement(serializer, request(method, payload))
