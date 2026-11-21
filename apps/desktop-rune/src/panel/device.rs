@@ -647,7 +647,7 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
     let title = text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).single_line().truncate();
     let top = header(row().gap(4.).center_y().child(back).child(title), if mjpeg { vec![reconnect] } else { vec![] });
     let body = if !mjpeg {
-        centered(vec![text(name).font(theme::SM_MEDIUM).color(t.c.foreground), note("This device requires the H.264 stream, which this app can't show yet.", t)])
+        centered(vec![text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground), note("This device requires the H.264 stream, which this app can't show yet.", t)])
     } else {
         match &app.ui.panel.device.stream {
             Some(stream) => {
