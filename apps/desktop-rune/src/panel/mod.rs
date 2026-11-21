@@ -983,7 +983,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 .role("tab")
                 .label(title.clone())
                 .focusable(true)
-                .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                // Web closes a tab on a middle click.
+                .pointer_buttons([rune::PointerButton::Middle])
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| match tx.button() {
+                    rune::PointerButton::Middle => close(s, surface),
+                    _ => s.ui.panel.active = Some(surface),
+                })
                 .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
                 .children(speaker)
@@ -1089,6 +1094,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-host-setup", |s| browser_scene(s, "host-setup")),
     ("browser-more-menu", |s| browser_scene(s, "more")),
     ("browser-file-chooser", |s| browser_scene(s, "chooser")),
+    ("browser-clipboard-prompt", |s| browser_scene(s, "clipboard-prompt")),
+    ("browser-external-prompt", |s| browser_scene(s, "external-prompt")),
+    ("browser-file-not-shown", |s| browser_scene(s, "file-not-shown")),
+    ("browser-server-unreachable", |s| browser_scene(s, "server-unreachable")),
     ("panel-launcher-profiles", |s| {
         scene(s, None);
         s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
@@ -1447,6 +1456,29 @@ mod sheet_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_launchers_profile_chevron_opens_its_menu_without_a_default_tab() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(480., 640.).child(picker(s, &crate::theme::theme(true)))
+        }
+        let mut rt = rune::Runtime::new(App::new(), view, (480., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let chevron = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("panel-launcher-profiles")).expect("the Browser row's chevron").rect;
+        let click = |rt: &mut rune::Runtime<App>, (x, y): (f32, f32)| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.);
+        };
+        let y = chevron[1] + chevron[3] / 2.;
+        click(&mut rt, (chevron[0] + chevron[2] / 2., y));
+        assert!(rt.state.ui.panel.launcher_profiles, "the chevron opens the profile menu");
+        assert!(rt.state.ui.panel.surfaces.is_empty(), "and opens no tab");
+        // The rest of the row still opens a tab in the default profile.
+        click(&mut rt, (chevron[0] - 120., y));
+        assert!(matches!(rt.state.ui.panel.surfaces[..], [Surface::Browser(_)]), "the row opens one tab");
+    }
+
     #[test]
     fn each_thread_gets_its_own_panel_back() {
         let mut app = App::new();
