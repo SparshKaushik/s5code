@@ -1190,7 +1190,7 @@ pub fn findings_handoff(d: &Value, activity: &Value) -> (String, Vec<Value>) {
         lines.extend(checks_in.iter().map(|c| format!("> {c}")));
     }
     if activity["commentsTruncated"] == true {
-        lines.push(format!("The conversation was truncated; more review comments may exist on {}.", match super::pr_row::provider_name(field(d, "provider")) { "source control" => "the host", host => host }));
+        lines.push(format!("The conversation was truncated; more review comments may exist on {}.", match crate::panel::pull_requests::provider(field(d, "url")) { "" => "the host", kind => super::pr_row::provider_name(kind) }));
     }
     if omitted > 0 {
         lines.push(format!("{omitted} further findings were omitted."));
@@ -1453,6 +1453,10 @@ mod tests {
         assert!(none.is_empty() && empty.ends_with("inspect the pull request and its failing checks before changing code."), "terminologyForUrl: an unknown host reads as a pull request");
         let (gitlab, _) = findings_handoff(&json!({"number": 7, "url": "https://gitlab.com/a/b/-/merge_requests/7"}), &Value::Null);
         assert!(gitlab.starts_with("Fix the actionable findings on MR #7") && gitlab.contains("inspect the merge request"));
+        let truncated = json!({"commentsTruncated": true});
+        let on = |url: &str| findings_handoff(&json!({"number": 7, "url": url, "provider": "github"}), &truncated).0;
+        assert!(on("https://git.example.com/a/b/-/merge_requests/7").ends_with("may exist on GitLab."), "hostLabelForChangeRequestUrl reads the URL, not the provider");
+        assert!(on("u").ends_with("may exist on the host."));
         let many: Vec<Value> = (0..25).map(|n| json!({"name": format!("c{n}"), "status": "failure"})).collect();
         let (capped, _) = findings_handoff(&json!({"number": 7, "url": "u", "checks": many}), &Value::Null);
         assert!(capped.contains("> c5\n") && !capped.contains("> c4\n") && capped.contains("5 further findings were omitted."), "the newest checks are kept");

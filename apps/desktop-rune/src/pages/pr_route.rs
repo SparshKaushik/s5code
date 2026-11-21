@@ -49,6 +49,9 @@ pub struct Ui {
     /// routedReads: which machines answered each pull request, oldest first, so a write or a
     /// refresh reaches their caches too.
     reads: Vec<(String, RoutedRead)>,
+    /// `pullRequests.invalidate` on the origin: (origin, sent, the caller's id, input, recheck).
+    /// The readers hear of it once the origin's own refresh succeeds.
+    refreshes: Vec<(String, u64, u64, Value, bool)>,
 }
 
 struct RoutedRead {
@@ -89,9 +92,7 @@ enum Step {
 /// Settings shares one with it. `None` when `env` has no client.
 pub(crate) fn send(s: &mut App, env: &str, method: &str, input: Value) -> Option<u64> {
     if method == "pullRequests.invalidate" {
-        let id = crate::env::net_of(s, env)?.request(method, input.clone());
-        invalidate_routed(s, env, &input, true);
-        return Some(id);
+        return refresh(s, env, input, true);
     }
     let (read, write) = (READS.contains(&method), WRITES.contains(&method));
     if !(read || write) || !is_ref(&input) {
@@ -105,6 +106,18 @@ pub(crate) fn send(s: &mut App, env: &str, method: &str, input: Value) -> Option
         candidates.insert(0, env.to_owned());
     }
     start(s, env, method, input, read, candidates, true)
+}
+
+fn refresh(s: &mut App, env: &str, input: Value, recheck: bool) -> Option<u64> {
+    let routed = s.ui.pages.route.reads.iter().any(|(_, read)| read.origin == env);
+    let net = crate::env::net_of(s, env)?;
+    let sent = net.request("pullRequests.invalidate", input.clone());
+    if !routed {
+        return Some(sent);
+    }
+    let id = net.reserve_id();
+    s.ui.pages.route.refreshes.push((env.to_owned(), sent, id, input, recheck));
+    Some(id)
 }
 
 fn start(s: &mut App, env: &str, method: &str, original: Value, read: bool, candidates: Vec<String>, recheck: bool) -> Option<u64> {
@@ -167,6 +180,18 @@ pub(crate) fn pump(s: &mut App) -> bool {
     for (env, id, until) in std::mem::take(&mut s.ui.pages.route.reports) {
         if super::pull_requests::take(s, &env, id).is_none() && now < until {
             s.ui.pages.route.reports.push((env, id, until));
+        }
+    }
+    for (origin, sent, id, input, recheck) in std::mem::take(&mut s.ui.pages.route.refreshes) {
+        match super::pull_requests::take(s, &origin, sent) {
+            Some(reply) => {
+                if reply.is_ok() {
+                    invalidate_routed(s, &origin, &input, recheck);
+                }
+                deliver(s, &origin, id, reply);
+                changed = true;
+            }
+            None => s.ui.pages.route.refreshes.push((origin, sent, id, input, recheck)),
         }
     }
     let mut kept = Vec::new();
@@ -233,7 +258,7 @@ pub(crate) fn pump(s: &mut App) -> bool {
                 if !r.read && (reply.is_ok() || r.method == "pullRequests.setFilesViewed") {
                     invalidate_readers(s, &r, now);
                 }
-                deliver(s, &r, reply);
+                deliver(s, &r.origin, r.id, reply);
             }
             None => kept.push(r),
         }
@@ -428,11 +453,11 @@ fn matches_reference(reference: &Value, filter: &Value) -> bool {
         && (!filter["host"].is_string() || lower(&reference["host"]) == lower(&filter["host"]))
 }
 
-fn deliver(s: &mut App, r: &Routed, reply: Result<Value, Value>) {
+fn deliver(s: &mut App, origin: &str, id: u64, reply: Result<Value, Value>) {
     // Parked environments' replies end on `App::src` (see `env::drain`), where callers read them.
-    let net = if s.src.net().is_some() { s.src.net() } else { crate::env::net_of(s, &r.origin) };
+    let net = if s.src.net().is_some() { s.src.net() } else { crate::env::net_of(s, origin) };
     if let Some(net) = net {
-        net.put_reply(r.id, reply);
+        net.put_reply(id, reply);
     }
 }
 
@@ -615,8 +640,19 @@ mod tests {
         answer_with(&mut s, Err(json!({"message": "rate limited"})));
         assert!(s.ui.pages.route.reports.is_empty(), "a refused write changed nothing");
 
-        invalidate_routed(&mut s, &origin, &json!({"reference": input()}), false);
+        let refreshing = |s: &App| s.ui.pages.route.refreshes[0].1;
+        let id = refresh(&mut s, &origin, json!({"reference": input()}), false).unwrap();
+        let sent = refreshing(&s);
+        s.src.net().unwrap().put_reply(sent, Err(json!({"message": "offline"})));
+        pump(&mut s);
+        assert!(s.ui.pages.route.reports.is_empty(), "a refresh the origin refused goes no further");
+        assert!(s.src.net().unwrap().take_reply(id).is_some_and(|r| r.is_err()), "the caller hears the origin's answer");
+        refresh(&mut s, &origin, json!({"reference": input()}), false).unwrap();
+        let sent = refreshing(&s);
+        s.src.net().unwrap().put_reply(sent, Ok(Value::Null));
+        pump(&mut s);
         assert_eq!((sent_to(&s, &origin), sent_to(&s, "box")), (1, 1));
+        assert!(s.ui.pages.route.refreshes.is_empty());
         s.ui.pages.route.reports.clear();
         invalidate_routed(&mut s, &origin, &json!({}), false);
         assert_eq!((sent_to(&s, &origin), sent_to(&s, "box")), (0, 1), "a refresh of everything reaches each reader once");
