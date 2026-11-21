@@ -75,6 +75,8 @@ pub struct Ui {
     viewed: Viewed,
     /// The cursor of the diff's next page while there is one (nextCursor).
     pub next: Option<String>,
+    /// How many files each page read past the first held, since each page is ordered apart.
+    pages: Vec<usize>,
     /// The page read in flight and the scope it was asked for.
     paging: Option<(u64, String)>,
     page_failed: bool,
@@ -94,7 +96,7 @@ pub struct Ui {
     /// Whether the toolbar measured under `WIDE_TOOLBAR` when it was last shown.
     narrow: Cell<Option<bool>>,
     /// Comments read past a thread's first page and the cursor after them, by thread (loadedPage).
-    loaded: HashMap<String, (Vec<Value>, Option<String>)>,
+    pub(super) loaded: HashMap<String, (Vec<Value>, Option<String>)>,
     /// Comment pages in flight: the request, its thread and the scope it was asked for.
     comment_pages: Vec<(u64, String, String)>,
     /// The review thread comment being edited.
@@ -242,8 +244,237 @@ fn hide_tests(s: &App) -> bool {
 
 /// The files shown: tests dropped while hidden, except one a reveal asked for, and whitespace-only
 /// changes read as unchanged while hidden.
-fn shown_files(source: &[FileDiff], hide: bool, ws: bool, kept: Option<&str>) -> Vec<FileDiff> {
-    source.iter().filter(|f| !hide || !is_test_file(f.path()) || kept == Some(f.path())).map(|f| if ws { hide_whitespace(f) } else { f.clone() }).collect()
+fn shown_files<'a>(source: impl IntoIterator<Item = &'a FileDiff>, hide: bool, ws: bool, kept: Option<&str>) -> Vec<FileDiff> {
+    source.into_iter().filter(|f| !hide || !is_test_file(f.path()) || kept == Some(f.path())).map(|f| if ws { hide_whitespace(f) } else { f.clone() }).collect()
+}
+
+/// The diff in web's order (diffModel): each page read by `order_diff_files`, then all of them as
+/// the file tree lists them. `pages` holds the length of each page read after the first.
+fn ordered_files<'a>(source: &'a [FileDiff], pages: &[usize]) -> Vec<&'a FileDiff> {
+    let mut sliced = Vec::with_capacity(source.len());
+    let mut rest = source;
+    for len in std::iter::once(source.len().saturating_sub(pages.iter().sum::<usize>())).chain(pages.iter().copied()) {
+        let (page, after) = rest.split_at(len.min(rest.len()));
+        let files: Vec<(&str, Vec<&str>)> = page
+            .iter()
+            .map(|f| {
+                let lines: Vec<&str> = if tier(f.path()) == Tier::Source { f.hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.as_str()).collect() } else { vec![] };
+                (f.path(), lines)
+            })
+            .collect();
+        sliced.extend(order_diff_files(&files).into_iter().map(|n| &page[n]));
+        rest = after;
+    }
+    let paths: Vec<&str> = sliced.iter().map(|f| f.path()).collect();
+    tree_order(&paths).into_iter().map(|n| sliced[n]).collect()
+}
+
+/// DiffFileTier.
+#[derive(Clone, Copy, PartialEq)]
+enum Tier {
+    Source,
+    Test,
+    Generated,
+}
+
+fn tier(path: &str) -> Tier {
+    const GENERATED_FILE_NAMES: &[&str] = &["pnpm-lock.yaml", "yarn.lock", "package-lock.json", "bun.lockb", "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock"];
+    const GENERATED_DIRECTORIES: &[&str] = &["__snapshots__", "__generated__", "dist", "build", "vendor"];
+    const TEST_DIRECTORIES: &[&str] = &["__tests__", "tests", "test"];
+    let (dirs, name) = path.rsplit_once('/').map_or((None, path), |(d, n)| (Some(d), n));
+    let under = |set: &[&str]| dirs.is_some_and(|d| d.split('/').any(|s| set.contains(&s)));
+    if GENERATED_FILE_NAMES.contains(&name) || name.ends_with(".snap") || name.ends_with(".min.js") || name.ends_with(".min.css") || name.contains(".generated.") || under(GENERATED_DIRECTORIES) {
+        Tier::Generated
+    } else if name.contains(".test.") || name.contains(".spec.") || under(TEST_DIRECTORIES) {
+        Tier::Test
+    } else {
+        Tier::Source
+    }
+}
+
+/// `localeCompare` closely enough for paths: case folded first.
+fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
+}
+
+fn strip_extension(path: &str) -> &str {
+    match (path.rfind('.'), path.rfind('/')) {
+        (Some(dot), slash) if slash.is_none_or(|slash| dot > slash) => &path[..dot],
+        _ => path,
+    }
+}
+
+fn base_name(path: &str) -> &str {
+    strip_extension(path.rsplit('/').next().unwrap_or(path))
+}
+
+fn resolve_relative(from: &str, specifier: &str) -> String {
+    let mut segments: Vec<&str> = from.split('/').collect();
+    segments.pop();
+    for part in specifier.split('/') {
+        match part {
+            "." | "" => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(part),
+        }
+    }
+    segments.join("/")
+}
+
+/// IMPORT_SPECIFIER's captures in one line: what `from`, `import` or `require(` names in quotes.
+fn specifiers(line: &str) -> Vec<&str> {
+    let b = line.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let skip = |mut at: usize| {
+        while at < b.len() && matches!(b[at], b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C) {
+            at += 1;
+        }
+        at
+    };
+    let quoted = |at: usize| {
+        let mut at = skip(at);
+        if b.get(at) == Some(&b'(') {
+            at = skip(at + 1);
+        }
+        if !matches!(b.get(at), Some(b'"' | b'\'')) {
+            return None;
+        }
+        let start = at + 1;
+        let end = start + b[start..].iter().position(|&c| c == b'"' || c == b'\'')?;
+        (end > start).then_some((start, end))
+    };
+    let mut out = vec![];
+    let mut at = 0;
+    while at < b.len() {
+        let after = if at > 0 && word(b[at - 1]) {
+            None
+        } else if b[at..].starts_with(b"from") {
+            Some(at + 4)
+        } else if b[at..].starts_with(b"import") {
+            Some(at + 6)
+        } else if b[at..].starts_with(b"require") {
+            let open = skip(at + 7);
+            (b.get(open) == Some(&b'(')).then_some(open + 1)
+        } else {
+            None
+        };
+        match after.and_then(quoted) {
+            Some((start, end)) => {
+                out.push(&line[start..end]);
+                at = end + 1;
+            }
+            None => at += 1,
+        }
+    }
+    out
+}
+
+fn imported_paths<'a>(path: &str, lines: &[&str], by_module: &HashMap<&str, &'a str>, by_base: &HashMap<&str, &'a str>) -> HashSet<&'a str> {
+    const MODULE_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+    let mut imported = HashSet::new();
+    for line in lines {
+        for specifier in specifiers(line) {
+            let with_extension = if specifier.starts_with('.') { resolve_relative(path, specifier) } else { specifier.to_owned() };
+            // Module-map keys omit extensions, which can differ from disk.
+            let resolved = MODULE_EXTENSIONS.iter().find_map(|e| with_extension.strip_suffix(*e)).unwrap_or(with_extension.as_str());
+            let target = by_module.get(resolved).or_else(|| by_module.get(format!("{resolved}/index").as_str())).or_else(|| by_base.get(base_name(resolved)));
+            if let Some(&target) = target
+                && target != path
+            {
+                imported.insert(target);
+            }
+        }
+    }
+    imported
+}
+
+/// orderByImports: whatever a file imports comes before it, by path where that cannot hold.
+fn order_by_imports<'a>(paths: &[&'a str], imports: &HashMap<&str, HashSet<&'a str>>) -> Vec<&'a str> {
+    let mut sorted = paths.to_vec();
+    sorted.sort_by(|a, b| locale_cmp(a, b));
+    let mut remaining: HashSet<&str> = paths.iter().copied().collect();
+    let mut ordered = Vec::with_capacity(paths.len());
+    while !remaining.is_empty() {
+        let ready = |p: &&str| imports.get(*p).is_none_or(|deps| deps.iter().all(|d| !remaining.contains(d)));
+        let next = sorted.iter().copied().filter(|p| remaining.contains(p)).find(ready).or_else(|| sorted.iter().copied().find(|p| remaining.contains(p)));
+        let Some(next) = next else { break };
+        remaining.remove(next);
+        ordered.push(next);
+    }
+    ordered
+}
+
+/// testedSourcePosition: `a.logic.test.ts` covers `a.logic.ts` while `a.browser.test.ts` covers
+/// `a.ts`, so the longest dotted prefix that names a source file wins.
+fn tested_source_position(path: &str, positions: &HashMap<&str, usize>) -> usize {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut name = [".test.", ".spec."].iter().filter_map(|t| name.find(*t)).min().map_or(name, |cut| &name[..cut]);
+    loop {
+        if let Some(&position) = positions.get(name) {
+            return position;
+        }
+        match name.rfind('.') {
+            Some(dot) if dot > 0 => name = &name[..dot],
+            _ => return usize::MAX,
+        }
+    }
+}
+
+/// orderDiffFiles: sources in import order, then tests by the source they cover, then generated
+/// files. Gives indices into `files`, each path once (its last file).
+fn order_diff_files(files: &[(&str, Vec<&str>)]) -> Vec<usize> {
+    let mut paths: Vec<&str> = vec![];
+    let mut by_path: HashMap<&str, usize> = HashMap::new();
+    for (n, (path, _)) in files.iter().enumerate() {
+        if by_path.insert(*path, n).is_none() {
+            paths.push(*path);
+        }
+    }
+    let of = |wanted: Tier| paths.iter().copied().filter(|p| tier(p) == wanted).collect::<Vec<_>>();
+    let sources = of(Tier::Source);
+    let mut by_module: HashMap<&str, &str> = HashMap::new();
+    let mut by_base: HashMap<&str, &str> = HashMap::new();
+    let mut ambiguous: HashSet<&str> = HashSet::new();
+    for &path in &sources {
+        by_module.insert(strip_extension(path), path);
+        let base = base_name(path);
+        if by_base.insert(base, path).is_some() {
+            ambiguous.insert(base);
+        }
+    }
+    for base in ambiguous {
+        by_base.remove(base);
+    }
+    let imports: HashMap<&str, HashSet<&str>> = sources.iter().map(|path| (*path, imported_paths(path, &files[by_path[path]].1, &by_module, &by_base))).collect();
+    let ordered = order_by_imports(&sources, &imports);
+
+    let mut positions: HashMap<&str, usize> = HashMap::new();
+    for (n, path) in ordered.iter().enumerate() {
+        positions.entry(base_name(path)).or_insert(n);
+    }
+    let mut tests = of(Tier::Test);
+    tests.sort_by(|a, b| tested_source_position(a, &positions).cmp(&tested_source_position(b, &positions)).then_with(|| locale_cmp(a, b)));
+    let mut generated = of(Tier::Generated);
+    generated.sort_by(|a, b| locale_cmp(a, b));
+    ordered.into_iter().chain(tests).chain(generated).map(|path| by_path[path]).collect()
+}
+
+/// orderDiffFilesLikeTree: each folder kept together and ranked where its first file is, so the
+/// list never disagrees with the tree. Gives indices into `paths`.
+fn tree_order(paths: &[&str]) -> Vec<usize> {
+    let mut positions: HashMap<&str, usize> = HashMap::new();
+    for (n, &path) in paths.iter().enumerate() {
+        positions.insert(path, n);
+        for (slash, _) in path.match_indices('/') {
+            positions.entry(&path[..=slash]).or_insert(n);
+        }
+    }
+    let key = |path: &str| path.match_indices('/').map(|(slash, _)| positions[&path[..=slash]]).chain([positions[path]]).collect::<Vec<_>>();
+    let mut order: Vec<usize> = (0..paths.len()).collect();
+    order.sort_by_cached_key(|&n| key(paths[n]));
+    order
 }
 
 /// hideWhitespaceChanges: in each run of changed lines, a removed and an added line that differ
@@ -570,6 +801,7 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.revealed = None;
         c.replying = None;
         c.next = None;
+        c.pages.clear();
         c.paging = None;
         c.page_failed = false;
         c.loaded.clear();
@@ -581,6 +813,7 @@ pub(super) fn poll(s: &mut App) -> bool {
     c.diff.set_wrap(wrap);
     if std::mem::take(&mut c.fresh) {
         // A new first page: pages read for the old one target another diff.
+        c.pages.clear();
         c.paging = None;
         c.page_failed = false;
         c.viewed.refresh = true;
@@ -606,7 +839,7 @@ fn show(s: &mut App) {
     let (default, ws, hide) = (fold_default(s), ignore_ws(s), hide_tests(s));
     let u = &s.ui.pages.detail;
     let source = u.files.as_deref().unwrap_or(&[]);
-    let files = shown_files(source, hide, ws, s.ui.pages.code.revealed.as_deref());
+    let files = shown_files(ordered_files(source, &s.ui.pages.code.pages), hide, ws, s.ui.pages.code.revealed.as_deref());
     let counts: HashMap<String, (usize, usize)> = source.iter().map(|f| (f.path().to_owned(), file_counts(f))).collect();
     let c = &mut s.ui.pages.code;
     c.counts = counts;
@@ -626,6 +859,7 @@ fn sync_page(s: &mut App, entry: &Value) -> bool {
     match got {
         Ok(d) => {
             let more = rune_kit::diff::parse(d["patch"].as_str().unwrap_or(""));
+            s.ui.pages.code.pages.push(more.len());
             let u = &mut s.ui.pages.detail;
             if let Some(files) = &mut u.files {
                 files.extend(more);
@@ -1028,6 +1262,11 @@ fn edit_loaded(loaded: &mut HashMap<String, (Vec<Value>, Option<String>)>, id: &
             }
         }
     }
+}
+
+/// A comment some thread read past its first page.
+pub(super) fn loaded_comment<'a>(s: &'a App, id: &str) -> Option<&'a Value> {
+    s.ui.pages.code.loaded.values().flat_map(|page| &page.0).find(|c| field(c, "id") == id)
 }
 
 /// canEditPullRequestComment for a review thread's comment.
@@ -1955,7 +2194,8 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
 /// `thread-reactions` (its comments reacted to, one more page read, and one comment being edited
 /// or the reaction picker open), `options` (the narrow
 /// toolbar's menu open), `tree-resized` (the file tree at a saved 420), `more-files` (a next
-/// page to read), `pending-review` (two comments
+/// page to read), `file-order` (sources by import, then tests, then generated files, as the tree
+/// lists them), `pending-review` (two comments
 /// pending, for the composer) and `line-comment` (a pending comment and a ranged draft).
 pub(super) fn scene(s: &mut App, kind: &str) {
     let usage = "apps/desktop-rune/src/pages/usage.rs";
@@ -2007,6 +2247,23 @@ pub(super) fn scene(s: &mut App, kind: &str) {
         "options" => {
             unfold(s, usage);
             s.ui.pages.code.options = true;
+        }
+        "file-order" => {
+            s.client_settings.values.insert(TREE_KEY.into(), json!(true));
+            let patch: String = [
+                ("pnpm-lock.yaml", "lockfileVersion: '9.0'"),
+                ("apps/web/src/components/Button.test.tsx", "import { Button } from \"./Button\";"),
+                ("apps/web/src/components/Button.tsx", "import { tone } from \"../lib/theme\";"),
+                ("apps/web/dist/app.js", "export {};"),
+                ("apps/web/src/components/Panel.tsx", "import { Button } from \"./Button\";"),
+                ("apps/web/src/lib/theme.ts", "export const tone = \"muted\";"),
+            ]
+            .iter()
+            .map(|(path, line)| format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{line}\n"))
+            .collect();
+            s.ui.pages.detail.files = Some(rune_kit::diff::parse(&patch));
+            s.ui.pages.code.pages.clear();
+            show(s);
         }
         "tree-resized" => {
             s.client_settings.values.insert(TREE_KEY.into(), json!(true));
@@ -2312,6 +2569,58 @@ mod tests {
         s.ui.pages.code.thread_pending = Some((1, EDIT_FAILED));
         start_edit(&mut s, "a", "1");
         assert!(s.ui.pages.code.editing.is_none(), "no other comment opens while one saves");
+    }
+
+    fn file<'a>(path: &'a str, lines: &[&'a str]) -> (&'a str, Vec<&'a str>) {
+        (path, lines.to_vec())
+    }
+
+    fn order<'a>(files: &[(&'a str, Vec<&'a str>)]) -> Vec<&'a str> {
+        order_diff_files(files).into_iter().map(|n| files[n].0).collect()
+    }
+
+    #[test]
+    fn files_go_sources_by_import_then_tests_by_their_source_then_generated() {
+        let source = ["src/app.ts", "src/dist.ts", "src/testing.ts"];
+        let tests = ["src/__tests__/app.ts", "src/app.spec.tsx", "src/app.test.ts", "test/app.ts", "tests/helpers/app.ts"];
+        let generated = ["apps/web/package-lock.json", "dist/app.js", "packages/core/vendor/lib.js", "pnpm-lock.yaml", "public/app.min.js", "src/__snapshots__/app.ts", "src/api.generated.ts", "src/app.test.ts.snap"];
+        let all: Vec<&str> = generated.iter().chain(&tests).chain(&source).rev().copied().collect();
+        let expected: Vec<&str> = source.iter().chain(&tests).chain(&generated).copied().collect();
+        assert_eq!(order(&all.iter().map(|p| file(p, &[])).collect::<Vec<_>>()), expected);
+
+        assert_eq!(order(&[file("src/ui/a.ts", &["import { b } from \"../lib/b\";"]), file("src/lib/b.ts", &[])]), ["src/lib/b.ts", "src/ui/a.ts"], "climbs out of the importer's folder");
+        assert_eq!(order(&[file("src/a.ts", &["import { b } from \"./lib\";"]), file("src/lib/index.ts", &[])]), ["src/lib/index.ts", "src/a.ts"], "a folder names its index");
+        assert_eq!(order(&[file("src/a.ts", &["import { b } from \"~/lib/b\";"]), file("lib/b.ts", &[])]), ["lib/b.ts", "src/a.ts"], "the last segment when the path does not line up");
+        assert_eq!(order(&[file("src/a.ts", &["import { b } from \"~/somewhere/b\";"]), file("one/b.ts", &[]), file("two/b.ts", &[])]), ["one/b.ts", "src/a.ts", "two/b.ts"], "an ambiguous last segment is not guessed");
+        assert_eq!(order(&[file("src/a.ts", &["import { b } from \"./b.js\";"]), file("src/b.ts", &[])]), ["src/b.ts", "src/a.ts"], "the .js beside a .ts");
+        assert_eq!(order(&[file("src/a.ts", &["const b = require(\"./b\");", "import \"./c\";"]), file("src/b.ts", &[]), file("src/c.ts", &[])]), ["src/b.ts", "src/c.ts", "src/a.ts"], "require and bare imports");
+        assert_eq!(order(&[file("src/b.ts", &["import { a } from \"./a\";"]), file("src/a.ts", &["import { b } from \"./b\";"])]), ["src/a.ts", "src/b.ts"], "path order inside a cycle");
+        assert_eq!(
+            order(&[file("pnpm-lock.yaml", &[]), file("src/a.test.ts", &[]), file("src/__tests__/b.ts", &[]), file("src/a.ts", &["import { b } from \"./b\";"]), file("src/b.ts", &[]), file("dist/a.js", &[])]),
+            ["src/b.ts", "src/a.ts", "src/__tests__/b.ts", "src/a.test.ts", "dist/a.js", "pnpm-lock.yaml"],
+            "tests follow the order of the sources they cover"
+        );
+        assert_eq!(order(&[file("src/orphan.spec.ts", &[]), file("src/a.test.ts", &[]), file("src/a.ts", &[])]), ["src/a.ts", "src/a.test.ts", "src/orphan.spec.ts"], "a test without its source goes last");
+        assert_eq!(
+            order(&[file("src/c.browser.test.tsx", &[]), file("src/b.test.ts", &[]), file("src/a.logic.test.ts", &[]), file("src/c.tsx", &[]), file("src/b.ts", &[]), file("src/a.logic.ts", &[])]),
+            ["src/a.logic.ts", "src/b.ts", "src/c.tsx", "src/a.logic.test.ts", "src/b.test.ts", "src/c.browser.test.tsx"],
+            "the longest dotted prefix naming a source wins"
+        );
+    }
+
+    #[test]
+    fn each_page_is_ordered_apart_and_the_list_follows_the_tree() {
+        assert_eq!(tree_order(&["src/b.ts", "lib/x.ts", "src/a.ts", "README.md"]), [0, 2, 1, 3], "a folder stays together where its first file is");
+
+        let files = rune_kit::diff::parse(&["src/a.test.ts", "src/a.ts", "lib/x.ts"].iter().map(|p| format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n")).collect::<String>());
+        let paths = |pages: &[usize]| ordered_files(&files, pages).iter().map(|f| f.path()).collect::<Vec<_>>();
+        assert_eq!(paths(&[1]), ["src/a.ts", "src/a.test.ts", "lib/x.ts"], "a later page never moves ahead of the first");
+        assert_eq!(paths(&[]), ["lib/x.ts", "src/a.ts", "src/a.test.ts"]);
+
+        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
+        let s = showing(&entry);
+        let shown: Vec<&str> = s.ui.pages.code.diff.files().iter().map(FileDiff::path).collect();
+        assert_eq!(shown, ["apps/desktop-rune/src/main.rs", "apps/desktop-rune/src/pages/mod.rs", "apps/desktop-rune/src/pages/usage.rs"], "the tab shows that order");
     }
 
     #[test]
