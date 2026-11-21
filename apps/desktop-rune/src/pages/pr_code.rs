@@ -245,7 +245,17 @@ fn hide_tests(s: &App) -> bool {
 /// The files shown: tests dropped while hidden, except one a reveal asked for, and whitespace-only
 /// changes read as unchanged while hidden.
 fn shown_files<'a>(source: impl IntoIterator<Item = &'a FileDiff>, hide: bool, ws: bool, kept: Option<&str>) -> Vec<FileDiff> {
-    source.into_iter().filter(|f| !hide || !is_test_file(f.path()) || kept == Some(f.path())).map(|f| if ws { hide_whitespace(f) } else { f.clone() }).collect()
+    source.into_iter().filter(|f| shown(f, hide, kept)).map(|f| if ws { hide_whitespace(f) } else { f.clone() }).collect()
+}
+
+fn shown(f: &FileDiff, hide: bool, kept: Option<&str>) -> bool {
+    !hide || !is_test_file(f.path()) || kept == Some(f.path())
+}
+
+/// The tab's "no file changes" state: nothing survives the test filter and no page is left.
+pub(super) fn no_changes(s: &App, files: &[FileDiff]) -> bool {
+    let kept = s.ui.pages.code.revealed.as_deref();
+    s.ui.pages.code.next.is_none() && !files.iter().any(|f| shown(f, hide_tests(s), kept))
 }
 
 /// The diff in web's order (diffModel): each page read by `order_diff_files`, then all of them as
@@ -2265,6 +2275,13 @@ pub(super) fn scene(s: &mut App, kind: &str) {
             s.ui.pages.code.pages.clear();
             show(s);
         }
+        "tests-hidden" => {
+            s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
+            let path = "apps/desktop-rune/src/pages/usage.test.rs";
+            s.ui.pages.detail.files = Some(rune_kit::diff::parse(&format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n")));
+            s.ui.pages.code.pages.clear();
+            show(s);
+        }
         "tree-resized" => {
             s.client_settings.values.insert(TREE_KEY.into(), json!(true));
             s.client_settings.values.insert(TREE_WIDTH_KEY.into(), json!(420));
@@ -2621,6 +2638,22 @@ mod tests {
         let s = showing(&entry);
         let shown: Vec<&str> = s.ui.pages.code.diff.files().iter().map(FileDiff::path).collect();
         assert_eq!(shown, ["apps/desktop-rune/src/main.rs", "apps/desktop-rune/src/pages/mod.rs", "apps/desktop-rune/src/pages/usage.rs"], "the tab shows that order");
+    }
+
+    #[test]
+    fn hidden_tests_leave_no_changes_only_once_no_page_is_left() {
+        let files = rune_kit::diff::parse(&["src/a.test.ts", "src/b.spec.ts"].iter().map(|p| format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n")).collect::<String>());
+        let mut s = App::new();
+        s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(false));
+        assert!(!no_changes(&s, &files));
+        assert!(no_changes(&s, &[]));
+        s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
+        assert!(no_changes(&s, &files), "every file is a hidden test");
+        s.ui.pages.code.revealed = Some("src/b.spec.ts".into());
+        assert!(!no_changes(&s, &files), "a revealed test stays shown");
+        s.ui.pages.code.revealed = None;
+        s.ui.pages.code.next = Some("c2".into());
+        assert!(!no_changes(&s, &files), "a later page may hold changes");
     }
 
     #[test]

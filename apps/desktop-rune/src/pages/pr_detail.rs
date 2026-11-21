@@ -82,6 +82,8 @@ pub struct Ui {
     pub not_found: bool,
     /// A copyable value reading "Copied" until the given time.
     pub copied: Option<(&'static str, i64)>,
+    /// The crumbs' number context menu, at the press.
+    pub number_menu: Option<(f32, f32)>,
     pub(super) live: super::pull_requests::Live,
     pub meta: super::pr_meta::Ui,
 }
@@ -952,15 +954,25 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
 /// Crumbs, the primary action and the actions menu; the panel's tab strip holds its toggles.
 fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
     let open_url = field(d, "url").to_string();
-    let menu_url = open_url.clone();
     let singular = if open_url.contains("/-/merge_requests/") { "merge request" } else { "pull request" };
     let on_host = super::pull_requests::open_label(s.ui.pages.detail.entry.as_ref().unwrap_or(d), &s.ui.pages.pull_requests.hosts);
+    if let Some(at) = s.ui.pages.detail.number_menu {
+        number_menu(t, &open_url, on_host.clone(), at, overlays);
+    }
+    let repository = field(d, "repository").to_string();
+    let repo = text(repository.clone()).font(theme::XS_MEDIUM).color(t.c.muted_foreground).truncate().shrink().min_w(0.0);
+    let repo = match repository_url(&open_url) {
+        Some(url) => repo.key("pr-detail-repository").cursor(Cursor::Pointer).role("link").help(format!("Open {repository} repository")).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        }),
+        None => repo.help(repository),
+    };
     let crumbs = row()
         .gap(6.0)
         .center_y()
         .shrink()
         .min_w(0.0)
-        .child(text(field(d, "repository").to_string()).font(theme::XS_MEDIUM).color(t.c.muted_foreground).truncate().shrink().min_w(0.0))
+        .child(repo)
         .child(
             row()
                 .key("pr-detail-number")
@@ -975,7 +987,7 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
                 .on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&open_url);
                 })
-                .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| s.ui.pages.pull_requests.context = Some((menu_url.clone(), at.x, at.y))),
+                .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| ui(s).number_menu = Some((at.x, at.y))),
         );
     // The @container/pr-header breakpoints: below 30rem the controls drop their labels, below
     // 35rem the checkout does too. The crumbs give way first; the controls never shrink.
@@ -1005,6 +1017,43 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         actions = actions.child(checkout_menu(s, t, d, compact, overlays)).child(loading);
     }
     row().key(TOP).w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
+}
+
+/// showPullRequestLinkContextMenu on the crumbs' number.
+fn number_menu(t: &T, url: &str, open_label: String, (x, y): (f32, f32), overlays: &mut Vec<El>) {
+    let (copy_url, open_url) = (url.to_string(), url.to_string());
+    Menu::new("pr-detail-number-menu")
+        .native(true)
+        .width(198.0)
+        .open(true)
+        .at(x, y)
+        .on_close(|s: &mut App| ui(s).number_menu = None)
+        .item(MenuItem::new("Copy link").icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            tx.copy(&copy_url);
+            ui(s).number_menu = None;
+        }))
+        .item(MenuItem::new(open_label).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            ui(s).number_menu = None;
+            if tx.open_url(&open_url).is_err() {
+                crate::shell::palette::toast_error(s, "Could not open the link", None);
+            }
+        }))
+        .overlay(&kit::theme(t), overlays);
+}
+
+/// parseChangeRequestUrl's `repositoryUrl`: the link up to its host's change request route,
+/// without query or hash.
+fn repository_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let scheme = &url[..url.len() - rest.len()];
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = rest.split_once('/')?;
+    let segments: Vec<&str> = path.split('/').collect();
+    let number = |s: &str| s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<u64>().is_ok_and(|n| n > 0);
+    let at = segments.windows(2).position(|w| matches!(w[0], "pull" | "pulls" | "pull-requests" | "pullrequest" | "merge_requests") && number(w[1]))?;
+    let end = if segments[at] == "merge_requests" { at.checked_sub(1).filter(|&n| segments[n] == "-")? } else { at };
+    let repository = &segments[..end];
+    (repository.len() >= 2 && repository.iter().all(|s| !s.is_empty())).then(|| format!("{scheme}{authority}/{}", repository.join("/")))
 }
 
 /// The detail's top row, whose width sets the header's breakpoints.
@@ -1151,7 +1200,16 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
         let label = if u.menu_confirm == Some(action) { confirm.to_string() } else { idle };
         MenuItem::new(label).icon(glyph).disabled(busy).on_select_tx(move |s: &mut App, tx: &mut Tx| arm_or_run_item(s, action, tx))
     };
-    let trigger = kit::Button::new("").variant("ghost-muted").size("icon-xs").icon(&i::ELLIPSIS).on_press(|s: &mut App| ui(s).menu = !ui(s).menu).build(t).label(format!("More {term} actions")).help(format!("More {term} actions"));
+    let refreshing = u.pending_invalidate.is_some() || u.pending_detail.is_some();
+    let trigger_label = if refreshing { format!("Refreshing {term}") } else { format!("More {term} actions") };
+    let trigger = kit::Button::new("")
+        .variant("ghost-muted")
+        .size("icon-xs")
+        .icon(if refreshing { &i::LOADER_CIRCLE } else { &i::ELLIPSIS })
+        .on_press(|s: &mut App| ui(s).menu = !ui(s).menu)
+        .build(t)
+        .label(trigger_label.clone())
+        .help(trigger_label);
     let ask = handoff_task(d, false);
     let explain = handoff_task(d, true);
     let mut menu = Menu::new("pr-detail-menu")
@@ -1421,9 +1479,29 @@ fn tab_bar(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
                 };
                 stat.child(icon(glyph, 12.0).color(t.c.muted_foreground)).child(text(shown).font(theme::TEXT_2XS.features("'tnum' 1")).color(t.c.muted_foreground))
             };
+            let mut stats = vec![stat(&i::MESSAGE_SQUARE, comments, ("comment", "comments", "Comments unavailable")), stat(&i::GIT_COMMIT_HORIZONTAL, commits, ("commit", "commits", "Commits unavailable"))];
+            let approvals = a.map_or(0, conv::approvals) as u64;
+            if approvals > 0 {
+                let (ink, n) = (success(t), crate::chat::details::thousands(approvals));
+                stats.push(
+                    row()
+                        .gap(4.0)
+                        .center_y()
+                        .label(format!("{n} {}", if approvals == 1 { "approval" } else { "approvals" }))
+                        .child(icon(&i::CIRCLE_CHECK, 12.0).color(ink))
+                        .child(text(n).font(theme::TEXT_2XS.features("'tnum' 1")).color(ink)),
+                );
+            }
+            // PullRequestMetaLine: dot-separated, dimmed until the activity answers.
+            let mut meta = row().gap(6.0).center_y().opacity(if a.is_none() { 0.35 } else { 1.0 });
+            for (n, stat) in stats.into_iter().enumerate() {
+                if n > 0 {
+                    meta = meta.child(text("·").font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.5)));
+                }
+                meta = meta.child(stat);
+            }
             bar = bar
-                .child(stat(&i::MESSAGE_SQUARE, comments, ("comment", "comments", "Comments unavailable")))
-                .child(stat(&i::GIT_COMMIT_HORIZONTAL, commits, ("commit", "commits", "Commits unavailable")))
+                .child(meta)
                 .child(order_toggle(t, u.oldest_first, ("Show oldest activity first", "Show newest activity first"), |s| ui(s).oldest_first = !ui(s).oldest_first));
         }
         _ => {}
@@ -1483,9 +1561,11 @@ fn check_glyph(t: &T, status: Option<&str>) -> (&'static rune::Icon, Color) {
     }
 }
 
-fn check_label(status: &str) -> &'static str {
-    match status {
+/// pullRequestCheckStatusLabel.
+fn check_label(c: &Value) -> &'static str {
+    match field(c, "status") {
         "pending" => "Running",
+        "action-required" if super::pr_row::workflow_approval(c) => "Awaiting approval",
         "action-required" => "Awaiting action",
         "success" => "Passed",
         "failure" => "Failed",
@@ -1600,7 +1680,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
                 .child(icon(glyph, 14.0).color(ink))
                 .child(text(field(c, "name").to_string()).font(theme::TEXT_XS).color(t.c.foreground).truncate().shrink().min_w(0.0))
                 .child(spacer())
-                .child(text(check_label(status)).font(theme::TEXT_XS).color(t.c.muted_foreground));
+                .child(text(check_label(c)).font(theme::TEXT_XS).color(t.c.muted_foreground));
             if let Some(url) = c["url"].as_str().map(str::to_string) {
                 r = r.key(format!("pr-check-{}", field(c, "name"))).hover(t.c.accent.alpha_mul(0.6)).cursor(Cursor::Pointer).on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&url);
@@ -1876,7 +1956,8 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
                 .center_y()
                 .shrink()
                 .child(avatar(avatars, &c["author"], 16.0, t))
-                .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink()),
+                .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink())
+                .child(text(conv::action(c)).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         };
         let mut h = row().w_full().gap(6.0).center_y().child(who);
         let state = field(c, "reviewState");
@@ -2004,7 +2085,7 @@ fn code(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let body = match (&u.files, &u.diff_error) {
         (None, Some(e)) => diff_unavailable(s, t, e),
         (None, None) => note(format!("Loading {term} diff...")),
-        (Some(files), _) if files.is_empty() => note(match conv::scoped_commit(u) {
+        (Some(files), _) if super::pr_code::no_changes(s, files) => note(match conv::scoped_commit(u) {
             Some(_) => "This commit has no file changes.".into(),
             None => format!("This {term} has no file changes."),
         }),
@@ -2048,6 +2129,8 @@ fn ghost(t: &T, term: &str) -> El {
 /// PullRequestsUnavailableState, naming a pull request the host doesn't have.
 fn unavailable(s: &App, t: &T, entry: &Value, error: &str) -> El {
     let url = field(entry, "url").to_string();
+    // The error stays up while Retry reads again (PullRequestsUnavailableState's `refreshing`).
+    let retrying = s.ui.pages.detail.pending_detail.is_some();
     let (title, description) = super::pr_actions::unavailable_text(entry, s.ui.pages.detail.not_found, error);
     col()
         .w_full()
@@ -2061,12 +2144,19 @@ fn unavailable(s: &App, t: &T, entry: &Value, error: &str) -> El {
         .child(
             row()
                 .gap(8.0)
-                .child(kit::Button::new("Retry").variant("outline").size("sm").icon(&i::REFRESH_CW).on_press(|s: &mut App| {
-                    ui(s).error = None;
-                    reload(s);
-                }).build(t))
-                .child(kit::Button::new(super::pull_requests::open_label(entry, &[])).variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                    let _ = tx.open_url(&url);
+                .child(
+                    kit::Button::new("Retry")
+                        .variant("outline")
+                        .size("sm")
+                        .icon(if retrying { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+                        .disabled(retrying)
+                        .on_press(|s: &mut App| reload(s))
+                        .build(t),
+                )
+                .children((!url.is_empty()).then(|| {
+                    kit::Button::new(super::pull_requests::open_label(entry, &s.ui.pages.pull_requests.hosts)).variant("outline").size("sm").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                        let _ = tx.open_url(&url);
+                    })
                 })),
         )
 }
@@ -2166,6 +2256,11 @@ fn diff_details(t: &T, error: &str, open: bool) -> El {
     out
 }
 
+/// The header and error state while the pull request reads again.
+pub(super) fn scene_refreshing(u: &mut Ui) {
+    u.pending_detail = Some(0);
+}
+
 /// The scene's conflicting pull request while Resolve conflicts prepares its checkout.
 pub(super) fn scene_resolving(u: &mut Ui) {
     if let Some(d) = &mut u.detail {
@@ -2194,6 +2289,27 @@ mod tests {
         assert_eq!(checks_freshness(Some(&json!({"state": "open", "updatedAt": "2026-11-14T11:00:00Z"})), &d), (Some("passing"), false), "a row without a rollup defers to the detail");
         let waiting = json!({"state": "open", "updatedAt": "2026-11-14T10:00:00Z", "checks": [{"name": "deploy", "status": "action-required"}]});
         assert_eq!(checks_freshness(Some(&entry("2026-11-14T11:00:00Z", json!("passing"))), &waiting), (Some("pending"), false), "the list can omit workflows awaiting approval");
+    }
+
+    #[test]
+    fn a_workflow_run_waiting_on_approval_says_so() {
+        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://github.com/o/r/actions/runs/12/job/3"})), "Awaiting approval");
+        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://ci.example/build/12"})), "Awaiting action");
+        assert_eq!(check_label(&json!({"status": "action-required", "url": null})), "Awaiting action");
+    }
+
+    #[test]
+    fn the_repository_link_is_the_change_request_url_up_to_its_route() {
+        let repo = repository_url;
+        assert_eq!(repo("https://github.com/O/r/pull/7/files?w=1#x").as_deref(), Some("https://github.com/O/r"));
+        assert_eq!(repo("https://gitlab.com/g/sub/p/-/merge_requests/3").as_deref(), Some("https://gitlab.com/g/sub/p"));
+        assert_eq!(repo("https://dev.azure.com/org/proj/_git/repo/pullrequest/5").as_deref(), Some("https://dev.azure.com/org/proj/_git/repo"));
+        assert_eq!(repo("https://bitbucket.org/ws/repo/pull-requests/2").as_deref(), Some("https://bitbucket.org/ws/repo"));
+        assert_eq!(repo("http://forge.local:3000/o/r/pulls/9").as_deref(), Some("http://forge.local:3000/o/r"));
+        assert_eq!(repo("https://github.com/o/r/issues/7"), None);
+        assert_eq!(repo("https://github.com/o/r/pull/0"), None);
+        assert_eq!(repo("https://github.com/pull/7"), None, "a repository needs an owner and a name");
+        assert_eq!(repo("file:///o/r/pull/7"), None);
     }
 
     #[test]

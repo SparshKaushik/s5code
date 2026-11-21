@@ -393,6 +393,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "more-files");
     }),
+    ("pull-requests-detail-code-tests-hidden", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "tests-hidden");
+    }),
     ("pull-requests-detail-code-file-order", |s| {
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "file-order");
@@ -486,6 +490,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             u.open_comments.insert("comments:c3".into());
         })
     }),
+    ("pull-requests-detail-timeline-approvals", |s| {
+        open_detail(s, 1, |u| {
+            if let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) {
+                list.push(json!({"id": "v3", "kind": "review", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": "Ship it.", "createdAt": "2026-11-06T09:52:00.000Z", "url": null, "path": null, "reviewState": "APPROVED"}));
+            }
+        })
+    }),
+    ("pull-requests-detail-timeline-loading", |s| open_detail(s, 1, |u| u.activity = None)),
     ("pull-requests-detail-commit-scope", |s| {
         open_detail(s, 1, |_| {});
         pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
@@ -539,6 +551,24 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.detail = None;
         u.error = Some("Pull request operation detail failed: Could not resolve to a PullRequest with the number of 2481.".into());
         u.not_found = true;
+    }),
+    ("pull-requests-detail-error-retrying", |s| {
+        open_detail(s, 0, pr_detail::scene_refreshing);
+        let u = &mut s.ui.pages.detail;
+        u.detail = None;
+        u.error = Some("The environment request failed.".into());
+    }),
+    ("pull-requests-detail-refreshing", |s| open_detail(s, 0, pr_detail::scene_refreshing)),
+    ("pull-requests-detail-number-menu", |s| open_detail(s, 0, |u| u.number_menu = Some((140.0, 40.0)))),
+    ("pull-requests-detail-checks-awaiting-approval", |s| {
+        open_detail(s, 0, |u| {
+            u.checks_open = true;
+            u.description_closed = true;
+            if let Some(d) = &mut u.detail {
+                d["checks"][1]["status"] = json!("action-required");
+                d["checks"][1]["url"] = json!("https://github.com/s5labs/s5code/actions/runs/123");
+            }
+        })
     }),
     ("pull-requests-detail-menu-merged", |s| {
         open_detail(s, 0, |u| {
@@ -798,6 +828,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-offline", |s| {
         open_usage(s, "cost");
         usage::offline_scene(s);
+    }),
+    ("usage-read-only", |s| {
+        open_usage(s, "cost");
+        usage::read_only_scene(s);
+    }),
+    ("usage-read-only-menu", |s| {
+        open_usage(s, "cost");
+        usage::read_only_scene(s);
+        s.ui.pages.usage.menu = Some("environments");
     }),
     ("usage-no-environments", |s| {
         open_usage(s, "cost");

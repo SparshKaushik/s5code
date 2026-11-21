@@ -46,7 +46,8 @@ pub fn poll(s: &mut App) -> bool {
     let pending: Vec<(String, u64)> = s.ui.settings.session.by_env.iter().filter_map(|(k, e)| Some((k.clone(), e.pending?))).collect();
     let mut changed = false;
     for (key, id) in pending {
-        let Some(reply) = crate::env::net_of(s, &key).and_then(|net| net.take_reply(id)) else { continue };
+        // `env::drain` hands a parked environment's replies to `App::src`.
+        let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)).or_else(|| crate::env::net_of(s, &key).and_then(|net| net.take_reply(id))) else { continue };
         let entry = s.ui.settings.session.by_env.entry(key).or_default();
         entry.pending = None;
         entry.reply = Some(reply);

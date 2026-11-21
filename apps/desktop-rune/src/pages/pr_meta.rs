@@ -1455,8 +1455,8 @@ mod tests {
         assert!(gitlab.starts_with("Fix the actionable findings on MR #7") && gitlab.contains("inspect the merge request"));
         let truncated = json!({"commentsTruncated": true});
         let on = |url: &str| findings_handoff(&json!({"number": 7, "url": url, "provider": "github"}), &truncated).0;
-        assert!(on("https://git.example.com/a/b/-/merge_requests/7").ends_with("may exist on GitLab."), "hostLabelForChangeRequestUrl reads the URL, not the provider");
-        assert!(on("u").ends_with("may exist on the host."));
+        assert!(on("https://git.example.com/a/b/-/merge_requests/7").contains("may exist on GitLab.\n"), "hostLabelForChangeRequestUrl reads the URL, not the provider");
+        assert!(on("u").contains("may exist on the host.\n"));
         let many: Vec<Value> = (0..25).map(|n| json!({"name": format!("c{n}"), "status": "failure"})).collect();
         let (capped, _) = findings_handoff(&json!({"number": 7, "url": "u", "checks": many}), &Value::Null);
         assert!(capped.contains("> c5\n") && !capped.contains("> c4\n") && capped.contains("5 further findings were omitted."), "the newest checks are kept");

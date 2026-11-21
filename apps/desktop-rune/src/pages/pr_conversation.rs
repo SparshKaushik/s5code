@@ -260,6 +260,14 @@ fn latest_outcomes(comments: &[Value], commits: &[Value]) -> Vec<Verdict> {
     latest
 }
 
+/// The Timeline tab's approvals: fresh ones only, and none while the comments are truncated.
+pub fn approvals(activity: &Value) -> usize {
+    if activity["commentsTruncated"] == true {
+        return 0;
+    }
+    latest_outcomes(list(Some(activity), "comments"), list(Some(activity), "commits")).iter().filter(|v| v.outcome == "approved" && !v.stale).count()
+}
+
 pub struct Reviewer {
     pub actor: Value,
     pub outcome: Option<&'static str>,
@@ -382,6 +390,11 @@ pub fn reviewer_avatars(avatars: &Avatars, t: &T, list: &[Reviewer]) -> El {
 
 // ---- timeline -----------------------------------------------------------------------------
 
+/// commentTimelineEvent's title: what a comment's author did.
+pub fn action(c: &Value) -> &'static str {
+    if field(c, "kind") == "review" { "reviewed" } else { "commented" }
+}
+
 /// PullRequestTimelineEvent: the pull request opening, each commit, each conversation, then
 /// its merge or close.
 pub struct Event<'a> {
@@ -406,8 +419,8 @@ pub fn timeline<'a>(d: &Value, a: &'a Value) -> Vec<Event<'a>> {
         });
     }
     for item in items(a) {
-        let (kind, title) = if field(&item.root, "kind") == "review" { ("review", "reviewed") } else { ("comment", "commented") };
-        let (at, actor) = (item.at, item.root["author"].clone());
+        let kind = if field(&item.root, "kind") == "review" { "review" } else { "comment" };
+        let (at, actor, title) = (item.at, item.root["author"].clone(), action(&item.root));
         events.push(Event { actor, item: Some(item), ..lifecycle(kind, at, title.to_string()) });
     }
     if let Some(at) = ts(d, "mergedAt") {
@@ -840,6 +853,12 @@ mod tests {
             "the newest verdict wins even out of order, dismissals drop out, plain reviews are not verdicts"
         );
         assert_eq!(review_state_label("CHANGES_REQUESTED"), "Changes requested");
+
+        let fresh = comment("v6", "kim", "2026-11-06T09:30:00Z", json!({"kind": "review", "reviewState": "APPROVED"}));
+        let mut activity = json!({"comments": [comments.to_vec(), vec![fresh]].concat(), "commits": commits});
+        assert_eq!(approvals(&activity), 1, "only an approval newer than the last commit counts");
+        activity["commentsTruncated"] = json!(true);
+        assert_eq!(approvals(&activity), 0, "truncated comments may hide a later verdict");
     }
 
     #[test]
@@ -854,6 +873,7 @@ mod tests {
         let got: Vec<_> = events.iter().map(|e| (e.kind, e.title.as_str())).collect();
         assert_eq!(got, [("merged", "Merge request merged"), ("review", "reviewed"), ("commit", "Commit 1a2b3c4"), ("opened", "opened this merge request")]);
         assert_eq!(events[3].actor["login"], "a");
+        assert_eq!((action(&a["comments"][0]), action(&comment("c", "b", "2026-11-06T09:00:00Z", json!({})))), ("reviewed", "commented"));
         assert_eq!(events[2].actor["login"], "a");
         let mut closed = d.clone();
         closed["provider"] = json!("github");
