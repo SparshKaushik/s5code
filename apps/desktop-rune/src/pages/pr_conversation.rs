@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(review_state_label("CHANGES_REQUESTED"), "Changes requested");
 
         let fresh = comment("v6", "kim", "2026-11-06T09:30:00Z", json!({"kind": "review", "reviewState": "APPROVED"}));
-        let mut activity = json!({"comments": [comments.to_vec(), vec![fresh]].concat(), "commits": commits});
+        let mut activity = json!({"comments": ([comments.to_vec(), vec![fresh]].concat()), "commits": commits});
         assert_eq!(approvals(&activity), 1, "only an approval newer than the last commit counts");
         activity["commentsTruncated"] = json!(true);
         assert_eq!(approvals(&activity), 0, "truncated comments may hide a later verdict");
