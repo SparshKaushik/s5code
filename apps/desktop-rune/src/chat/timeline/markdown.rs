@@ -198,10 +198,10 @@ pub(crate) fn diagram(source: &str, t: &T) -> Option<El> {
 }
 
 pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
-    memoized(app, source, id, t, ink(t))
+    memoized(app, source, id, t, ink(t), false)
 }
 
-fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
+fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color, run: bool) -> El {
     let ui = &app.ui.chat.timeline;
     let fence = format!("{id}-fence-");
     let mut unwrapped: Vec<&String> = ui.wrapped.iter().filter(|k| k.starts_with(&fence)).collect();
@@ -212,24 +212,38 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, copied, t.code.to_bits(), media::signature(app, source));
-    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink))
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, copied, t.code.to_bits(), media::signature(app, source), run);
+    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink, run))
 }
 
-/// [`view`] with find-in-thread matches painted; rows with marks build fresh while the bar is open.
-pub fn view_marked(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
+/// A reply, with find-in-thread matches painted (rows with marks build fresh while the bar is
+/// open); once finished, its shell code blocks can run in the thread's terminal.
+pub fn reply(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, run: bool) -> El {
     match marks {
-        None => view(app, source, id, t),
-        Some(_) => build(app, source, id, t, marks, ink(t)),
+        None => memoized(app, source, id, t, ink(t), run),
+        Some(_) => build(app, source, id, t, marks, ink(t), run),
     }
+}
+
+/// MarkdownCodeBlock `canRun`: a closed shell fence holding one visible command line. Control
+/// and format characters (bidi overrides, zero-width) could make the shown command differ from
+/// what the terminal receives.
+fn runnable(language: &str, code: &str, closed: bool) -> bool {
+    let format = |c: char| matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}');
+    let command = code.trim();
+    closed
+        && matches!(language, "sh" | "bash" | "zsh" | "fish" | "shell" | "powershell" | "pwsh")
+        && !command.is_empty()
+        && !command.ends_with('\\')
+        && !code.chars().any(|c| c.is_control() || format(c))
 }
 
 /// A user message in its bubble's ink, each newline a line break (ChatMarkdown `lineBreaks`).
 pub fn user(app: &App, text: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
     let source = user_source(text);
     match marks {
-        None => memoized(app, &source, id, t, t.c.message_foreground),
-        Some(_) => build(app, &source, id, t, marks, t.c.message_foreground),
+        None => memoized(app, &source, id, t, t.c.message_foreground, false),
+        Some(_) => build(app, &source, id, t, marks, t.c.message_foreground, false),
     }
 }
 
@@ -256,7 +270,7 @@ pub fn user_source(text: &str) -> String {
     out
 }
 
-fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
+fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: rune::Color, run: bool) -> El {
     let mut out = col().w_full().gap(10.4);
     let lines: Vec<_> = source.split_inclusive('\n').collect();
     let mut start = 0;
@@ -286,6 +300,7 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: r
         while i < lines.len() && !lines[i].trim_start().starts_with(marker) {
             i += 1;
         }
+        let closed = i < lines.len();
         let code = lines[code_start..i]
             .concat()
             .trim_end_matches('\n')
@@ -324,6 +339,20 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: r
                         }
                     }),
             )
+            .children((run && runnable(language, &code, closed)).then(|| {
+                let command = code.trim().to_owned();
+                row()
+                    .size(24.0, 24.0)
+                    .center()
+                    .child(icon(&icons::PLAY, 12.0).color(t.c.muted_foreground))
+                    .radius(6.0)
+                    .hover(t.c.muted)
+                    .focusable(true)
+                    .role("button")
+                    .label("Run in terminal")
+                    .help("Run in terminal")
+                    .on_press(move |app: &mut App| crate::chat::details::scripts::run_command(app, &command))
+            }))
             .child(copy_button(app, &code, t, "Copy code"));
         let fenced = format!("```{language}\n{code}\n```");
         let code_view = Markdown::new(fenced.clone())
@@ -368,7 +397,20 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: r
 
 #[cfg(test)]
 mod tests {
-    use super::user_source;
+    use super::{runnable, user_source};
+
+    #[test]
+    fn only_a_closed_one_line_shell_fence_runs() {
+        assert!(runnable("bash", "npm test", true));
+        assert!(runnable("pwsh", "  Get-ChildItem  ", true));
+        assert!(!runnable("bash", "npm test", false), "FAILED: a fence still streaming");
+        assert!(!runnable("python", "print(1)", true));
+        assert!(!runnable("sh", "   ", true));
+        assert!(!runnable("sh", "make \\", true), "FAILED: a continuation waits for more input");
+        assert!(!runnable("sh", "cd a\nmake", true), "FAILED: a newline is a control character");
+        assert!(!runnable("sh", "rm -rf \u{202e}fdsa", true), "FAILED: a bidi override hides the real command");
+        assert!(!runnable("sh", "ls\u{200b}", true));
+    }
 
     #[test]
     fn user_text_keeps_its_line_breaks_outside_code() {

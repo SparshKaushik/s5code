@@ -30,6 +30,10 @@ pub struct State {
     cancelling: HashMap<String, u64>,
     /// Run id -> `prepared-run.retry` in flight.
     retrying: HashMap<String, u64>,
+    /// Threads whose cancel was Work locally: their prompt goes out again once it lands.
+    work_locally: HashSet<String>,
+    /// Cancelled for Work locally, until the run settles and the worktree is cleared.
+    resending: HashSet<String>,
 }
 
 fn stage_label(id: &str) -> &'static str {
@@ -133,11 +137,17 @@ pub fn poll(app: &mut App) -> bool {
         ui.watched = Some(id);
     }
     let mut failures = Vec::new();
-    ui.cancelling.retain(|_, request| {
+    let (work_locally, resending) = (&mut ui.work_locally, &mut ui.resending);
+    ui.cancelling.retain(|thread, request| {
         let Some(reply) = net.take_reply(*request) else { return true };
         changed = true;
-        if let Err(error) = reply {
-            failures.push(("Could not cancel worktree setup", error));
+        let resend = work_locally.remove(thread);
+        match reply {
+            Ok(v) if resend && v["cancelled"] == true => {
+                resending.insert(thread.clone());
+            }
+            Ok(_) => {}
+            Err(error) => failures.push(("Could not cancel worktree setup", error)),
         }
         false
     });
@@ -153,7 +163,40 @@ pub fn poll(app: &mut App) -> bool {
         let description = crate::shell::palette::error_message(&error, "An error occurred.");
         crate::shell::palette::toast_error(app, title, Some(&description));
     }
+    let st = app.state();
+    let ready: Vec<(String, Value)> = app
+        .ui
+        .chat
+        .timeline
+        .worktree
+        .resending
+        .iter()
+        .filter_map(|thread| {
+            let projection = &st.thread_views.get(thread)?.projection;
+            let shell = st.threads.iter().find(|r| s(r, "id") == thread.as_str());
+            if !settled(projection, shell) {
+                return None;
+            }
+            Some((thread.clone(), prompt(projection)?.clone()))
+        })
+        .collect();
+    for (thread, message) in ready {
+        app.ui.chat.timeline.worktree.resending.remove(&thread);
+        super::actions::resend(app, &thread, &message);
+        changed = true;
+    }
     changed
+}
+
+/// The prompt a cancelled setup held back: the thread's latest message.
+fn prompt(projection: &Value) -> Option<&Value> {
+    array(projection, "turnItems").iter().rev().find(|i| s(i, "type") == "user_message")
+}
+
+/// The cancelled run has failed and the thread's worktree is gone, so a send starts locally.
+fn settled(projection: &Value, shell: Option<&Value>) -> bool {
+    let active = array(projection, "runs").iter().any(|r| matches!(s(r, "status"), "preparing" | "queued" | "starting" | "running" | "waiting"));
+    !active && shell.is_none_or(|r| s(r, "worktreePath").is_empty())
 }
 
 fn cancel(app: &mut App, thread: &str) {
@@ -337,6 +380,19 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .on_press(move |app: &mut App| cancel(app, &cancel_thread))
                 .build(t),
         );
+        let local_thread = thread.to_owned();
+        actions = actions.child(
+            Button::new("Work locally")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::LAPTOP)
+                .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
+                .on_press(move |app: &mut App| {
+                    cancel(app, &local_thread);
+                    app.ui.chat.timeline.worktree.work_locally.insert(local_thread.clone());
+                })
+                .build(t),
+        );
     }
     card = card.child(actions);
     if open {
@@ -398,6 +454,18 @@ mod tests {
         assert_eq!(setup_terminal(&with("running")), Some("setup-1"));
         assert_eq!(setup_terminal(&with("failed")), Some("setup-1"));
         assert_eq!(setup_terminal(&snapshot("running", json!([{"id": "setup-script", "status": "running"}]))), None);
+    }
+
+    #[test]
+    fn work_locally_resends_the_latest_prompt_once_the_cancel_settles() {
+        let item = |kind: &str, text: &str| json!({"type": kind, "text": text});
+        let p = |run: &str| json!({"runs": [{"status": run}], "turnItems": [item("user_message", "first"), item("assistant_message", "a"), item("user_message", "build it")]});
+        assert_eq!(prompt(&p("failed")).map(|m| s(m, "text")), Some("build it"));
+        let worktree = json!({"worktreePath": "/wt"});
+        let local = json!({"worktreePath": null});
+        assert!(!settled(&p("preparing"), Some(&local)), "FAILED: waits for the cancelled run to fail");
+        assert!(!settled(&p("failed"), Some(&worktree)), "FAILED: waits for the worktree to be cleared");
+        assert!(settled(&p("failed"), Some(&local)));
     }
 
     #[test]
