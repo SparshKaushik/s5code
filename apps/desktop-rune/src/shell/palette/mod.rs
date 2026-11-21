@@ -409,6 +409,15 @@ pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>,
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
     s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
 }
+#[cfg(test)]
+pub(crate) fn toast_description(s: &App) -> Option<&str> {
+    s.ui.shell.palette.notice.as_ref().and_then(|n| n.description.as_deref())
+}
+#[cfg(test)]
+pub(crate) fn press_toast_action(s: &mut App, label: &str) {
+    let action = s.ui.shell.palette.notice.as_ref().and_then(|n| n.actions.iter().find(|a| a.0 == label)).map(|a| a.2.clone()).expect("the toast offers that action");
+    action(s, &mut Tx::default());
+}
 /// The open toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
     let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
@@ -433,6 +442,16 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     });
 }
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
+/// The open toast stays until it is dismissed (web `timeout: 0`).
+pub(crate) fn keep_toast(s: &mut App) {
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.until = i64::MAX;
+    }
+}
+pub(crate) fn toast_warning_sticky(s: &mut App, title: &str, description: Option<&str>) {
+    toast_warning(s, title, description, Vec::new(), false);
+    keep_toast(s);
+}
 pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
     toast(s, title, description);
     if let Some(notice) = s.ui.shell.palette.notice.as_mut() {

@@ -176,11 +176,18 @@ fn open_match(s: &mut App, index: usize) {
     crate::panel::open_file_at(s, path, line);
 }
 
+fn back(s: &mut App) {
+    close(s);
+    s.ui.shell.palette.open = true;
+    s.ui.shell.palette.query.focused = true;
+}
+
 fn on_input_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     let n = current(s).0.len();
     let ui = &mut s.ui.search;
     match e.key {
-        Key::Escape => close(s),
+        // Web `BackToCommand`: Escape returns to the command palette, as the footer says.
+        Key::Escape => back(s),
         Key::Down if n > 0 => ui.selected = (ui.selected + 1) % n,
         Key::Up if n > 0 => ui.selected = (ui.selected + n - 1) % n,
         Key::Enter => {
@@ -310,11 +317,7 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
         .label("Back")
         .center()
         .cursor(Cursor::Pointer)
-        .on_press(|s: &mut App| {
-            close(s);
-            s.ui.shell.palette.open = true;
-            s.ui.shell.palette.query.focused = true;
-        })
+        .on_press(back)
         .child(icon(&icons::ARROW_LEFT, 16.).color(t.c.contrast_icon_muted));
     let head = row().w_full().h(48.).pl(17.).pr(10.).gap(12.).center_y().child(back).child(input).child(options);
 

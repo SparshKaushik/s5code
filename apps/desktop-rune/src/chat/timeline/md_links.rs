@@ -68,7 +68,7 @@ fn thread_id(href: &str) -> Option<String> {
     (segment(env) && segment(id)).then(|| percent_decode(id))
 }
 
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
