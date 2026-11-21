@@ -1265,6 +1265,23 @@ fn reset_pill(t: &T, resets: Option<&str>, credits: i64, boxed: bool) -> El {
     pill
 }
 
+/// LegendRow's accessible name: its text, with the screen-reader-only "Segment " and credits.
+fn legend_label(index: usize, a: &Account, remaining: i64, resets: Option<&str>, credits: i64) -> String {
+    let name = match (&a.display_name, &a.email) {
+        (Some(name), _) => name.clone(),
+        (None, Some(email)) => format!("Account {}", initials(email)),
+        (None, None) => driver_label(&a.driver).unwrap_or(a.driver.as_str()).to_string(),
+    };
+    let mut label = format!("Segment {index} {name} {remaining}%");
+    if let Some(r) = resets {
+        label.push_str(&format!(" {}", r.replace("resets in ", "↻ ")));
+    }
+    if credits > 0 {
+        label.push_str(&format!(" {credits} reset {} banked", if credits == 1 { "credit" } else { "credits" }));
+    }
+    label
+}
+
 /// LegendRow: the narrow bar's key, opening the same popover as its segment.
 fn legend_row(t: &T, seg: &Seg, now: i64) -> El {
     let w = &seg.member.window;
@@ -1288,7 +1305,7 @@ fn legend_row(t: &T, seg: &Seg, now: i64) -> El {
         .hover(t.c.accent)
         .cursor(rune::Cursor::Pointer)
         .role("button")
-        .label(format!("Segment {}", seg.index))
+        .label(legend_label(seg.index, seg.account, remaining_percent(w), resets.as_deref(), credits))
         .on_press(move |s: &mut App| ui(s).segment = Some(key.clone()))
         .child(swatch)
         .child(account_name(t, seg.account, theme::XS_MEDIUM))
@@ -1647,5 +1664,15 @@ mod tests {
         assert_eq!((hue("sparsh@example.com"), hue("work@acme.io")), (288.0, 125.0));
         assert_eq!((initials("work@acme.io"), initials("")), ("WA".to_string(), "?".to_string()));
         assert_eq!(hub_name("Team.JSON"), "Team");
+    }
+
+    #[test]
+    fn legend_rows_read_their_segment_account_and_banked_credits() {
+        let named = account("Work", "codex", json!([]));
+        assert_eq!(legend_label(1, &named, 62, Some("resets in 1h 30m"), 2), "Segment 1 Work 62% ↻ 1h 30m 2 reset credits banked");
+        let chip = Account { display_name: None, email: Some("work@acme.io".into()), ..named.clone() };
+        assert_eq!(legend_label(2, &chip, 0, None, 1), "Segment 2 Account WA 0% 1 reset credit banked");
+        let bare = Account { display_name: None, ..named };
+        assert_eq!(legend_label(3, &bare, 100, Some("resets now"), 0), "Segment 3 Codex 100% resets now");
     }
 }

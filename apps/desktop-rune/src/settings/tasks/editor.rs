@@ -52,9 +52,9 @@ pub(super) fn set_model(s: &mut App, instance: &str, model: &str) {
     }
 }
 
-pub(super) fn scene_refs(s: &mut App, refs: Vec<Value>) {
+pub(super) fn scene_refs(s: &mut App, refs: Vec<Value>, total: u64, next: Option<u64>) {
     if let Some(e) = editor_mut(s) {
-        branch::scene(e, refs);
+        branch::scene(e, refs, total, next);
     }
 }
 

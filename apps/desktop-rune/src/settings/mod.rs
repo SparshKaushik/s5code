@@ -37,7 +37,7 @@ mod projects;
 mod providers;
 mod scope;
 pub mod search;
-mod snapshots;
+pub(crate) mod snapshots;
 mod snooze;
 mod source_control;
 pub(crate) mod storage;
@@ -115,6 +115,7 @@ pub struct Ui {
     pub providers_ui: providers::Ui,
     pub source_control: source_control::Ui,
     pub connections: connections::Ui,
+    pub snapshots: snapshots::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
     pub session: permissions::Session,
@@ -358,6 +359,9 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
 }
 
+/// A `results` entry's field holding why its request failed, for sections that show it.
+pub(super) const LOAD_ERROR: &str = "_loadError";
+
 pub fn request(s: &mut App, method: &str, payload: Value) {
     if method == "server.updateSettings" && matches!(s.src, crate::data::Source::Live(_)) {
         let mut current = server_settings(s).clone();
@@ -539,6 +543,11 @@ pub fn poll(s: &mut App) -> bool {
         }
     }
     wanted.extend(resource_telemetry::wanted(s));
+    if let Some(resource) = crate::panel::device_wanted(s)
+        && !wanted.contains(&resource)
+    {
+        wanted.push(resource);
+    }
     for resource in add_provider::wanted(s) {
         if !wanted.contains(&resource) {
             wanted.push(resource);
@@ -609,6 +618,19 @@ pub fn poll(s: &mut App) -> bool {
                         .unwrap_or("this environment")
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
+                    // Linked environments show their own failures, as web's section does.
+                    if method == "peerLinks.list" {
+                        let mut failed = json!({});
+                        failed[LOAD_ERROR] = json!(message);
+                        s.ui.settings.results.insert(method, failed);
+                        changed = true;
+                        continue;
+                    }
+                    if method == "peerLinks.unlink" {
+                        crate::shell::palette::toast_error_brief(s, "Could not forget the link", Some(&message));
+                        changed = true;
+                        continue;
+                    }
                     match message.strip_prefix("Setting not saved. ") {
                         Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
                         None => s.ui.settings.error = Some(message),
@@ -1068,6 +1090,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
+    snapshots::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -1185,6 +1208,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-scheduled-tasks-base-branch", |s| {
         scene(s, "scheduled-tasks");
         tasks::scene(s, "base-branch");
+    }),
+    ("settings-scheduled-tasks-base-branch-long", |s| {
+        scene(s, "scheduled-tasks");
+        tasks::scene(s, "base-branch-long");
     }),
     ("settings-scheduled-tasks-model", |s| {
         scene(s, "scheduled-tasks");
@@ -1540,6 +1567,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
     }
+    if snapshots::recording(s) {
+        return snapshots::on_key(s, e, tx);
+    }
     if focuses_search(e, tx.focused().is_some()) {
         let search = &mut s.ui.settings.search;
         search.focused = true;
@@ -1794,5 +1824,28 @@ mod reveal_tests {
         missing.retain(|title| !HIDDEN_HERE.contains(title));
         missing.sort_unstable();
         assert_eq!(missing, UNBUILT, "FAILED: unkeyed search titles {missing:?}");
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use crate::{App, Route, data::Source};
+    use serde_json::json;
+
+    #[test]
+    fn switching_environment_moves_the_pages_subscriptions() {
+        let mut s = App::new();
+        s.src = Source::Live(s5_net::Net::in_memory("http://local.test"));
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "http://box.test".into(), bearer: String::new() });
+        crate::env::park(&mut s, "box", Source::Live(s5_net::Net::in_memory("http://box.test")));
+        // Set directly: navigating to Settings would bring this machine back into focus.
+        s.route = Route::Settings("devices".into());
+        let watching = |s: &mut App, key: &str| crate::env::net_of(s, key).is_some_and(|net| net.watching("subscribeDeviceState", json!({})));
+        super::poll(&mut s);
+        assert!(watching(&mut s, crate::env::LOCAL));
+        crate::env::switch(&mut s, "box");
+        super::poll(&mut s);
+        assert!(watching(&mut s, "box"), "FAILED: the newly focused environment is subscribed");
+        assert!(!watching(&mut s, crate::env::LOCAL), "FAILED: the old environment's subscription is dropped");
     }
 }

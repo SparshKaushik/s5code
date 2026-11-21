@@ -29,6 +29,9 @@ ring = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
 qrcodegen = "1.8"
 
+[dev-dependencies]
+s5-net = { path = "net", features = ["test-support"] }
+
 [profile.dev.package."*"]
 debug = false
 opt-level = 2

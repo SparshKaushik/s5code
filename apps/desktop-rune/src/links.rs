@@ -421,7 +421,7 @@ pub fn overlays(s: &App, t: &crate::theme::T, layers: &mut Vec<rune::El>) {
             rune::row()
                 .gap(8.0)
                 .child(crate::kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t))
-                .child(crate::kit::Button::new("Add").on_press(confirm_pairing).build(t)),
+                .child(crate::kit::Button::new("Confirm").on_press(confirm_pairing).build(t)),
         )
         .build(t, layers);
 }
