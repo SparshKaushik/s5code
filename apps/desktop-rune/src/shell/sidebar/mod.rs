@@ -173,6 +173,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             ask_delete(s, &id);
         }
     }),
+    // Two new-thread drafts (newest first) and a thread holding unsent text.
+    ("sidebar-drafts", |s| {
+        scene_on(s, "Replay showcase");
+        scene_drafts(s);
+    }),
+    ("sidebar-drafts-hover", |s| {
+        scene_on(s, "Replay showcase");
+        scene_drafts(s);
+        s.ui.shell.sidebar.card = thread_titled(s, "Todo list replay");
+    }),
     ("sidebar-scope", |s| {
         scene_on(s, "Replay showcase");
         toggle_scope(s);
@@ -267,6 +277,19 @@ fn scene_shared_repository(s: &mut App) {
 
 fn thread_titled(s: &App, title: &str) -> Option<String> {
     s.state().threads.iter().find(|t| t["title"].as_str().is_some_and(|x| x.starts_with(title))).map(|t| crate::data::s(t, "id").to_string())
+}
+
+fn scene_drafts(s: &mut App) {
+    let now = s.now_ms;
+    let projects: Vec<String> = s.state().projects.iter().take(2).map(|p| crate::data::s(p, "id").to_string()).collect();
+    for (n, project) in projects.iter().enumerate() {
+        let draft = s.ui.chat.composer.drafts.entry(crate::chat::composer::home_key(project)).or_default();
+        draft.edit = TextEdit::new(if n == 0 { "Sketch the retry policy for webhooks" } else { "Ask about the flaky login test" });
+        draft.created_at = now - (n as i64 + 1) * 600_000;
+    }
+    if let Some(id) = thread_titled(s, "Todo list replay") {
+        s.ui.chat.composer.drafts.entry(id).or_default().edit = TextEdit::new("Half a follow-up question");
+    }
 }
 
 /// The web's `/` redirects to the newest thread; the reference shots open on "New thread".

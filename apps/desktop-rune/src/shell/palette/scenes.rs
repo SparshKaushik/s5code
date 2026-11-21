@@ -99,6 +99,38 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_query(s, "My App");
         s.ui.shell.palette.add.publish = true;
     }),
+    ("palette-add-environment", |s| {
+        open_thread(s);
+        park_box(s);
+        open(s);
+        add_project::open(s);
+    }),
+    ("palette-new-project-machines", |s| {
+        open_thread(s);
+        park_box(s);
+        open(s);
+        s.ui.shell.palette.add.discovery = Some(discovery());
+        add_project::start_new(s);
+        set_query(s, "My App");
+    }),
+    ("palette-themes", |s| {
+        open_thread(s);
+        open(s);
+        push_page(s, "themes", "");
+    }),
+    ("palette-linked", |s| {
+        open_thread(s);
+        let thread = current(s);
+        let threads = vec![
+            json!({"id": thread, "title": "Replay showcase", "archivedAt": null}),
+            json!({"id": "t-retry", "title": "Retry webhook deliveries", "archivedAt": "2026-11-01T00:00:00.000Z"}),
+        ];
+        super::open_linked(s, "https://github.com/acme/s5code/pull/412", crate::env::LOCAL, Some(threads));
+    }),
+    ("keybindings-warning", |s| {
+        open_thread(s);
+        actions::keybindings_warning(s, "Invalid keybinding at index 2: unknown command \"thread.jump.0\".");
+    }),
     ("palette-files", |s| {
         open_thread(s);
         open(s);
@@ -156,6 +188,15 @@ fn current(s: &App) -> String {
 }
 fn open(s: &mut App) {
     super::reset(s, true);
+}
+/// A second connected machine, "Build box", that can take new projects.
+fn park_box(s: &mut App) {
+    let mut state = data::empty_state();
+    state.conn = s5_net::Conn::Open;
+    state.shell_ready = true;
+    state.config = Some(json!({"newProjectsRoot": "/srv/projects", "environment": {"label": "Build box"}}));
+    s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Build box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+    crate::env::park(s, "box", data::Source::Fixture(state));
 }
 fn browse(s: &mut App, directory: &str, parent: &str, names: &[&str]) {
     let entries: Vec<Value> = names.iter().map(|name| json!({"name": name, "fullPath": format!("{parent}/{name}")})).collect();

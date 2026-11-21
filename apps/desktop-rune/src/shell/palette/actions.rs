@@ -530,7 +530,7 @@ const INVALID_KEYBINDINGS: &str = "Invalid keybindings configuration";
 
 /// `KeybindingsConfigWarning`: the issue as a warning, with "Open keybindings.json" while this
 /// connection may operate, the server names the file and an editor is installed.
-fn keybindings_warning(s: &mut App, message: &str) {
+pub(super) fn keybindings_warning(s: &mut App, message: &str) {
     let path = config(s)["keybindingsConfigPath"].as_str().filter(|p| !p.is_empty()).map(str::to_owned);
     let editor = crate::chat::details::preferred_editor(s).map(|e| e.0);
     let usable = crate::chat::details::grants(s, "orchestration:operate") && path.is_some() && editor.is_some();
