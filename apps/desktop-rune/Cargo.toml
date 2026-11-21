@@ -29,6 +29,13 @@ ring = "0.17"
 pulldown-cmark = { version = "0.13", default-features = false }
 qrcodegen = "1.8"
 
+# Linux SnapShots over the session bus (Screenshot portal, GNOME extension), on the versions and
+# features Rune's `dbus` feature already brings in.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }
+tokio = { version = "1", features = ["rt", "time"] }
+futures-util = "0.3"
+
 [dev-dependencies]
 s5-net = { path = "net", features = ["test-support"] }
 

@@ -173,7 +173,12 @@ function run(argv) {
 }"#;
 
 pub fn supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(target_os = "macos") || linux()
+}
+
+/// Linux capture, which Electron offers on Wayland only.
+pub fn linux() -> bool {
+    crate::desktop::capture_linux::wayland()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -263,6 +268,14 @@ pub struct State {
     /// Why capture can't run.
     pub message: Option<String>,
     pub test: Test,
+    /// Linux: the capture backend and GNOME extension setup, unknown until checked.
+    pub linux: Option<crate::desktop::capture_linux::Setup>,
+    /// Linux: a check or extension action is running.
+    pub linux_busy: bool,
+    /// Linux: why the last check or action failed.
+    pub linux_error: Option<String>,
+    /// Linux: the portal is asking the user to approve the shortcut.
+    pub shortcut_pending: bool,
 }
 
 /// The registration the settings ask for.
@@ -281,6 +294,10 @@ enum Event {
     Captured(Result<(Shot, PathBuf), (Step, Status)>),
     Tested(Result<(), (Step, Status)>),
     Permissions(Option<Permissions>),
+    CaptureFailed(String),
+    LinuxChecked(Result<crate::desktop::capture_linux::Setup, String>),
+    LinuxActed(Result<(), String>),
+    Registered(u64, Result<rune::ShortcutId, rune::ShortcutError>),
 }
 
 #[derive(Default)]
@@ -327,12 +344,13 @@ fn push(event: Event, waker: &Option<Waker>) {
 /// Keeps the app handle for shortcuts and, on macOS, adds the flash overlay.
 pub fn register(app: &mut rune::App<App>) {
     let handle = app.handle();
-    let flash = supported().then(|| {
+    // Overlays need global window positions, which Wayland hides.
+    let flash = cfg!(target_os = "macos").then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flash", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flash_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
         app.overlay(spec.options(options), ())
     });
-    let flight = supported().then(|| {
+    let flight = cfg!(target_os = "macos").then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flight", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flight_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
         app.overlay(spec.options(options), Flight::default())
@@ -729,7 +747,8 @@ pub fn availability(shortcut: &Value) -> Result<(), String> {
     let parsed = accelerator(shortcut).and_then(|a| a.parse::<rune::Shortcut>().ok()).ok_or_else(|| SHORTCUT_TAKEN.to_owned())?;
     LIVE.with(|live| {
         let live = live.borrow();
-        let Some(app) = live.app.as_ref().filter(|_| supported()) else { return Ok(()) };
+        // On Linux a trial registration would raise the portal's consent dialog.
+        let Some(app) = live.app.as_ref().filter(|_| cfg!(target_os = "macos")) else { return Ok(()) };
         let id = app.register_shortcut(parsed, |_: &mut App, _: &mut Tx| {}).map_err(|_| SHORTCUT_TAKEN.to_owned())?;
         let _ = app.unregister_shortcut(id);
         Ok(())
@@ -786,10 +805,24 @@ fn apply(live: &mut Live, plan: Plan, waker: Option<Waker>) {
     state.message = None;
     state.shortcut_registered = false;
     state.shortcut_message = None;
+    state.shortcut_pending = false;
     match &plan {
         Plan::Off => {}
         Plan::Blocked => state.message = Some(SCREEN_RECORDING_MESSAGE.into()),
         Plan::Invalid => state.shortcut_message = Some(SHORTCUT_TAKEN.into()),
+        Plan::Pair(_) if linux() => live.state.shortcut_message = Some(crate::desktop::capture_linux::MODIFIER_PAIR_UNAVAILABLE.into()),
+        Plan::Chord(accelerator) if linux() => {
+            // Portal consent can take minutes; Rune registers Linux shortcuts off the UI thread.
+            let (Some(app), Ok(shortcut)) = (live.app.clone(), accelerator.parse::<rune::Shortcut>()) else {
+                live.state.shortcut_message = Some(SHORTCUT_TAKEN.into());
+                return;
+            };
+            live.state.shortcut_pending = true;
+            std::thread::spawn(move || {
+                let result = app.register_shortcut(shortcut, move |s: &mut App, _: &mut Tx| triggered(s, generation));
+                push(Event::Registered(generation, result), &waker);
+            });
+        }
         Plan::Pair(modifier) => match spawn_poller(modifier, generation, waker) {
             Ok(child) => {
                 live.registration = Registration::Pair(child);
@@ -848,9 +881,59 @@ pub fn play_sound(sound: &str) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(&path, bytes);
     }
-    if let Ok(mut child) = Command::new(AFPLAY).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    if linux() {
+        crate::desktop::capture_linux::play(&path);
+    } else if let Ok(mut child) = Command::new(AFPLAY).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         std::thread::spawn(move || child.wait());
     }
+}
+
+/// `PortalCaptureShortcut`'s failures, as the shortcut row shows them.
+pub fn registration_message(error: &rune::ShortcutError) -> &'static str {
+    match error {
+        rune::ShortcutError::Conflict => SHORTCUT_TAKEN,
+        rune::ShortcutError::PermissionDenied => "Shortcut permission wasn't granted. Use Shortcut permissions to ask again.",
+        rune::ShortcutError::InvalidAccelerator(_) => "This key isn't supported as a Wayland capture shortcut. Choose another key.",
+        _ => "Could not connect to your desktop's shortcut service.",
+    }
+}
+
+/// Checks the Linux backend and extension setup again.
+pub fn refresh_linux(s: &App) {
+    let started = LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let start = linux() && !live.state.linux_busy;
+        if start {
+            live.state.linux_busy = true;
+        }
+        start
+    });
+    if started {
+        let waker = s.ui.panel.waker.clone();
+        std::thread::spawn(move || push(Event::LinuxChecked(crate::desktop::capture_linux::detect()), &waker));
+    }
+}
+
+/// Installs, enables or disables the GNOME extension, then checks again.
+pub fn linux_action(s: &App, action: crate::desktop::capture_linux::Action) {
+    let started = LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let start = linux() && !live.state.linux_busy;
+        if start {
+            live.state.linux_busy = true;
+            live.state.linux_error = None;
+        }
+        start
+    });
+    if started {
+        let waker = s.ui.panel.waker.clone();
+        std::thread::spawn(move || push(Event::LinuxActed(crate::desktop::capture_linux::act(action)), &waker));
+    }
+}
+
+/// Linux: the backend to capture with, once known.
+fn linux_backend() -> Option<crate::desktop::capture_linux::Backend> {
+    LIVE.with(|live| live.borrow().state.linux.as_ref().map(|setup| setup.backend))
 }
 
 /// The shortcut's capture: the sound when it starts, as web plays it on `started`.
@@ -862,11 +945,34 @@ pub fn start(s: &mut App) {
     if busy {
         return;
     }
+    let linux_backend = linux().then(linux_backend);
+    if linux_backend == Some(None) {
+        LIVE.with(|live| live.borrow_mut().capturing = false);
+        refresh_linux(s);
+        crate::shell::palette::toast_error(s, "Snapshot failed", Some("Still checking capture access. Try again in a moment."));
+        return;
+    }
     if crate::settings::value(s, "snapShotPlaySound") != false {
         play_sound(crate::settings::value(s, "snapShotSound").as_str().unwrap_or("soft-pop"));
     }
     let waker = s.ui.panel.waker.clone();
     let dir = crate::host::t3_home().join("userdata").join("snap-shots");
+    if let Some(Some(backend)) = linux_backend {
+        std::thread::spawn(move || {
+            let path = dir.join(format!("window-{}.png", crate::shell::palette::add_project::iso_now().replace(':', "-")));
+            let captured = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| crate::desktop::capture_linux::capture(backend, &path));
+            let event = match captured {
+                Ok(source) => {
+                    let _ = std::fs::write(source_path(&path.to_string_lossy()), source.to_string());
+                    let bounds = Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+                    Event::Captured(Ok((Shot { bounds, source, thumbnail: None }, path)))
+                }
+                Err(message) => Event::CaptureFailed(message),
+            };
+            push(event, &waker);
+        });
+        return;
+    }
     let accessibility = LIVE.with(|live| live.borrow().state.permissions.is_some_and(|p| p.accessibility));
     let extras = Extras {
         text: crate::settings::value(s, "snapShotIncludeAccessibility") != false && accessibility,
@@ -886,7 +992,7 @@ pub fn start(s: &mut App) {
 
 /// The setup wizard's "Test capture": a capture that is discarded.
 pub fn test(s: &mut App) {
-    if !supported() {
+    if !cfg!(target_os = "macos") {
         LIVE.with(|live| live.borrow_mut().state.test = Test::Failed("Test capture requires macOS.".into()));
         return;
     }
@@ -925,7 +1031,7 @@ pub fn request_accessibility(s: &App) {
 fn permissions(s: &App, mode: &'static str) {
     let started = LIVE.with(|live| {
         let mut live = live.borrow_mut();
-        let start = supported() && !live.checking;
+        let start = cfg!(target_os = "macos") && !live.checking;
         if start {
             live.checking = true;
             live.checked_at = Some(Instant::now());
@@ -1003,6 +1109,47 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                     Err((_, status)) => crate::shell::palette::toast_error(s, "Snapshot failed", Some(capture_message(status))),
                 }
             }
+            Event::CaptureFailed(message) => {
+                LIVE.with(|live| live.borrow_mut().capturing = false);
+                crate::shell::palette::toast_error(s, "Snapshot failed", Some(&message));
+            }
+            Event::LinuxChecked(result) => LIVE.with(|live| {
+                let mut live = live.borrow_mut();
+                live.state.linux_busy = false;
+                match result {
+                    Ok(setup) => {
+                        live.state.linux = Some(setup);
+                        live.state.message = None;
+                    }
+                    Err(message) => live.state.message = Some(message),
+                }
+            }),
+            Event::LinuxActed(result) => {
+                LIVE.with(|live| {
+                    let mut live = live.borrow_mut();
+                    live.state.linux_busy = false;
+                    live.state.linux_error = result.err();
+                });
+                refresh_linux(s);
+            }
+            Event::Registered(generation, result) => LIVE.with(|live| {
+                let mut live = live.borrow_mut();
+                if live.generation != generation {
+                    // The settings moved on while the portal asked; drop the stale binding.
+                    if let (Ok(id), Some(app)) = (result, &live.app) {
+                        let _ = app.unregister_shortcut(id);
+                    }
+                    return;
+                }
+                live.state.shortcut_pending = false;
+                match result {
+                    Ok(id) => {
+                        live.registration = Registration::Chord(id);
+                        live.state.shortcut_registered = true;
+                    }
+                    Err(error) => live.state.shortcut_message = Some(registration_message(&error).into()),
+                }
+            }),
             Event::Tested(result) => {
                 let passed = result.is_ok();
                 LIVE.with(|live| live.borrow_mut().state.test = result.map_or_else(|(step, status)| Test::Failed(test_message(step, status)), |()| Test::Passed));
@@ -1015,13 +1162,23 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
             }),
         }
     }
-    let wizard = crate::settings::snapshots::checking_access(s);
+    let wizard = crate::settings::snapshots::checking_access(s) && !linux();
     let on_page = matches!(&s.route, Route::Settings(p) if p == "snap-shot");
     let (unknown, due) = LIVE.with(|live| {
         let live = live.borrow();
         (live.state.permissions.is_none(), live.checked_at.is_none_or(|at| at.elapsed() >= PERMISSION_POLL))
     });
-    if (unknown && (enabled(s) || on_page)) || (wizard && due) {
+    if linux() {
+        // Linux has no permission prompts to check, only the capture backend.
+        let (unknown_setup, busy) = LIVE.with(|live| {
+            let mut live = live.borrow_mut();
+            live.state.permissions.get_or_insert(Permissions { screen_recording: true, accessibility: true });
+            (live.state.linux.is_none() && live.state.message.is_none(), live.state.linux_busy)
+        });
+        if unknown_setup && !busy && (enabled(s) || on_page) {
+            refresh_linux(s);
+        }
+    } else if (unknown && (enabled(s) || on_page)) || (wizard && due) {
         check_permissions(s, false);
     }
     let shortcut = crate::settings::value(s, "snapShotShortcut");
