@@ -885,8 +885,8 @@ pub fn request_delete_many(s: &mut App, ids: Vec<String>) {
 }
 
 fn delete_many(s: &mut App, ids: &[String]) {
-    for id in ids {
-        delete(s, id);
+    for (n, id) in ids.iter().enumerate() {
+        delete_after(s, id, &ids[..n]);
     }
     s.ui.shell.sidebar.selected.retain(|id| !ids.contains(id));
 }
@@ -911,7 +911,12 @@ pub fn request_delete(s: &mut App, id: &str) {
 }
 
 pub fn delete(s: &mut App, id: &str) {
-    crate::chat::details::cleanup::before_delete(s, id);
+    delete_after(s, id, &[]);
+}
+
+/// Deletes `id` after `earlier` in a bulk delete, which no longer hold a worktree it shares.
+fn delete_after(s: &mut App, id: &str, earlier: &[String]) {
+    crate::chat::details::cleanup::before_delete(s, id, earlier);
     dispatch(s, "thread.delete", id, json!({}));
     patch(s, id, |p| p.archived = true);
     if s.route == Route::Thread(id.to_string()) {

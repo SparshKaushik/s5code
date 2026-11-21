@@ -715,10 +715,14 @@ fn layered(e: &Edit, subject: &str, c: Option<&Value>) -> (String, Vec<Value>) {
     (sig, shown)
 }
 
-/// A comment in the activity, among the conversation or a review thread's.
-fn find_comment<'a>(activity: &'a Value, id: &str) -> Option<&'a Value> {
-    let threads = activity["reviewThreads"].as_array().into_iter().flatten().flat_map(|th| th["comments"].as_array().into_iter().flatten());
-    activity["comments"].as_array().into_iter().flatten().chain(threads).find(|c| field(c, "id") == id)
+/// A comment in the activity, among the conversation or a review thread's, or one the Code tab
+/// read past its thread's first page.
+fn find_comment<'a>(s: &'a App, id: &str) -> Option<&'a Value> {
+    let held = s.ui.pages.detail.activity.as_ref().and_then(|activity| {
+        let threads = activity["reviewThreads"].as_array().into_iter().flatten().flat_map(|th| th["comments"].as_array().into_iter().flatten());
+        activity["comments"].as_array().into_iter().flatten().chain(threads).find(|c| field(c, "id") == id)
+    });
+    held.or_else(|| super::pr_code::loaded_comment(s, id))
 }
 
 /// PullRequestReactionBar for a comment: its reactions, then the button opening the picker where
@@ -793,7 +797,7 @@ pub fn reaction_picker(s: &App, t: &T, overlays: &mut Vec<El>) {
     if !matches!(u.tab, 0..=2) {
         return;
     }
-    let (sig, shown) = layered(&u.edit, &subject, u.activity.as_ref().and_then(|a| find_comment(a, &subject)));
+    let (sig, shown) = layered(&u.edit, &subject, find_comment(s, &subject));
     let mut options = row().key(format!("pr-reaction-picker-{subject}")).gap(2.0).px(7.0).py(3.0).center_y();
     for (content, emoji, name) in REACTIONS {
         let reacted = shown.iter().any(|r| field(r, "content") == content && r["viewerHasReacted"] == true);
@@ -1191,6 +1195,13 @@ mod tests {
         s.ui.pages.detail.edit.reactions.insert("c1".into(), ("sig".into(), vec![("heart", true), ("rocket", false)]));
         finish(&mut s, Pending::Reaction { subject: "c1".into(), content: "heart" }, Err(json!({})));
         assert_eq!(s.ui.pages.detail.edit.reactions["c1"].1, vec![("rocket", false)], "a refused reaction drops back to the host's");
+
+        s.ui.pages.detail.activity = Some(json!({"comments": [{"id": "c1"}], "reviewThreads": [{"id": "t1", "comments": [{"id": "tc1"}]}]}));
+        let later = json!({"id": "tc5", "reactions": [{"content": "heart", "count": 1, "actors": [], "viewerHasReacted": true}]});
+        s.ui.pages.code.loaded.insert("t1".into(), (vec![later], None));
+        assert_eq!(["c1", "tc1", "tc5", "gone"].map(|id| find_comment(&s, id).map(|c| field(c, "id"))), [Some("c1"), Some("tc1"), Some("tc5"), None]);
+        let (_, shown) = layered(&s.ui.pages.detail.edit, "tc5", find_comment(&s, "tc5"));
+        assert!(shown[0]["viewerHasReacted"] == true, "the picker ticks your reaction on a comment read past the thread's first page");
         assert!(REACTIONS.iter().all(|r| r.1.ends_with('\u{FE0F}')), "every reaction asks for the colour emoji font");
     }
 

@@ -409,7 +409,7 @@ fn copy_contents(app: &mut App, tx: &mut Tx) {
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
 fn rendered_on(ui: &Ui) -> bool {
-    ui.rendered.unwrap_or(matches!(fp::kind(&ui.selected), Kind::Table(_)))
+    ui.rendered.unwrap_or(matches!(fp::kind(&ui.selected), Kind::Table(_) | Kind::Mermaid))
 }
 
 fn toggle_rendered(app: &mut App) {
@@ -1201,6 +1201,10 @@ fn file_body(app: &App, ui: &Ui, wrap: bool, width: Option<f32>, t: &T) -> El {
         (Kind::Notebook, _, Some(Err(e))) => no_preview(Some(e.as_str())),
         (Kind::Markdown, ..) if rendered_on(ui) => fp::markdown(app, &ui.selected, &ui.editor.text, t),
         (Kind::Table(_), Some(table), _) if rendered_on(ui) => fp::table(table, t),
+        (Kind::Mermaid, ..) if rendered_on(ui) => match crate::chat::timeline::markdown::diagram(&ui.editor.text, t) {
+            Some(diagram) => fp::diagram(diagram),
+            None => no_preview(Some("This diagram type can't be drawn here.")),
+        },
         _ => editor(ui, t, wrap, width),
     }
 }
@@ -1302,6 +1306,8 @@ mod tests {
         ui.selected = "README.md".into();
         ui.rendered = None;
         assert!(!rendered_on(&ui), "markdown opens as source");
+        ui.selected = "flow.mmd".into();
+        assert!(rendered_on(&ui), "Mermaid opens as its diagram");
         ui.selected = "nb.ipynb".into();
         show(&mut ui, r#"{"nbformat":4,"cells":[]}"#.into(), false);
         assert!(matches!(ui.notebook, Some(Ok(_))) && ui.table.is_none());
