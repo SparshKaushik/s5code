@@ -550,15 +550,17 @@ fn poll_rows(s: &mut App) -> bool {
         }
         let open = live.detail.as_ref().map_or(data::s(&r.snapshot, "state") != "merged" && data::s(&r.snapshot, "state") != "closed", |d| d["state"] == "open");
         let detail_due = live.detail_pending.is_none() && (live.detail.is_none() && live.detail_at == 0 || open && now - live.detail_at >= DETAIL_REFRESH_MS);
+        let settled_empty = live.checks.as_ref().is_some_and(Value::is_null);
+        let checks = merged_detail(live).and_then(|d| d["checks"].as_array().cloned()).unwrap_or_default();
+        let checks_due = !detail_due && checks_on && open && live.detail.is_some() && !settled_empty && live.checks_pending.is_none() && live.detail_pending.is_none() && now - live.checks_at >= checks_interval(&checks);
+        let env = s.ui.env.active.clone();
         if detail_due {
             let mut payload = reference.clone();
             payload["allowStale"] = json!(false);
-            live.detail_pending = Some(net.request("pullRequests.detail", payload));
+            s.ui.chat.details.prs.entry(r.url.clone()).or_default().detail_pending = crate::pages::pr_route::send(s, &env, "pullRequests.detail", payload);
         }
-        let settled_empty = live.checks.as_ref().is_some_and(Value::is_null);
-        let checks = merged_detail(live).and_then(|d| d["checks"].as_array().cloned()).unwrap_or_default();
-        if checks_on && open && live.detail.is_some() && !settled_empty && live.checks_pending.is_none() && live.detail_pending.is_none() && now - live.checks_at >= checks_interval(&checks) {
-            live.checks_pending = Some(net.request("pullRequests.checks", reference.clone()));
+        if checks_due {
+            s.ui.chat.details.prs.entry(r.url.clone()).or_default().checks_pending = crate::pages::pr_route::send(s, &env, "pullRequests.checks", reference.clone());
         }
         if let Some((action, e)) = acted {
             let title = if action == "merge" { format!("Could not merge this {}", singular(s)) } else { format!("Could not mark this {} ready", singular(s)) };
@@ -690,8 +692,9 @@ fn poll_handoff(s: &mut App) -> bool {
 
 fn run_action(s: &mut App, url: &str, action: &'static str, method: Option<String>) {
     let Some(r) = row_prs(s).into_iter().find(|r| r.url == url) else { return };
-    let (Some(reference), Some(net)) = (r.reference, s.src.net()) else { return };
-    let id = net.request("pullRequests.runAction", crate::pages::pr_detail::action_payload(&reference, action, method.as_deref()));
+    let Some(reference) = r.reference else { return };
+    let env = s.ui.env.active.clone();
+    let Some(id) = crate::pages::pr_route::send(s, &env, "pullRequests.runAction", crate::pages::pr_detail::action_payload(&reference, action, method.as_deref())) else { return };
     s.ui.chat.details.prs.entry(url.to_string()).or_default().action = Some((id, action));
 }
 

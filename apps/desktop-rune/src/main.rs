@@ -200,6 +200,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= wizard::poll(s);
     changed |= search::poll(s);
     changed |= desktop::poll(s, tx);
+    changed |= desktop::capture::poll(s, tx);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
@@ -214,7 +215,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
     // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
     if matches!(e.key, rune::Key::Modifier { .. }) {
-        return pages::on_modifier(s, e);
+        return settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
     }
     panel::preview::note_focus(s, tx);
     shell::quit::on_key(s, e, tx)
@@ -243,7 +244,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 
@@ -273,6 +274,7 @@ fn main() {
     };
     let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
     panel::popout::register(&mut app);
+    desktop::capture::register(&mut app);
     notify::set_window(app.handle());
     instance.serve(app.handle());
     #[cfg(unix)]
