@@ -39,3 +39,6 @@ opt-level = 2
 [profile.release]
 codegen-units = 16
 incremental = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openh264 = "0.9.10"

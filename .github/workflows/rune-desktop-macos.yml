@@ -55,6 +55,10 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # VideoToolbox decodes the H.264 test clip on a real Mac.
+      - name: Test H.264
+        run: cargo test --release --locked --bin s5code-rune h264
+
       # The app starts this bundled server on launch, as the Electron app starts its own.
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
