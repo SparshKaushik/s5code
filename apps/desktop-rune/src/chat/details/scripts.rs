@@ -721,7 +721,11 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
         .child(col().w_full().gap(6.0).child(field_label("Keybinding")).child(keybinding).child(help(
             "Press a shortcut. Use Backspace to clear. Shortcuts are environment-wide. Projects using the same action share its shortcut.",
         )))
-        .child(col().w_full().gap(6.0).child(field_label("Command")).child(kit::TextArea::new(&e.command).placeholder("bun test").rows(3).on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k).w_full()))
+        .child(col().w_full().gap(6.0).child(field_label("Command")).child({
+            let command = kit::TextArea::new(&e.command).placeholder("bun test").rows(3);
+            // The fieldset is disabled as a whole; without its edit hook the command can't change.
+            if locked { command.build(&k).w_full().opacity(0.64) } else { command.on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k).w_full() }
+        }))
         .child(
             col()
                 .w_full()
