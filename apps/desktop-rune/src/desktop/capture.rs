@@ -30,6 +30,22 @@ const FLASH_DURATION: Duration = Duration::from_millis(180);
 const FLASH_PEAK_OPACITY: f32 = 0.08;
 const PERMISSION_POLL: Duration = Duration::from_secs(2);
 const SCREEN_RECORDING_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+const ACCESSIBILITY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+/// `ACCESSIBILITY_TIMEOUT_MS`; the script stops itself a little sooner to return what it read.
+const TEXT_TIMEOUT: Duration = Duration::from_millis(3_000);
+const TEXT_SCRIPT_BUDGET_MS: u64 = 2_500;
+/// `SNAP_SHOT_ACCESSIBLE_TEXT_MAX_CHARS` and `MAX_ACCESSIBILITY_TREE_NODES`.
+pub const ACCESSIBLE_TEXT_MAX_CHARS: usize = 32_000;
+const ACCESSIBILITY_MAX_NODES: u32 = 10_000;
+/// `SnapShotTransition`'s duration range, distance scale and easing.
+const FLIGHT_MIN_MS: f32 = 280.0;
+const FLIGHT_MAX_MS: f32 = 680.0;
+const FLIGHT_DISTANCE_SCALE: f32 = 2_000.0;
+const FLIGHT_EASING: (f32, f32, f32, f32) = (0.2, 0.8, 0.2, 1.0);
+/// The card's height where it lands on the composer's attachment row, and the decoded size cap.
+const FLIGHT_CARD_HEIGHT: f32 = 56.0;
+const FLIGHT_IMAGE_MAX: u32 = 480;
+const FLIGHT_FADE: Duration = Duration::from_millis(120);
 pub const SCREEN_RECORDING_MESSAGE: &str = "Allow Screen Recording in System Settings, then restart T3 Code.";
 pub const SHORTCUT_TAKEN: &str = "This shortcut is already used by the system or another app.";
 const WINDOW_UNAVAILABLE: &str = "The active window is not available for capture.";
@@ -92,17 +108,77 @@ function run(argv) {
 // TCC answers for the responsible process, which for this child is the app. Null means unknown.
 const PERMISSIONS_SCRIPT: &str = r#"
 ObjC.import("CoreGraphics");
+ObjC.import("ApplicationServices");
 function run(argv) {
   let screen = null;
+  let accessibility = null;
   try {
     if (argv[0] === "request" && !$.CGPreflightScreenCaptureAccess()) $.CGRequestScreenCaptureAccess();
     screen = Boolean($.CGPreflightScreenCaptureAccess());
   } catch (e) {}
-  return JSON.stringify({ screenRecording: screen });
+  try {
+    accessibility = argv[0] === "request-accessibility"
+      ? Boolean($.AXIsProcessTrustedWithOptions($({ AXTrustedCheckOptionPrompt: true })))
+      : Boolean($.AXIsProcessTrusted());
+  } catch (e) {}
+  return JSON.stringify({ screenRecording: screen, accessibility });
+}"#;
+
+// Electron's `accessibleWindowText` walk through System Events: each element's name (else its
+// description) and value, depth first in order, until the node, size or time budget runs out.
+const TEXT_SCRIPT: &str = r#"
+function run(argv) {
+  const pid = Number(argv[0]);
+  const title = argv[1];
+  const deadline = Date.now() + Number(argv[2]);
+  const budget = Number(argv[3]);
+  const maxNodes = Number(argv[4]);
+  const events = Application("System Events");
+  const processes = events.processes.whose({ unixId: pid });
+  if (processes.length === 0) return "[]";
+  const windows = processes[0].windows;
+  let window = null;
+  try {
+    const named = windows.whose({ name: title });
+    if (title && named.length > 0) window = named[0];
+  } catch (e) {}
+  if (!window) {
+    if (windows.length === 0) return "[]";
+    window = windows[0];
+  }
+  const text = (read) => {
+    try {
+      const v = read();
+      return typeof v === "string" ? v : typeof v === "number" ? String(v) : "";
+    } catch (e) {
+      return "";
+    }
+  };
+  const out = [];
+  const stack = [window];
+  let used = 0;
+  let visited = 0;
+  while (stack.length > 0 && visited < maxNodes && used < budget && Date.now() < deadline) {
+    const element = stack.pop();
+    visited += 1;
+    const name = text(() => element.name()) || text(() => element.description());
+    const value = text(() => element.value());
+    out.push(name, value);
+    used += name.length + value.length;
+    let children = [];
+    try { children = element.uiElements(); } catch (e) {}
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
+  return JSON.stringify(out);
 }"#;
 
 pub fn supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(target_os = "macos") || linux()
+}
+
+/// Linux capture, which Electron offers on Wayland only.
+pub fn linux() -> bool {
+    crate::desktop::capture_linux::wayland()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,6 +215,35 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Permissions {
     pub screen_recording: bool,
+    pub accessibility: bool,
+}
+
+/// `macActiveWindow`'s answer: the front app and its layer-0 windows, front to back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Front {
+    pub owner: String,
+    pub pid: u32,
+    pub windows: Vec<Candidate>,
+}
+
+/// What a capture found: the window, for the flash and the flight, and its `SnapShotSource`.
+pub struct Shot {
+    bounds: Bounds,
+    source: Value,
+    thumbnail: Option<rune::Pixels>,
+}
+
+/// The flight overlay's state: the captured picture and the card's frame inside the overlay.
+#[derive(Default)]
+pub struct Flight {
+    pixels: rune::Pixels,
+    card: [f32; 4],
+}
+
+enum FlightStage {
+    /// Shown at the captured window; the next poll sends it on its way.
+    Launch { shown: Instant, to: [f32; 4], seconds: f32 },
+    Flying { until: Instant },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -163,6 +268,14 @@ pub struct State {
     /// Why capture can't run.
     pub message: Option<String>,
     pub test: Test,
+    /// Linux: the capture backend and GNOME extension setup, unknown until checked.
+    pub linux: Option<crate::desktop::capture_linux::Setup>,
+    /// Linux: a check or extension action is running.
+    pub linux_busy: bool,
+    /// Linux: why the last check or action failed.
+    pub linux_error: Option<String>,
+    /// Linux: the portal is asking the user to approve the shortcut.
+    pub shortcut_pending: bool,
 }
 
 /// The registration the settings ask for.
@@ -178,9 +291,13 @@ pub enum Plan {
 enum Event {
     Triggered(u64),
     PairExited(u64),
-    Captured(Result<(Bounds, PathBuf), (Step, Status)>),
+    Captured(Result<(Shot, PathBuf), (Step, Status)>),
     Tested(Result<(), (Step, Status)>),
     Permissions(Option<Permissions>),
+    CaptureFailed(String),
+    LinuxChecked(Result<crate::desktop::capture_linux::Setup, String>),
+    LinuxActed(Result<(), String>),
+    Registered(u64, Result<rune::ShortcutId, rune::ShortcutError>),
 }
 
 #[derive(Default)]
@@ -196,6 +313,10 @@ struct Live {
     app: Option<rune::AppHandle<App>>,
     flash: Option<rune::OverlayHandle<()>>,
     flash_shown: Option<Instant>,
+    flight: Option<rune::OverlayHandle<Flight>>,
+    flight_stage: Option<FlightStage>,
+    /// The composer's frame in screen points, where a flight lands.
+    composer: Option<[f32; 4]>,
     applied: Option<Plan>,
     registration: Registration,
     generation: u64,
@@ -223,15 +344,22 @@ fn push(event: Event, waker: &Option<Waker>) {
 /// Keeps the app handle for shortcuts and, on macOS, adds the flash overlay.
 pub fn register(app: &mut rune::App<App>) {
     let handle = app.handle();
-    let flash = supported().then(|| {
+    // Overlays need global window positions, which Wayland hides.
+    let flash = cfg!(target_os = "macos").then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flash", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flash_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
         app.overlay(spec.options(options), ())
+    });
+    let flight = cfg!(target_os = "macos").then(|| {
+        let spec = rune::OverlaySpec { name: "SnapShot flight", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flight_view };
+        let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
+        app.overlay(spec.options(options), Flight::default())
     });
     LIVE.with(|live| {
         let mut live = live.borrow_mut();
         live.app = Some(handle);
         live.flash = flash;
+        live.flight = flight;
     });
 }
 
@@ -239,18 +367,66 @@ fn flash_view(_: &(), _: &mut rune::Cx<()>) -> El {
     rune::el().w_full().h_full().fill(rune::Color::WHITE.alpha(FLASH_PEAK_OPACITY))
 }
 
+/// `SnapShotTransition`'s card: the captured window's picture, rounded, with a faint edge.
+fn flight_view(f: &Flight, _: &mut rune::Cx<Flight>) -> El {
+    let [x, y, w, h] = f.card;
+    let card = rune::el()
+        .key("snap-shot-flight-card")
+        .absolute(x, y)
+        .w(w)
+        .h(h)
+        .clip_rounded(10.0)
+        .border(1.0, rune::Color::WHITE.alpha(0.25))
+        .pixels_fit(&f.pixels, rune::SurfaceFit::Fill);
+    rune::el().w_full().h_full().child(card)
+}
+
+/// Where a flight lands: the composer's attachment row, as tall as a thumbnail, the window's
+/// aspect kept.
+pub fn flight_target(composer: [f32; 4], source: Bounds) -> [f32; 4] {
+    let aspect = (source.width / source.height.max(1.0)) as f32;
+    let width = (FLIGHT_CARD_HEIGHT * aspect).clamp(40.0, (composer[2] - 26.0).max(40.0));
+    [composer[0] + 13.0, composer[1] + 13.0, width, FLIGHT_CARD_HEIGHT]
+}
+
+/// `snapShotAnimationDurationMs`, in seconds: longer flights take longer, within 280–680 ms.
+pub fn flight_seconds(source: [f32; 4], target: [f32; 4]) -> f32 {
+    let center = |r: [f32; 4]| (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let ((sx, sy), (tx, ty)) = (center(source), center(target));
+    let distance = (sx - tx).hypot(sy - ty);
+    (FLIGHT_MAX_MS - (FLIGHT_MAX_MS - FLIGHT_MIN_MS) * (-distance / FLIGHT_DISTANCE_SCALE).exp()) / 1000.0
+}
+
+/// The overlay's frame covering both ends, and each end inside it.
+pub fn flight_frames(source: [f32; 4], target: [f32; 4]) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let x = source[0].min(target[0]);
+    let y = source[1].min(target[1]);
+    let right = (source[0] + source[2]).max(target[0] + target[2]);
+    let bottom = (source[1] + source[3]).max(target[1] + target[3]);
+    let local = |r: [f32; 4]| [r[0] - x, r[1] - y, r[2], r[3]];
+    ([x, y, right - x, bottom - y], local(source), local(target))
+}
+
+/// The composer reports its frame here so a capture knows where to fly.
+pub fn note_composer(_: &mut App, rect: [f32; 4]) {
+    if supported() {
+        LIVE.with(|live| live.borrow_mut().composer = Some(rect));
+    }
+}
+
 pub fn state() -> State {
     LIVE.with(|live| State { supported: supported(), ..live.borrow().state.clone() })
 }
 
-/// `decodeMacActiveWindowLookup`: the front app's name and its layer-0 windows, front to back.
-pub fn parse_lookup(output: &str) -> Result<Option<(String, Vec<Candidate>)>, Status> {
+/// `decodeMacActiveWindowLookup`: the front app and its layer-0 windows, front to back.
+pub fn parse_lookup(output: &str) -> Result<Option<Front>, Status> {
     let output = output.trim();
     if output.is_empty() {
         return Ok(None);
     }
     let v: Value = serde_json::from_str(output).map_err(|_| Status::Failed)?;
     let owner = v["owner"]["name"].as_str().ok_or(Status::Failed)?.to_owned();
+    let pid = v["owner"]["processId"].as_u64().unwrap_or_default() as u32;
     let mut windows = Vec::new();
     for w in v["windows"].as_array().ok_or(Status::Failed)? {
         let n = |v: &Value| v.as_f64().ok_or(Status::Failed);
@@ -262,7 +438,7 @@ pub fn parse_lookup(output: &str) -> Result<Option<(String, Vec<Candidate>)>, St
             alpha: n(&w["alpha"])?,
         });
     }
-    Ok(Some((owner, windows)))
+    Ok(Some(Front { owner, pid, windows }))
 }
 
 /// `macActiveWindow`: the frontmost visible window, skipping untitled helper strips that hug an
@@ -353,22 +529,120 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((word(16)?, word(20)?))
 }
 
+/// How a capture runs: whether to read the window's text and to decode a picture to fly.
+#[derive(Clone, Copy, Default)]
+struct Extras {
+    text: bool,
+    thumbnail: bool,
+}
+
 /// Finds and captures the front window into `path`, scaled down as Electron stores it.
-fn capture_front(path: &Path) -> Result<Bounds, (Step, Status)> {
+fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
     let find = |status| (Step::FindWindow, status);
     let failed = (Step::CaptureWindow, Status::Failed);
     let output = run(OSASCRIPT, &["-l", "JavaScript", "-e", LOOKUP_SCRIPT], LOOKUP_TIMEOUT).map_err(find)?;
-    let (_, windows) = parse_lookup(&output).map_err(find)?.ok_or(find(Status::Missing))?;
-    let window = choose(&windows).ok_or(find(Status::Missing))?;
+    let front = parse_lookup(&output).map_err(find)?.ok_or(find(Status::Missing))?;
+    let window = choose(&front.windows).ok_or(find(Status::Missing))?;
     let (id, target) = (window.id.to_string(), path.to_string_lossy());
     run(SCREENCAPTURE, &["-l", id.as_str(), "-o", "-x", "-t", "png", &*target], CAPTURE_TIMEOUT).map_err(|status| (Step::CaptureWindow, status))?;
     let bytes = std::fs::read(path).map_err(|_| failed)?;
     let size = png_size(&bytes).ok_or(failed)?;
+    let decoded = || image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|_| failed);
+    let mut image = None;
     if let Some((w, h)) = fitted(size, window.bounds) {
-        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|_| failed)?;
-        image.resize_exact(w, h, image::imageops::FilterType::Lanczos3).save_with_format(path, image::ImageFormat::Png).map_err(|_| failed)?;
+        let resized = decoded()?.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
+        resized.save_with_format(path, image::ImageFormat::Png).map_err(|_| failed)?;
+        image = Some(resized);
     }
-    Ok(window.bounds)
+    let thumbnail = extras.thumbnail.then(|| image.map_or_else(decoded, Ok).ok()).flatten().map(|image| {
+        let small = image.thumbnail(FLIGHT_IMAGE_MAX, FLIGHT_IMAGE_MAX).to_rgba8();
+        let pixels = rune::Pixels::new();
+        pixels.set(small.width(), small.height(), small.into_raw());
+        pixels
+    });
+    let text = extras.text.then(|| read_text(front.pid, &window.title)).flatten();
+    let source = snap_shot_source(&front.owner, &window.title, text.as_deref());
+    Ok(Shot { bounds: window.bounds, source, thumbnail })
+}
+
+/// The window's text through System Events, or None when Accessibility isn't allowed or the
+/// app exposes none.
+fn read_text(pid: u32, title: &str) -> Option<String> {
+    let args = [pid.to_string(), title.to_owned(), TEXT_SCRIPT_BUDGET_MS.to_string(), (ACCESSIBLE_TEXT_MAX_CHARS * 2).to_string(), ACCESSIBILITY_MAX_NODES.to_string()];
+    let mut argv = vec!["-l", "JavaScript", "-e", TEXT_SCRIPT];
+    argv.extend(args.iter().map(String::as_str));
+    let output = run(OSASCRIPT, &argv, TEXT_TIMEOUT).ok()?;
+    let values: Vec<String> = serde_json::from_str(output.trim()).ok()?;
+    Some(accessible_text(&values, ACCESSIBLE_TEXT_MAX_CHARS)).filter(|t| !t.is_empty())
+}
+
+/// `accessibleWindowText` over the walk's names and values: trimmed, each once, one per line,
+/// cut at `max` UTF-16 units without splitting a character.
+pub fn accessible_text(values: &[String], max: usize) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut text = String::new();
+    let mut used = 0;
+    for value in values {
+        let cleaned = value.replace('\0', "");
+        let candidate = cleaned.trim();
+        if candidate.is_empty() || seen.iter().any(|s| s == candidate) {
+            continue;
+        }
+        let separator = usize::from(!text.is_empty());
+        let remaining = max.saturating_sub(used + separator);
+        if remaining == 0 {
+            return text;
+        }
+        let mut piece = String::new();
+        let mut units = 0;
+        for c in candidate.chars() {
+            if units + c.len_utf16() > remaining {
+                break;
+            }
+            piece.push(c);
+            units += c.len_utf16();
+        }
+        if piece.is_empty() {
+            return text;
+        }
+        if separator == 1 {
+            text.push('\n');
+        }
+        text.push_str(&piece);
+        used += separator + units;
+        if piece.len() < candidate.len() {
+            return text;
+        }
+        seen.push(candidate.to_owned());
+    }
+    text
+}
+
+/// Where a snapshot's `SnapShotSource` waits beside its picture until the draft sends it.
+pub fn source_path(png: &str) -> String {
+    format!("{png}.source.json")
+}
+
+/// A queued file's `SnapShotSource`, when it is a snapshot.
+pub fn attached_source(png: &str) -> Option<Value> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(source_path(png)).ok()?).ok()?;
+    (v["kind"] == "snap-shot").then_some(v)
+}
+
+/// `SnapShotSource` for a capture: the app, the window title and, when read, its text.
+pub fn snap_shot_source(owner: &str, title: &str, text: Option<&str>) -> Value {
+    let clip = |s: &str, n: usize| s.trim().chars().take(n).collect::<String>().trim().to_owned();
+    let app = Some(clip(owner, 255)).filter(|a| !a.is_empty()).unwrap_or_else(|| "Window".into());
+    let mut source = json!({
+        "kind": "snap-shot",
+        "capturedAt": crate::shell::palette::add_project::iso_now(),
+        "appName": app,
+        "windowTitle": clip(title, 1_000),
+    });
+    if let Some(text) = text.map(str::trim).filter(|t| !t.is_empty()) {
+        source["accessibleText"] = json!(text);
+    }
+    source
 }
 
 /// `isModifierPairShortcut`: the modifier a pair shortcut watches.
@@ -473,7 +747,8 @@ pub fn availability(shortcut: &Value) -> Result<(), String> {
     let parsed = accelerator(shortcut).and_then(|a| a.parse::<rune::Shortcut>().ok()).ok_or_else(|| SHORTCUT_TAKEN.to_owned())?;
     LIVE.with(|live| {
         let live = live.borrow();
-        let Some(app) = live.app.as_ref().filter(|_| supported()) else { return Ok(()) };
+        // On Linux a trial registration would raise the portal's consent dialog.
+        let Some(app) = live.app.as_ref().filter(|_| cfg!(target_os = "macos")) else { return Ok(()) };
         let id = app.register_shortcut(parsed, |_: &mut App, _: &mut Tx| {}).map_err(|_| SHORTCUT_TAKEN.to_owned())?;
         let _ = app.unregister_shortcut(id);
         Ok(())
@@ -530,10 +805,24 @@ fn apply(live: &mut Live, plan: Plan, waker: Option<Waker>) {
     state.message = None;
     state.shortcut_registered = false;
     state.shortcut_message = None;
+    state.shortcut_pending = false;
     match &plan {
         Plan::Off => {}
         Plan::Blocked => state.message = Some(SCREEN_RECORDING_MESSAGE.into()),
         Plan::Invalid => state.shortcut_message = Some(SHORTCUT_TAKEN.into()),
+        Plan::Pair(_) if linux() => live.state.shortcut_message = Some(crate::desktop::capture_linux::MODIFIER_PAIR_UNAVAILABLE.into()),
+        Plan::Chord(accelerator) if linux() => {
+            // Portal consent can take minutes; Rune registers Linux shortcuts off the UI thread.
+            let (Some(app), Ok(shortcut)) = (live.app.clone(), accelerator.parse::<rune::Shortcut>()) else {
+                live.state.shortcut_message = Some(SHORTCUT_TAKEN.into());
+                return;
+            };
+            live.state.shortcut_pending = true;
+            std::thread::spawn(move || {
+                let result = app.register_shortcut(shortcut, move |s: &mut App, _: &mut Tx| triggered(s, generation));
+                push(Event::Registered(generation, result), &waker);
+            });
+        }
         Plan::Pair(modifier) => match spawn_poller(modifier, generation, waker) {
             Ok(child) => {
                 live.registration = Registration::Pair(child);
@@ -592,9 +881,59 @@ pub fn play_sound(sound: &str) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(&path, bytes);
     }
-    if let Ok(mut child) = Command::new(AFPLAY).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    if linux() {
+        crate::desktop::capture_linux::play(&path);
+    } else if let Ok(mut child) = Command::new(AFPLAY).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         std::thread::spawn(move || child.wait());
     }
+}
+
+/// `PortalCaptureShortcut`'s failures, as the shortcut row shows them.
+pub fn registration_message(error: &rune::ShortcutError) -> &'static str {
+    match error {
+        rune::ShortcutError::Conflict => SHORTCUT_TAKEN,
+        rune::ShortcutError::PermissionDenied => "Shortcut permission wasn't granted. Use Shortcut permissions to ask again.",
+        rune::ShortcutError::InvalidAccelerator(_) => "This key isn't supported as a Wayland capture shortcut. Choose another key.",
+        _ => "Could not connect to your desktop's shortcut service.",
+    }
+}
+
+/// Checks the Linux backend and extension setup again.
+pub fn refresh_linux(s: &App) {
+    let started = LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let start = linux() && !live.state.linux_busy;
+        if start {
+            live.state.linux_busy = true;
+        }
+        start
+    });
+    if started {
+        let waker = s.ui.panel.waker.clone();
+        std::thread::spawn(move || push(Event::LinuxChecked(crate::desktop::capture_linux::detect()), &waker));
+    }
+}
+
+/// Installs, enables or disables the GNOME extension, then checks again.
+pub fn linux_action(s: &App, action: crate::desktop::capture_linux::Action) {
+    let started = LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let start = linux() && !live.state.linux_busy;
+        if start {
+            live.state.linux_busy = true;
+            live.state.linux_error = None;
+        }
+        start
+    });
+    if started {
+        let waker = s.ui.panel.waker.clone();
+        std::thread::spawn(move || push(Event::LinuxActed(crate::desktop::capture_linux::act(action)), &waker));
+    }
+}
+
+/// Linux: the backend to capture with, once known.
+fn linux_backend() -> Option<crate::desktop::capture_linux::Backend> {
+    LIVE.with(|live| live.borrow().state.linux.as_ref().map(|setup| setup.backend))
 }
 
 /// The shortcut's capture: the sound when it starts, as web plays it on `started`.
@@ -606,22 +945,54 @@ pub fn start(s: &mut App) {
     if busy {
         return;
     }
+    let linux_backend = linux().then(linux_backend);
+    if linux_backend == Some(None) {
+        LIVE.with(|live| live.borrow_mut().capturing = false);
+        refresh_linux(s);
+        crate::shell::palette::toast_error(s, "Snapshot failed", Some("Still checking capture access. Try again in a moment."));
+        return;
+    }
     if crate::settings::value(s, "snapShotPlaySound") != false {
         play_sound(crate::settings::value(s, "snapShotSound").as_str().unwrap_or("soft-pop"));
     }
     let waker = s.ui.panel.waker.clone();
     let dir = crate::host::t3_home().join("userdata").join("snap-shots");
+    if let Some(Some(backend)) = linux_backend {
+        std::thread::spawn(move || {
+            let path = dir.join(format!("window-{}.png", crate::shell::palette::add_project::iso_now().replace(':', "-")));
+            let captured = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| crate::desktop::capture_linux::capture(backend, &path));
+            let event = match captured {
+                Ok(source) => {
+                    let _ = std::fs::write(source_path(&path.to_string_lossy()), source.to_string());
+                    let bounds = Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+                    Event::Captured(Ok((Shot { bounds, source, thumbnail: None }, path)))
+                }
+                Err(message) => Event::CaptureFailed(message),
+            };
+            push(event, &waker);
+        });
+        return;
+    }
+    let accessibility = LIVE.with(|live| live.borrow().state.permissions.is_some_and(|p| p.accessibility));
+    let extras = Extras {
+        text: crate::settings::value(s, "snapShotIncludeAccessibility") != false && accessibility,
+        thumbnail: crate::settings::value(s, "snapShotAnimations") != false,
+    };
     std::thread::spawn(move || {
         let name = format!("window-{}.png", crate::shell::palette::add_project::iso_now().replace(':', "-"));
         let path = dir.join(name);
-        let result = std::fs::create_dir_all(&dir).map_err(|_| (Step::CaptureWindow, Status::Failed)).and_then(|()| capture_front(&path)).map(|bounds| (bounds, path));
+        let result = std::fs::create_dir_all(&dir).map_err(|_| (Step::CaptureWindow, Status::Failed)).and_then(|()| capture_front(&path, extras)).map(|shot| {
+            // The attachment's `source` rides beside the picture until the draft sends it.
+            let _ = std::fs::write(source_path(&path.to_string_lossy()), shot.source.to_string());
+            (shot, path)
+        });
         push(Event::Captured(result), &waker);
     });
 }
 
 /// The setup wizard's "Test capture": a capture that is discarded.
 pub fn test(s: &mut App) {
-    if !supported() {
+    if !cfg!(target_os = "macos") {
         LIVE.with(|live| live.borrow_mut().state.test = Test::Failed("Test capture requires macOS.".into()));
         return;
     }
@@ -630,7 +1001,7 @@ pub fn test(s: &mut App) {
     std::thread::spawn(move || {
         let dir = std::env::temp_dir().join(format!("s5code-snapshot-test-{}", std::process::id()));
         let path = dir.join("test.png");
-        let result = std::fs::create_dir_all(&dir).map_err(|_| (Step::CaptureWindow, Status::Failed)).and_then(|()| capture_front(&path)).map(|_| ());
+        let result = std::fs::create_dir_all(&dir).map_err(|_| (Step::CaptureWindow, Status::Failed)).and_then(|()| capture_front(&path, Extras::default())).map(|_| ());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
         push(Event::Tested(result), &waker);
@@ -649,9 +1020,18 @@ pub fn retry() {
 
 /// Rechecks permissions, prompting for Screen Recording and opening its settings pane on `request`.
 pub fn check_permissions(s: &App, request: bool) {
+    permissions(s, if request { "request" } else { "check" });
+}
+
+/// Prompts for Accessibility, which app text reads windows through, and opens its pane.
+pub fn request_accessibility(s: &App) {
+    permissions(s, "request-accessibility");
+}
+
+fn permissions(s: &App, mode: &'static str) {
     let started = LIVE.with(|live| {
         let mut live = live.borrow_mut();
-        let start = supported() && !live.checking;
+        let start = cfg!(target_os = "macos") && !live.checking;
         if start {
             live.checking = true;
             live.checked_at = Some(Instant::now());
@@ -663,20 +1043,22 @@ pub fn check_permissions(s: &App, request: bool) {
     }
     let waker = s.ui.panel.waker.clone();
     std::thread::spawn(move || {
-        let mode = if request { "request" } else { "check" };
         let permissions = run(OSASCRIPT, &["-l", "JavaScript", "-e", PERMISSIONS_SCRIPT, mode], LOOKUP_TIMEOUT).ok().and_then(|out| parse_permissions(&out));
-        if request && permissions.is_some_and(|p| !p.screen_recording) {
+        if mode == "request" && permissions.is_some_and(|p| !p.screen_recording) {
             let _ = run(OPEN, &[SCREEN_RECORDING_SETTINGS_URL], LOOKUP_TIMEOUT);
+        }
+        if mode == "request-accessibility" && permissions.is_some_and(|p| !p.accessibility) {
+            let _ = run(OPEN, &[ACCESSIBILITY_SETTINGS_URL], LOOKUP_TIMEOUT);
         }
         push(Event::Permissions(permissions), &waker);
     });
 }
 
-/// The permissions script's answer; an unknown Screen Recording grant counts as allowed so the
-/// test capture, not a guess, reports the problem.
+/// The permissions script's answer; an unknown grant counts as allowed so the test capture, not
+/// a guess, reports the problem.
 pub fn parse_permissions(output: &str) -> Option<Permissions> {
     let v: Value = serde_json::from_str(output.trim()).ok()?;
-    Some(Permissions { screen_recording: v["screenRecording"].as_bool().unwrap_or(true) })
+    Some(Permissions { screen_recording: v["screenRecording"].as_bool().unwrap_or(true), accessibility: v["accessibility"].as_bool().unwrap_or(true) })
 }
 
 /// Where a capture lands: web's last thread or draft on screen, which needs a project.
@@ -715,15 +1097,59 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                     continue;
                 }
                 match result {
-                    Ok((bounds, path)) => {
+                    Ok((shot, path)) => {
                         if crate::settings::value(s, "snapShotFlash") != false {
-                            flash(bounds);
+                            flash(shot.bounds);
+                        }
+                        if let Some(pixels) = shot.thumbnail.filter(|_| crate::settings::value(s, "snapShotAnimations") != false) {
+                            fly(shot.bounds, pixels);
                         }
                         deliver(s, path);
                     }
                     Err((_, status)) => crate::shell::palette::toast_error(s, "Snapshot failed", Some(capture_message(status))),
                 }
             }
+            Event::CaptureFailed(message) => {
+                LIVE.with(|live| live.borrow_mut().capturing = false);
+                crate::shell::palette::toast_error(s, "Snapshot failed", Some(&message));
+            }
+            Event::LinuxChecked(result) => LIVE.with(|live| {
+                let mut live = live.borrow_mut();
+                live.state.linux_busy = false;
+                match result {
+                    Ok(setup) => {
+                        live.state.linux = Some(setup);
+                        live.state.message = None;
+                    }
+                    Err(message) => live.state.message = Some(message),
+                }
+            }),
+            Event::LinuxActed(result) => {
+                LIVE.with(|live| {
+                    let mut live = live.borrow_mut();
+                    live.state.linux_busy = false;
+                    live.state.linux_error = result.err();
+                });
+                refresh_linux(s);
+            }
+            Event::Registered(generation, result) => LIVE.with(|live| {
+                let mut live = live.borrow_mut();
+                if live.generation != generation {
+                    // The settings moved on while the portal asked; drop the stale binding.
+                    if let (Ok(id), Some(app)) = (result, &live.app) {
+                        let _ = app.unregister_shortcut(id);
+                    }
+                    return;
+                }
+                live.state.shortcut_pending = false;
+                match result {
+                    Ok(id) => {
+                        live.registration = Registration::Chord(id);
+                        live.state.shortcut_registered = true;
+                    }
+                    Err(error) => live.state.shortcut_message = Some(registration_message(&error).into()),
+                }
+            }),
             Event::Tested(result) => {
                 let passed = result.is_ok();
                 LIVE.with(|live| live.borrow_mut().state.test = result.map_or_else(|(step, status)| Test::Failed(test_message(step, status)), |()| Test::Passed));
@@ -732,17 +1158,27 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
             Event::Permissions(permissions) => LIVE.with(|live| {
                 let mut live = live.borrow_mut();
                 live.checking = false;
-                live.state.permissions = Some(permissions.unwrap_or(Permissions { screen_recording: true }));
+                live.state.permissions = Some(permissions.unwrap_or(Permissions { screen_recording: true, accessibility: true }));
             }),
         }
     }
-    let wizard = crate::settings::snapshots::checking_access(s);
+    let wizard = crate::settings::snapshots::checking_access(s) && !linux();
     let on_page = matches!(&s.route, Route::Settings(p) if p == "snap-shot");
     let (unknown, due) = LIVE.with(|live| {
         let live = live.borrow();
         (live.state.permissions.is_none(), live.checked_at.is_none_or(|at| at.elapsed() >= PERMISSION_POLL))
     });
-    if (unknown && (enabled(s) || on_page)) || (wizard && due) {
+    if linux() {
+        // Linux has no permission prompts to check, only the capture backend.
+        let (unknown_setup, busy) = LIVE.with(|live| {
+            let mut live = live.borrow_mut();
+            live.state.permissions.get_or_insert(Permissions { screen_recording: true, accessibility: true });
+            (live.state.linux.is_none() && live.state.message.is_none(), live.state.linux_busy)
+        });
+        if unknown_setup && !busy && (enabled(s) || on_page) {
+            refresh_linux(s);
+        }
+    } else if (unknown && (enabled(s) || on_page)) || (wizard && due) {
         check_permissions(s, false);
     }
     let shortcut = crate::settings::value(s, "snapShotShortcut");
@@ -771,10 +1207,66 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         }
         true
     });
-    if fading || wizard {
-        tx.wake_after(if fading { Duration::from_millis(16) } else { PERMISSION_POLL });
+    let flying = step_flight();
+    match (fading, flying, wizard) {
+        (true, ..) => tx.wake_after(Duration::from_millis(16)),
+        (_, Some(next), _) => tx.wake_after(next),
+        (_, None, true) => tx.wake_after(PERMISSION_POLL),
+        _ => {}
     }
     changed
+}
+
+/// `SnapShotTransition`: shows the picture over the captured window, then on the next poll moves
+/// it to the composer on Electron's curve; the overlay hides once it lands. One flight, no loop.
+fn fly(bounds: Bounds, pixels: rune::Pixels) {
+    LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let (Some(flight), Some(composer)) = (live.flight.clone(), live.composer) else { return };
+        let source = [bounds.x as f32, bounds.y as f32, bounds.width as f32, bounds.height as f32];
+        let target = flight_target(composer, bounds);
+        let (frame, from, to) = flight_frames(source, target);
+        flight.set_placement(Some(rune::OverlayPlacement::Rect { x: frame[0], y: frame[1], width: frame[2], height: frame[3] }));
+        flight.update(move |f, tx| {
+            f.pixels = pixels;
+            f.card = from;
+            tx.instant();
+        });
+        flight.show();
+        live.flight_stage = Some(FlightStage::Launch { shown: Instant::now(), to, seconds: flight_seconds(source, target) });
+    });
+}
+
+/// Advances the flight; returns when to look again while it runs.
+fn step_flight() -> Option<Duration> {
+    LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        let flight = live.flight.clone()?;
+        match live.flight_stage.take()? {
+            FlightStage::Launch { shown, to, seconds } if shown.elapsed() >= Duration::from_millis(32) => {
+                let (x1, y1, x2, y2) = FLIGHT_EASING;
+                flight.update(move |f, tx| {
+                    f.card = to;
+                    tx.motion_curve(rune::Curve::tween(seconds, rune::Easing::cubic(x1, y1, x2, y2)));
+                });
+                let duration = Duration::from_secs_f32(seconds);
+                live.flight_stage = Some(FlightStage::Flying { until: Instant::now() + duration });
+                Some(duration)
+            }
+            stage @ FlightStage::Launch { .. } => {
+                live.flight_stage = Some(stage);
+                Some(Duration::from_millis(16))
+            }
+            FlightStage::Flying { until } if Instant::now() < until => {
+                live.flight_stage = Some(FlightStage::Flying { until });
+                Some(until - Instant::now())
+            }
+            FlightStage::Flying { .. } => {
+                flight.fade_out(FLIGHT_FADE);
+                None
+            }
+        }
+    })
 }
 
 /// Electron's `SnapShotFlash`: a faint white panel over the captured window that fades once.
@@ -804,9 +1296,9 @@ mod tests {
     #[test]
     fn parses_the_lookup_like_electron() {
         let output = r#"{"owner":{"name":"Safari","processId":42},"windows":[{"id":7,"title":"Docs","bounds":{"x":0,"y":25,"width":1200,"height":800},"alpha":1}]}"#;
-        let (owner, windows) = parse_lookup(output).unwrap().unwrap();
-        assert_eq!(owner, "Safari");
-        assert_eq!(windows, [window(7, "Docs", (0., 25., 1200., 800.))]);
+        let front = parse_lookup(output).unwrap().unwrap();
+        assert_eq!((front.owner.as_str(), front.pid), ("Safari", 42));
+        assert_eq!(front.windows, [window(7, "Docs", (0., 25., 1200., 800.))]);
         assert_eq!(parse_lookup("  \n"), Ok(None), "no frontmost app");
         assert_eq!(parse_lookup("{not json"), Err(Status::Failed));
         assert_eq!(parse_lookup(r#"{"owner":{"name":"A"},"windows":[{"id":"7"}]}"#), Err(Status::Failed), "the schema rejects wrong types");
@@ -847,14 +1339,14 @@ mod tests {
         assert!(exited.ends_with("check that \"S5 Code\" is allowed for both."));
         assert!(test_message(Step::FindWindow, Status::TimedOut).contains("Finding the front window timed out."));
         assert!(test_message(Step::FindWindow, Status::Failed).contains("Finding the front window failed. macOS"));
-        assert_eq!(parse_permissions(r#"{"screenRecording":false}"#), Some(Permissions { screen_recording: false }));
-        assert_eq!(parse_permissions(r#"{"screenRecording":null}"#), Some(Permissions { screen_recording: true }), "unknown is left to the test capture");
+        assert_eq!(parse_permissions(r#"{"screenRecording":false,"accessibility":false}"#), Some(Permissions { screen_recording: false, accessibility: false }));
+        assert_eq!(parse_permissions(r#"{"screenRecording":null}"#), Some(Permissions { screen_recording: true, accessibility: true }), "unknown is left to the test capture");
         assert_eq!(parse_permissions(""), None);
     }
 
     #[test]
     fn settings_choose_the_registration() {
-        let granted = Some(Permissions { screen_recording: true });
+        let granted = Some(Permissions { screen_recording: true, accessibility: false });
         let pair = json!({"kind": "both-shift-keys"});
         let chord = json!({"key": "2", "modKey": true, "shiftKey": true, "ctrlKey": false, "altKey": false, "metaKey": false});
         assert_eq!(plan(false, granted, false, &pair), Plan::Off, "disabled");
@@ -869,6 +1361,36 @@ mod tests {
         assert!("shift+cmd+2".parse::<rune::Shortcut>().is_ok(), "Rune parses the accelerator");
         assert_eq!(pair_label("meta"), "Command + Command");
         assert_eq!(pair_shortcut("shift"), pair);
+    }
+
+    #[test]
+    fn reads_app_text_like_electron() {
+        let values: Vec<String> = ["Docs", "", " Docs ", "Search\0", "Search", "Body"].map(String::from).into();
+        assert_eq!(accessible_text(&values, 100), "Docs\nSearch\nBody", "trimmed, NULs dropped, each once, one per line");
+        assert_eq!(accessible_text(&values, 8), "Docs\nSea", "the cap cuts the last value");
+        assert_eq!(accessible_text(&values, 5), "Docs", "no separator without text after it");
+        let emoji = vec!["ab".to_owned(), "😀x".to_owned()];
+        assert_eq!(accessible_text(&emoji, 4), "ab", "a character is never split");
+        let source = snap_shot_source("  Safari ", "Docs", Some(" Body "));
+        assert_eq!((source["kind"].as_str(), source["appName"].as_str(), source["windowTitle"].as_str(), source["accessibleText"].as_str()), (Some("snap-shot"), Some("Safari"), Some("Docs"), Some("Body")));
+        assert!(source["capturedAt"].is_string());
+        let bare = snap_shot_source("", "", Some("  "));
+        assert_eq!(bare["appName"], "Window", "an unnamed app reads as Window");
+        assert!(bare.get("accessibleText").is_none());
+    }
+
+    #[test]
+    fn flies_like_the_electron_transition() {
+        let near = flight_seconds([0., 0., 100., 100.], [0., 0., 100., 100.]);
+        assert!((near - 0.28).abs() < 1e-4, "{near}");
+        let far = flight_seconds([0., 0., 100., 100.], [20_000., 0., 100., 100.]);
+        assert!((far - 0.68).abs() < 1e-3, "{far}");
+        let target = flight_target([100., 600., 700., 120.], Bounds { x: 0., y: 0., width: 1600., height: 1000. });
+        assert_eq!([target[0], target[1], target[3]], [113., 613., 56.], "lands on the attachment row at thumbnail height");
+        assert!((target[2] - 89.6).abs() < 1e-3, "keeps the window's aspect: {}", target[2]);
+        let (frame, from, to) = flight_frames([500., 100., 400., 300.], [113., 613., 90., 56.]);
+        assert_eq!(frame, [113., 100., 787., 569.]);
+        assert_eq!((from, to), ([387., 0., 400., 300.], [0., 513., 90., 56.]));
     }
 
     #[test]

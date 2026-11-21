@@ -10,6 +10,7 @@ pub(crate) mod macos;
 #[cfg(unix)]
 pub mod cli;
 pub mod capture;
+pub mod capture_linux;
 pub mod exposure;
 pub mod policy;
 #[cfg(unix)]
