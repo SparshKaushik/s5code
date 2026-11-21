@@ -23,6 +23,7 @@ use crate::env::TAG;
 use crate::icons as i;
 use crate::kit::{self, Menu, MenuItem, Placement};
 use crate::panel::diff::comments::{ReviewLine, find_index, range_label, record, review_lines};
+use crate::panel::diff::find::{self as diff_find, Find};
 use crate::panel::diff::state::{DiffMode, DiffState, HEADER_H, LINE_H, LineRange, LineRef, Note, Row};
 use crate::panel::diff::view::{self, Host, Look};
 use crate::panel::diff::{all_dirs, is_test_file, layout_toggle, save_layout, toggle, tree_rows};
@@ -48,6 +49,8 @@ const COMMENTS_FAILED: &str = "More comments could not be loaded";
 const TREE_WIDTH_KEY: &str = "diffFileTreeWidth";
 /// PullRequestCommentBody's clip (`max-h-[240px]`).
 const COMMENT_CLIP: f32 = 240.0;
+/// getRenderablePatch's reason for a page it read no file from.
+const RAW_REASON: &str = "Unsupported diff format. Showing raw patch.";
 const ENVIRONMENT_TICKS: &str = "This host keeps no shared record of which files you have read, so these ticks are kept by this environment. They follow you between the apps connected to it, but the host's own web UI will not show them.";
 
 #[derive(Default)]
@@ -108,6 +111,15 @@ pub struct Ui {
     full_comments: HashSet<String>,
     /// The file last revealed from outside the tab, shown even while tests are hidden (revealRequest).
     revealed: Option<String>,
+    /// That reveal until the file is loaded and scrolled to, paging forward meanwhile.
+    reveal: Option<String>,
+    /// Find in the diff (`panel::diff::find`), as the Diff panel has it.
+    pub(crate) find: Option<Find>,
+    pub(crate) find_edit: TextEdit,
+    /// A finished turn's reread of the diff's first page, and the scope it was asked for.
+    refetch: Option<(u64, String)>,
+    /// Pages the parser read no file from, shown as text (getRenderablePatch's raw kind).
+    pub(super) raw: Vec<String>,
 }
 
 /// The line comment being written (DraftAnchor).
@@ -252,10 +264,11 @@ fn shown(f: &FileDiff, hide: bool, kept: Option<&str>) -> bool {
     !hide || !is_test_file(f.path()) || kept == Some(f.path())
 }
 
-/// The tab's "no file changes" state: nothing survives the test filter and no page is left.
+/// The tab's "no file changes" state: nothing survives the test filter, no page is left and
+/// none was left unread.
 pub(super) fn no_changes(s: &App, files: &[FileDiff]) -> bool {
     let kept = s.ui.pages.code.revealed.as_deref();
-    s.ui.pages.code.next.is_none() && !files.iter().any(|f| shown(f, hide_tests(s), kept))
+    s.ui.pages.code.next.is_none() && s.ui.pages.code.raw.is_empty() && !files.iter().any(|f| shown(f, hide_tests(s), kept))
 }
 
 /// The diff in web's order (diffModel): each page read by `order_diff_files`, then all of them as
@@ -809,6 +822,7 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.diff.set_selection(None);
         c.orphans_open = false;
         c.revealed = None;
+        c.reveal = None;
         c.replying = None;
         c.next = None;
         c.pages.clear();
@@ -817,8 +831,11 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.loaded.clear();
         c.editing = None;
         c.full_comments.clear();
+        c.raw.clear();
         changed = true;
     }
+    changed |= sync_refetch(s, &entry);
+    let c = &mut s.ui.pages.code;
     c.diff.set_mode(mode);
     c.diff.set_wrap(wrap);
     if std::mem::take(&mut c.fresh) {
@@ -837,12 +854,81 @@ pub(super) fn poll(s: &mut App) -> bool {
                 show(s);
             }
             unfold(s, &path);
+            s.ui.pages.code.reveal = Some(path);
             changed = true;
         }
         changed |= sync_page(s, &entry) | sync_notes(s);
     }
-    changed |= sync_thread_command(s, &entry) | sync_comment_pages(s, &entry);
+    changed |= sync_thread_command(s, &entry) | sync_comment_pages(s, &entry) | diff_find::refresh(s, Host::PullRequest);
     sync_viewed(s, &entry) | changed
+}
+
+/// answerReveal: a file asked for from outside the tab (a guide's link) is scrolled to once it
+/// is loaded, the diff paging forward until it arrives.
+pub fn answer_reveal(s: &mut App, tx: &mut Tx) -> bool {
+    let Some(path) = s.ui.pages.code.reveal.clone() else { return false };
+    if s.ui.pages.detail.files.is_none() {
+        return false;
+    }
+    match s.ui.pages.code.diff.file_index(&path) {
+        Some(f) => {
+            let c = &mut s.ui.pages.code;
+            c.reveal = None;
+            c.diff.scroll_to_file(f, tx);
+            true
+        }
+        None => load_more(s),
+    }
+}
+
+/// backgroundRefreshToken: a finished turn reads the diff's first page and the viewed ticks
+/// again, the shown diff staying until the new one lands.
+pub(super) fn turn_finished(s: &mut App) {
+    s.ui.pages.code.viewed.refresh = true;
+    if s.ui.pages.detail.files.is_none() || s.ui.pages.code.refetch.is_some() {
+        return;
+    }
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    let mut input = reference(&entry);
+    if let Some(oid) = scoped_commit(&s.ui.pages.detail) {
+        input["commit"] = json!(oid);
+    }
+    let scope = s.ui.pages.code.scope.clone();
+    let Some(net) = super::pull_requests::net_for(s, &entry) else { return };
+    let id = net.http_request("POST", "/api/pull-requests/diff", input);
+    s.ui.pages.code.refetch = Some((id, scope));
+}
+
+/// The reread first page replaces the diff, as a newly read one does; a failed one leaves it.
+fn sync_refetch(s: &mut App, entry: &Value) -> bool {
+    let Some((id, asked)) = s.ui.pages.code.refetch.clone() else { return false };
+    let Some(got) = reply(s, entry, id) else { return false };
+    s.ui.pages.code.refetch = None;
+    if asked != s.ui.pages.code.scope {
+        return true;
+    }
+    if let Ok(d) = got {
+        first_page(s, &d);
+    }
+    true
+}
+
+/// A first page read again replaces the diff, as a newly read one does.
+fn first_page(s: &mut App, d: &Value) {
+    let patch = d["patch"].as_str().unwrap_or("");
+    let files = rune_kit::diff::parse(patch);
+    s.ui.pages.code.raw = unparsed(patch, &files);
+    let u = &mut s.ui.pages.detail;
+    u.files = Some(files);
+    u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
+    let c = &mut s.ui.pages.code;
+    c.next = d["nextCursor"].as_str().map(str::to_owned);
+    c.fresh = true;
+}
+
+/// The page's patch when the parser read no file from it.
+pub(super) fn unparsed(patch: &str, files: &[FileDiff]) -> Vec<String> {
+    if files.is_empty() && !patch.trim().is_empty() { vec![patch.to_owned()] } else { vec![] }
 }
 
 fn show(s: &mut App) {
@@ -868,7 +954,10 @@ fn sync_page(s: &mut App, entry: &Value) -> bool {
     }
     match got {
         Ok(d) => {
-            let more = rune_kit::diff::parse(d["patch"].as_str().unwrap_or(""));
+            let patch = d["patch"].as_str().unwrap_or("");
+            let more = rune_kit::diff::parse(patch);
+            let raw = unparsed(patch, &more);
+            s.ui.pages.code.raw.extend(raw);
             s.ui.pages.code.pages.push(more.len());
             let u = &mut s.ui.pages.detail;
             if let Some(files) = &mut u.files {
@@ -1346,6 +1435,27 @@ fn tree_width(w: f32, row: f32) -> f32 {
     w.clamp(192.0, max)
 }
 
+/// The resize handle's keys: Left widens and Right narrows by 16, Home and End go to the bounds.
+fn resize_step(key: &Key, w: f32, row: f32) -> Option<f32> {
+    let next = match key {
+        Key::Left => w + 16.0,
+        Key::Right => w - 16.0,
+        Key::Home => 0.0,
+        Key::End => f32::MAX,
+        _ => return None,
+    };
+    Some(tree_width(next, row))
+}
+
+/// A folder row's keys: Right opens it, Left folds it.
+fn fold_key(folded: &mut HashSet<String>, dir: &str, key: &Key) -> bool {
+    match key {
+        Key::Right => folded.remove(dir),
+        Key::Left if !folded.contains(dir) => folded.insert(dir.to_owned()),
+        _ => false,
+    }
+}
+
 /// The tree's width: the one being dragged, else the saved one, else the first.
 fn tree_shown(s: &App, row: f32) -> f32 {
     let saved = s.client_settings.values.get(TREE_WIDTH_KEY).and_then(Value::as_f64).map(|w| w as f32);
@@ -1411,7 +1521,7 @@ fn toggle_file(s: &mut App, path: &str, sticky: bool, tx: &mut Tx) {
 }
 
 /// Opens `path` without ever folding it, as a reveal must; returns its index.
-pub(super) fn unfold(s: &mut App, path: &str) -> Option<usize> {
+pub(crate) fn unfold(s: &mut App, path: &str) -> Option<usize> {
     let default = fold_default(s);
     let c = &mut s.ui.pages.code;
     fold_to(c, default, path, false);
@@ -1514,7 +1624,7 @@ pub(super) fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         }
         meta.push(seg);
     }
-    if u.diff_truncated {
+    if u.diff_truncated || !c.raw.is_empty() {
         meta.push(hint(&i::TRIANGLE_ALERT, warn, "Some of this diff was not shown", "The host withheld part of this diff: a binary file, or a change too large to inline.".into()));
     }
     let inline = u.detail.as_ref().is_some_and(|d| d["capabilities"]["review"]["inlineComment"] == true && d["viewerPermissions"]["comment"] != false);
@@ -1593,6 +1703,14 @@ pub(super) fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
 
 /// The loaded diff, beside the file tree when it is open, under the conversations it has no line for.
 pub(super) fn view(s: &App, t: &T) -> El {
+    let c = &s.ui.pages.code;
+    // Raw pages show once no page is left, as the sentinel still pages until then.
+    let raw = (c.next.is_none() && !c.raw.is_empty()).then(|| raw_pages(t, &c.raw));
+    if c.diff.files().is_empty()
+        && let Some(raw) = raw
+    {
+        return raw;
+    }
     let mut main = row().key("pr-code-main").grow(1.0).min_h(0.0).w_full().items_stretch().child(diff_view(s, t));
     if tree_open(s) && !s.ui.pages.code.diff.files().is_empty() {
         let row_w = rune::memo::layout_with("pr-code-main", |r| r[2]);
@@ -1601,7 +1719,22 @@ pub(super) fn view(s: &App, t: &T) -> El {
         }
         main = main.child(tree_handle(t)).child(tree(s, t, row_w.map(|w| tree_shown(s, w))));
     }
-    col().grow(1.0).min_h(0.0).w_full().children(orphans(s, t)).child(main)
+    col().grow(1.0).min_h(0.0).w_full().children(orphans(s, t)).child(main).children(raw.map(|r| col().w_full().max_h(256.0).min_h(0.0).child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(r)))
+}
+
+/// The pages the parser could not read, as text (rawSlicesView and unstructured).
+fn raw_pages(t: &T, raw: &[String]) -> El {
+    let mut list = col().w_full().gap(16.0).px(16.0).py(20.0);
+    for patch in raw {
+        list = list.child(
+            col()
+                .w_full()
+                .gap(8.0)
+                .child(text(RAW_REASON).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(text(patch.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).wrap().selectable(true)),
+        );
+    }
+    col().key("pr-code-raw").grow(1.0).min_h(0.0).w_full().child(list).scroll(ScrollSpec { stick_bottom: false })
 }
 
 /// FileExplorerPane's resize handle: the tree's left edge, so moving left widens it; the width is
@@ -1614,6 +1747,17 @@ fn tree_handle(t: &T) -> El {
         .cursor(Cursor::ResizeColumn)
         .role("separator")
         .label("Resize PR Code files")
+        .focusable(true)
+        .on_key(|s: &mut App, e: &KeyEvent, _: &mut Tx| {
+            if e.mods.alt || e.mods.ctrl || e.mods.cmd || e.mods.logo {
+                return false;
+            }
+            let row = s.ui.pages.code.tree_row.get();
+            let Some(w) = resize_step(&e.key, tree_shown(s, row), row) else { return false };
+            s.client_settings.values.insert(TREE_WIDTH_KEY.into(), json!(w.round()));
+            s.client_settings.save();
+            true
+        })
         .on_drag(|s: &mut App, d: &mut rune::Drag, _: &mut Tx| {
             let row = s.ui.pages.code.tree_row.get();
             if d.cancelled() {
@@ -1894,7 +2038,10 @@ fn diff_view(s: &App, t: &T) -> El {
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }
-    root.on_key(|s: &mut App, e, tx| s.ui.pages.code.diff.key(e, tx))
+    if let Some(bar) = diff_find::bar(s, &look.t, Host::PullRequest) {
+        root = root.child(bar.pin(None, Some(HEADER_H + 8.0), Some(12.0), None));
+    }
+    root.on_key(|s: &mut App, e, tx| diff_find::key(s, Host::PullRequest, e, tx) || s.ui.pages.code.diff.key(e, tx))
 }
 
 /// renderCodeViewFooter: what became of the next page.
@@ -2133,12 +2280,13 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
         head = head.child(fold_all.build(t).help(label));
     }
     let name = format!("{} #{} files", super::pr_row::capitalized(super::pr_row::term(d)), d["number"]);
-    let mut list = col().key("pr-code-tree-rows").w_full().padding(4.0).gap(1.0).role("tree").label(name);
+    let mut list = col().key("pr-code-tree-rows").w_full().padding(4.0).gap(1.0).role("tree").label(name).focus_group();
     for (n, r) in rows.into_iter().enumerate() {
         let pad = 8.0 + r.depth as f32 * 12.0;
-        let base = row().key(format!("t{n}")).h(24.0).pl(pad).pr(8.0).gap(6.0).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem");
+        let base = row().key(format!("t{n}")).h(24.0).pl(pad).pr(8.0).gap(6.0).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem").level(r.depth + 1);
         let line = if let Some(dir) = r.dir {
             let open = !c.folded_dirs.contains(&dir);
+            let keyed = dir.clone();
             base.hover(t.c.foreground.alpha(0.07))
                 .label(r.label.clone())
                 .expanded(open)
@@ -2151,6 +2299,7 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
                         folded.insert(dir.clone());
                     }
                 })
+                .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| fold_key(&mut s.ui.pages.code.folded_dirs, &keyed, &e.key))
         } else {
             let f = r.file.unwrap_or(0);
             let file = &st.files()[f];
@@ -2163,6 +2312,7 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
             let selected = f == current;
             let path = file.path().to_owned();
             base.pl(pad + 18.0)
+                .focus_selected(selected)
                 .fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(path.clone())
@@ -2203,7 +2353,8 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
 /// `threads` (a conversation inline, and two no line holds, opened), `thread-edit` and
 /// `thread-reactions` (its comments reacted to, one more page read, and one comment being edited
 /// or the reaction picker open), `options` (the narrow
-/// toolbar's menu open), `tree-resized` (the file tree at a saved 420), `more-files` (a next
+/// toolbar's menu open), `find` (find in the diff over three matches), `raw` (a page the parser
+/// could not read), `tree-resized` (the file tree at a saved 420), `more-files` (a next
 /// page to read), `file-order` (sources by import, then tests, then generated files, as the tree
 /// lists them), `pending-review` (two comments
 /// pending, for the composer) and `line-comment` (a pending comment and a ranged draft).
@@ -2257,6 +2408,17 @@ pub(super) fn scene(s: &mut App, kind: &str) {
         "options" => {
             unfold(s, usage);
             s.ui.pages.code.options = true;
+        }
+        "find" => {
+            unfold(s, usage);
+            s.ui.pages.code.find = Some(Find::default());
+            s.ui.pages.code.find_edit = TextEdit::new("wall");
+            diff_find::refresh(s, Host::PullRequest);
+        }
+        "raw" => {
+            s.ui.pages.detail.files = Some(vec![]);
+            s.ui.pages.code.raw = vec!["Binary files a/apps/desktop-rune/assets/icon.png and b/apps/desktop-rune/assets/icon.png differ\n".into()];
+            show(s);
         }
         "file-order" => {
             s.client_settings.values.insert(TREE_KEY.into(), json!(true));
@@ -2666,5 +2828,92 @@ mod tests {
         assert_eq!((c["sectionId"].as_str(), c["sectionTitle"].as_str(), c["text"].as_str()), (Some("pull-request:7"), Some("PR #7 review"), Some("")));
         assert_eq!(c["contextId"], json!(crate::chat::composer::chips::context_id("review-comment", &format!("pull-request-selection:{usage}:210:211"))));
         assert_eq!(c["rangeLabel"], "+210 to +211");
+    }
+
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent { key, mods: rune::Mods::default() }
+    }
+
+    #[test]
+    fn find_opens_on_the_chord_and_going_to_a_match_unfolds_its_file() {
+        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
+        let mut s = showing(&entry);
+        s.client_settings.values.insert("diffFilesCollapsed".into(), json!(true));
+        show(&mut s);
+        let usage = "apps/desktop-rune/src/pages/usage.rs";
+        let f = s.ui.pages.code.diff.file_index(usage).unwrap();
+        assert!(s.ui.pages.code.diff.collapsed(f));
+        let mut tx = Tx::default();
+        assert!(!diff_find::key(&mut s, Host::PullRequest, &key(Key::Escape), &mut tx), "nothing to close yet");
+        assert!(diff_find::key(&mut s, Host::PullRequest, &key(Key::Command('f')), &mut tx));
+        assert!(s.ui.pages.code.find.is_some() && s.ui.pages.code.find_edit.focused);
+        s.ui.pages.code.find_edit = TextEdit::new("hour_label");
+        assert!(diff_find::refresh(&mut s, Host::PullRequest));
+        assert!(diff_find::key(&mut s, Host::PullRequest, &key(Key::Command('g')), &mut tx));
+        assert!(!s.ui.pages.code.diff.collapsed(f), "the match's file opens");
+        assert!(s.ui.pages.code.toggled.contains(usage), "through the tab's own folds, so a redraw keeps it open");
+        assert!(diff_find::key(&mut s, Host::PullRequest, &key(Key::Escape), &mut tx));
+        assert!(s.ui.pages.code.find.is_none());
+    }
+
+    #[test]
+    fn a_file_asked_for_from_outside_is_scrolled_to_once_it_is_loaded() {
+        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
+        let mut s = showing(&entry);
+        let usage = "apps/desktop-rune/src/pages/usage.rs";
+        s.ui.pages.detail.expanded.insert(usage.into());
+        poll(&mut s);
+        assert_eq!(s.ui.pages.code.reveal.as_deref(), Some(usage));
+        let f = s.ui.pages.code.diff.file_index(usage).unwrap();
+        assert!(!s.ui.pages.code.diff.collapsed(f));
+        let mut tx = Tx::default();
+        assert!(answer_reveal(&mut s, &mut tx));
+        assert!(s.ui.pages.code.reveal.is_none(), "answered once");
+        s.ui.pages.code.reveal = Some("later.rs".into());
+        assert!(!answer_reveal(&mut s, &mut tx), "no page is left to read it from");
+        assert_eq!(s.ui.pages.code.reveal.as_deref(), Some("later.rs"), "kept until a page brings it");
+    }
+
+    #[test]
+    fn a_finished_turn_rereads_the_first_page_and_the_ticks() {
+        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
+        let mut s = showing(&entry);
+        poll(&mut s);
+        s.ui.pages.code.pages = vec![1];
+        turn_finished(&mut s);
+        assert!(s.ui.pages.code.viewed.refresh, "the viewed ticks read again");
+        let p = "src/a.rs";
+        first_page(&mut s, &json!({"patch": format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n"), "truncated": false, "nextCursor": "c2"}));
+        poll(&mut s);
+        let shown: Vec<&str> = s.ui.pages.code.diff.files().iter().map(FileDiff::path).collect();
+        assert_eq!(shown, [p]);
+        assert!(s.ui.pages.code.pages.is_empty(), "pages read for the old diff go");
+        assert_eq!(s.ui.pages.code.next.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn a_page_the_parser_cannot_read_shows_as_text_instead_of_no_changes() {
+        assert_eq!(unparsed("Binary files differ\n", &[]), ["Binary files differ\n"]);
+        assert!(unparsed("  \n", &[]).is_empty());
+        assert!(unparsed("x", &patch()).is_empty());
+        let mut s = App::new();
+        s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(false));
+        assert!(no_changes(&s, &[]));
+        s.ui.pages.code.raw = vec!["Binary files differ\n".into()];
+        assert!(!no_changes(&s, &[]), "the page shows as text instead");
+    }
+
+    #[test]
+    fn the_file_tree_takes_arrow_keys_for_folders_and_its_width() {
+        assert_eq!(resize_step(&Key::Left, 320.0, 1000.0), Some(336.0));
+        assert_eq!(resize_step(&Key::Right, 200.0, 1000.0), Some(192.0), "never under the minimum");
+        assert_eq!(resize_step(&Key::Home, 400.0, 1000.0), Some(192.0));
+        assert_eq!(resize_step(&Key::End, 300.0, 1000.0), Some(560.0));
+        assert_eq!(resize_step(&Key::Up, 300.0, 1000.0), None);
+        let mut folded = HashSet::new();
+        assert!(fold_key(&mut folded, "src", &Key::Left) && folded.contains("src"));
+        assert!(!fold_key(&mut folded, "src", &Key::Left), "already folded");
+        assert!(fold_key(&mut folded, "src", &Key::Right) && folded.is_empty());
+        assert!(!fold_key(&mut folded, "src", &Key::Right), "already open, so the key goes on");
     }
 }

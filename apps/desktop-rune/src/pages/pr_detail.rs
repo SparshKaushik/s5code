@@ -192,6 +192,7 @@ pub fn poll(s: &mut App) -> bool {
                     u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
                     s.ui.pages.code.fresh = true;
                     s.ui.pages.code.next = d["nextCursor"].as_str().map(str::to_owned);
+                    s.ui.pages.code.raw = super::pr_code::unparsed(d["patch"].as_str().unwrap_or(""), u.files.as_deref().unwrap_or(&[]));
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),
             }
@@ -422,7 +423,8 @@ fn start_checkout(s: &mut App, mode: &'static str) {
 
 /// startResolveConflicts: a worktree checkout whose thread then holds the resolve prompt.
 fn resolve_conflicts(s: &mut App) {
-    let Some(d) = ui(s).detail.clone() else { return };
+    let u = ui(s);
+    let Some(d) = u.detail.clone().or_else(|| u.entry.clone()) else { return };
     start_handoff(s, "worktree", Some(resolve_text(&d)));
 }
 
@@ -532,6 +534,8 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if !matches!(s.route, Route::PullRequests) {
         return false;
     }
+    // The Summary and Timeline hold the markdown editors.
+    let editors = ui(s).tab < 2 && !s.ui.shell.palette.open;
     if matches!(e.key, rune::Key::Escape) {
         let u = ui(s);
         if u.menu || u.confirm.is_some() || u.menu_confirm.is_some() {
@@ -540,9 +544,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
             u.menu_confirm = None;
             return true;
         }
-        return false;
+        return editors && super::pr_edit::preview_key(s, e, tx);
     }
-    if super::pr_guide::on_key(s, e, tx) {
+    if (editors && super::pr_edit::preview_key(s, e, tx)) || super::pr_guide::on_key(s, e, tx) {
         return true;
     }
     // The open panel's `pullRequest.copyNumber`; the palette keeps the keys while open.
@@ -1014,6 +1018,10 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
     } else if s.ui.pages.detail.error.is_none() {
         let term = super::pr_row::capitalized(super::pr_row::term(d));
         let loading = kit::Button::new("").variant("ghost").size("icon-xs").icon(&i::ELLIPSIS).disabled(true).build(t).label(format!("{term} actions loading"));
+        // The list's summary already knows a conflict, so its fix need not wait for the detail.
+        if field(d, "state") == "open" && field(d, "mergeability") == "conflicting" {
+            actions = actions.child(resolve_button(s, t, d, narrow));
+        }
         actions = actions.child(checkout_menu(s, t, d, compact, overlays)).child(loading);
     }
     row().key(TOP).w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
@@ -1148,19 +1156,7 @@ fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr
     out.push(match p {
         Primary::Merged => state_badge("Merged", &i::GIT_MERGE),
         Primary::Closed => state_badge("Closed", &i::GIT_PULL_REQUEST_CLOSED),
-        Primary::Resolve => {
-            let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_some()) { "Preparing..." } else { "Resolve conflicts" };
-            let unavailable = checkout_root(s, d).is_none() || !checkout_allowed(s, u.entry.as_ref().unwrap_or(d), "worktree");
-            kit::Button::new(shown(label))
-                .variant("destructive-outline")
-                .size("xs")
-                .icon(&i::TRIANGLE_ALERT)
-                .disabled(u.checkout.is_some() || unavailable)
-                .on_press(resolve_conflicts)
-                .build(t)
-                .label(label)
-                .help(label)
-        }
+        Primary::Resolve => resolve_button(s, t, d, narrow),
         Primary::Ready => kit::Button::new(shown("Ready for review"))
             .variant("default")
             .size("xs")
@@ -1178,6 +1174,23 @@ fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr
         Primary::Merge => merging("merge", method_label(&merge_method(s, d)).to_string(), "Merging...", "Confirm merge?"),
     });
     out
+}
+
+/// PullRequestResolveConflictsButton: a worktree checkout whose thread then holds the resolve
+/// prompt; `narrow` drops its label.
+fn resolve_button(s: &App, t: &T, d: &Value, narrow: bool) -> El {
+    let u = &s.ui.pages.detail;
+    let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_some()) { "Preparing..." } else { "Resolve conflicts" };
+    let unavailable = checkout_root(s, d).is_none() || !checkout_allowed(s, u.entry.as_ref().unwrap_or(d), "worktree");
+    kit::Button::new(if narrow { "" } else { label })
+        .variant("destructive-outline")
+        .size("xs")
+        .icon(&i::TRIANGLE_ALERT)
+        .disabled(u.checkout.is_some() || unavailable)
+        .on_press(resolve_conflicts)
+        .build(t)
+        .label(label)
+        .help(label)
 }
 
 /// PullRequestActionsMenu: the handoffs, then what the pull request's state allows, its links,
@@ -1718,7 +1731,7 @@ fn comments(s: &App, t: &T, items: &[conv::Item], kept: &[&conv::Item], hidden: 
     let Some(a) = &u.activity else {
         return match &u.activity_error {
             Some(e) => activity_unavailable(s, t, e, true, refresh_detail),
-            None => muted("Loading comments…".into()),
+            None => conversation_ghost(t, u.detail.as_ref().or(u.entry.as_ref()).map_or("pull request", super::pr_row::term)),
         };
     };
     let total = conv::comment_count(items);
@@ -1788,7 +1801,8 @@ fn location(t: &T, c: &Value, thread: Option<&Value>) -> Option<El> {
     Some(row().w_full().gap(8.0).center_y().child(text(label.clone()).font(theme::mono(theme::TEXT_XS)).color(muted).truncate().shrink().min_w(0.0).help(label)).children(outdated))
 }
 
-/// CollapsedComment: who and when, the reply count, and the state that opens it.
+/// CollapsedComment: who and when, the reply count, the state that opens it, and its reactions;
+/// closed, a one-line preview that opens it too.
 fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
     let c = &item.root;
     let open = s.ui.pages.detail.open_comments.contains(item.id);
@@ -1797,36 +1811,30 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
     let muted = t.c.muted_foreground;
     let d = s.ui.pages.detail.detail.as_ref().unwrap_or(&Value::Null);
     let mut head = row().w_full().gap(8.0).center_y().child(actor_label(s, t, d, &c["author"], format!("pr-comment-author-{}", field(c, "id")), t.c.foreground));
-    if let Some(at) = ts(c, "createdAt") {
-        head = head.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
-    }
-    head = head.child(spacer()).children(super::pr_edit::reaction_bar(s, t, c));
+    head = head.children(comment_time(s, t, c)).child(spacer());
     let replies = item.replies.len() + item.more;
     if replies > 0 {
         head = head.child(text(format!("{replies} {}", if replies == 1 { "reply" } else { "replies" })).font(theme::TEXT_XS).color(muted));
     }
     let toggle = item.id.to_string();
-    head = head.child(
-        row()
-            .key(format!("pr-conversation-toggle-{}", item.id))
-            .h(24.0)
-            .px(8.0)
-            .gap(6.0)
-            .center_y()
-            .radius(radius::MD)
-            .hover(t.c.muted)
-            .cursor(Cursor::Pointer)
-            .role("button")
-            .label(label)
-            .child(text(label).font(theme::TEXT_XS).color(muted))
-            .child(icon(&i::CHEVRON_DOWN, 14.0).color(muted).rotate(if open { 180f32.to_radians() } else { 0.0 }))
-            .on_press(move |s: &mut App| {
-                let o = &mut ui(s).open_comments;
-                if !o.remove(&toggle) {
-                    o.insert(toggle.clone());
-                }
-            }),
-    );
+    head = head
+        .child(
+            row()
+                .key(format!("pr-conversation-toggle-{}", item.id))
+                .h(24.0)
+                .px(8.0)
+                .gap(6.0)
+                .center_y()
+                .radius(radius::MD)
+                .hover(t.c.muted)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label(label)
+                .child(text(label).font(theme::TEXT_XS).color(muted))
+                .child(icon(&i::CHEVRON_DOWN, 14.0).color(muted).rotate(if open { 180f32.to_radians() } else { 0.0 }))
+                .on_press(move |s: &mut App| conv::toggle_open(s, &toggle)),
+        )
+        .children(super::pr_edit::reaction_bar(s, t, c));
     let mut card = col().key(format!("pr-conversation-{}", item.id)).w_full().padding(12.0).radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).child(head);
     if let Some(at) = location(t, c, item.thread) {
         card = card.child(at.mt(8.0));
@@ -1834,19 +1842,28 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
     let body = conv::visible_body(field(c, "body"));
     if !open {
         if let Some(body) = body {
-            card = card.child(text(conv::preview(&body)).font(theme::TEXT_XS).color(muted).truncate().mt(8.0));
+            let (preview, toggle) = (conv::preview(&body), item.id.to_string());
+            card = card.child(
+                row()
+                    .key(format!("pr-conversation-preview-{}", item.id))
+                    .w_full()
+                    .mt(8.0)
+                    .hover_group()
+                    .cursor(Cursor::Pointer)
+                    .role("button")
+                    .label(preview.clone())
+                    .child(text(preview).font(theme::TEXT_XS).color(muted).group_color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0))
+                    .on_press(move |s: &mut App| conv::toggle_open(s, &toggle)),
+            );
         }
         return card.children(conv::more_replies(t, item).map(|m| m.mt(8.0)));
     }
-    if let Some(body) = super::pr_edit::comment_body(s, t, c, body.map(|b| markdown(t, &b))) {
+    let shown = body.map(|b| super::pr_code::clipped_comment(s, t, field(c, "id"), markdown(t, &b)));
+    if let Some(body) = super::pr_edit::comment_body(s, t, c, shown) {
         card = card.child(col().w_full().mt(8.0).child(body));
     }
     if !item.replies.is_empty() {
-        let mut thread = col().w_full().gap(12.0);
-        for r in &item.replies {
-            thread = thread.children(super::pr_edit::comment_body(s, t, r, Some(markdown(t, field(r, "body").trim()))));
-        }
-        card = card.child(row().w_full().mt(12.0).ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0)));
+        card = card.child(reply_thread(s, t, &item.replies, Surface::Summary(None)).mt(12.0));
     }
     card.children(conv::more_replies(t, item).map(|m| m.mt(8.0)))
 }
@@ -1936,64 +1953,89 @@ fn time_help(s: &App, c: &Value) -> String {
     if c["url"].is_string() { format!("{when} · Open comment on host") } else { when }
 }
 
-fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surface<'_>) -> El {
-    let avatars = &s.ui.pages.avatars;
+/// CommentIdentity's time: the full date in its tooltip, and a press opens the comment on the host.
+fn comment_time(s: &App, t: &T, c: &Value) -> Option<El> {
+    let at = ts(c, "createdAt")?;
+    let when = text(relative(at, s.now_ms)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground);
+    let time = row().key(format!("pr-comment-time-{}", field(c, "id"))).help(time_help(s, c));
+    Some(match c["url"].as_str().map(str::to_string) {
+        Some(url) => time.hover_group().cursor(Cursor::Pointer).role("link").child(when.group_color(t.c.foreground)).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        }),
+        None => time.child(when),
+    })
+}
+
+/// A card's header: who and what they said, the fix it offers, reactions, when, and its link.
+fn head_line(s: &App, t: &T, c: &Value, surface: Surface<'_>, path: Option<String>, fix: Option<Finding>) -> El {
     let open_label = match surface {
         Surface::Summary(_) => on_host(s),
         Surface::Timeline => "Open activity on host".into(),
     };
+    let d = s.ui.pages.detail.detail.as_ref().unwrap_or(&Value::Null);
+    // CommentIdentity names and links the Summary's authors; the Timeline shows the login alone.
+    let who = match surface {
+        Surface::Summary(_) => actor_label(s, t, d, &c["author"], format!("pr-comment-author-{}", field(c, "id")), t.c.foreground),
+        Surface::Timeline => row()
+            .gap(6.0)
+            .center_y()
+            .shrink()
+            .child(avatar(&s.ui.pages.avatars, &c["author"], 16.0, t))
+            .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink())
+            .child(text(conv::action(c)).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+    };
+    let mut h = row().w_full().gap(6.0).center_y().child(who);
+    let state = field(c, "reviewState");
+    if let Some(outcome) = conv::outcome(state) {
+        h = h.child(conv::outcome_badge(t, outcome));
+    } else if !state.is_empty() {
+        h = h.child(text(conv::review_state_label(state)).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
+    if let Some(path) = path {
+        h = h.child(text(path).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0));
+    }
+    h = h.child(spacer());
+    if let Some(finding) = fix {
+        h = h.child(kit::Button::new(FIX_FINDING).variant("ghost").size("xs").icon(&i::HAMMER).on_press(move |s: &mut App| fix_finding(s, &finding)).build(t));
+    }
+    h = h.children(super::pr_edit::reaction_bar(s, t, c));
+    h = h.children(comment_time(s, t, c));
+    if let Some(url) = c["url"].as_str().map(str::to_string) {
+        h = h.child(
+            row()
+                .key(format!("pr-comment-open-{}", field(c, "id")))
+                .size(20.0, 20.0)
+                .center()
+                .radius(radius::SM)
+                .hover(t.c.accent)
+                .cursor(Cursor::Pointer)
+                .label(open_label)
+                .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
+                .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                    let _ = tx.open_url(&url);
+                }),
+        );
+    }
+    h
+}
+
+/// A thread's replies beside a rule, each under its own header; the Summary clips their bodies
+/// behind "Show full comment" as it does every comment's (PullRequestCommentBody).
+fn reply_thread(s: &App, t: &T, replies: &[Cow<Value>], surface: Surface<'_>) -> El {
+    let mut thread = col().w_full().gap(12.0);
+    for r in replies {
+        let r = &**r;
+        let shown = markdown(t, field(r, "body").trim());
+        let shown = if matches!(surface, Surface::Summary(_)) { super::pr_code::clipped_comment(s, t, field(r, "id"), shown) } else { shown };
+        thread = thread.child(col().w_full().gap(6.0).child(head_line(s, t, r, surface, None, None)).children(super::pr_edit::comment_body(s, t, r, Some(shown))));
+    }
+    row().w_full().ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))
+}
+
+fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surface<'_>) -> El {
     let fix = match surface {
         Surface::Summary(thread) => card_finding(c, thread),
         Surface::Timeline => None,
-    };
-    let d = s.ui.pages.detail.detail.as_ref().unwrap_or(&Value::Null);
-    // CommentIdentity names and links the Summary's authors; the Timeline shows the login alone.
-    let head_line = |c: &Value, path: Option<String>, fix: Option<Finding>| {
-        let who = match surface {
-            Surface::Summary(_) => actor_label(s, t, d, &c["author"], format!("pr-comment-author-{}", field(c, "id")), t.c.foreground),
-            Surface::Timeline => row()
-                .gap(6.0)
-                .center_y()
-                .shrink()
-                .child(avatar(avatars, &c["author"], 16.0, t))
-                .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink())
-                .child(text(conv::action(c)).font(theme::TEXT_XS).color(t.c.muted_foreground)),
-        };
-        let mut h = row().w_full().gap(6.0).center_y().child(who);
-        let state = field(c, "reviewState");
-        if let Some(outcome) = conv::outcome(state) {
-            h = h.child(conv::outcome_badge(t, outcome));
-        } else if !state.is_empty() {
-            h = h.child(text(conv::review_state_label(state)).font(theme::TEXT_XS).color(t.c.muted_foreground));
-        }
-        if let Some(path) = path {
-            h = h.child(text(path).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0));
-        }
-        h = h.child(spacer());
-        if let Some(finding) = fix {
-            h = h.child(kit::Button::new(FIX_FINDING).variant("ghost").size("xs").icon(&i::HAMMER).on_press(move |s: &mut App| fix_finding(s, &finding)).build(t));
-        }
-        h = h.children(super::pr_edit::reaction_bar(s, t, c));
-        if let Some(at) = ts(c, "createdAt") {
-            h = h.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground).help(time_help(s, c)));
-        }
-        if let Some(url) = c["url"].as_str().map(str::to_string) {
-            h = h.child(
-                row()
-                    .key(format!("pr-comment-open-{}", field(c, "id")))
-                    .size(20.0, 20.0)
-                    .center()
-                    .radius(radius::SM)
-                    .hover(t.c.accent)
-                    .cursor(Cursor::Pointer)
-                    .label(open_label.clone())
-                    .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
-                    .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                        let _ = tx.open_url(&url);
-                    }),
-            );
-        }
-        h
     };
     let (path, at) = match surface {
         Surface::Summary(thread) => (None, location(t, c, thread)),
@@ -2004,7 +2046,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
         .radius(radius::LG)
         .border(1.0, t.c.border.alpha_mul(0.6))
         .clip_rounded(radius::LG)
-        .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(c, path, fix)))
+        .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(s, t, c, surface, path, fix)))
         .children(at.map(|at| at.px(12.0).pt(8.0)));
     let summary = matches!(surface, Surface::Summary(_));
     let rendered = conv::visible_body(field(c, "body")).map(|b| markdown(t, &b)).map(|b| if summary { super::pr_code::clipped_comment(s, t, field(c, "id"), b) } else { b });
@@ -2012,11 +2054,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
         card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(body));
     }
     if !replies.is_empty() {
-        let mut thread = col().w_full().gap(12.0);
-        for r in replies {
-            thread = thread.child(col().w_full().gap(6.0).child(head_line(&**r, None, None)).children(super::pr_edit::comment_body(s, t, r, Some(markdown(t, field(r, "body").trim())))));
-        }
-        card = card.child(row().w_full().px(12.0).pb(12.0).child(row().w_full().ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))));
+        card = card.child(row().w_full().px(12.0).pb(12.0).child(reply_thread(s, t, replies, surface)));
     }
     card
 }
@@ -2161,13 +2199,41 @@ fn unavailable(s: &App, t: &T, entry: &Value, error: &str) -> El {
         )
 }
 
-/// The Timeline before its activity answers: a loading note, or PullRequestActivityUnavailableState.
+/// The Timeline before its activity answers: its ghost, or PullRequestActivityUnavailableState.
 fn activity_state(s: &App, t: &T) -> El {
     let u = &s.ui.pages.detail;
-    let Some(error) = &u.activity_error else {
-        return col().w_full().padding(16.0).role("status").label("Loading timeline").child(text("Loading activity…").font(theme::TEXT_XS).color(t.c.muted_foreground));
-    };
+    let Some(error) = &u.activity_error else { return timeline_ghost(t) };
     activity_unavailable(s, t, error, false, retry_activity)
+}
+
+/// PullRequestTimelineGhost: a rail of event shapes, each a dot on the line, a title and a time.
+fn timeline_ghost(t: &T) -> El {
+    let bar = t.c.muted_foreground.alpha_mul(0.15);
+    let mut rail = col().self_stretch().ml(8.0).pl(21.0).child(el().w(1.0).fill(t.c.border.alpha_mul(0.7)).pin(Some(0.0), Some(0.0), None, Some(0.0)));
+    for frac in [0.6, 0.4, 0.5, 2.0 / 3.0, 0.4, 0.6] {
+        rail = rail.child(
+            col()
+                .w_full()
+                .pb(20.0)
+                .child(el().size(8.0, 8.0).radius(radius::FULL).fill(bar).absolute(-24.5, 4.0))
+                .child(row().w_full().child(el().h(14.0).w_frac(frac).radius(4.0).fill(bar)))
+                .child(el().mt(6.0).w(64.0).h(12.0).radius(4.0).fill(bar)),
+        );
+    }
+    col().w_full().px(16.0).py(20.0).role("status").label("Loading timeline").child(rail)
+}
+
+/// PullRequestConversationGhost: comment shapes, an avatar beside three lines, while the
+/// activity is read.
+fn conversation_ghost(t: &T, term: &str) -> El {
+    let bar = t.c.muted_foreground.alpha_mul(0.15);
+    let line = |frac: f32| row().w_full().child(el().h(12.0).w_frac(frac).radius(4.0).fill(bar));
+    let mut out = col().w_full().py(8.0).gap(16.0).role("status").label(format!("Loading {term} conversation"));
+    for frac in [0.4, 1.0 / 3.0, 0.4] {
+        let lines = col().grow(1.0).shrink().min_w(0.0).gap(6.0).child(line(frac)).child(line(1.0)).child(line(0.75));
+        out = out.child(row().w_full().gap(8.0).items_start().child(el().size(20.0, 20.0).radius(radius::FULL).fill(bar)).child(lines));
+    }
+    out
 }
 
 /// PullRequestActivityUnavailableState; `compact` is the Summary's Comments section.
@@ -2332,6 +2398,27 @@ mod tests {
         s.ui.shell.palette.open = false;
         assert!(on_key(&mut s, &chord, &mut Tx::default()), "FAILED: the chord copies the number");
         assert_eq!(crate::shell::palette::toast_title(&s), Some("PR number copied"));
+    }
+
+    #[test]
+    fn a_previewed_markdown_editor_keeps_its_save_and_cancel_keys() {
+        let mut s = App::new();
+        s.navigate(Route::PullRequests);
+        let mut draft = crate::pages::pr_edit::Draft::new("Body");
+        draft.preview = true;
+        s.ui.pages.detail.edit.body = Some(draft);
+        let escape = rune::KeyEvent::from(rune::Key::Escape);
+        s.ui.pages.detail.tab = 2;
+        assert!(!on_key(&mut s, &escape, &mut Tx::default()), "FAILED: the Code tab has no editor to cancel");
+        s.ui.pages.detail.tab = 0;
+        s.ui.pages.detail.menu = true;
+        assert!(on_key(&mut s, &escape, &mut Tx::default()));
+        assert!(s.ui.pages.detail.edit.body.is_some(), "FAILED: an open menu takes Escape first");
+        let mut save = rune::KeyEvent::from(rune::Key::Enter);
+        save.mods.cmd = true;
+        assert!(on_key(&mut s, &save, &mut Tx::default()), "FAILED: Cmd+Enter belongs to the editor even when it can't save");
+        assert!(on_key(&mut s, &escape, &mut Tx::default()));
+        assert!(s.ui.pages.detail.edit.body.is_none(), "FAILED: Escape cancels the previewed editor");
     }
 
     #[test]
@@ -2566,9 +2653,9 @@ mod tests {
         d["mergeability"] = json!("conflicting");
         d[crate::env::TAG] = json!("box");
         s.ui.pages.detail.entry = Some(d.clone());
-        s.ui.pages.detail.detail = Some(d.clone());
         resolve_conflicts(&mut s);
-        let Some(Checkout { request, mode, task, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the checkout is prepared first") };
+        let Some(Checkout { request, mode, task, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the list's conflict starts the checkout before the detail is read") };
+        s.ui.pages.detail.detail = Some(d.clone());
         assert_eq!((mode, task.as_deref()), ("worktree", Some(resolve_text(&d).as_str())));
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Preparing the pull request checkout..."));
         resolve_conflicts(&mut s);

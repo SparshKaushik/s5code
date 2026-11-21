@@ -191,16 +191,45 @@ pub fn visible_body(body: &str) -> Option<String> {
     (!strip_comments(body).trim().is_empty()).then(|| body.trim().to_string())
 }
 
+/// `!?(\[([^\]]+)\])\([^)]*\)` → its text: links and images read as their labels.
+fn strip_links(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let link = after.find(']').filter(|&close| close > 0).and_then(|close| {
+            let target = after[close + 1..].strip_prefix('(')?;
+            let end = target.find(')')?;
+            Some((&after[..close], &target[end + 1..]))
+        });
+        match link {
+            Some((label, next)) => {
+                let head = &rest[..open];
+                out.push_str(head.strip_suffix('!').unwrap_or(head));
+                out.push_str(label);
+                rest = next;
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The one-line preview of a collapsed comment, without markdown marks.
 pub fn preview(body: &str) -> String {
-    let lines: Vec<String> = strip_comments(body)
+    let stripped = strip_comments(body);
+    let kept: Vec<&str> = stripped
         .lines()
         .filter(|l| {
             let l = l.trim().trim_start_matches('>').trim();
             !(l.starts_with("[!") && l.ends_with(']'))
         })
-        .map(|l| l.trim_start_matches(|c: char| c.is_whitespace() || ">#*-".contains(c)).replace(['*', '`'], ""))
         .collect();
+    let lines: Vec<String> = strip_links(&kept.join("\n")).lines().map(|l| l.trim_start_matches(|c: char| c.is_whitespace() || ">#*-".contains(c)).replace(['*', '`'], "")).collect();
     lines.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -232,6 +261,21 @@ fn toggle_popup(s: &mut App, name: &'static str) {
 
 // ---- reviewer verdicts ------------------------------------------------------------------
 
+/// newestPullRequestCommitAt.
+pub fn newest_commit(commits: &[Value]) -> Option<i64> {
+    commits.iter().filter_map(|c| ts(c, "committedDate")).max()
+}
+
+/// isPullRequestVerdictStale: given before the newest commit; an unreadable time never is.
+pub fn verdict_stale(at: Option<i64>, newest: Option<i64>) -> bool {
+    at.zip(newest).is_some_and(|(at, newest)| at < newest)
+}
+
+/// pullRequestReviewOutcomeStaleLabel.
+pub fn stale_label(outcome: &str) -> String {
+    format!("{} earlier changes", outcome_label(outcome))
+}
+
 struct Verdict {
     key: String,
     actor: Value,
@@ -243,13 +287,13 @@ struct Verdict {
 /// latestPullRequestReviewOutcomes: each reviewer's newest verdict, stale when a commit landed
 /// after it; dismissals drop out.
 fn latest_outcomes(comments: &[Value], commits: &[Value]) -> Vec<Verdict> {
-    let newest = commits.iter().filter_map(|c| ts(c, "committedDate")).max();
+    let newest = newest_commit(commits);
     let mut latest: Vec<Verdict> = Vec::new();
     for c in comments {
         let Some(o) = outcome(field(c, "reviewState")) else { continue };
         let key = c["author"]["login"].as_str().map_or_else(|| format!("ghost:{}", field(c, "id")), str::to_string);
         let at = ts(c, "createdAt");
-        let verdict = Verdict { key, actor: c["author"].clone(), outcome: o, at, stale: at.zip(newest).is_some_and(|(at, newest)| at < newest) };
+        let verdict = Verdict { key, actor: c["author"].clone(), outcome: o, at, stale: verdict_stale(at, newest) };
         match latest.iter_mut().find(|v| v.key == verdict.key) {
             Some(current) if current.at.zip(at).is_some_and(|(current, at)| current > at) => {}
             Some(current) => *current = verdict,
@@ -310,6 +354,15 @@ fn outcome_glyph(outcome: &str) -> &'static rune::Icon {
     }
 }
 
+/// pullRequestReviewOutcomeToneClassName.
+fn outcome_tone(t: &T, outcome: &str) -> Color {
+    match outcome {
+        "approved" => if t.dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 },
+        "changes-requested" => t.c.destructive,
+        _ => t.c.muted_foreground.alpha_mul(0.7),
+    }
+}
+
 fn outcome_ring(t: &T, outcome: &str) -> Color {
     match outcome {
         "approved" => if t.dark { tw::EMERALD_400 } else { tw::EMERALD_500 },
@@ -356,7 +409,7 @@ pub fn reviewer_avatars(avatars: &Avatars, t: &T, list: &[Reviewer]) -> El {
             _ => login.to_string(),
         };
         let tip = match r.outcome {
-            Some(o) if r.stale => format!("{named}: {} earlier changes", outcome_label(o)),
+            Some(o) if r.stale => format!("{named}: {}", stale_label(o)),
             Some(o) => format!("{named}: {}", outcome_label(o)),
             None => named,
         };
@@ -538,18 +591,57 @@ pub type Card = fn(&App, &T, &Value, &[Cow<Value>]) -> El;
 
 /// PullRequestTimelineTab's rows for `events`, in their order.
 pub fn timeline_rows(s: &App, t: &T, events: &[Event<'_>], term: &str, card: Card) -> Vec<El> {
+    let newest = newest_commit(list(s.ui.pages.detail.activity.as_ref(), "commits"));
     rows(events)
         .into_iter()
         .map(|r| match r {
             Row::Comments(run) => comment_group(s, t, &run, card),
             Row::Event(e) => match (&e.item, e.kind) {
                 (Some(item), _) if item.thread.is_some() => thread_row(s, t, e, item, card),
+                (Some(item), _) if outcome(field(&item.root, "reviewState")).is_some() => verdict_row(s, t, e, item, verdict_stale(e.at, newest)),
                 (Some(item), _) => beside(marker(actor_mark(s, t, &e.actor)), card(s, t, &item.root, &item.replies)).key(format!("pr-conversation-{}", item.id)),
                 (None, "commit") => commit_row(s, t, e),
                 _ => lifecycle_row(s, t, e, term),
             },
         })
         .collect()
+}
+
+/// ReviewVerdictEvent: who gave which verdict and when, its reactions and link, then its text. A
+/// verdict older than the newest commit reads muted and says so.
+fn verdict_row(s: &App, t: &T, e: &Event<'_>, item: &Item<'_>, stale: bool) -> El {
+    let c = &*item.root;
+    let verdict = outcome(field(c, "reviewState")).unwrap_or("dismissed");
+    let muted = t.c.muted_foreground;
+    let said = outcome_label(verdict).to_lowercase();
+    let state = text(said.clone()).font(theme::XS_MEDIUM);
+    let state = if stale { state.color(muted).opacity(0.7).label(format!("{said}, before the latest commits")).help(stale_label(verdict)) } else { state.color(outcome_tone(t, verdict)) };
+    let login = e.actor["login"].as_str().unwrap_or("ghost").to_string();
+    let who = row().gap(6.0).center_y().child(text(login).font(theme::weight(theme::TEXT_XS, theme::SEMIBOLD)).color(t.c.foreground)).child(state);
+    let small = theme::TEXT_2XS;
+    let mut meta = row().mt(2.0).gap(6.0).center_y().min_w(0.0);
+    if let Some(at) = e.at {
+        meta = meta.child(text(relative(at, s.now_ms)).font(small).color(muted));
+    }
+    if let Some(path) = c["path"].as_str().filter(|p| !p.is_empty()) {
+        if e.at.is_some() {
+            meta = meta.child(text("·").font(small).color(muted.alpha_mul(0.5)));
+        }
+        meta = meta.child(row().gap(4.0).center_y().shrink().min_w(0.0).child(icon(&i::FILE_CODE_CORNER, 12.0).color(muted)).child(text(path.to_string()).font(small).color(muted).truncate().shrink().min_w(0.0)));
+    }
+    let mut head = row().w_full().py(6.0).gap(8.0).center_y().child(col().grow(1.0).shrink().min_w(0.0).child(who).child(meta)).children(super::pr_edit::reaction_bar(s, t, c));
+    if let Some(url) = c["url"].as_str().map(str::to_string) {
+        let open = kit::Button::new("").variant("ghost-muted").size("icon-xs").icon(&i::EXTERNAL_LINK).build(t).key(format!("pr-verdict-open-{}", item.id)).label("Open activity on host");
+        head = head.child(open.on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        }));
+    }
+    let mut content = col().w_full().child(head);
+    if let Some(body) = visible_body(field(c, "body")) {
+        content = content.child(col().w_full().mt(12.0).child(pr_detail::markdown(t, &body)));
+    }
+    let mark = if e.actor.is_object() { avatar(&s.ui.pages.avatars, &e.actor, 28.0, t) } else { icon(outcome_glyph(verdict), 14.0).color(outcome_tone(t, verdict)) };
+    beside(marker(mark).mt(8.0), content).key(format!("pr-conversation-{}", item.id))
 }
 
 /// ActorTimelineMarker's avatar, or the comment glyph without an actor.
@@ -562,7 +654,7 @@ fn beside(mark: El, content: El) -> El {
     row().w_full().gap(16.0).items_start().child(mark).child(col().grow(1.0).shrink().min_w(0.0).child(content))
 }
 
-fn toggle_open(s: &mut App, key: &str) {
+pub fn toggle_open(s: &mut App, key: &str) {
     let open = &mut s.ui.pages.detail.open_comments;
     if !open.remove(key) {
         open.insert(key.to_string());
@@ -853,6 +945,13 @@ mod tests {
             "the newest verdict wins even out of order, dismissals drop out, plain reviews are not verdicts"
         );
         assert_eq!(review_state_label("CHANGES_REQUESTED"), "Changes requested");
+        let newest = newest_commit(&[json!({"committedDate": "2026-11-06T08:30:00Z"}), json!({"committedDate": "2026-11-06T09:10:00Z"}), json!({"committedDate": "soon"})]);
+        let at = |v: &str| ts(&json!({"at": v}), "at");
+        assert_eq!(newest, at("2026-11-06T09:10:00Z"));
+        assert!(verdict_stale(at("2026-11-06T09:00:00Z"), newest));
+        assert!(!verdict_stale(at("2026-11-06T09:10:00Z"), newest), "a verdict on the newest commit is current");
+        assert!(!verdict_stale(at("later"), newest) && !verdict_stale(at("2026-11-06T09:00:00Z"), None));
+        assert_eq!(stale_label("approved"), "Approved earlier changes");
 
         let fresh = comment("v6", "kim", "2026-11-06T09:30:00Z", json!({"kind": "review", "reviewState": "APPROVED"}));
         let mut activity = json!({"comments": ([comments.to_vec(), vec![fresh]].concat()), "commits": commits});
@@ -953,5 +1052,7 @@ mod tests {
         assert_eq!(visible_body("<!-- bot:meta -->\n "), None);
         assert_eq!(visible_body(" Hi <!-- x --> "), Some("Hi <!-- x -->".into()));
         assert_eq!(preview("> [!NOTE]\n## **Fix** the `clamp`\n- then <!-- x -->ship"), "Fix the clamp then ship");
+        assert_eq!(preview("See [the docs](https://x.test/a) and ![chart](c.png), not [this] or [](y) or a!"), "See the docs and chart, not [this] or [](y) or a!");
+        assert_eq!(preview("[[x](u) then [a [b] c](u) and [d](e"), "[x then [a [b] c](u) and [d](e", "a label ends at its first closing bracket and needs its target");
     }
 }

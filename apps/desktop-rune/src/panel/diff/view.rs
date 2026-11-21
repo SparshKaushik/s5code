@@ -234,10 +234,10 @@ pub fn build(s: &App, look: Rc<Look>, footer: Option<El>) -> El {
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }
-    if let Some(bar) = super::find::bar(s, &look.t) {
+    if let Some(bar) = super::find::bar(s, &look.t, Host::Panel) {
         root = root.child(bar.pin(None, Some(HEADER_H + 8.0), Some(12.0), None));
     }
-    root.on_key(|s: &mut App, e, tx| super::find::key(s, e, tx) || st_mut(s).key(e, tx))
+    root.on_key(|s: &mut App, e, tx| super::find::key(s, Host::Panel, e, tx) || st_mut(s).key(e, tx))
 }
 
 pub(crate) fn content_width(l: &Look, st: &DiffState) -> f32 {

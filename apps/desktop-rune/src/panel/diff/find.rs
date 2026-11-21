@@ -7,10 +7,11 @@ use std::ops::Range;
 
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax;
-use rune::{Color, Cursor, El, Icon, Key, KeyEvent, Span, Tx, icon, rich, row, text, text_input};
+use rune::{Color, Cursor, El, Icon, Key, KeyEvent, Span, TextEdit, Tx, icon, rich, row, text, text_input};
 use rune_kit::diff::{LineKind, Side};
 
 use super::state::{DiffState, GAP};
+use super::view::Host;
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
 
@@ -101,46 +102,88 @@ pub fn collect(st: &DiffState, re: &Regex, word: bool) -> Vec<Hit> {
     hits
 }
 
-fn signature(app: &App) -> u64 {
-    let ui = &app.ui.panel.diff;
+/// The find, its query and the diff it searches, in the view that hosts them.
+fn parts(app: &mut App, host: Host) -> (&mut Option<Find>, &mut TextEdit, &mut DiffState) {
+    match host {
+        Host::Panel => {
+            let ui = &mut app.ui.panel.diff;
+            (&mut ui.find, &mut ui.find_edit, &mut ui.state)
+        }
+        Host::PullRequest => {
+            let c = &mut app.ui.pages.code;
+            (&mut c.find, &mut c.find_edit, &mut c.diff)
+        }
+    }
+}
+
+fn parts_ref(app: &App, host: Host) -> (Option<&Find>, &TextEdit, &DiffState) {
+    match host {
+        Host::Panel => {
+            let ui = &app.ui.panel.diff;
+            (ui.find.as_ref(), &ui.find_edit, &ui.state)
+        }
+        Host::PullRequest => {
+            let c = &app.ui.pages.code;
+            (c.find.as_ref(), &c.find_edit, &c.diff)
+        }
+    }
+}
+
+/// onRevealSearchMatch: folds are the host's state, so the host unfolds the file.
+fn unfold(app: &mut App, host: Host, f: usize) {
+    match host {
+        Host::Panel => {
+            let ui = &mut app.ui.panel.diff;
+            ui.touched = true;
+            ui.state.set_collapsed(f, false);
+        }
+        Host::PullRequest => {
+            let Some(path) = app.ui.pages.code.diff.files().get(f).map(|file| file.path().to_owned()) else { return };
+            crate::pages::pr_code::unfold(app, &path);
+        }
+    }
+}
+
+fn signature(app: &App, host: Host) -> u64 {
+    let (find, edit, st) = parts_ref(app, host);
     let mut h = std::hash::DefaultHasher::new();
-    ui.find_edit.text.hash(&mut h);
-    if let Some(f) = &ui.find {
+    edit.text.hash(&mut h);
+    if let Some(f) = find {
         (f.case, f.word, f.regex).hash(&mut h);
     }
-    ui.state.files_rev.hash(&mut h);
+    st.files_rev.hash(&mut h);
     h.finish()
 }
 
-fn paint(app: &mut App) {
-    let ui = &mut app.ui.panel.diff;
-    let Some(find) = &ui.find else { return };
+fn paint(app: &mut App, host: Host) {
+    let (find, _, st) = parts(app, host);
+    let Some(find) = find.as_ref() else { return };
     let mut map: HashMap<(u32, u32, u32), Vec<(Range<usize>, bool)>> = HashMap::new();
     for (j, hit) in find.hits.iter().enumerate() {
         map.entry((hit.f as u32, hit.h, hit.i)).or_default().push((hit.range.clone(), find.current == Some(j)));
     }
-    ui.state.set_hits(map);
+    st.set_hits(map);
 }
 
 /// Searches again when the query, its options or the files changed; keeps the current match
 /// when it is still there. Returns whether anything changed.
-pub fn refresh(app: &mut App) -> bool {
-    if app.ui.panel.diff.find.is_none() {
+pub fn refresh(app: &mut App, host: Host) -> bool {
+    if parts_ref(app, host).0.is_none() {
         return false;
     }
-    let sig = signature(app);
-    let ui = &mut app.ui.panel.diff;
-    let Some(find) = ui.find.as_mut() else { return false };
+    let sig = signature(app, host);
+    let (find, edit, st) = parts(app, host);
+    let st: &DiffState = st;
+    let Some(find) = find.as_mut() else { return false };
     if find.searched == sig {
         return false;
     }
     find.searched = sig;
     let before = find.current.and_then(|j| find.hits.get(j).cloned());
-    find.hits = pattern(&ui.find_edit.text, find.case, find.regex).map(|re| collect(&ui.state, &re, find.word)).unwrap_or_default();
-    let st = &ui.state;
+    find.hits = pattern(&edit.text, find.case, find.regex).map(|re| collect(st, &re, find.word)).unwrap_or_default();
     let first = first_visible(&find.hits, &|h: &Hit| st.row_at(h.f, h.side, h.line), st.first_visible_row(), st.visible_file());
     find.current = before.and_then(|b| find.hits.iter().position(|h| *h == b)).or(first);
-    paint(app);
+    paint(app, host);
     true
 }
 
@@ -154,16 +197,16 @@ fn first_visible(hits: &[Hit], row: &dyn Fn(&Hit) -> Option<u32>, top: u32, file
 }
 
 /// Shows match `j`: unfolds its file, opens its gap, scrolls it below the sticky header.
-fn go(app: &mut App, tx: &mut Tx, j: usize) {
-    let ui = &mut app.ui.panel.diff;
-    let Some(find) = ui.find.as_mut() else { return };
+fn go(app: &mut App, tx: &mut Tx, host: Host, j: usize) {
+    let (find, _, st) = parts(app, host);
+    let Some(find) = find.as_mut() else { return };
     let Some(hit) = find.hits.get(j).cloned() else { return };
     find.current = Some(j);
-    if ui.state.collapsed(hit.f) {
-        ui.touched = true;
-        ui.state.set_collapsed(hit.f, false);
+    if st.collapsed(hit.f) {
+        unfold(app, host, hit.f);
     }
-    if hit.h & GAP != 0 {
+    if host == Host::Panel && hit.h & GAP != 0 {
+        let ui = &mut app.ui.panel.diff;
         let g = (hit.h & !GAP) as usize;
         if ui.state.row_at(hit.f, hit.side, hit.line).is_none() {
             let n = ui.state.gap_len(hit.f, g);
@@ -172,16 +215,16 @@ fn go(app: &mut App, tx: &mut Tx, j: usize) {
             super::sync_extras(app);
         }
     }
-    let ui = &mut app.ui.panel.diff;
-    if let Some(r) = ui.state.row_at(hit.f, hit.side, hit.line) {
+    let (_, _, st) = parts(app, host);
+    if let Some(r) = st.row_at(hit.f, hit.side, hit.line) {
         // Two rows of headroom keep the match clear of the floating find bar.
-        ui.state.reveal_row(r.saturating_sub(2), tx);
+        st.reveal_row(r.saturating_sub(2), tx);
     }
-    paint(app);
+    paint(app, host);
 }
 
-fn navigate(app: &mut App, tx: &mut Tx, back: bool) {
-    let Some(find) = &app.ui.panel.diff.find else { return };
+fn navigate(app: &mut App, tx: &mut Tx, host: Host, back: bool) {
+    let Some(find) = parts_ref(app, host).0 else { return };
     let n = find.hits.len();
     if n == 0 {
         return;
@@ -191,68 +234,68 @@ fn navigate(app: &mut App, tx: &mut Tx, back: bool) {
         (Some(c), true) => (c + n - 1) % n,
         (None, _) => 0,
     };
-    go(app, tx, j);
+    go(app, tx, host, j);
 }
 
-fn open(app: &mut App) {
-    let ui = &mut app.ui.panel.diff;
-    ui.find.get_or_insert_with(Find::default);
-    let len = ui.find_edit.text.len();
-    ui.find_edit.set_selection(0, len);
-    ui.find_edit.focused = true;
-    refresh(app);
+fn open(app: &mut App, host: Host) {
+    let (find, edit, _) = parts(app, host);
+    find.get_or_insert_with(Find::default);
+    let len = edit.text.len();
+    edit.set_selection(0, len);
+    edit.focused = true;
+    refresh(app, host);
 }
 
-pub fn close(app: &mut App) {
-    let ui = &mut app.ui.panel.diff;
-    if ui.find.take().is_some() {
-        ui.find_edit.focused = false;
-        ui.state.set_hits(HashMap::new());
+pub fn close(app: &mut App, host: Host) {
+    let (find, edit, st) = parts(app, host);
+    if find.take().is_some() {
+        edit.focused = false;
+        st.set_hits(HashMap::new());
     }
 }
 
 /// The diff's keys: Cmd/Ctrl+F opens, Cmd/Ctrl+G and Shift steps, Escape closes.
-pub fn key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+pub fn key(app: &mut App, host: Host, e: &KeyEvent, tx: &mut Tx) -> bool {
     if e.is_command('f') {
-        open(app);
+        open(app, host);
         return true;
     }
-    if app.ui.panel.diff.find.is_none() {
+    if parts_ref(app, host).0.is_none() {
         return false;
     }
     if e.is_command('g') {
-        navigate(app, tx, e.mods.shift);
+        navigate(app, tx, host, e.mods.shift);
         return true;
     }
     if e.key == Key::Escape {
-        close(app);
+        close(app, host);
         return true;
     }
     false
 }
 
-fn input_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+fn input_key(app: &mut App, host: Host, e: &KeyEvent, tx: &mut Tx) -> bool {
     match e.key {
-        Key::Enter => navigate(app, tx, e.mods.shift),
+        Key::Enter => navigate(app, tx, host, e.mods.shift),
         Key::Escape => {
-            close(app);
+            close(app, host);
             tx.blur();
         }
-        _ if e.is_command('g') => navigate(app, tx, e.mods.shift),
+        _ if e.is_command('g') => navigate(app, tx, host, e.mods.shift),
         _ => return false,
     }
     true
 }
 
-fn changed(app: &mut App, tx: &mut Tx) {
-    if refresh(app)
-        && let Some(j) = app.ui.panel.diff.find.as_ref().and_then(|f| f.current)
+fn changed(app: &mut App, host: Host, tx: &mut Tx) {
+    if refresh(app, host)
+        && let Some(j) = parts_ref(app, host).0.and_then(|f| f.current)
     {
-        go(app, tx, j);
+        go(app, tx, host, j);
     }
 }
 
-fn option(t: &T, label: &'static str, glyph: &'static str, on: bool, flag: fn(&mut Find) -> &mut bool) -> El {
+fn option(t: &T, host: Host, label: &'static str, glyph: &'static str, on: bool, flag: fn(&mut Find) -> &mut bool) -> El {
     let fg = if on { t.c.primary } else { t.c.muted_foreground };
     let glyph_el = if glyph == "ab" {
         rich(glyph, vec![Span::new(0, 2).underline(fg)]).font(theme::mono(theme::TEXT_2XS)).color(fg)
@@ -264,11 +307,11 @@ fn option(t: &T, label: &'static str, glyph: &'static str, on: bool, flag: fn(&m
         b = b.fill(t.c.primary.alpha_mul(0.12));
     }
     b.on_press_tx(move |s: &mut App, tx| {
-        if let Some(f) = s.ui.panel.diff.find.as_mut() {
+        if let Some(f) = parts(s, host).0.as_mut() {
             let v = flag(f);
             *v = !*v;
         }
-        changed(s, tx);
+        changed(s, host, tx);
     })
 }
 
@@ -280,16 +323,16 @@ fn button(t: &T, key: &'static str, label: &'static str, glyph: &'static Icon, e
     b.hover(t.c.accent).cursor(Cursor::Pointer).on_press_tx(act)
 }
 
-pub fn bar(s: &App, t: &T) -> Option<El> {
-    let ui = &s.ui.panel.diff;
-    let find = ui.find.as_ref()?;
+pub fn bar(s: &App, t: &T, host: Host) -> Option<El> {
+    let (find, find_edit, _) = parts_ref(s, host);
+    let find = find?;
     let n = find.hits.len();
-    let count = match (ui.find_edit.text.is_empty(), find.current) {
+    let count = match (find_edit.text.is_empty(), find.current) {
         (true, _) => String::new(),
         (false, Some(c)) => format!("{} of {n}", c + 1),
         (false, None) => "No results".into(),
     };
-    let input = text_input(&ui.find_edit, theme::TEXT_SM)
+    let input = text_input(find_edit, theme::TEXT_SM)
         .key("diff-find-input")
         .role("textbox")
         .label("Find")
@@ -301,9 +344,9 @@ pub fn bar(s: &App, t: &T) -> Option<El> {
         .color(t.c.popover_foreground)
         .placeholder("Find", t.c.muted_foreground)
         .caret(t.c.popover_foreground, t.c.primary.alpha_mul(0.3))
-        .on_edit(|s: &mut App| &mut s.ui.panel.diff.find_edit)
-        .on_input_key(input_key)
-        .on_input_change(changed);
+        .on_edit(move |s: &mut App| parts(s, host).1)
+        .on_input_key(move |s: &mut App, e: &KeyEvent, tx: &mut Tx| input_key(s, host, e, tx))
+        .on_input_change(move |s: &mut App, tx: &mut Tx| changed(s, host, tx));
     Some(
         row()
             .key("diff-find")
@@ -317,14 +360,14 @@ pub fn bar(s: &App, t: &T) -> Option<El> {
             .role("search")
             .label("Find in diff")
             .child(input)
-            .child(option(t, "Match case", "Aa", find.case, |f| &mut f.case))
-            .child(option(t, "Match whole word", "ab", find.word, |f| &mut f.word))
-            .child(option(t, "Use regular expression", ".*", find.regex, |f| &mut f.regex))
+            .child(option(t, host, "Match case", "Aa", find.case, |f| &mut f.case))
+            .child(option(t, host, "Match whole word", "ab", find.word, |f| &mut f.word))
+            .child(option(t, host, "Use regular expression", ".*", find.regex, |f| &mut f.regex))
             .child(text(count).font(theme::TEXT_2XS).color(t.c.muted_foreground).min_w(56.0).px(4.0))
-            .child(button(t, "prev", "Previous match", &icons::ARROW_UP, n > 0, |s, tx| navigate(s, tx, true)))
-            .child(button(t, "next", "Next match", &icons::ARROW_DOWN, n > 0, |s, tx| navigate(s, tx, false)))
-            .child(button(t, "close", "Close find", &icons::X, true, |s, tx| {
-                close(s);
+            .child(button(t, "prev", "Previous match", &icons::ARROW_UP, n > 0, move |s, tx| navigate(s, tx, host, true)))
+            .child(button(t, "next", "Next match", &icons::ARROW_DOWN, n > 0, move |s, tx| navigate(s, tx, host, false)))
+            .child(button(t, "close", "Close find", &icons::X, true, move |s, tx| {
+                close(s, host);
                 tx.blur();
             })),
     )

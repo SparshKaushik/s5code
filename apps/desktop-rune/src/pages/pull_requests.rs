@@ -1068,6 +1068,7 @@ fn watch_refreshes(s: &mut App, on: bool) -> bool {
     after_turn(ui(s), &moved, &active);
     if s.ui.pages.detail.entry.as_ref().is_some_and(|e| moved.iter().any(|env| env.as_str() == origin(e, &active))) {
         super::pr_detail::refresh(s);
+        super::pr_code::turn_finished(s);
     }
     true
 }
