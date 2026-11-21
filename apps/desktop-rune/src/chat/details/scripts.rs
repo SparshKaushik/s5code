@@ -323,6 +323,17 @@ fn edit_denied(s: &App, changes_keybinding: bool) -> Option<&'static str> {
     }
 }
 
+/// A chat code block's "Run in terminal" (runShellCommand): the project-script terminal, the
+/// command kept in shell history and not remembered as the last action.
+pub fn run_command(s: &mut App, command: &str) {
+    if !can_run(s) {
+        return;
+    }
+    let worktree = composer::ctx(s).thread.map(|t| data::s(t, "worktreePath").to_string()).filter(|p| !p.is_empty());
+    let Some(cwd) = super::cwd(s) else { return };
+    crate::panel::drawer::run(s, &cwd, worktree.as_deref(), format!("{command}\r"));
+}
+
 pub fn run(s: &mut App, script: &Value) {
     if !can_run(s) {
         return;

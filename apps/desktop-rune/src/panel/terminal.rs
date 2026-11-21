@@ -247,6 +247,8 @@ pub struct Ui {
     pub menu: Option<Menu>,
     /// Requests whose failure is written into their terminal, as web's `writeSystemMessage`.
     pending: Vec<(u64, String, String)>,
+    /// `terminal.resize` replies, dropped unread: web reports no resize failure.
+    resizes: Vec<u64>,
     /// `terminal.close` requests, to type `exit` when one fails.
     closing: Vec<(u64, String, String)>,
     /// The palette last drawn with, for colour queries answered outside the view.
@@ -465,7 +467,7 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
         && let Some(net) = app.src.net()
     {
         let request = net.request("terminal.resize", json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}));
-        app.ui.panel.terminal.pending.push((request, thread.to_string(), id.to_string()));
+        app.ui.panel.terminal.resizes.push(request);
     }
 }
 
@@ -506,6 +508,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             tx.wake_after(p.due - now);
         }
     }
+    if let Some(net) = app.src.net() {
+        app.ui.panel.terminal.resizes.retain(|request| net.take_reply(*request).is_none());
+    }
     let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
     for (request, thread, id) in pending {
         match app.src.net().and_then(|net| net.take_reply(request)) {
@@ -527,7 +532,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     && let Some(session) = app.ui.panel.terminal.get_mut(&thread, &id)
                 {
                     let message = data::s(&error, "message");
-                    system_line(session, if message.is_empty() { "Terminal request failed" } else { message });
+                    system_line(session, if message.is_empty() { "Terminal write failed" } else { message });
                     changed = true;
                 }
             }

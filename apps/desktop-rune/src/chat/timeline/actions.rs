@@ -51,6 +51,8 @@ enum Step {
     Download(Receiver<Result<Vec<String>, String>>),
     /// The rollback until the server accepts it (`rpc` taken), then until the projection settles.
     Rollback { rpc: Option<u64>, watch: Watch, started: i64 },
+    /// A resend with its files in hand.
+    Ready,
 }
 
 struct Pending {
@@ -58,6 +60,8 @@ struct Pending {
     restore_files: bool,
     /// The message's attachments, downloaded for the composer.
     files: Vec<String>,
+    /// Sends the prompt again instead of rolling back (the worktree card's Work locally).
+    resend: bool,
     step: Step,
 }
 
@@ -347,7 +351,7 @@ fn rewind(app: &mut App, thread: &str, restore_files: bool) {
     }
     app.ui.chat.timeline.actions.confirm.remove(thread);
     app.ui.chat.timeline.actions.errors.remove(thread);
-    match start(app, rewind, restore_files) {
+    match start(app, rewind, restore_files, false) {
         Ok(pending) => {
             app.ui.chat.timeline.actions.rewinds.insert(thread.to_owned(), pending);
         }
@@ -357,7 +361,7 @@ fn rewind(app: &mut App, thread: &str, restore_files: bool) {
     }
 }
 
-fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, String> {
+fn start(app: &mut App, rewind: Rewind, restore_files: bool, resend: bool) -> Result<Pending, String> {
     if rewind.attachments.iter().any(|a| s(a, "type") != "image" || image_ext(s(a, "mimeType")).is_none()) {
         return Err("This message has an attachment that cannot be restored.".into());
     }
@@ -366,7 +370,7 @@ fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, 
         return Err("Make room for this message's attachments in the composer before rewinding.".into());
     }
     let step = if rewind.attachments.is_empty() {
-        roll_back(app, &rewind, restore_files)?
+        after_files(app, &rewind, restore_files, resend)?
     } else {
         let net = app.src.net().ok_or_else(|| "The environment is not connected.".to_owned())?;
         Step::Urls(
@@ -380,7 +384,32 @@ fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, 
                 .collect(),
         )
     };
-    Ok(Pending { rewind, restore_files, files: Vec::new(), step })
+    Ok(Pending { rewind, restore_files, files: Vec::new(), resend, step })
+}
+
+fn after_files(app: &mut App, rewind: &Rewind, restore_files: bool, resend: bool) -> Result<Step, String> {
+    if resend { Ok(Step::Ready) } else { roll_back(app, rewind, restore_files) }
+}
+
+/// Work locally (ChatView onWorktreeSetupWorkLocally): once the setup is cancelled the server
+/// has cleared the thread's worktree, so the prompt goes out again from the project checkout.
+pub fn resend(app: &mut App, thread: &str, message: &Value) {
+    let rewind = Rewind {
+        thread: thread.to_owned(),
+        text: s(message, "text").to_owned(),
+        records: rows::array(&message["context"], "records").to_vec(),
+        attachments: rows::array(message, "attachments").to_vec(),
+        scope: String::new(),
+        checkpoint: String::new(),
+    };
+    match start(app, rewind, false, true) {
+        Ok(pending) => {
+            app.ui.chat.timeline.actions.rewinds.insert(thread.to_owned(), pending);
+        }
+        Err(message) => {
+            app.ui.chat.timeline.actions.errors.insert(thread.to_owned(), message);
+        }
+    }
 }
 
 /// The run ordinal a checkpoint rewinds to: the run it was taken after, 0 for the thread start.
@@ -522,7 +551,7 @@ fn step(app: &mut App, p: &mut Pending) -> Outcome {
         Step::Download(rx) => match rx.try_recv() {
             Ok(Ok(files)) => {
                 p.files = files;
-                match roll_back(app, &p.rewind, p.restore_files) {
+                match after_files(app, &p.rewind, p.restore_files, p.resend) {
                     Ok(step) => step,
                     Err(message) => return Outcome::Failed(message),
                 }
@@ -531,6 +560,7 @@ fn step(app: &mut App, p: &mut Pending) -> Outcome {
             Err(TryRecvError::Empty) => return Outcome::Waiting,
             Err(TryRecvError::Disconnected) => return Outcome::Failed(FAILED.into()),
         },
+        Step::Ready => return Outcome::Done,
         Step::Rollback { rpc, watch, started } => {
             let mut moved = false;
             if let Some(id) = *rpc {
@@ -565,6 +595,9 @@ fn land(app: &mut App, p: Pending) {
     let key = crate::chat::composer::draft_key(app, &Route::Thread(thread.clone()));
     let focus = matches!(app.frame_route(), Route::Thread(open) if *open == thread);
     crate::chat::composer::restore_rewound(app, &key, &recallable(&p.rewind.text), &p.rewind.records, p.files, focus);
+    if p.resend && focus {
+        crate::chat::composer::submit(app);
+    }
 }
 
 pub fn poll(app: &mut App) -> bool {
@@ -829,6 +862,19 @@ pub fn proactive_changes(projection: &Value, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_locally_puts_the_prompt_back_without_rolling_back() {
+        let mut app = App::new();
+        let message = json!({"type": "user_message", "text": "fix the build", "attachments": []});
+        resend(&mut app, "t", &message);
+        let pending = app.ui.chat.timeline.actions.rewinds.remove("t").expect("FAILED: the resend is pending");
+        assert!(matches!(pending.step, Step::Ready), "FAILED: no rollback goes out");
+        land(&mut app, pending);
+        let key = crate::chat::composer::draft_key(&app, &Route::Thread("t".into()));
+        let draft = crate::chat::composer::take_draft(&mut app, &key).expect("FAILED: the prompt is in the thread's draft");
+        assert!(draft.to_string().contains("fix the build"), "{draft}");
+    }
 
     #[test]
     fn a_fork_opens_once_its_thread_lands_or_reports_it_never_did() {
