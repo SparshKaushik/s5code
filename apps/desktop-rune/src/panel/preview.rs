@@ -2970,6 +2970,8 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
             .label(format!("Viewport {axis}"))
             .w(if width >= 360. { 56. } else { 52. })
             .h(24.)
+            // A 16-point line centred in the 24-point box.
+            .py(4.)
             .px(6.)
             .radius(6.)
             .fill(t.c.input.alpha_mul(0.32))
@@ -3269,7 +3271,6 @@ fn file_not_shown(t: &T, tab: TabId, url: &str, id: &str, name: &str) -> El {
     let buttons = row()
         .w_full()
         .gap(8.)
-        .pt(32.)
         .center_y()
         .child(el().grow(1.))
         .child(kit::Button::new("Open in browser").variant("outline").size("sm").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
@@ -3282,16 +3283,19 @@ fn file_not_shown(t: &T, tab: TabId, url: &str, id: &str, name: &str) -> El {
                 stream.save(&id, file.clone());
             }
         }));
+    // `PreviewUnreachable`'s frame: the buttons sit at the page's foot (`mt-auto pt-8`).
     let body = col()
         .w_full()
         .max_w(576.)
+        .grow(1.)
         .px(32.)
         .py(64.)
         .child(icon(&ERROR_ICON, 48.).size(48., 48.).color(t.c.muted_foreground.alpha_mul(0.7)).mb(24.))
         .child(text("This file can’t be shown here").font(theme::weight(theme::TEXT_2XL, theme::SEMIBOLD)).color(t.c.contrast_foreground).mb(12.))
         .child(rich(message, vec![Span::new(0, name.len()).weight(theme::SEMIBOLD).color(t.c.contrast_foreground)]).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full())
+        .child(el().grow(1.).min_h(32.))
         .child(buttons);
-    col().key("browser-file-not-shown").grow(1.).min_h(0.).w_full().items_center().child(body)
+    row().key("browser-file-not-shown").grow(1.).min_h(0.).w_full().fill(t.c.background).child(el().grow(1.)).child(body).child(el().grow(1.))
 }
 
 /// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
