@@ -57,6 +57,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         push_page(s, "add-project", "");
         push_page(s, "add-browse", "~/projects/");
     }),
+    ("content-search-results", |s| {
+        open_thread(s);
+        crate::search::scene_results(s);
+    }),
     ("content-search-denied", |s| {
         open_thread(s);
         deny_files(s);

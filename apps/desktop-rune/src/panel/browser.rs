@@ -79,6 +79,20 @@ pub enum Cmd {
     Erase(TabId, f32, f32),
     /// The PNG of every mark's union, as `Event::Marked`.
     CaptureMarks(TabId),
+    /// The elements a region drag encloses, in viewport CSS pixels, as `Event::Enclosed`.
+    Enclosed(TabId, [f32; 4]),
+    /// Answers the page's `navigator.clipboard.readText()`: the text, or None to refuse it.
+    ClipboardAnswer(TabId, u64, Option<String>),
+    /// Stops this profile's Chrome; `wipe` deletes the profile's data after.
+    Quit { wipe: bool },
+}
+
+/// Which tab a command acts on, when it names one.
+fn cmd_tab(cmd: &Cmd) -> Option<TabId> {
+    match cmd {
+        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) | Cmd::Enclosed(tab, _) | Cmd::ClipboardAnswer(tab, ..) => Some(*tab),
+        _ => None,
+    }
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -114,11 +128,13 @@ pub struct Status {
     pub favicon: Option<String>,
     /// Chrome's target id once the page is attached, for an agent's own connection to it.
     pub target: Option<String>,
+    /// The DevTools `host:port` of the Chrome showing the tab: each profile runs its own.
+    pub host: Option<String>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None, target: None }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None, target: None, host: None }
     }
 }
 
@@ -136,11 +152,17 @@ pub enum Event {
     /// A right-click's link, image rect, editable and selection, at the menu's window point.
     Context { tab: TabId, at: (f32, f32), info: Value },
     Clipboard(String),
+    /// The page asked to read the clipboard, answered with `Cmd::ClipboardAnswer`.
+    ClipboardRead { tab: TabId, id: u64, origin: String },
+    /// A link to another application (`mailto:`, `slack:`), which Electron confirms first.
+    External { tab: TabId, url: String },
     Image(Vec<u8>),
     /// A finished download, moved to the Downloads folder, as Electron does for a person's.
     Download(Result<PathBuf, String>),
     /// The mark `Cmd::Erase` removed, by the order marks were added.
     Erased(TabId, Option<usize>),
+    /// What a region drag enclosed: each element as a pick reports it, none for a bare region.
+    Enclosed(TabId, [f32; 4], Vec<Value>),
     /// The annotation's screenshot, cropped to its marks.
     Marked(TabId, Option<Vec<u8>>),
 }
@@ -151,35 +173,58 @@ pub struct Shared {
     /// Chrome could not start, or its connection dropped.
     pub fatal: Option<String>,
     pub events: Vec<Event>,
-    /// Chrome's DevTools `host:port` once it is up.
-    pub devtools: Option<String>,
     /// Bumped on every visible change, so the UI re-runs its view only when something moved.
     pub generation: u64,
 }
 
-pub struct Browser {
-    tx: Option<Sender<Cmd>>,
-    pub shared: Arc<Mutex<Shared>>,
-}
+/// The Default profile, which every tab uses unless it opens in another.
+pub const DEFAULT_PROFILE: &str = "default";
+pub const INCOGNITO_PROFILE: &str = "incognito";
 
-impl Default for Browser {
-    fn default() -> Self {
-        Browser { tx: None, shared: Arc::default() }
-    }
+/// The panel's Chrome: one process per browser profile in use, as Electron keeps one session per
+/// profile. Only the Default profile's starts with the panel; another starts with its first tab.
+#[derive(Default)]
+pub struct Browser {
+    workers: HashMap<String, Sender<Cmd>>,
+    pub shared: Arc<Mutex<Shared>>,
+    waker: Option<Waker>,
+    /// Each tab's profile, so its commands reach its Chrome.
+    profiles: HashMap<TabId, String>,
+    viewport: Option<(f32, f32, f32)>,
+    shown: Option<TabId>,
+    tracked: Option<TabId>,
+    recording: Option<TabId>,
+    /// Removed profiles whose Chrome still shows tabs: their data goes when the last one closes.
+    doomed: Vec<String>,
 }
 
 impl Browser {
     pub fn started(&self) -> bool {
-        self.tx.is_some()
+        !self.workers.is_empty()
     }
 
-    /// Launches Chrome on a worker; commands sent before it is up queue in the channel.
+    /// Launches the Default profile's Chrome on a worker; commands sent before it is up queue.
     pub fn start(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+        self.worker(DEFAULT_PROFILE);
+    }
+
+    /// Lets tabs start their profile's Chrome, without starting one yet.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// The profile's worker, starting its Chrome first if this is its first use.
+    fn worker(&mut self, profile: &str) -> Option<Sender<Cmd>> {
+        if let Some(tx) = self.workers.get(profile) {
+            return Some(tx.clone());
+        }
+        let waker = self.waker.clone()?;
         let (tx, rx) = channel();
-        self.tx = Some(tx);
         let shared = self.shared.clone();
+        let owned = profile.to_owned();
         std::thread::spawn(move || {
-            if let Err(e) = run(rx, shared.clone(), waker.clone()) {
+            if let Err(e) = run(rx, shared.clone(), waker.clone(), owned) {
                 let mut s = shared.lock().unwrap();
                 s.fatal = Some(e);
                 s.generation += 1;
@@ -187,20 +232,144 @@ impl Browser {
                 waker();
             }
         });
+        // A late Chrome learns what the others were told: the page area, and its shown tab.
+        if let Some((w, h, scale)) = self.viewport {
+            let _ = tx.send(Cmd::Viewport { w, h, scale });
+        }
+        let _ = tx.send(Cmd::Show(self.shown.filter(|t| self.profile(*t) == profile)));
+        let _ = tx.send(Cmd::Track(self.tracked.filter(|t| self.profile(*t) == profile)));
+        self.workers.insert(profile.to_owned(), tx.clone());
+        Some(tx)
     }
 
+    fn profile(&self, tab: TabId) -> &str {
+        self.profiles.get(&tab).map_or(DEFAULT_PROFILE, String::as_str)
+    }
+
+    /// The Default profile's worker, which browser imports write into.
     pub fn sender(&self) -> Option<Sender<Cmd>> {
-        self.tx.clone()
+        self.workers.get(DEFAULT_PROFILE).cloned()
     }
 
-    pub fn send(&self, cmd: Cmd) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(cmd);
+    /// Opens a tab in `profile`'s Chrome.
+    pub fn open(&mut self, tab: TabId, pixels: Pixels, profile: &str) {
+        self.profiles.insert(tab, profile.to_owned());
+        if let Some(tx) = self.worker(profile) {
+            let _ = tx.send(Cmd::Open(tab, pixels));
+        }
+    }
+
+    /// Shows a popup as `tab` in its opener's Chrome, the only one that has it.
+    pub fn adopt(&mut self, tab: TabId, pixels: Pixels, target: String, opener: Option<TabId>) {
+        let profile = opener.map_or(DEFAULT_PROFILE, |o| self.profile(o)).to_owned();
+        self.profiles.insert(tab, profile.clone());
+        if let Some(tx) = self.worker(&profile) {
+            let _ = tx.send(Cmd::Adopt(tab, pixels, target));
+        }
+    }
+
+    /// Clears a profile's cookies and cache, as Electron clears its session: through its Chrome
+    /// when it runs, else by deleting its folder. A removed profile's tabs stay open, as web's
+    /// "Removed profile", and its folder goes with the last of them.
+    pub fn clear(&mut self, profile: &str, removed: bool) {
+        match self.workers.get(profile) {
+            Some(tx) => {
+                for cmd in [Cmd::ClearCookies, Cmd::ClearCache] {
+                    let _ = tx.send(cmd);
+                }
+                if removed && !self.doomed.iter().any(|p| p == profile) {
+                    self.doomed.push(profile.to_owned());
+                }
+            }
+            None => self.quit(profile, true),
+        }
+    }
+
+    /// Stops `profile`'s Chrome, deleting its data when `wipe`.
+    fn quit(&mut self, profile: &str, wipe: bool) {
+        match self.workers.remove(profile) {
+            Some(tx) => {
+                let _ = tx.send(Cmd::Quit { wipe });
+            }
+            None if wipe => {
+                let dir = profile_dir(profile);
+                std::thread::spawn(move || std::fs::remove_dir_all(dir));
+            }
+            None => {}
+        }
+    }
+
+    pub fn send(&mut self, cmd: Cmd) {
+        let route = |b: &Browser, tab: Option<TabId>| tab.map_or(DEFAULT_PROFILE, |t| b.profile(t)).to_owned();
+        match cmd {
+            Cmd::Viewport { w, h, scale } => {
+                self.viewport = Some((w, h, scale));
+                for tx in self.workers.values() {
+                    let _ = tx.send(Cmd::Viewport { w, h, scale });
+                }
+            }
+            Cmd::Show(tab) | Cmd::Track(tab) => {
+                let show = matches!(cmd, Cmd::Show(_));
+                if show {
+                    self.shown = tab;
+                } else {
+                    self.tracked = tab;
+                }
+                for (profile, tx) in &self.workers {
+                    let mine = tab.filter(|t| self.profile(*t) == profile);
+                    let _ = tx.send(if show { Cmd::Show(mine) } else { Cmd::Track(mine) });
+                }
+            }
+            Cmd::Open(tab, pixels) => self.open(tab, pixels, DEFAULT_PROFILE),
+            Cmd::SetCookies(..) => {
+                if let Some(tx) = self.workers.get(DEFAULT_PROFILE) {
+                    let _ = tx.send(cmd);
+                }
+            }
+            Cmd::StopRecording(_) => {
+                let recording = self.recording.take();
+                let profile = route(self, recording);
+                if let Some(tx) = self.workers.get(&profile) {
+                    let _ = tx.send(cmd);
+                }
+            }
+            cmd => {
+                let tab = cmd_tab(&cmd);
+                if let Cmd::Record { tab, .. } = &cmd {
+                    self.recording = Some(*tab);
+                }
+                // Page input, edits and clearing data act on the shown tab's Chrome.
+                let profile = route(self, tab.or(self.shown));
+                let closed = matches!(cmd, Cmd::Close(_));
+                if let Some(tx) = self.workers.get(&profile) {
+                    let _ = tx.send(cmd);
+                }
+                if closed {
+                    self.profiles.remove(&tab.unwrap_or_default());
+                    // Only the Default profile's Chrome outlives its tabs.
+                    if profile != DEFAULT_PROFILE && !self.profiles.values().any(|p| *p == profile) {
+                        let wipe = profile == INCOGNITO_PROFILE || self.doomed.iter().any(|p| *p == profile);
+                        self.doomed.retain(|p| *p != profile);
+                        self.quit(&profile, wipe);
+                    }
+                }
+            }
         }
     }
 
     pub fn status(&self, tab: TabId) -> Status {
         self.shared.lock().unwrap().tabs.get(&tab).cloned().unwrap_or_default()
+    }
+}
+
+/// Where a profile keeps its Chrome data: Default's own folder, one per named profile, and a
+/// throwaway one for Incognito, emptied whenever its Chrome starts.
+pub fn profile_dir(profile: &str) -> PathBuf {
+    let root = crate::host::t3_home().join("userdata").join("browser");
+    match profile {
+        DEFAULT_PROFILE => root.join("rune-default"),
+        INCOGNITO_PROFILE => std::env::temp_dir().join(format!("s5-rune-incognito-{}", std::process::id())),
+        other => root.join(format!("rune-profile-{}", other.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>())),
     }
 }
 
@@ -222,29 +391,66 @@ fn chrome_path() -> String {
     candidates.iter().find(|p| std::path::Path::new(p).is_file()).cloned().unwrap_or_else(|| "chrome-headless-shell".into())
 }
 
-static CHROME: Mutex<Option<Child>> = Mutex::new(None);
+/// Every Chrome this process started, by profile.
+static CHROME: Mutex<Vec<(String, Child)>> = Mutex::new(Vec::new());
 
-/// Stops the headless Chrome this process started: once the window loop returns, or before a
+/// Stops the headless Chromes this process started: once the window loop returns, or before a
 /// relaunch at a new display scale.
 pub fn shutdown() {
-    if let Some(mut child) = CHROME.lock().unwrap().take() {
+    for (_, mut child) in std::mem::take(&mut *CHROME.lock().unwrap()) {
         let _ = child.kill();
         // Reaped, so a relaunch finds the profile free.
         let _ = child.wait();
     }
+    let _ = std::fs::remove_dir_all(profile_dir(INCOGNITO_PROFILE));
 }
 
-/// Starts Chrome on the persistent Default profile, as the Electron app keeps its default
-/// session; a profile another instance holds falls back to a throwaway one.
-fn launch(scale: f32) -> Result<(Child, String), String> {
-    let persistent = crate::host::t3_home().join("userdata").join("browser").join("rune-default");
-    launch_in(&persistent, scale).or_else(|_| launch_in(&std::env::temp_dir().join(format!("s5-rune-chrome-{}", std::process::id())), scale))
+/// Stops one profile's Chrome.
+fn shutdown_profile(profile: &str) {
+    let mut chromes = CHROME.lock().unwrap();
+    while let Some(i) = chromes.iter().position(|(p, _)| p == profile) {
+        let (_, mut child) = chromes.remove(i);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Starts Chrome on the profile's persistent folder, as the Electron app keeps one session per
+/// profile; a folder another instance holds falls back to a throwaway one.
+fn launch(profile: &str, scale: f32) -> Result<(Child, String, PathBuf), String> {
+    let dir = profile_dir(profile);
+    if profile == INCOGNITO_PROFILE {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let spare = std::env::temp_dir().join(format!("s5-rune-chrome-{}-{profile}", std::process::id()));
+    match launch_in(&dir, scale) {
+        Ok((child, ws)) => Ok((child, ws, dir)),
+        Err(_) => launch_in(&spare, scale).map(|(child, ws)| (child, ws, spare)),
+    }
+}
+
+/// Every Chrome's switches but its folder and scale.
+const CHROME_ARGS: [&str; 7] = ["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"];
+
+/// Whether Chrome could show a PDF itself, decided from how it was started rather than from
+/// `navigator.pdfViewerEnabled`, which stays true where Chrome would download the PDF instead:
+/// headless (no viewer extension to draw it), `--disable-pdf-viewer`, or a profile set to
+/// `plugins.always_open_pdf_externally`. Only when none apply is the page's own answer asked.
+fn native_pdf_possible(args: &[&str], preferences: &Value) -> bool {
+    let headless = args.iter().any(|a| *a == "--headless" || a.starts_with("--headless="));
+    let disabled = args.contains(&"--disable-pdf-viewer");
+    let external = preferences["plugins"]["always_open_pdf_externally"] == true;
+    !headless && !disabled && !external
+}
+
+fn preferences(dir: &std::path::Path) -> Value {
+    std::fs::read(dir.join("Default").join("Preferences")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null)
 }
 
 fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), String> {
     let _ = std::fs::create_dir_all(profile);
     let mut child = Command::new(chrome_path())
-        .args(["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"])
+        .args(CHROME_ARGS)
         // Page and browser ids are unguessable, so any origin may open the DevTools frontend.
         .arg("--remote-allow-origins=*")
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -273,6 +479,8 @@ fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), S
 
 enum Reply {
     Erased(TabId),
+    Enclosed(TabId, [f32; 4]),
+    PdfViewer(String),
     MarksBounds(TabId),
     MarksShot(TabId),
     Created(TabId),
@@ -360,26 +568,35 @@ struct Worker {
     agent_downloads: HashMap<String, (String, String)>,
     /// When each tab's renderer last crashed, for web's three remounts in 30 s.
     crashes: HashMap<TabId, Vec<std::time::Instant>>,
+    /// Whether this Chrome shows PDFs itself: no when its switches or profile rule it out, else
+    /// once a page has said.
+    native_pdf: Option<bool>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
 
-fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<(), String> {
+fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: String) -> Result<(), String> {
     // The headless shell paints frames at the device scale it starts with, whatever scale a page
     // emulates, so it waits for the window's.
     let mut early = Vec::new();
     let scale = loop {
-        let cmd = rx.recv().map_err(|_| "The window closed".to_string())?;
+        let Ok(cmd) = rx.recv() else { return Ok(()) };
+        if let Cmd::Quit { wipe } = cmd {
+            if wipe {
+                let _ = std::fs::remove_dir_all(profile_dir(&profile));
+            }
+            return Ok(());
+        }
         let scale = if let Cmd::Viewport { scale, .. } = &cmd { Some(*scale) } else { None };
         early.push(cmd);
         if let Some(scale) = scale {
             break scale;
         }
     };
-    let (child, url) = launch(scale)?;
-    *CHROME.lock().unwrap() = Some(child);
+    let (child, url, dir) = launch(&profile, scale)?;
+    let native_pdf = (!native_pdf_possible(&CHROME_ARGS, &preferences(&dir))).then_some(false);
+    CHROME.lock().unwrap().push((profile.clone(), child));
     let host = url.trim_start_matches("ws://").split('/').next().unwrap_or_default().to_string();
-    shared.lock().unwrap().devtools = Some(host.clone());
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
     let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
@@ -402,6 +619,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         downloads: HashMap::new(),
         agent_downloads: HashMap::new(),
         crashes: HashMap::new(),
+        native_pdf,
         shared,
         waker,
     };
@@ -413,8 +631,19 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         w.command(cmd);
     }
     loop {
-        while let Ok(cmd) = rx.try_recv() {
-            w.command(cmd);
+        loop {
+            match rx.try_recv() {
+                Ok(Cmd::Quit { wipe }) => {
+                    shutdown_profile(&profile);
+                    if wipe {
+                        let _ = std::fs::remove_dir_all(profile_dir(&profile));
+                    }
+                    return Ok(());
+                }
+                Ok(cmd) => w.command(cmd),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
         }
         let msg = match w.ws.read() {
             Ok(Message::Text(t)) => t,
@@ -463,6 +692,13 @@ impl Worker {
             s.generation += 1;
             drop(s);
             (self.waker)();
+        }
+    }
+
+    /// Without Chrome's own viewer, a PDF page's response is replaced with the bundled one.
+    fn pdf_viewer(&mut self, session: &str, native: bool) {
+        if !native {
+            self.send(Some(session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
         }
     }
 
@@ -757,6 +993,10 @@ impl Worker {
             Cmd::Erase(tab, x, y) => {
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.erase({x}, {y})"), "returnByValue": true }), Some(Reply::Erased(tab)));
             }
+            Cmd::Enclosed(tab, r) => {
+                let expression = format!("({ENCLOSED_JS})({}, {}, {}, {}, {PICK_JS})", r[0], r[1], r[2], r[3]);
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Enclosed(tab, r)));
+            }
             Cmd::CaptureMarks(tab) => {
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("{MARKS_JS}; window.__s5Marks.bounds()"), "returnByValue": true }), Some(Reply::MarksBounds(tab)));
             }
@@ -772,6 +1012,12 @@ impl Worker {
                     self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
                 }
             }
+            Cmd::ClipboardAnswer(tab, id, text) => {
+                let expression = format!("window.__s5Resolve && __s5Resolve({id}, {})", json!(text));
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression }), None);
+            }
+            // The run loop takes it before a command reaches here.
+            Cmd::Quit { .. } => {}
         }
     }
 
@@ -967,6 +1213,11 @@ impl Worker {
                     self.event(Event::Dialog { tab, kind, message, default });
                 }
             }
+            "Runtime.bindingCalled" if p["name"] == "__s5Page" => {
+                if let Some(event) = page_message(tab, p["payload"].as_str().unwrap_or_default()) {
+                    self.event(event);
+                }
+            }
             "Runtime.bindingCalled" if p["name"] == "__s5Audio" => {
                 let audible = p["payload"] == "1";
                 self.update(tab, |s| s.audible = audible);
@@ -1051,7 +1302,11 @@ impl Worker {
                 t.session = Some(session.clone());
                 let queue = std::mem::take(&mut t.queue);
                 let target = t.target.clone();
-                self.update(tab, |s| s.target = target);
+                let host = self.host.clone();
+                self.update(tab, |s| {
+                    s.target = target;
+                    s.host = Some(host);
+                });
                 self.sessions.insert(session.clone(), tab);
                 self.send(Some(&session), "Page.enable", json!({}), None);
                 self.send(Some(&session), "Network.enable", json!({}), None);
@@ -1059,8 +1314,14 @@ impl Worker {
                 self.send(Some(&session), "Runtime.enable", json!({}), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
-                // Chrome's headless shell has no PDF viewer, so a PDF page arrives as pdf.js.
-                self.send(Some(&session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
+                self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Page" }), None);
+                self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": PAGE_JS, "runImmediately": true }), None);
+                // A Chrome with its own PDF viewer shows PDFs itself; the headless shell has none,
+                // so there a PDF page arrives as the bundled pdf.js.
+                match self.native_pdf {
+                    Some(native) => self.pdf_viewer(&session, native),
+                    None => self.send(Some(&session), "Runtime.evaluate", json!({ "expression": "navigator.pdfViewerEnabled === true", "returnByValue": true }), Some(Reply::PdfViewer(session.clone()))),
+                }
                 self.metrics(tab);
                 let scheme = self.tabs.get(&tab).map_or("", |t| t.scheme);
                 if !scheme.is_empty() {
@@ -1252,6 +1513,15 @@ impl Worker {
                 let index = r["result"]["value"].as_u64().map(|i| i as usize);
                 self.event(Event::Erased(tab, index));
             }
+            Reply::PdfViewer(session) => {
+                let native = r["result"]["value"].as_bool().unwrap_or(false);
+                self.native_pdf = Some(native);
+                self.pdf_viewer(&session, native);
+            }
+            Reply::Enclosed(tab, rect) => {
+                let elements = r["result"]["value"].as_str().and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok()).unwrap_or_default();
+                self.event(Event::Enclosed(tab, rect, elements));
+            }
             Reply::MarksBounds(tab) => match marks_clip(&r["result"]["value"]) {
                 Some(clip) => self.call(tab, "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::MarksShot(tab))),
                 None => self.event(Event::Marked(tab, None)),
@@ -1405,6 +1675,24 @@ const PICK_JS: &str = r##"function () {
     rect: { x: r.x, y: r.y, width: r.width, height: r.height },
     doc: { x: r.x + scrollX, y: r.y + scrollY },
   });
+}"##;
+
+/// Desktop's `selectElementsInRect`: the leaves, buttons and links whose centre the region holds,
+/// smallest first and at most `MAX_MARQUEE_ELEMENTS`, each described as a pick describes it.
+const ENCLOSED_JS: &str = r##"(x, y, w, h, pick) => {
+  const marks = document.querySelector("[data-s5-annotation]");
+  const found = [...document.querySelectorAll("body *")]
+    .filter((el) => !(marks && marks.contains(el)))
+    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+    .filter(({ r }) => r.width >= 2 && r.height >= 2 && !(r.right < x || r.left > x + w || r.bottom < y || r.top > y + h))
+    .filter(({ el, r }) => {
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      return cx >= x && cx <= x + w && cy >= y && cy <= y + h &&
+        (el.children.length === 0 || el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement || el.getAttribute("role") === "button");
+    })
+    .sort((a, b) => a.r.width * a.r.height - b.r.width * b.r.height)
+    .slice(0, 20);
+  return JSON.stringify(found.map(({ el }) => JSON.parse(pick.call(el))));
 }"##;
 
 /// `recordingKeyLabel` for an unmodified key: arrows and symbols for named keys, letters upper.
@@ -1571,9 +1859,15 @@ fn pdf_response(headers: &Value) -> bool {
 fn pdf_viewer(url: &str) -> String {
     let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
     let name = s5_net::url::form_urlencoded::parse(format!("n={}", name.replace('+', "%2B")).as_bytes()).next().map_or_else(String::new, |(_, n)| n.into_owned());
-    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    PDF_VIEWER.replace("{title}", &escape(&name))
+    // `{` too, so a file name can't stand in for the placeholders after it.
+    let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('{', "&#123;");
+    PDF_VIEWER.replace("{title}", &escape(&name)).replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
 }
+
+// pdf.js 3.11.174 (Apache-2.0, `assets/pdfjs/LICENSE`), bundled as Electron bundles its viewer so
+// PDFs show offline. The `.txt` names keep the repo's JS lint and formatter off minified code.
+const PDFJS: &str = include_str!("../../assets/pdfjs/pdf.min.js.txt");
+const PDFJS_WORKER: &str = include_str!("../../assets/pdfjs/pdf.worker.min.js.txt");
 
 const PDF_VIEWER: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
@@ -1583,14 +1877,16 @@ html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
 canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
 #status{padding:16px;text-align:center}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>{pdfjs}</script>
+<script type="text/plain" id="pdfjs-worker">{worker}</script>
 </head><body><div id="status">Loading PDF…</div><div id="pages"></div>
 <script>
 (async () => {
   const status = document.getElementById("status");
   const lib = window.pdfjsLib;
-  if (!lib) { status.textContent = "The PDF viewer could not load. Check the connection and reload."; return; }
-  lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  if (!lib) { status.textContent = "The PDF viewer could not load."; return; }
+  const worker = new Blob([document.getElementById("pdfjs-worker").textContent], { type: "text/javascript" });
+  lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(worker);
   try {
     const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
     status.remove();
@@ -1612,6 +1908,63 @@ canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;heigh
   }
 })();
 </script></body></html>"#;
+
+/// What the page script reports: a copy, a clipboard read to answer, or an external link.
+fn page_message(tab: TabId, payload: &str) -> Option<Event> {
+    let m: Value = serde_json::from_str(payload).ok()?;
+    match m["kind"].as_str()? {
+        "copy" => m["text"].as_str().filter(|t| !t.is_empty()).map(|t| Event::Clipboard(t.to_owned())),
+        "read" => Some(Event::ClipboardRead { tab, id: m["id"].as_u64()?, origin: m["origin"].as_str().filter(|o| !o.is_empty() && *o != "null")?.to_owned() }),
+        "external" => {
+            let url = s5_net::url::Url::parse(m["url"].as_str()?).ok()?;
+            let never = ["about", "blob", "chrome", "data", "devtools", "file", "filesystem", "http", "https", "javascript", "view-source"];
+            (!never.contains(&url.scheme())).then(|| Event::External { tab, url: url.to_string() })
+        }
+        _ => None,
+    }
+}
+
+/// Electron's clipboard and external-protocol hooks, which the headless shell lacks: copies
+/// reach the system clipboard, reads ask first, and links to other applications are confirmed.
+const PAGE_JS: &str = r#"(() => {
+  if (window.__s5PageHooks) return;
+  window.__s5PageHooks = true;
+  const send = (m) => { try { __s5Page(JSON.stringify(m)); } catch {} };
+  const clip = navigator.clipboard;
+  if (clip) {
+    const writeText = clip.writeText && clip.writeText.bind(clip);
+    clip.writeText = (text) => { send({ kind: "copy", text: String(text) }); return writeText ? writeText(text).catch(() => {}) : Promise.resolve(); };
+    const write = clip.write && clip.write.bind(clip);
+    clip.write = async (items) => {
+      for (const item of items || []) {
+        if (item.types && item.types.includes("text/plain")) { send({ kind: "copy", text: await (await item.getType("text/plain")).text() }); break; }
+      }
+      return write ? write(items).catch(() => {}) : undefined;
+    };
+    let next = 0;
+    const waiting = new Map();
+    window.__s5Resolve = (id, text) => {
+      const w = waiting.get(id);
+      waiting.delete(id);
+      if (w) text === null ? w.reject(new DOMException("Read permission denied.", "NotAllowedError")) : w.resolve(text);
+    };
+    clip.readText = () => new Promise((resolve, reject) => { const id = ++next; waiting.set(id, { resolve, reject }); send({ kind: "read", id, origin: location.origin }); });
+  }
+  let set = null;
+  const setData = DataTransfer.prototype.setData;
+  DataTransfer.prototype.setData = function (type, value) { if (/^text(\/plain)?$/i.test(type)) set = String(value); return setData.call(this, type, value); };
+  for (const type of ["copy", "cut"]) {
+    addEventListener(type, () => { set = null; }, true);
+    addEventListener(type, (e) => { const text = e.defaultPrevented ? set : String(getSelection() || ""); if (text) send({ kind: "copy", text }); });
+  }
+  addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0) return;
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    if (!a || /^(https?|about|blob|chrome|data|devtools|file|filesystem|javascript|view-source):/i.test(a.href)) return;
+    e.preventDefault();
+    send({ kind: "external", url: a.href });
+  });
+})()"#;
 
 const AUDIO_JS: &str = r#"(() => {
   if (window !== top || window.__s5Mute) return;
@@ -1838,6 +2191,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_page_script_reports_copies_reads_and_links_to_other_apps() {
+        assert!(matches!(page_message(1, r#"{"kind":"copy","text":"npm i"}"#), Some(Event::Clipboard(t)) if t == "npm i"));
+        assert!(page_message(1, r#"{"kind":"copy","text":""}"#).is_none());
+        assert!(matches!(page_message(2, r#"{"kind":"read","id":7,"origin":"http://localhost:5173"}"#), Some(Event::ClipboardRead { tab: 2, id: 7, origin }) if origin == "http://localhost:5173"));
+        assert!(page_message(2, r#"{"kind":"read","id":7,"origin":"null"}"#).is_none(), "an opaque origin is refused, as Electron does");
+        assert!(matches!(page_message(3, r#"{"kind":"external","url":"mailto:dev@example.com"}"#), Some(Event::External { tab: 3, url }) if url == "mailto:dev@example.com"));
+        for url in ["https://example.com/", "javascript:alert(1)", "file:///etc/passwd", "not a url"] {
+            assert!(page_message(3, &json!({ "kind": "external", "url": url }).to_string()).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn each_profile_gets_its_tabs_commands_and_quits_with_its_last_tab() {
+        let mut b = Browser::default();
+        let (default_tx, default_rx) = channel();
+        let (work_tx, work_rx) = channel();
+        let (incognito_tx, incognito_rx) = channel();
+        b.workers.insert(DEFAULT_PROFILE.into(), default_tx);
+        b.workers.insert("work".into(), work_tx);
+        b.workers.insert(INCOGNITO_PROFILE.into(), incognito_tx);
+        let drain = |rx: &Receiver<Cmd>| rx.try_iter().collect::<Vec<_>>();
+        b.open(1, Pixels::new(), DEFAULT_PROFILE);
+        b.open(2, Pixels::new(), "work");
+        b.open(3, Pixels::new(), "work");
+        b.open(4, Pixels::new(), INCOGNITO_PROFILE);
+        b.adopt(5, Pixels::new(), "popup".into(), Some(2));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Open(1, _)]));
+        assert!(matches!(drain(&work_rx)[..], [Cmd::Open(2, _), Cmd::Open(3, _), Cmd::Adopt(5, ..)]));
+        drain(&incognito_rx);
+
+        b.send(Cmd::Show(Some(2)));
+        b.send(Cmd::Navigate(1, "http://a/".into()));
+        b.send(Cmd::Text("x".into()));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Show(None), Cmd::Navigate(1, _)]));
+        assert!(matches!(drain(&work_rx)[..], [Cmd::Show(Some(2)), Cmd::Text(_)]));
+        assert!(matches!(drain(&incognito_rx)[..], [Cmd::Show(None)]));
+
+        // Removing a running profile clears it now and deletes it with its last tab.
+        b.clear("work", true);
+        for tab in [2, 3, 5] {
+            b.send(Cmd::Close(tab));
+        }
+        assert!(matches!(drain(&work_rx)[..], [Cmd::ClearCookies, Cmd::ClearCache, Cmd::Close(2), Cmd::Close(3), Cmd::Close(5), Cmd::Quit { wipe: true }]));
+        assert!(!b.workers.contains_key("work"));
+        // Incognito forgets everything once its last tab closes; Default's Chrome stays.
+        b.send(Cmd::Close(4));
+        assert!(matches!(drain(&incognito_rx)[..], [Cmd::Close(4), Cmd::Quit { wipe: true }]));
+        b.send(Cmd::Close(1));
+        assert!(matches!(drain(&default_rx)[..], [Cmd::Close(1)]));
+        assert_eq!(b.workers.keys().collect::<Vec<_>>(), [DEFAULT_PROFILE]);
+    }
+
+    #[test]
     fn zoom_shrinks_the_css_viewport() {
         assert_eq!(metrics(540., 820., 1.), (540, 820));
         assert_eq!(metrics(540., 820., 1.25), (432, 656));
@@ -1883,6 +2289,17 @@ mod tests {
         let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
         assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
         assert!(page.contains("getDocument({ url: location.href"));
+        // Our headless Chrome always gets pdf.js; a headful one only where it would show the PDF.
+        let headful = ["--no-first-run"];
+        assert!(!native_pdf_possible(&CHROME_ARGS, &Value::Null));
+        assert!(native_pdf_possible(&headful, &Value::Null));
+        assert!(!native_pdf_possible(&["--headless=new"], &Value::Null));
+        assert!(!native_pdf_possible(&["--no-first-run", "--disable-pdf-viewer"], &Value::Null));
+        assert!(!native_pdf_possible(&headful, &json!({ "plugins": { "always_open_pdf_externally": true } })));
+        assert!(native_pdf_possible(&headful, &json!({ "plugins": { "always_open_pdf_externally": false } })));
+        // Offline: pdf.js and its worker come with the app, not from a CDN.
+        assert!(!page.contains("https://"), "the page loads nothing from the network");
+        assert!(page.contains("pdfjsLib") && page.contains(PDFJS_WORKER) && page.matches("{pdfjs}").count() == 0);
     }
 
     #[test]

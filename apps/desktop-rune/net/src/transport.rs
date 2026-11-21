@@ -91,6 +91,7 @@ fn failure(message: &str) -> Reply {
 pub(crate) fn run(
     base: String,
     token: String,
+    subscribe_shell: bool,
     commands: Receiver<Command>,
     incoming: Sender<Incoming>,
     wake: impl Fn(),
@@ -102,7 +103,7 @@ pub(crate) fn run(
     let mut subs: HashMap<Route, Subscription> = HashMap::new();
     // Stream ids occupy a separate range that JavaScript can represent exactly.
     let mut next = 1u64 << 32;
-    for route in [Route::Shell, Route::Config] {
+    for route in [Route::Shell, Route::Config].into_iter().filter(|_| subscribe_shell) {
         subs.insert(
             route,
             Subscription {
@@ -402,6 +403,7 @@ mod socket_tests {
             run(
                 format!("http://{address}"),
                 "test-token".into(),
+                true,
                 rx,
                 events,
                 || {},
@@ -517,6 +519,29 @@ mod socket_tests {
             .find(|r| r["tag"] == "orchestration.subscribeShell")
             .unwrap();
         assert_eq!(shell["payload"]["afterSequence"], 42);
+        tx.send(Command::Stop).unwrap();
+        worker.join().unwrap();
+    }
+    #[test]
+    fn a_requests_only_connection_sends_nothing_but_its_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (events, _incoming) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run(format!("http://{address}"), "test-token".into(), false, rx, events, || {})
+        });
+        let (tcp, _) = listener.accept().unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut ws = tungstenite::accept(tcp).unwrap();
+        tx.send(Command::Request(7, "server.updateServer".into(), json!({"targetVersion":"1.0.0"})))
+            .unwrap();
+        let first = read(&mut ws);
+        assert_eq!(
+            (first["id"].clone(), first["tag"].clone()),
+            (json!(7), json!("server.updateServer")),
+            "FAILED: an outdated server's socket must not subscribe to the shell or config"
+        );
         tx.send(Command::Stop).unwrap();
         worker.join().unwrap();
     }

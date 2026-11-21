@@ -246,6 +246,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-subagent-group-open", subagent_group_open),
     ("timeline-compacting", compacting),
     ("chat-side-pane", side_pane),
+    ("chat-side-pane-composer", side_pane_composer),
+    ("chat-side-pane-stop", side_pane_stop),
+    ("chat-side-reopen", side_reopen),
     ("timeline-work-icons", work_icons),
     ("timeline-interrupted-meta", interrupted_meta),
     ("timeline-attempt-nested", attempt_nested),
@@ -262,8 +265,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-banner-stack", composer_banner_stack),
     ("timeline-now-banners", timeline_now_banners),
     ("timeline-citations", citations),
+    ("timeline-citations-with-chips", citations_with_chips),
+    ("composer-citation-comment", crate::chat::composer::chips::comment_scene),
     ("timeline-media-actions", media_actions),
     ("timeline-video-fallback", video_fallback),
+    ("timeline-stopped-replies", stopped_replies),
+    ("timeline-html-render", html_render),
+    ("timeline-subagent-remote", subagent_remote),
+    ("composer-subagent-bar", subagent_bar),
+    ("composer-usage-limits-reset-credits", usage_reset_credits),
 ];
 
 /// A prompt quoting the showcase's first reply twice, the first quote's popover open.
@@ -291,6 +301,31 @@ fn citations(app: &mut App) {
     let text = format!("Compare [Assistant quote]({first}) with the plan.\n\nAnd this: [Assistant quote]({})", href(&cite(Some("Can we keep this but shorter?"))));
     push_visible(app, vec![serde_json::json!({"id": "scene-citations", "type": "user_message", "text": text, "createdAt": "2026-01-01T00:00:00Z", "attachments": []})]);
     app.ui.chat.timeline.md_links.citation = Some(("md-block-scene-citations-0-0".into(), first));
+}
+/// A prompt with a terminal chip and a commented quote, which read as chips in the bubble's
+/// plain text; the quote's popover open.
+fn citations_with_chips(app: &mut App) {
+    use super::citation::{Citation, href};
+    showcase(app);
+    let Route::Thread(thread) = app.route.clone() else { return };
+    let quoted = "Group tool calls under one header so a long turn reads as one step.";
+    let quote = href(&Citation {
+        environment_id: "local".into(),
+        thread_id: thread,
+        message_id: "scene-message".into(),
+        text: quoted.into(),
+        comment: Some("Can we keep this but shorter?".into()),
+        start: 0,
+        end: quoted.encode_utf16().count() as u64,
+        prefix: String::new(),
+        suffix: String::new(),
+    });
+    let terminal = crate::chat::composer::chips::samples().remove(0);
+    let chip = format!("[{}](t3-context://v1/terminal/{})", crate::data::s(&terminal, "label"), crate::data::s(&terminal, "contextId"));
+    let text = format!("Why does {chip} fail? Compare [Assistant quote]({quote}) with the plan.");
+    push_visible(app, vec![serde_json::json!({"id": "scene-citation-chips", "type": "user_message", "text": text,
+        "createdAt": "2026-01-01T00:00:00Z", "attachments": [], "context": {"records": [terminal]}})]);
+    app.ui.chat.timeline.md_links.citation = Some((super::chip::bubble_key("scene-citation-chips"), quote));
 }
 /// A reply with a workspace screenshot, its media actions menu open.
 fn media_actions(app: &mut App) {
@@ -982,15 +1017,47 @@ fn side_pane(app: &mut App) {
     showcase(app);
     let Route::Thread(parent) = app.route.clone() else { return };
     if let crate::data::Source::Fixture(state) = &mut app.src {
-        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
-        state.threads.push(serde_json::json!({"id": "scene-side", "title": "Why does the retry back off?", "projectId": project, "status": "idle",
-            "lineage": {"parentThreadId": parent, "sideChat": true}}));
+        let Some(shell) = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).cloned() else { return };
+        // Forked from the parent as it was last updated, and hidden from the sidebar like any side chat.
+        state.threads.push(serde_json::json!({"id": "scene-side", "title": "Why does the retry back off?", "projectId": shell["projectId"], "status": "idle",
+            "createdAt": shell["updatedAt"], "updatedAt": shell["updatedAt"], "modelSelection": shell["modelSelection"],
+            "runtimeMode": shell["runtimeMode"], "interactionMode": shell["interactionMode"],
+            "lineage": {"parentThreadId": parent, "rootThreadId": parent, "relationshipToParent": "fork", "sideChat": true}}));
         if let Some(view) = state.thread_views.get(&parent) {
             let projection = view.projection.clone();
             state.thread_views.insert("scene-side".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
         }
     }
     app.ui.chat.side.open.insert(parent, "scene-side".into());
+}
+/// The side chat's composer with a typed follow-up and a file queued, the caret in it.
+fn side_pane_composer(app: &mut App) {
+    side_pane(app);
+    let d = app.ui.chat.composer.drafts.entry("scene-side".into()).or_default();
+    d.edit = rune::TextEdit::new("Would jitter make the retries spread out more?");
+    d.edit.set_caret(d.edit.text.len());
+    d.edit.focused = true;
+    let file = std::env::temp_dir().join("s5-scene-attachments").join("retry-trace.log");
+    if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
+        let _ = std::fs::write(&file, vec![b'.'; 12 * 1024]);
+    }
+    d.attachments.push(file.display().to_string());
+}
+/// A running side chat: its composer offers Stop, while the chat's own composer stays idle.
+fn side_pane_stop(app: &mut App) {
+    side_pane(app);
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(side) = state.threads.iter_mut().find(|r| crate::data::s(r, "id") == "scene-side")
+    {
+        side["activeRunId"] = "scene-side-run".into();
+        side["status"] = "running".into();
+    }
+}
+/// A closed side chat opened again from its parent (openSideChatTab), the caret in its composer.
+fn side_reopen(app: &mut App) {
+    side_pane(app);
+    app.ui.chat.side.open.clear();
+    crate::chat::side::open_tab(app, "scene-side");
 }
 /// A subagent's header: its parent in the breadcrumb, and the linked environment it came from.
 fn header_subagent(app: &mut App) {
@@ -1106,4 +1173,91 @@ fn timeline_now_banners(app: &mut App) {
         state.threads.push(serde_json::json!({"id": "scene-side-chat", "title": "Naming ideas", "projectId": project,
             "status": "idle", "lineage": {"parentThreadId": parent, "sideChat": true}, "pendingRuntimeRequest": {"kind": "user_input"}}));
     }
+}
+
+/// A stopped turn's earlier reply shows no meta; its last reply's meta sits below its work.
+fn stopped_replies(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-10T00:00:{s:02}.000Z");
+    let run = "scene-stopped-replies";
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 994, "status": "interrupted", "startedAt": at(0), "completedAt": at(30)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| scene_item(run, &at, id, kind, end, fields);
+    push_visible(app, vec![
+        item("scene-replies-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "Tidy the billing module.", "attachments": []})),
+        item("scene-replies-first", "assistant_message", 4, json!({"text": "Starting with the expiry helpers."})),
+        item("scene-replies-read", "dynamic_tool", 6, json!({"toolName": "Read", "input": {"path": "src/billing/expiry.rs"}})),
+        item("scene-replies-last", "assistant_message", 12, json!({"text": "The helpers are tidy. Running the tests next."})),
+        item("scene-replies-test", "command_execution", 28, json!({"input": "vp test run src/billing", "status": "interrupted"})),
+        item("scene-replies-result", "run_interrupt_result", 30, json!({"message": "Stopped by the user."})),
+    ]);
+}
+
+/// A finished turn's open fold holding an `html_render` page's card.
+fn html_render(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-11T00:00:{s:02}.000Z");
+    let run = "scene-html-run";
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 995, "status": "completed", "startedAt": at(0), "completedAt": at(20)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| scene_item(run, &at, id, kind, end, fields);
+    let page = json!({"htmlRender": {"attachmentId": "scene-html-page", "title": "Q3 revenue by region", "height": 420}});
+    push_visible(app, vec![
+        item("scene-html-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "Chart Q3 revenue by region.", "attachments": []})),
+        item("scene-html-tool", "dynamic_tool", 14, json!({"toolName": "mcp__t3-code__html_render", "input": {"title": "Q3 revenue by region"},
+            "output": {"structuredContent": page}})),
+        item("scene-html-reply", "assistant_message", 20, json!({"text": "The chart is above. EMEA led the quarter."})),
+    ]);
+    app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
+}
+
+/// A delegated task running in a linked environment, named after its row title.
+fn subagent_remote(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let child = other_thread(app);
+    let at = |s: u32| format!("2026-12-12T00:00:{s:02}.000Z");
+    push_visible(app, vec![json!({"id": "scene-remote-task", "type": "subagent", "subagentId": "scene-remote-agent", "status": "running",
+        "title": "Run the GPU benchmarks", "driver": "codex", "childThreadId": child, "progress": "Warming up the cluster",
+        "startedAt": at(0), "createdAt": at(0), "updatedAt": at(5),
+        "remoteChild": {"environmentId": "scene-env-build", "threadId": "scene-remote-thread", "label": "Build box"}})]);
+    if let Some(now) = crate::data::iso_ms(&at(42)) {
+        app.now_ms = now;
+    }
+}
+
+/// An Antigravity subagent's thread: the bar in the composer's place, with "Subagent work".
+fn subagent_bar(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let parent = other_thread(app);
+    let instance = "scene-antigravity";
+    patch_config(app, |config| {
+        let provider = json!({"instanceId": instance, "driver": "antigravity", "displayName": "Antigravity", "status": "ready", "models": [
+            {"slug": "gemini-3-pro", "name": "Gemini 3 Pro", "capabilities": {"optionDescriptors": [
+                {"id": "reasoningEffort", "type": "select", "options": [{"id": "high", "label": "High"}, {"id": "low", "label": "Low"}]}]}}]});
+        match config["providers"].as_array_mut() {
+            Some(providers) => providers.push(provider),
+            None => config["providers"] = json!([provider]),
+        }
+    });
+    patch_shell(app, json!({"creationSource": "provider", "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"},
+        "modelSelection": {"instanceId": instance, "model": "gemini-3-pro", "options": [{"id": "reasoningEffort", "value": "high"}]}}));
+    let started = "2026-12-13T00:00:00.000Z";
+    push_items(app, "nodes", vec![json!({"id": "scene-subagent-root", "kind": "root_turn", "runId": null, "status": "running", "startedAt": started})]);
+    if let Some(start) = crate::data::iso_ms(started) {
+        app.now_ms = start + 42_000;
+    }
+}
+
+/// The `/usage-limits` panel with two reset credits banked on the Claude login.
+fn usage_reset_credits(app: &mut App) {
+    if let Some((_, open)) = crate::chat::composer::SCENES.iter().find(|(name, _)| *name == "composer-usage-limits") {
+        open(app);
+    }
+    patch_config(app, |config| {
+        for p in config["providers"].as_array_mut().into_iter().flatten().filter(|p| p["instanceId"] == "claudeAgent") {
+            p["usageLimits"]["resetCredits"] = serde_json::json!({"availableCount": 2, "nextExpiresAt": "2026-12-08T00:00:00.000Z", "nextCreditId": "credit-1"});
+        }
+    });
 }

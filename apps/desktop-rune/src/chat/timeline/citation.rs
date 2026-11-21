@@ -8,7 +8,7 @@ use rune::{Align, Color, El, ScrollSpec, Side, Tx, col, el, row, text};
 
 const HREF_PREFIX: &str = "t3-citation://v1/";
 const MAX_TEXT: usize = 8_000;
-const MAX_COMMENT: usize = 8_000;
+pub const MAX_COMMENT: usize = 8_000;
 const MAX_CONTEXT: usize = 32;
 const MAX_ID: usize = 512;
 const MAX_HREF: usize = 9 * (MAX_TEXT + MAX_COMMENT) + 16_000;
@@ -26,11 +26,6 @@ pub struct Citation {
     pub end: u64,
     pub prefix: String,
     pub suffix: String,
-}
-
-/// ContextChip's `citation` accent.
-pub fn accent() -> Color {
-    rune::color::oklch(0.62, 0.16, 259.0)
 }
 
 fn units(v: &str) -> usize {
@@ -83,6 +78,12 @@ pub fn href(c: &Citation) -> String {
     }
     let query = pairs.iter().map(|(k, v)| format!("{k}={}", encode(v, true))).collect::<Vec<_>>().join("&");
     format!("{HREF_PREFIX}{path}?{query}")
+}
+
+/// `withAssistantCitationComment`: the comment trimmed, and dropped when that leaves nothing.
+pub fn with_comment(c: &Citation, comment: &str) -> Citation {
+    let comment = Some(comment.trim()).filter(|v| !v.is_empty()).map(str::to_owned);
+    Citation { comment, ..c.clone() }
 }
 
 /// `parseAssistantCitationHref`: the citation a link names, if it is a valid one.
@@ -194,10 +195,11 @@ pub fn go_to_source(app: &mut App, c: &Citation, tx: &mut Tx) {
 pub fn popover(app: &App, t: &T) -> Option<El> {
     let (anchor, href) = app.ui.chat.timeline.md_links.citation.as_ref()?;
     let citation = parse_href(href)?;
-    Some(card(t, &citation).anchored(anchor.clone(), Side::Top, Align::Start, 4.0).modal(true, close))
+    Some(card(t, &citation, None).anchored(anchor.clone(), Side::Top, Align::Start, 4.0).modal(true, close))
 }
 
-fn card(t: &T, c: &Citation) -> El {
+/// The quote card; `edit` is the composer chip's comment button, beside Go to source.
+pub fn card(t: &T, c: &Citation, edit: Option<El>) -> El {
     let quote = row()
         .w_full()
         .child(el().w(2.0).self_stretch().fill(t.c.border))
@@ -230,7 +232,7 @@ fn card(t: &T, c: &Citation) -> El {
                 .gap(12.0)
                 .padding(4.0)
                 .child(col().w_full().max_h(256.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
-                .child(go),
+                .child(row().gap(8.0).center_y().child(go).children(edit)),
         )
 }
 
@@ -260,6 +262,18 @@ mod tests {
         assert_eq!(parse_href(&h), Some(c.clone()));
         let commented = Citation { comment: Some("Why?".into()), ..c };
         assert_eq!(parse_href(&href(&commented)), Some(commented));
+    }
+
+    #[test]
+    fn comments_trim_and_round_trip_through_the_href() {
+        let c = sample();
+        let commented = with_comment(&c, "  Why a mutex?\n");
+        assert_eq!(commented.comment.as_deref(), Some("Why a mutex?"));
+        let h = href(&commented);
+        assert!(h.ends_with("&comment=Why+a+mutex%3F"), "{h}");
+        assert_eq!(parse_href(&h), Some(commented.clone()));
+        assert_eq!(with_comment(&commented, "   "), c);
+        assert_eq!(href(&with_comment(&commented, "")), href(&c));
     }
 
     #[test]

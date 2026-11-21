@@ -1,5 +1,6 @@
 //! ThreadDetailsItemsMenu and threadDetailsItems.ts: which items the thread details card shows.
-//! The choices live in the client settings Electron shares, so web reads the same ones.
+//! The choices live in the client settings Electron shares, so web reads the same ones. The card
+//! menu and the Settings row (`settings::thread_details`) both use this list and its rules.
 
 use rune::El;
 use serde_json::{Map, Value, json};
@@ -79,15 +80,13 @@ pub fn is_default(settings: &Map<String, Value>) -> bool {
 fn set(s: &mut App, id: &str, on: bool) {
     let Some(item) = ITEMS.iter().find(|i| i.id == id) else { return };
     let next = with_item(&s.client_settings.values, item, on);
-    s.client_settings.values.insert(ITEMS_KEY.into(), next);
-    s.client_settings.save();
+    crate::settings::update(s, ITEMS_KEY, next);
 }
 
 /// RESET_THREAD_DETAILS_ITEMS: also clears the retired Labs flag, so Usage and Context return to off.
 pub fn reset(s: &mut App) {
-    s.client_settings.values.insert(ITEMS_KEY.into(), json!({}));
-    s.client_settings.values.insert(USAGE_KEY.into(), json!(false));
-    s.client_settings.save();
+    crate::settings::update(s, ITEMS_KEY, json!({}));
+    crate::settings::update(s, USAGE_KEY, json!(false));
 }
 
 /// ThreadDetailsItemsMenuItems: the card's context menu and Settings share it.

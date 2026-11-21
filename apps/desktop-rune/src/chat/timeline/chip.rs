@@ -12,6 +12,9 @@ use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, Route};
 
+/// The quote model and card, for the composer's quote chips (AssistantCitationChip `composer`).
+pub use super::citation::{Citation, MAX_COMMENT, card as citation_card, href as citation_href, label as citation_label, parse_href as parse_citation, with_comment};
+
 /// The bubble's chip links, keyed `kind/id` for [`pressed`], with their tooltips.
 pub fn links(shown: &[chips::Shown], records: &[Value]) -> Vec<Link> {
     shown
@@ -29,8 +32,10 @@ pub fn links(shown: &[chips::Shown], records: &[Value]) -> Vec<Link> {
 }
 
 fn tooltip(kind: &str, id: &str, record: Option<&Value>) -> Option<String> {
-    if kind == "mention" {
-        return Some(id.to_owned());
+    match kind {
+        "mention" => return Some(id.to_owned()),
+        "citation" => return None,
+        _ => {}
     }
     let Some(r) = record else { return Some("This context is no longer available.".into()) };
     match kind {
@@ -54,9 +59,14 @@ fn tooltip(kind: &str, id: &str, record: Option<&Value>) -> Option<String> {
 /// A bubble chip was clicked: act on it, or open its details over the message.
 pub fn pressed(app: &mut App, item: &str, link: &str, records: &[Value], tx: &mut Tx) {
     let Some((kind, id)) = link.split_once('/') else { return };
-    if kind == "mention" {
-        crate::panel::open_file(app, id.to_owned());
-        return;
+    match kind {
+        "mention" => return crate::panel::open_file(app, id.to_owned()),
+        // A quote chip shows its source over the bubble, as in Markdown.
+        "citation" => {
+            app.ui.chat.timeline.md_links.citation = Some((bubble_key(item), id.to_owned()));
+            return;
+        }
+        _ => {}
     }
     let Some(record) = records.iter().find(|r| s(r, "contextId") == id) else { return };
     match kind {

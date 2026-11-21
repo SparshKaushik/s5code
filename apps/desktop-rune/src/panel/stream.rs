@@ -85,6 +85,13 @@ impl Stream {
         Stream { tx, state, inbox, pressed: AtomicBool::new(false), base, bearer, query, waker }
     }
 
+    /// A stream already in `state`, connected to nothing, for headless scenes.
+    pub fn fixture(state: State) -> Stream {
+        let (tx, _) = channel();
+        let waker: rune::Waker = Arc::new(|| {});
+        Stream { tx, state: Arc::new(Mutex::new(state)), inbox: Arc::default(), pressed: AtomicBool::new(false), base: String::new(), bearer: String::new(), query: String::new(), waker }
+    }
+
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
     }
@@ -96,6 +103,11 @@ impl Stream {
 
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
+    }
+
+    /// Saves one of the session's downloads again, as web's "Download" on a file it can't show.
+    pub fn save(&self, id: &str, name: String) {
+        fetch_download((self.base.clone(), self.bearer.clone(), self.query.clone()), self.inbox.clone(), self.waker.clone(), id, name);
     }
 
     /// Answers the page's file picker with these files; none cancels it.
@@ -340,8 +352,11 @@ fn update(state: &Mutex<State>, waker: &rune::Waker, f: impl FnOnce(&mut State))
 
 /// Saves a download the page started into the Downloads folder, as Electron saves a person's.
 fn download(ctx: &Ctx, id: &str, name: String) {
-    let (base, bearer, inbox, waker) = (ctx.base.clone(), ctx.bearer.clone(), ctx.inbox.clone(), ctx.waker.clone());
-    let query = format!("{}&id={}", session_query(&ctx.query), encode(id));
+    fetch_download((ctx.base.clone(), ctx.bearer.clone(), ctx.query.clone()), ctx.inbox.clone(), ctx.waker.clone(), id, name);
+}
+
+fn fetch_download((base, bearer, session): (String, String, String), inbox: Arc<Mutex<Vec<Event>>>, waker: rune::Waker, id: &str, name: String) {
+    let query = format!("{}&id={}", session_query(&session), encode(id));
     std::thread::spawn(move || {
         let saved = s5_net::api_get(&base, &bearer, "/api/preview-stream/download", &query, 4 << 30).and_then(|bytes| {
             let dir = super::browser::downloads_dir();

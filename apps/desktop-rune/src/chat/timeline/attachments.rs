@@ -9,6 +9,11 @@ use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+/// An image bubble's 240x180 frame on a 2x display.
+const THUMBNAIL_DECODE: u32 = 480;
+/// The lightbox's own decode, held only while it is open.
+const LIGHTBOX_DECODE: u32 = 2048;
+
 #[derive(Default)]
 pub struct Assets {
     pending: HashMap<String, u64>,
@@ -16,11 +21,61 @@ pub struct Assets {
     pub(super) failed: std::collections::HashSet<String>,
     /// The image the lightbox shows: an attachment id or a Markdown media key.
     pub open: Option<String>,
+    /// The open image at lightbox size, and whether a view has drawn it yet.
+    zoom: Option<(String, Loaded, bool)>,
+    /// The thread whose pictures are decoded; another thread's are dropped.
+    thread: Option<String>,
     pub media: media::State,
 }
 
-pub fn poll(app: &mut App) -> bool {
-    let media_changed = media::poll(app);
+impl Assets {
+    /// Drops the decoded pictures of a thread no longer shown. Requests in flight stay so their
+    /// replies are still taken.
+    fn forget(&mut self) {
+        self.ready.clear();
+        self.failed.clear();
+        self.open = None;
+        self.zoom = None;
+        self.media.forget();
+    }
+}
+
+/// Loads the lightbox's full-size picture while it is open, and drops it once closed.
+fn zoom(app: &mut App) -> bool {
+    let open = app.ui.chat.timeline.assets.open.clone();
+    let assets = &mut app.ui.chat.timeline.assets;
+    if let Some((key, loaded, drawn)) = &mut assets.zoom
+        && open.as_deref() == Some(key.as_str())
+    {
+        let ready = !*drawn && loaded.pixels.size().0 > 0;
+        *drawn |= ready;
+        return ready;
+    }
+    let had = assets.zoom.take().is_some();
+    let waker = app.ui.panel.waker.clone();
+    let next = open.and_then(|key| {
+        let (_, loaded) = media::find(&*app, &key)?;
+        let loaded = loaded.filter(|l| l.kind == Some(Kind::Image) && !l.url.is_empty())?;
+        Some((key, Loaded::new(loaded.url, loaded.name, loaded.kind, LIGHTBOX_DECODE, waker), false))
+    });
+    app.ui.chat.timeline.assets.zoom = next;
+    had
+}
+
+pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
+    let mut moved = false;
+    if let crate::Route::Thread(thread) = app.frame_route()
+        && app.ui.chat.timeline.assets.thread.as_ref() != Some(thread)
+    {
+        let thread = Some(thread.clone());
+        let assets = &mut app.ui.chat.timeline.assets;
+        if assets.thread.is_some() {
+            assets.forget();
+            moved = true;
+        }
+        assets.thread = thread;
+    }
+    let media_changed = moved | media::poll(app, tx) | zoom(app);
     let crate::Route::Thread(thread) = app.frame_route() else {
         return media_changed;
     };
@@ -64,7 +119,7 @@ pub fn poll(app: &mut App) -> bool {
             let base = net.base_url().to_owned();
             let url = format!("{}{}", base.trim_end_matches('/'), s(&reply, "relativeUrl"));
             let kind = media::attachment_kind(s(&a, "mimeType"), s(&a, "name"));
-            assets.ready.insert(id.to_owned(), Loaded::new(url, s(&a, "name").to_owned(), kind, waker.clone()));
+            assets.ready.insert(id.to_owned(), Loaded::new(url, s(&a, "name").to_owned(), kind, THUMBNAIL_DECODE, waker.clone()));
         }
     }
     changed
@@ -188,7 +243,9 @@ pub fn lightbox(app: &App) -> Option<El> {
     let (source, loaded) = media::find(app, id)?;
     let loaded = loaded?;
     let url = loaded.url.clone();
-    let picture = el().w_full().h_full().pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit);
+    let zoom = app.ui.chat.timeline.assets.zoom.as_ref().filter(|(k, z, _)| k == id && z.pixels.size().0 > 0);
+    let pixels = zoom.map_or(&loaded.pixels, |(_, z, _)| &z.pixels);
+    let picture = el().w_full().h_full().pixels_fit(pixels, rune::SurfaceFit::Fit);
     let mut menu = Vec::new();
     // The lightbox is dark in both themes, and so is its menu.
     media::menu(app, &crate::kit::theme(&theme::theme(true)), &mut menu);

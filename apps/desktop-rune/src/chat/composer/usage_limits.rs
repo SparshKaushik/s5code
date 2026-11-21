@@ -1,9 +1,11 @@
 //! The panel `/usage-limits` opens over the composer (ComposerUsageLimits, useUsageLimitsPanel):
-//! the selected provider's subscription windows for each signed-in account. Reset credits are
-//! redeemed from the Usage page, not here.
+//! the selected provider's subscription windows for each signed-in account, and their banked
+//! reset credits (ResetCredits) to redeem.
+
+use std::collections::HashMap;
 
 use rune::{Color, Cursor, Cx, El, col, el, icon, row, spacer, text};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{ctx, draft, draft_key, providers, selection};
 use crate::App;
@@ -20,6 +22,12 @@ pub struct Panel {
     /// another route or provider) hides it, so work that spends quota closes it.
     pub(super) open: Option<(String, i64)>,
     email_shown: bool,
+    /// The account awaiting "Use a reset credit?", and `provider.consumeResetCredit`'s input.
+    confirm: Option<(String, Value)>,
+    /// The request, its account and its environment.
+    redeeming: Option<(u64, String, String)>,
+    /// What each account's last redemption said (useResetCredit's status).
+    status: HashMap<String, String>,
 }
 
 /// isUsageLimitsCommand.
@@ -72,10 +80,13 @@ pub(super) fn open(s: &mut App) -> bool {
 
 /// One account's limits in the panel (UsageLimitsReport's accounts).
 pub(super) struct Account {
+    id: String,
     label: String,
     plan: Option<String>,
     driver: String,
     accent: Option<String>,
+    /// `resetCreditInput`: what redeeming this account's reset credit sends.
+    redeem: Option<Value>,
     limits: Value,
 }
 
@@ -195,10 +206,12 @@ pub(super) fn collect(instance: &str, providers: &[Value], sources: &[Value]) ->
     let mut accounts: Vec<Account> = native
         .iter()
         .map(|(_, p)| Account {
+            id: data::s(p, "instanceId").to_owned(),
             label: instance_label(p),
             plan: text_of(&p["auth"]["label"]),
             driver: driver.to_owned(),
             accent: text_of(&p["accentColor"]),
+            redeem: Some(json!({"instanceId": p["instanceId"]})),
             limits: p["usageLimits"].clone(),
         })
         .collect();
@@ -212,11 +225,14 @@ pub(super) fn collect(instance: &str, providers: &[Value], sources: &[Value]) ->
             }
             let id = data::s(a, "id");
             let hub_name = id.strip_suffix(".json").or_else(|| id.strip_suffix(".JSON")).unwrap_or(id);
+            let redeem = text_of(&a["usageLimits"]["resetCredits"]["nextCreditId"]).map(|credit| json!({"sourceId": src["id"], "accountId": id, "creditId": credit}));
             accounts.push(Account {
+                id: format!("{}:{id}", data::s(src, "id")),
                 label: format!("{} · {hub_name}", data::s(src, "label")),
                 plan: text_of(&a["plan"]),
                 driver: driver.to_owned(),
                 accent: None,
+                redeem,
                 limits: a["usageLimits"].clone(),
             });
         }
@@ -420,7 +436,7 @@ pub(super) fn banner(s: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
                 }),
             );
         }
-        body = body.child(entry);
+        body = body.child(entry.children(reset_credits(s, t, account, now)));
     }
     for notice in report.notices {
         body = body.child(text(notice).font(theme::TEXT_XS).color(muted).wrap());
@@ -439,6 +455,72 @@ pub(super) fn banner(s: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
             .child(header)
             .child(col().w_full().max_h(240.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body)),
     )
+}
+
+/// ResetCredits: the credits banked, Use reset, and what the last redemption said.
+fn reset_credits(s: &App, t: &T, account: &Account, now: i64) -> Option<El> {
+    let input = account.redeem.clone()?;
+    let credits = &account.limits["resetCredits"];
+    if !credits.is_object() {
+        return None;
+    }
+    let panel = &s.ui.chat.composer.usage;
+    let count = credits["availableCount"].as_i64().unwrap_or(0);
+    let status = panel.status.get(&account.id);
+    if count == 0 && status.is_none() {
+        return None;
+    }
+    let busy = panel.redeeming.as_ref().is_some_and(|r| r.1 == account.id);
+    let summary = crate::pages::usage_limits::credits_summary(credits, now, false);
+    let mut line = row().w_full().gap(12.0).center_y().child(text(summary).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
+    if count > 0 {
+        let key = account.id.clone();
+        line = line.child(
+            crate::kit::Button::new(if busy { "Using…" } else { "Use reset" })
+                .size("xs")
+                .variant("outline")
+                .disabled(busy)
+                .on_press(move |s: &mut App| s.ui.chat.composer.usage.confirm = Some((key.clone(), input.clone())))
+                .build(t),
+        );
+    }
+    if let Some(status) = status {
+        line = line.child(text(status.clone()).font(theme::TEXT_XS).color(t.c.foreground).wrap().shrink().min_w(0.0));
+    }
+    Some(line)
+}
+
+/// ResetCreditDialog for the panel's Use reset.
+pub(super) fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some((key, input)) = s.ui.chat.composer.usage.confirm.clone() else { return };
+    let allowed = crate::pages::usage_limits::can_redeem(s, &s.ui.env.active);
+    crate::pages::usage_limits::reset_credit_dialog(t, layers, allowed, |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
+}
+
+/// useResetCredit's redeem, on the environment the composer reads.
+fn redeem(s: &mut App, key: &str, input: &Value) {
+    s.ui.chat.composer.usage.confirm = None;
+    let environment = s.ui.env.active.clone();
+    if !crate::pages::usage_limits::can_redeem(s, &environment) {
+        return;
+    }
+    let Some(net) = s.src.net() else { return };
+    let id = net.request("provider.consumeResetCredit", input.clone());
+    let usage = &mut s.ui.chat.composer.usage;
+    usage.status.remove(key);
+    usage.redeeming = Some((id, key.to_owned(), environment));
+}
+
+/// Takes the redemption's answer: from the composer's environment, or the active one it was
+/// handed to once that environment was parked.
+pub(super) fn poll(s: &mut App) -> bool {
+    let Some((id, key, environment)) = s.ui.chat.composer.usage.redeeming.clone() else { return false };
+    let reply = s.src.net().and_then(|n| n.take_reply(id)).or_else(|| crate::env::net_of(s, &environment).and_then(|n| n.take_reply(id)));
+    let Some(reply) = reply else { return false };
+    let usage = &mut s.ui.chat.composer.usage;
+    usage.redeeming = None;
+    usage.status.insert(key, crate::pages::usage_limits::redeemed(&reply));
+    true
 }
 
 /// The `composer-usage-limits` scene: a Claude login with a session and a weekly window.
@@ -497,12 +579,25 @@ mod tests {
         assert_eq!(report.accounts.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(), ["Claude · claude-work", "Hub · bob"]);
         assert_eq!(report.accounts[1].plan.as_deref(), Some("Pro"));
         assert_eq!(report.notices, ["Proxy: unreachable"]);
+        assert_eq!(report.accounts[0].redeem, Some(json!({"instanceId": "claude-work"})));
+        assert_eq!((report.accounts[1].id.as_str(), report.accounts[1].redeem.as_ref()), ("hub:bob.json", None), "no credit to name");
         assert_eq!(limits_notice(&report.accounts[1].limits).as_deref(), Some("No limits reported."));
         // A source error with no accounts offers the command for every driver.
         assert!(has_limits("codex", &providers, &sources));
         assert!(!has_limits("codex", &providers, &sources[..1]));
         assert!(collect("codex", &providers, &sources[..1]).is_none());
         assert!(is_command(" /Usage-Limits ") && !is_command("/usage-limits now"));
+    }
+
+    #[test]
+    fn a_reset_credit_answer_becomes_the_account_status() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::offline());
+        let id = s.src.net().map(|n| n.request("provider.consumeResetCredit", json!({"instanceId": "claude-work"}))).unwrap();
+        s.ui.chat.composer.usage.redeeming = Some((id, "claude-work".into(), s.ui.env.active.clone()));
+        assert!(poll(&mut s));
+        assert_eq!(s.ui.chat.composer.usage.redeeming, None);
+        assert_eq!(s.ui.chat.composer.usage.status.get("claude-work").map(String::as_str), Some("network worker stopped"));
     }
 
     #[test]

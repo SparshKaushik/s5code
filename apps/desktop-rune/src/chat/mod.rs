@@ -7,6 +7,7 @@ pub mod details;
 pub mod home;
 pub mod server_update;
 pub mod side;
+pub mod subagent_bar;
 pub mod timeline;
 pub mod topbar;
 
@@ -114,7 +115,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(timeline::scroll_to_end(s, cx, t, &lane))
         .children(timeline::banners::lane(s, t, &lane))
         .children(timeline::banners::stack(s, cx, t, &lane))
-        .child(composer::view(s, cx, t, &lane))
+        // A provider-native subagent takes no messages; its bar stands in for the composer.
+        .child(subagent_bar::view(s, cx, t, &lane).unwrap_or_else(|| composer::view(s, cx, t, &lane)))
         .children(details::view(s, cx, t, shown, w))
         .children({
             let bw = details::WIDTH.min(w - 2.0 * details::GAP);

@@ -1156,7 +1156,7 @@ pub fn findings_handoff(d: &Value, activity: &Value) -> (String, Vec<Value>) {
     let remarks_in = tail(&remarks, FINDING_LIMIT - checks_in.len());
     let threads_in = tail(&threads, FINDING_LIMIT - checks_in.len() - remarks_in.len());
     let omitted = threads.len() + checks.len() + remarks.len() - threads_in.len() - checks_in.len() - remarks_in.len();
-    let (short, term) = (super::pr_actions::short_label(d), super::pr_row::term(d));
+    let (term, short) = super::pr_detail::url_term(d);
     let mut lines = vec![
         format!("Fix the actionable findings on {short} #{number}, titled `{}`, at `{}`.", bounded_field(field(d, "title")), bounded_field(field(d, "url"))),
         format!(
@@ -1178,7 +1178,7 @@ pub fn findings_handoff(d: &Value, activity: &Value) -> (String, Vec<Value>) {
         lines.extend(checks_in.iter().map(|c| format!("> {c}")));
     }
     if activity["commentsTruncated"] == true {
-        lines.push(format!("The conversation was truncated; more review comments may exist on {}.", super::pr_row::provider_name(field(d, "provider"))));
+        lines.push(format!("The conversation was truncated; more review comments may exist on {}.", match super::pr_row::provider_name(field(d, "provider")) { "source control" => "the host", host => host }));
     }
     if omitted > 0 {
         lines.push(format!("{omitted} further findings were omitted."));
@@ -1438,7 +1438,9 @@ mod tests {
         assert_eq!(records[0]["text"], "julius: rename this");
 
         let (empty, none) = findings_handoff(&json!({"number": 7, "url": "u"}), &Value::Null);
-        assert!(none.is_empty() && empty.ends_with("inspect the change request and its failing checks before changing code."));
+        assert!(none.is_empty() && empty.ends_with("inspect the pull request and its failing checks before changing code."), "terminologyForUrl: an unknown host reads as a pull request");
+        let (gitlab, _) = findings_handoff(&json!({"number": 7, "url": "https://gitlab.com/a/b/-/merge_requests/7"}), &Value::Null);
+        assert!(gitlab.starts_with("Fix the actionable findings on MR #7") && gitlab.contains("inspect the merge request"));
         let many: Vec<Value> = (0..25).map(|n| json!({"name": format!("c{n}"), "status": "failure"})).collect();
         let (capped, _) = findings_handoff(&json!({"number": 7, "url": "u", "checks": many}), &Value::Null);
         assert!(capped.contains("> c5\n") && !capped.contains("> c4\n") && capped.contains("5 further findings were omitted."), "the newest checks are kept");
