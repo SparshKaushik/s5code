@@ -1,8 +1,6 @@
 //! Web `SnapShotSettings` and its `SnapShotSetupDialog`, on macOS through `desktop::capture`.
 //! Elsewhere this client has no capture backend, so web's `SettingsUnavailableGroup` shows
 //! instead and the capture rows and wizard stay hidden, as web hides them without a bridge.
-//! Include app text and Capture animations stay hidden on macOS too: Electron reads app text
-//! through a native accessibility module and flies captures in with a continuous animation.
 
 use super::controls as c;
 use crate::desktop::capture::{self, State, Test};
@@ -66,8 +64,13 @@ fn access_ready(state: &State) -> bool {
     state.message.is_none()
 }
 
-fn permissions_ready(state: &State) -> bool {
-    state.permissions.is_some_and(|p| p.screen_recording)
+/// `captureSetupMacPermissionsReady`: Screen Recording, and Accessibility when app text is on.
+fn permissions_ready(state: &State, include_text: bool) -> bool {
+    state.permissions.is_some_and(|p| p.screen_recording && (!include_text || p.accessibility))
+}
+
+fn include_text(s: &App) -> bool {
+    super::value(s, "snapShotIncludeAccessibility") != false
 }
 
 /// `snapShotStatus` on macOS.
@@ -87,9 +90,9 @@ fn status(state: &State, enabled: bool) -> &'static str {
     }
 }
 
-/// `snapShotSetupComplete` without app text.
-fn setup_complete(state: &State) -> bool {
-    state.permissions.is_some() && access_ready(state) && permissions_ready(state) && state.shortcut_registered
+/// `snapShotSetupComplete`.
+fn setup_complete(state: &State, include_text: bool) -> bool {
+    state.permissions.is_some() && access_ready(state) && permissions_ready(state, include_text) && state.shortcut_registered
 }
 
 /// The shortcut status line: recording, the candidate's check, else `snapShotShortcutStatus`.
@@ -416,7 +419,7 @@ pub fn view(s: &App, t: &T) -> El {
     let ui = &s.ui.settings.snapshots;
     let on = enabled(s);
     let mut toggle = row().gap(8.0).center_y();
-    if on && !setup_complete(&state) {
+    if on && !setup_complete(&state, include_text(s)) {
         let label = if access_ready(&state) { "Manage capture" } else { "Continue setup" };
         toggle = toggle.child(kit::Button::new(label).variant("outline").size("xs").on_press(open_setup).build(t));
     }
@@ -429,6 +432,19 @@ pub fn view(s: &App, t: &T) -> El {
     }));
     let mut rows = vec![setting(t, title("SnapShots", false, t), DESCRIPTION, Some(status(&state, on).into()), toggle)];
     if on {
+        let text_on = include_text(s);
+        rows.push(setting(
+            t,
+            title("Include app text", true, t),
+            "Include text and controls when the app makes them available.",
+            None,
+            switch(t, text_on, "Include app text in snapshots", move |s: &mut App| {
+                if !text_on {
+                    capture::request_accessibility(s);
+                }
+                super::update(s, "snapShotIncludeAccessibility", json!(!text_on));
+            }),
+        ));
         rows.push(setting(
             t,
             title("Capture shortcut", true, t),
@@ -445,6 +461,14 @@ pub fn view(s: &App, t: &T) -> El {
             "Show a gentle cue on the captured window.",
             None,
             switch(t, flash, "Flash captured window", move |s: &mut App| super::update(s, "snapShotFlash", json!(!flash))),
+        ));
+        let animate = super::value(s, "snapShotAnimations") != false;
+        rows.push(setting(
+            t,
+            title("Capture animations", true, t),
+            "Animate captured windows into your draft.",
+            None,
+            switch(t, animate, "Animate snapshots", move |s: &mut App| super::update(s, "snapShotAnimations", json!(!animate))),
         ));
     }
     c::section("SnapShots", vec![c::card(rows, t)], t)
@@ -524,31 +548,39 @@ fn leave_to(s: &mut App, step: Step) {
     }
 }
 
-/// Web `PermissionChecklist` with Screen Recording, the one permission capture uses here.
-fn checklist(state: &State, busy: bool, t: &T) -> El {
-    let granted = permissions_ready(state);
-    let action = if granted {
-        row().gap(4.0).center_y().role("status").child(icon(&icons::CIRCLE_CHECK, 16.0).color(t.c.success)).child(text("Allowed").font(theme::TEXT_XS).color(t.c.success))
-    } else {
-        kit::Button::new("Allow").variant("outline").size("xs").disabled(busy).on_press(|s: &mut App| capture::check_permissions(s, true)).build(t)
+/// Web `PermissionChecklist` on macOS: Screen Recording, and Accessibility for app text.
+fn checklist(state: &State, include_text: bool, busy: bool, t: &T) -> El {
+    let p = state.permissions.unwrap_or_default();
+    let text_copy = if include_text { "Include text and controls from the captured app." } else { "Optional. Include text and controls from the captured app." };
+    let item = |icon_: &'static rune::Icon, name: &str, copy: &str, granted: bool, allow: fn(&mut App)| {
+        let action = if granted {
+            row().gap(4.0).center_y().role("status").child(icon(&icons::CIRCLE_CHECK, 16.0).color(t.c.success)).child(text("Allowed").font(theme::TEXT_XS).color(t.c.success))
+        } else {
+            kit::Button::new("Allow").variant("outline").size("xs").disabled(busy).on_press(allow).build(t)
+        };
+        row()
+            .w_full()
+            .gap(12.0)
+            .px(12.0)
+            .py(8.0)
+            .center_y()
+            .radius(8.0)
+            .border(1.0, t.c.border)
+            .child(icon(icon_, 24.0).color(t.c.muted_foreground))
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(name.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+                    .child(text(copy.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
+            )
+            .child(action)
     };
-    row()
+    col()
         .w_full()
-        .gap(12.0)
-        .px(12.0)
-        .py(8.0)
-        .center_y()
-        .radius(8.0)
-        .border(1.0, t.c.border)
-        .child(icon(&icons::MONITOR, 24.0).color(t.c.muted_foreground))
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .child(text("Screen Recording").font(theme::SM_MEDIUM).color(t.c.foreground))
-                .child(text("Capture the window you're using.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
-        )
-        .child(action)
+        .gap(8.0)
+        .child(item(&icons::MONITOR, "Screen Recording", "Capture the window you're using.", p.screen_recording, |s| capture::check_permissions(s, true)))
+        .child(item(&icons::TEXT_SEARCH, "Accessibility", text_copy, p.accessibility, |s| capture::request_accessibility(s)))
 }
 
 fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
@@ -561,10 +593,11 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
         _ => None,
     };
     let ready = access_ready(&state);
+    let text_on = include_text(s);
     let small = |copy: String, color| text(copy).font(theme::TEXT_XS.lh(18.0)).color(color).wrap();
     let (heading, description) = match wizard.step {
         Step::Access if state.message.is_some() && state.permissions.is_none() => ("Let's try that again", "Couldn't check snapshots. Try again to continue."),
-        Step::Access if permissions_ready(&state) => ("Allow snapshots", "Test a snapshot of the current window. If macOS asks to bypass its window picker, choose Allow. The test image is discarded."),
+        Step::Access if permissions_ready(&state, text_on) => ("Allow snapshots", "Test a snapshot of the current window. If macOS asks to bypass its window picker, choose Allow. The test image is discarded."),
         Step::Access => ("Allow snapshots", "Allow each permission, then continue."),
         Step::Shortcut => ("Choose your shortcut", "Use both Shift keys, or record a different shortcut."),
     };
@@ -573,7 +606,7 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
         .gap(16.0)
         .child(col().gap(8.0).child(text(heading).font(theme::SM_MEDIUM).color(t.c.foreground)).child(small(description.into(), t.c.muted_foreground)));
     match wizard.step {
-        Step::Access => body = body.child(checklist(&state, busy, t)),
+        Step::Access => body = body.child(checklist(&state, text_on, busy, t)),
         Step::Shortcut => {
             let mut shortcut = col().gap(12.0).child(row().child(recorder(ui, &display_shortcut(s), t)));
             if let Some(status) = shortcut_status(ui, &state) {
@@ -626,7 +659,7 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
     footer = footer.child(kit::Button::new(later).variant("ghost").disabled(busy).on_press(|s: &mut App| close_setup(s, false)).build(t));
     footer = footer.child(match wizard.step {
         Step::Access => kit::Button::new(if busy { "Working…" } else { "Test capture and continue" })
-            .disabled(busy || !permissions_ready(&state))
+            .disabled(busy || !permissions_ready(&state, text_on))
             .on_press(|s: &mut App| capture::test(s))
             .build(t),
         Step::Shortcut => {
@@ -661,7 +694,7 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
 fn scene_state(screen_recording: bool) -> State {
     State {
         supported: true,
-        permissions: Some(capture::Permissions { screen_recording }),
+        permissions: Some(capture::Permissions { screen_recording, accessibility: screen_recording }),
         shortcut_registered: screen_recording,
         shortcut_message: screen_recording.then(|| "Shift + Shift is observed and cannot be reserved exclusively.".into()),
         message: (!screen_recording).then(|| capture::SCREEN_RECORDING_MESSAGE.into()),
@@ -685,6 +718,11 @@ pub(crate) const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-snap-shot-wizard-access", |s| {
         mac_scene(s, false, scene_state(false));
+        s.ui.settings.snapshots.wizard = Some(Wizard { step: Step::Access, was_enabled: false });
+    }),
+    ("settings-snap-shot-wizard-accessibility", |s| {
+        let permissions = Some(capture::Permissions { screen_recording: true, accessibility: false });
+        mac_scene(s, false, State { permissions, ..scene_state(true) });
         s.ui.settings.snapshots.wizard = Some(Wizard { step: Step::Access, was_enabled: false });
     }),
     ("settings-snap-shot-wizard-test-failed", |s| {
@@ -713,8 +751,11 @@ mod tests {
         assert_eq!(status(&scene_state(false), true), "Capture needs attention");
         assert_eq!(status(&ready, true), "Shortcut saved");
         assert_eq!(status(&State { shortcut_verified: true, ..ready.clone() }, true), "Ready to capture");
-        assert!(setup_complete(&ready));
-        assert!(!setup_complete(&scene_state(false)));
+        assert!(setup_complete(&ready, true));
+        assert!(!setup_complete(&scene_state(false), false));
+        let no_text = State { permissions: Some(capture::Permissions { screen_recording: true, accessibility: false }), ..ready.clone() };
+        assert!(setup_complete(&no_text, false), "Accessibility is optional without app text");
+        assert!(!setup_complete(&no_text, true), "app text needs Accessibility");
         assert_eq!(shortcut_status(&Ui::default(), &ready).as_deref(), Some("Shortcut saved."));
         let taken = State { shortcut_registered: false, shortcut_message: Some(capture::SHORTCUT_TAKEN.into()), ..ready };
         assert_eq!(shortcut_status(&Ui::default(), &taken).as_deref(), Some(capture::SHORTCUT_TAKEN));

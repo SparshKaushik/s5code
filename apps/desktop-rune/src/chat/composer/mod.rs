@@ -1590,6 +1590,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 
     let mut body = col()
         .key("composer")
+        .on_screen_layout(crate::desktop::capture::note_composer)
         .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| add_files(s, files.iter().map(|p| p.display().to_string())))
         .w_full().radius(radius::XL2).fill(composer_fill(t)).border(1.0, composer_outline(t)).padding(1.0).pb(11.0);
     if !t.dark {
