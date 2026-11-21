@@ -75,6 +75,20 @@ pub fn open(s: &mut App) {
     s.ui.search = Ui { open: true, query, visible: VISIBLE_WINDOW, ..Ui::default() };
 }
 
+/// Scene: settled results across a Rust and a TypeScript file, for their syntax colours.
+pub(crate) fn scene_results(s: &mut App) {
+    open(s);
+    s.ui.search.query = TextEdit::new("needle");
+    s.ui.search.query.focused = true;
+    let line = |path: &str, n: u64, content: &str, at: u64| json!({"path": path, "lineNumber": n, "lineContent": content, "matchRanges": [{"start": at, "end": at + 6}]});
+    let matches = vec![
+        line("src/lib.rs", 12, "    let needle = haystack.find(|x| x.is_some());", 8),
+        line("src/lib.rs", 40, "fn needle_count(items: &[Item]) -> usize { items.len() }", 3),
+        line("web/search.ts", 7, "export const needle = (query: string): number => 42;", 13),
+    ];
+    s.ui.search.results = Results { params: params(s).unwrap_or_default(), matches, ..Results::default() };
+}
+
 fn close(s: &mut App) {
     s.ui.search.open = false;
     s.ui.search.pending = None;
