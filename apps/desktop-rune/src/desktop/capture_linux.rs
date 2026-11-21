@@ -534,16 +534,20 @@ pub fn scene_setup(backend: Backend, extension: Option<ExtensionStatus>) -> Setu
     let bundled = bundled();
     let extension = extension.map(|status| {
         use ExtensionStatus as S;
-        let loaded = Some(f64::from(bundled.0));
-        let (state, installed, user_extensions) = match status {
-            S::NotInstalled => (None, None, true),
-            S::RestartRequired => (None, Some(bundled.0), true),
-            S::ExtensionsDisabled => (Some(2.0), Some(bundled.0), false),
-            S::Enabled => (Some(1.0), Some(bundled.0), true),
-            S::Error => (Some(3.0), Some(bundled.0), true),
-            _ => (Some(2.0), Some(bundled.0), true),
+        let version = bundled.0;
+        // (shell major, state, installed version, loaded version, user extensions)
+        let (major, state, installed, loaded, user_extensions) = match status {
+            S::Unsupported => ("1".to_owned(), None, None, None, true),
+            S::NotInstalled => (String::new(), None, None, None, true),
+            S::RestartRequired => (String::new(), None, Some(version), None, true),
+            S::UpdateRequired => (String::new(), Some(2.0), Some(version.saturating_sub(1)), Some(version.saturating_sub(1)), true),
+            S::ExtensionsDisabled => (String::new(), Some(2.0), Some(version), Some(version), false),
+            S::Disabled => (String::new(), Some(2.0), Some(version), Some(version), true),
+            S::Enabled => (String::new(), Some(1.0), Some(version), Some(version), true),
+            S::Error => (String::new(), Some(3.0), Some(version), Some(version), true),
         };
-        let shell = Shell { version: format!("{}.1", bundled.1.last().cloned().unwrap_or_default()), user_extensions, state, loaded_version: loaded.filter(|_| state.is_some()), error: None };
+        let major = if major.is_empty() { bundled.1.last().cloned().unwrap_or_default() } else { major };
+        let shell = Shell { version: format!("{major}.1"), user_extensions, state, loaded_version: loaded.map(f64::from), error: None };
         extension_status(&shell, installed, &bundled)
     });
     Setup { backend, extension }
@@ -587,6 +591,11 @@ mod tests {
         let (version, shells) = bundled();
         assert!(version >= 1 && shells.iter().any(|s| s == "48"), "{version} {shells:?}");
         assert_eq!(metadata(r#"{"uuid":"other@x","version":1,"shell-version":[]}"#), None);
+        use ExtensionStatus as S;
+        for status in [S::NotInstalled, S::RestartRequired, S::UpdateRequired, S::ExtensionsDisabled, S::Disabled, S::Enabled, S::Unsupported, S::Error] {
+            let setup = scene_setup(Backend::Picker, Some(status));
+            assert_eq!(setup.extension.map(|(s, _)| s), Some(status), "scenes reach every state through extension_status");
+        }
     }
 
     #[test]
