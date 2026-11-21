@@ -89,7 +89,7 @@ fn feedback_notice(status: &FeedbackStatus) -> (&'static str, Option<String>) {
 /// submitCodexFeedback: on a Codex thread, a bare `/feedback [reason]` uploads the session's
 /// logs instead of sending a message. True when the draft was taken.
 pub fn send_feedback(app: &mut App) -> bool {
-    let Route::Thread(thread) = app.frame_route().clone() else { return false };
+    let Route::Thread(thread) = super::route(app) else { return false };
     if super::selection(app).and_then(|(i, _)| super::provider(app, &i)).is_none_or(|p| s(p, "driver") != "codex") {
         return false;
     }
@@ -115,8 +115,8 @@ pub fn send_feedback(app: &mut App) -> bool {
 }
 
 fn feedback_items(app: &App, t: &T) -> Vec<Item> {
-    let Route::Thread(thread) = app.frame_route() else { return Vec::new() };
-    let Some(entries) = app.ui.chat.banners.feedback.get(thread) else { return Vec::new() };
+    let Route::Thread(thread) = super::route(app) else { return Vec::new() };
+    let Some(entries) = app.ui.chat.banners.feedback.get(&thread) else { return Vec::new() };
     entries
         .iter()
         .map(|(id, status)| {
@@ -255,7 +255,7 @@ fn fallback_dismiss_key(app: &App) -> String {
 
 /// The new-thread draft's fallback, unless a model was picked in it.
 fn draft_fallback(app: &App) -> Option<Fallback> {
-    if matches!(app.frame_route(), Route::Thread(_)) || super::draft(app).is_some_and(|d| d.model.is_some()) {
+    if matches!(super::route(app), Route::Thread(_)) || super::draft(app).is_some_and(|d| d.model.is_some()) {
         return None;
     }
     let project = super::ctx(app).project.and_then(|p| selection_of(&p["defaultModelSelection"]));
@@ -280,7 +280,7 @@ fn fallback_item(app: &App, t: &T) -> Option<Item> {
     item.description = Some(format!("{} is out of usage{resets}", f.provider));
     let default = f.default.clone();
     let label = format!("Use {}", super::model_name(app, &default.0, &default.1));
-    item.actions.push(Button::new(label).variant("ghost").size("xs").on_press(move |s: &mut App| super::draft_mut(s).model = Some(default.clone())).build(t));
+    item.actions.push(Button::new(label).variant("ghost").size("xs").on_press(super::act(app, move |s: &mut App| super::draft_mut(s).model = Some(default.clone()))).build(t));
     let window = f.window;
     item.dismiss = Some(dismiss(t, "Dismiss fallback model notice", move |s: &mut App| {
         let key = fallback_dismiss_key(s);
@@ -305,7 +305,7 @@ fn ceiling_item(app: &App, t: &T) -> Option<Item> {
     let (denial, fallback) = ceiling(app)?;
     let mut item = Item::new("managed-runtime-mode", Variant::Warning, &icons::BUILDING, denial);
     if let Some((mode, label)) = fallback {
-        item.actions.push(Button::new(format!("Switch to {label}")).variant("ghost").size("xs").on_press(move |s: &mut App| super::set_runtime_mode(s, mode)).build(t));
+        item.actions.push(Button::new(format!("Switch to {label}")).variant("ghost").size("xs").on_press(super::act(app, move |s: &mut App| super::set_runtime_mode(s, mode))).build(t));
     }
     Some(item)
 }
@@ -378,7 +378,7 @@ fn card(t: &T, item: Item, first: bool) -> El {
 /// The stack above the composer, ending in `drawer` (an open question, the plan follow-up or
 /// the branch notice), each card tucked under the next.
 pub fn dock(app: &App, t: &T, drawer: Option<El>) -> Option<El> {
-    let question = crate::chat::timeline::question::active(app).is_some();
+    let question = super::asking(app);
     let mut cards: Vec<El> = shelf(items(app, t), question).into_iter().enumerate().map(|(n, item)| card(t, item, n == 0)).collect();
     cards.extend(drawer);
     let last = cards.len().checked_sub(1)?;

@@ -1148,6 +1148,10 @@ pub fn go_forward(s: &mut App) {
 }
 
 pub fn open_thread(s: &mut App, id: &str) {
+    // A side chat of the open thread opens beside it (onOpenRelatedThread's openSideChatTab).
+    if crate::chat::side::open_tab(s, id) {
+        return;
+    }
     let ui = &mut s.ui.shell.sidebar;
     ui.selected.clear();
     ui.anchor = Some(id.to_string());
