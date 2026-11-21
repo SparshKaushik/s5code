@@ -411,18 +411,40 @@ fn shutdown_profile(profile: &str) {
 
 /// Starts Chrome on the profile's persistent folder, as the Electron app keeps one session per
 /// profile; a folder another instance holds falls back to a throwaway one.
-fn launch(profile: &str, scale: f32) -> Result<(Child, String), String> {
+fn launch(profile: &str, scale: f32) -> Result<(Child, String, PathBuf), String> {
     let dir = profile_dir(profile);
     if profile == INCOGNITO_PROFILE {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    launch_in(&dir, scale).or_else(|_| launch_in(&std::env::temp_dir().join(format!("s5-rune-chrome-{}-{profile}", std::process::id())), scale))
+    let spare = std::env::temp_dir().join(format!("s5-rune-chrome-{}-{profile}", std::process::id()));
+    match launch_in(&dir, scale) {
+        Ok((child, ws)) => Ok((child, ws, dir)),
+        Err(_) => launch_in(&spare, scale).map(|(child, ws)| (child, ws, spare)),
+    }
+}
+
+/// Every Chrome's switches but its folder and scale.
+const CHROME_ARGS: [&str; 7] = ["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"];
+
+/// Whether Chrome could show a PDF itself, decided from how it was started rather than from
+/// `navigator.pdfViewerEnabled`, which stays true where Chrome would download the PDF instead:
+/// headless (no viewer extension to draw it), `--disable-pdf-viewer`, or a profile set to
+/// `plugins.always_open_pdf_externally`. Only when none apply is the page's own answer asked.
+fn native_pdf_possible(args: &[&str], preferences: &Value) -> bool {
+    let headless = args.iter().any(|a| *a == "--headless" || a.starts_with("--headless="));
+    let disabled = args.contains(&"--disable-pdf-viewer");
+    let external = preferences["plugins"]["always_open_pdf_externally"] == true;
+    !headless && !disabled && !external
+}
+
+fn preferences(dir: &std::path::Path) -> Value {
+    std::fs::read(dir.join("Default").join("Preferences")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null)
 }
 
 fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), String> {
     let _ = std::fs::create_dir_all(profile);
     let mut child = Command::new(chrome_path())
-        .args(["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"])
+        .args(CHROME_ARGS)
         // Page and browser ids are unguessable, so any origin may open the DevTools frontend.
         .arg("--remote-allow-origins=*")
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -540,7 +562,8 @@ struct Worker {
     agent_downloads: HashMap<String, (String, String)>,
     /// When each tab's renderer last crashed, for web's three remounts in 30 s.
     crashes: HashMap<TabId, Vec<std::time::Instant>>,
-    /// Whether this Chrome has its own PDF viewer, once a page has said.
+    /// Whether this Chrome shows PDFs itself: no when its switches or profile rule it out, else
+    /// once a page has said.
     native_pdf: Option<bool>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
@@ -564,7 +587,8 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
             break scale;
         }
     };
-    let (child, url) = launch(&profile, scale)?;
+    let (child, url, dir) = launch(&profile, scale)?;
+    let native_pdf = (!native_pdf_possible(&CHROME_ARGS, &preferences(&dir))).then_some(false);
     CHROME.lock().unwrap().push((profile.clone(), child));
     let host = url.trim_start_matches("ws://").split('/').next().unwrap_or_default().to_string();
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
@@ -589,7 +613,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
         downloads: HashMap::new(),
         agent_downloads: HashMap::new(),
         crashes: HashMap::new(),
-        native_pdf: None,
+        native_pdf,
         shared,
         waker,
     };
@@ -2179,6 +2203,14 @@ mod tests {
         let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
         assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
         assert!(page.contains("getDocument({ url: location.href"));
+        // Our headless Chrome always gets pdf.js; a headful one only where it would show the PDF.
+        let headful = ["--no-first-run"];
+        assert!(!native_pdf_possible(&CHROME_ARGS, &Value::Null));
+        assert!(native_pdf_possible(&headful, &Value::Null));
+        assert!(!native_pdf_possible(&["--headless=new"], &Value::Null));
+        assert!(!native_pdf_possible(&["--no-first-run", "--disable-pdf-viewer"], &Value::Null));
+        assert!(!native_pdf_possible(&headful, &json!({ "plugins": { "always_open_pdf_externally": true } })));
+        assert!(native_pdf_possible(&headful, &json!({ "plugins": { "always_open_pdf_externally": false } })));
         // Offline: pdf.js and its worker come with the app, not from a CDN.
         assert!(!page.contains("https://"), "the page loads nothing from the network");
         assert!(page.contains("pdfjsLib") && page.contains(PDFJS_WORKER) && page.matches("{pdfjs}").count() == 0);

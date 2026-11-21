@@ -1409,6 +1409,29 @@ mod sheet_tests {
 mod tests {
     use super::*;
     #[test]
+    fn the_launchers_profile_chevron_opens_its_menu_without_a_default_tab() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(480., 640.).child(picker(s, &crate::theme::theme(true)))
+        }
+        let mut rt = rune::Runtime::new(App::new(), view, (480., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let chevron = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("panel-launcher-profiles")).expect("the Browser row's chevron").rect;
+        let click = |rt: &mut rune::Runtime<App>, (x, y): (f32, f32)| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.);
+        };
+        let y = chevron[1] + chevron[3] / 2.;
+        click(&mut rt, (chevron[0] + chevron[2] / 2., y));
+        assert!(rt.state.ui.panel.launcher_profiles, "the chevron opens the profile menu");
+        assert!(rt.state.ui.panel.surfaces.is_empty(), "and opens no tab");
+        // The rest of the row still opens a tab in the default profile.
+        click(&mut rt, (chevron[0] - 120., y));
+        assert!(matches!(rt.state.ui.panel.surfaces[..], [Surface::Browser(_)]), "the row opens one tab");
+    }
+
+    #[test]
     fn each_thread_gets_its_own_panel_back() {
         let mut app = App::new();
         let ids: Vec<String> = app.state().threads.iter().take(2).map(|v| data::s(v, "id").to_string()).collect();
