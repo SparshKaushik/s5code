@@ -315,16 +315,19 @@ def main():
         rows = []
         for i, (body, colour) in enumerate(parts):
             body = body.replace("\\", "\\\\").replace('"', '\\"')
-            print(f'static {const}_{i}: Icon = Icon {{ name: "editor-{editor}-{i}", view: {fmt(view)}, body: "{body}" }};')
+            print(f'static {const}_{i}: Icon = Icon {{ name: "editor-{editor}-{i}", view: {fmt(view) if "." in fmt(view) else fmt(view) + ".0"}, body: "{body}" }};')
             light, dark = CLASS_FILL[comp] if colour == "class" else (colour, colour)
             rows.append(f'(&{const}_{i}, "{light}", "{dark}")')
-        table.append((editor, rows))
+        table.append((editor, const, rows))
+    print("\ntype Layer = (&'static Icon, &'static str, &'static str);\n")
+    for editor, const, rows in table:
+        print(f"static {const}: [Layer; {len(rows)}] = [{', '.join(rows)}];")
     print("\n/// Each mark's layers, bottom first: glyph, light-theme colour, dark-theme colour.")
     print('/// `currentColor` takes the foreground, as web\'s `text-foreground` does.')
-    print("pub fn layers(editor: &str) -> Option<&'static [(&'static Icon, &'static str, &'static str)]> {")
+    print("pub fn layers(editor: &str) -> Option<&'static [Layer]> {")
     print("    Some(match editor {")
-    for editor, rows in table:
-        print(f'        "{editor}" => &[{", ".join(rows)}],')
+    for editor, const, rows in table:
+        print(f'        "{editor}" => &{const},')
     print("        _ => return None,")
     print("    })")
     print("}")
