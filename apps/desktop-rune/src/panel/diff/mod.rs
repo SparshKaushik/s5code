@@ -1504,7 +1504,7 @@ fn tree_pane(app: &App, t: &T) -> El {
                 .fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(file.path().to_string())
-                .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground))
+                .child(crate::file_icons::view(file.path(), 14.0, t.dark))
                 .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
                 .on_press_tx(move |s: &mut App, tx| {
                     let ui = &mut s.ui.panel.diff;

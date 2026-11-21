@@ -405,7 +405,7 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
             .px(12.)
             .gap(8.)
             .center_y()
-            .child(icon(&icons::FILE, 14.).color(t.c.contrast_muted_foreground))
+            .child(crate::file_icons::view(path, 14., t.dark))
             .child(text(name.to_string()).font(theme::XS_MEDIUM).color(t.c.contrast_foreground));
         if !directory.is_empty() {
             heading = heading.child(text(directory.to_string()).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground).truncate().shrink().min_w(0.));

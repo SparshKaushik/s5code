@@ -19,6 +19,7 @@ mod onboarding;
 mod pages;
 mod panel;
 mod search;
+mod file_icons;
 mod settings;
 mod shell;
 mod theme;

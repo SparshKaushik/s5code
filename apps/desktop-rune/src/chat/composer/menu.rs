@@ -480,7 +480,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
             r = r.fill(t.c.accent);
         }
         if let Some(folder) = item.folder {
-            r = r.child(icon(if folder { &icons::FOLDER } else { &icons::FILE }, 16.0).color(t.c.secondary_label));
+            r = r.child(if folder { icon(&icons::FOLDER, 16.0).color(t.c.secondary_label) } else { crate::file_icons::view(&item.id, 16.0, t.dark) });
         }
         if let Some(pr) = &item.pr
             && let Some((tone, glyph)) = super::chips::look("review-comment", Some(&json!({"pullRequest": pr})))

@@ -189,7 +189,7 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
                 let (checkpoint, path, menu) = (checkpoint.clone(), entry.path.clone(), entry.path.clone());
                 line.label(entry.name.clone())
                     .on_secondary_press(move |app: &mut App, at: rune::PointerPress, _: &mut rune::Tx| crate::panel::file_menu(app, menu.clone(), (at.x, at.y)))
-                    .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
+                    .child(crate::file_icons::view(&entry.name, 14.0, t.dark))
                     .child(text(entry.name).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground.alpha_mul(0.85)).truncate().shrink().min_w(0.0))
                     .on_press(move |app: &mut App| crate::panel::open_diff_at(app, checkpoint.clone(), &path))
             }
