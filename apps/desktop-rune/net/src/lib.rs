@@ -556,6 +556,22 @@ pub fn api_post(base: &str, bearer: &str, path: &str, query: &str, content_type:
         .map(|_| ())
         .map_err(api_error)
 }
+/// The body of an empty POST to one of the server's `/api` routes as this client, at most `limit` bytes.
+pub fn api_post_read(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .post(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .call()
+        .map_err(api_error)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
     if !relative_url.starts_with("/api/attachments/upload/") {

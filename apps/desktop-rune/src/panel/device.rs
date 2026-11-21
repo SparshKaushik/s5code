@@ -1,13 +1,15 @@
 //! DevicePanel over MJPEG: the environment's simulators and emulators, `device.open` for this
-//! thread, and the opened iOS simulator's screen from serve-sim's `stream.mjpeg`. Viewing only:
-//! touch, Home and Rotate ride the hub's input socket, and every other stream is H.264.
+//! thread, and the opened iOS simulator's screen from serve-sim's `stream.mjpeg`, driven through
+//! serve-sim's input socket. Every other stream is H.264, which this app can't decode.
+
+mod input;
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rune::{El, Pixels, Tx, col, el, icon, row, text};
+use rune::{El, Key, Phase, Pixels, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use crate::theme::{self, AlphaMul, T};
@@ -32,6 +34,10 @@ pub struct Ui {
     stream: Option<Stream>,
     /// A recorded `DeviceServiceState` for scenes, which have no connection.
     fixture: Option<Value>,
+    /// The "More device actions" menu.
+    menu: bool,
+    /// `device.close` with shutdown in flight.
+    powering_off: Option<u64>,
 }
 
 struct Stream {
@@ -43,12 +49,18 @@ struct Stream {
     ticket: Option<u64>,
     started: Instant,
     seen: u64,
+    input: Option<input::Input>,
+    /// `device.detail`, then each `device.action`, in flight; the newest `DeviceDetail`.
+    detail: Option<u64>,
+    settings: Option<Value>,
 }
 
 #[derive(Default)]
 struct Shared {
     frames: u64,
     failed: Option<String>,
+    capturing: bool,
+    capture_failed: Option<String>,
 }
 
 impl Drop for Stream {
@@ -207,22 +219,137 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         return;
     }
     ui.stream = None;
+    ui.menu = false;
     let Some((host, device)) = wanted else { return };
     if app.ui.panel.device.fixture.is_some() {
+        app.ui.panel.device.stream = Some(fixture_stream(key(&host, &device)));
         return;
     }
-    let ticket = app.src.net().map(|n| n.http_request("POST", "/api/auth/websocket-ticket/media", json!({})));
-    let failed = ticket.is_none().then(|| STREAM_FAILED.to_owned());
-    app.ui.panel.device.stream = Some(Stream {
+    let mut stream = Stream {
         key: key(&host, &device),
         pixels: Pixels::new(),
-        shared: Arc::new(Mutex::new(Shared { frames: 0, failed })),
+        shared: Arc::default(),
         stop: Arc::default(),
-        ticket,
+        ticket: None,
         started: Instant::now(),
         seen: 0,
-    });
+        input: None,
+        detail: None,
+        settings: None,
+    };
+    stream.ticket = app.src.net().map(|n| n.http_request("POST", "/api/auth/websocket-ticket/media", json!({})));
+    if stream.ticket.is_none() {
+        stream.shared.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(STREAM_FAILED.to_owned());
+    }
+    if let Some(net) = app.src.net_ref() {
+        let wake = app.ui.panel.waker.clone();
+        let wake = move || {
+            if let Some(wake) = &wake {
+                wake();
+            }
+        };
+        stream.input = Some(input::Input::open(net.base_url().to_owned(), net.bearer().to_owned(), &host, &device, wake));
+    }
+    stream.detail = request(app, "device.detail", json!({"hostId": host, "deviceId": device}));
+    app.ui.panel.device.stream = Some(stream);
     tx.wake_after(FIRST_FRAME);
+}
+
+/// A stream with one plain frame for scenes: the panel's chrome without a simulator.
+fn fixture_stream(key: String) -> Stream {
+    let shared = Shared { frames: 1, ..Default::default() };
+    Stream {
+        key,
+        pixels: fixture_screen(),
+        shared: Arc::new(Mutex::new(shared)),
+        stop: Arc::default(),
+        ticket: None,
+        started: Instant::now(),
+        seen: 0,
+        input: None,
+        detail: None,
+        settings: Some(json!({"appearance": "light"})),
+    }
+}
+
+fn fixture_screen() -> Pixels {
+    let (w, h) = (393u32, 852u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for _ in 0..w {
+            let k = y as f32 / h as f32;
+            rgba.extend_from_slice(&[(40. + 60. * k) as u8, (90. + 40. * k) as u8, (200. - 60. * k) as u8, 255]);
+        }
+    }
+    let pixels = Pixels::new();
+    pixels.set(w, h, rgba);
+    pixels
+}
+
+/// What this device's buttons send, once serve-sim admits input.
+fn input(app: &App) -> Option<&input::Input> {
+    app.ui.panel.device.stream.as_ref()?.input.as_ref()
+}
+
+fn input_ready(app: &App) -> bool {
+    app.ui.panel.device.fixture.is_some() || input(app).is_some_and(|i| i.state.lock().unwrap_or_else(|e| e.into_inner()).ready())
+}
+
+/// `device.action` on the shown device; its reply is the device's new `DeviceDetail`.
+fn act(app: &mut App, action: Value) {
+    let Some((host, device)) = app.ui.panel.device.stream.as_ref().and_then(|s| s.key.split_once('\u{0}')).map(|(h, d)| (h.to_owned(), d.to_owned())) else { return };
+    let mut payload = action;
+    payload["hostId"] = json!(host);
+    payload["deviceId"] = json!(device);
+    let id = request(app, "device.action", payload);
+    if let Some(stream) = app.ui.panel.device.stream.as_mut() {
+        stream.detail = id;
+    }
+}
+
+/// serve-sim's PNG screenshot, saved to Downloads as web's download.
+fn screenshot(app: &mut App, name: &str) {
+    let Some(net) = app.src.net_ref() else { return };
+    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    let wake = app.ui.panel.waker.clone();
+    let Some(stream) = app.ui.panel.device.stream.as_ref() else { return };
+    let Some((host, device)) = stream.key.split_once('\u{0}') else { return };
+    let mut shared = stream.shared.lock().unwrap_or_else(|e| e.into_inner());
+    if shared.capturing {
+        return;
+    }
+    shared.capturing = true;
+    drop(shared);
+    let query = format!("device={}&hostId={}", encode(device), encode(host));
+    let file: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let file = format!("{file}-{}.png", data::now_ms());
+    let shared = stream.shared.clone();
+    std::thread::spawn(move || {
+        let saved = s5_net::api_post_read(&base, &bearer, "/api/device-hub/vendor/serve-sim/api/screenshot", &query, 64 << 20)
+            .map_err(|e| format!("Screenshot capture failed ({e}). Try again."))
+            .and_then(|png| if png.is_empty() { Err("The device returned an empty screenshot. Try again.".to_owned()) } else { Ok(png) })
+            .and_then(|png| {
+                let dir = super::browser::downloads_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let path = super::browser::unique_path(&dir, &file).ok_or("Could not save the screenshot.")?;
+                std::fs::write(path, png).map_err(|e| e.to_string())
+            });
+        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.capturing = false;
+        shared.capture_failed = saved.err();
+        drop(shared);
+        if let Some(wake) = &wake {
+            wake();
+        }
+    });
+}
+
+/// Web's "Power off device": closes the session with shutdown, then the surface.
+fn power_off(app: &mut App) {
+    let Some((thread, _)) = super::context(app) else { return };
+    let Some((host, device)) = app.ui.panel.device.stream.as_ref().and_then(|s| s.key.split_once('\u{0}')).map(|(h, d)| (h.to_owned(), d.to_owned())) else { return };
+    app.ui.panel.device.menu = false;
+    app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}));
 }
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
@@ -243,6 +370,33 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         if let Err(e) = reply {
             app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not refresh devices."));
         }
+        changed = true;
+    }
+    if let Some(id) = app.ui.panel.device.powering_off
+        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
+    {
+        app.ui.panel.device.powering_off = None;
+        match reply {
+            Ok(_) => super::close(app, super::Surface::Device),
+            Err(e) => app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not power off the device.")),
+        }
+        changed = true;
+    }
+    if let Some(id) = app.ui.panel.device.stream.as_ref().and_then(|s| s.detail)
+        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
+    {
+        let stream = app.ui.panel.device.stream.as_mut().expect("the stream holds the request");
+        stream.detail = None;
+        match reply {
+            Ok(detail) => stream.settings = Some(detail["settings"].clone()),
+            Err(e) => app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not reach the device.")),
+        }
+        changed = true;
+    }
+    if let Some(stream) = app.ui.panel.device.stream.as_ref()
+        && let Some(failed) = stream.shared.lock().unwrap_or_else(|e| e.into_inner()).capture_failed.take()
+    {
+        app.ui.panel.device.error = Some(failed);
         changed = true;
     }
     sync_stream(app, tx);
@@ -280,7 +434,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     if shared.frames == 0 && shared.failed.is_none() && stream.started.elapsed() >= FIRST_FRAME {
         shared.failed = Some(NO_VIDEO.into());
     }
-    let seen = shared.frames + u64::from(shared.failed.is_some());
+    let seen = shared.frames * 4 + u64::from(shared.failed.is_some()) * 2 + u64::from(shared.capturing);
     drop(shared);
     if seen != stream.seen {
         stream.seen = seen;
@@ -382,7 +536,109 @@ fn list(app: &App, state: &Value, t: &T) -> El {
         .child(col().grow(1.).min_h(0.).scroll(rune::ScrollSpec { stick_bottom: false }).child(body))
 }
 
-fn stream_view(app: &App, state: &Value, session: &Value, t: &T) -> El {
+/// `size` scaled to fit inside `area`.
+fn fit(area: (f32, f32), size: (f32, f32)) -> (f32, f32) {
+    let k = (area.0 / size.0).min(area.1 / size.1);
+    (size.0 * k, size.1 * k)
+}
+
+/// The screen at its fitted size, taking taps, swipes and typing once the stage is laid out.
+fn screen(stream: &Stream, stage: Option<(f32, f32)>, name: &str) -> El {
+    let (iw, ih) = stream.pixels.size();
+    let fitted = stage.filter(|_| iw > 0 && ih > 0).map(|(w, h)| fit((w - 32., h - 32.), (iw as f32, ih as f32))).filter(|(w, h)| *w >= 1. && *h >= 1.);
+    let screen = match fitted {
+        Some((w, h)) => el()
+            .size(w, h)
+            .pixels(&stream.pixels)
+            .key("device-screen")
+            .focusable(true)
+            .on_drag(move |s: &mut App, d, _| {
+                let phase = match d.phase {
+                    _ if d.cancelled() => "end",
+                    Phase::Down => "begin",
+                    Phase::Up => "end",
+                    _ => "move",
+                };
+                if let Some(input) = input(s) {
+                    input.touch(phase, f64::from(d.x / w), f64::from(d.y / h));
+                }
+            })
+            .on_key(|s: &mut App, e, tx| {
+                // Web's way out of a surface that takes every key.
+                if matches!(e.key, Key::Escape) && e.mods.shift {
+                    tx.blur();
+                    return true;
+                }
+                !e.mods.cmd && !e.mods.ctrl && input(s).is_some_and(|i| i.key(&e.key))
+            }),
+        None => el().w_full().grow(1.).min_h(0.).pixels_fit(&stream.pixels, rune::SurfaceFit::Fit),
+    };
+    col().key("device-stage").grow(1.).min_h(0.).min_w(0.).padding(16.).center().role("img").label(format!("{name} screen")).child(screen)
+}
+
+fn rail_button(label: impl Into<String>, glyph: &'static rune::Icon, disabled: bool, t: &T, f: impl Fn(&mut App) + 'static) -> El {
+    let label = label.into();
+    kit::Button::new(label.clone()).icon(glyph).variant("ghost").size("icon-sm").disabled(disabled).on_press(f).build(t).help(label)
+}
+
+/// `DeviceControlsRail`: the shown device's buttons, on the stream's right edge.
+fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Vec<El>) -> El {
+    let ready = input_ready(app);
+    let (streaming, capturing) = stream.map_or((false, false), |s| {
+        let shared = s.shared.lock().unwrap_or_else(|e| e.into_inner());
+        (shared.frames > 0 && shared.failed.is_none(), shared.capturing)
+    });
+    let appearance = stream.and_then(|s| s.settings.as_ref()).and_then(|v| v["appearance"].as_str());
+    let next = if appearance == Some("dark") { "light" } else { "dark" };
+    let busy = stream.is_none_or(|s| s.detail.is_some());
+    let shot = name.to_owned();
+    let more = kit::Button::new("More device actions")
+        .icon(&icons::ELLIPSIS)
+        .variant("ghost")
+        .size("icon-sm")
+        .on_press(|s: &mut App| s.ui.panel.device.menu = !s.ui.panel.device.menu)
+        .build(t)
+        .help("More device actions");
+    let menu = kit::Menu::new("device-more-menu")
+        .trigger(more)
+        .placement(kit::Placement::BottomEnd)
+        .width(198.)
+        .native(true)
+        .open(app.ui.panel.device.menu)
+        .on_close(|s: &mut App| s.ui.panel.device.menu = false)
+        .item(kit::MenuItem::new("Close device panel").icon(&icons::X).on_select(|s: &mut App| {
+            s.ui.panel.device.menu = false;
+            super::close(s, super::Surface::Device);
+        }))
+        .separator()
+        .item(kit::MenuItem::new("Power off device").icon(&icons::POWER).variant("destructive").disabled(app.ui.panel.device.powering_off.is_some()).on_select(power_off))
+        .build(&kit::theme(t), overlays);
+    let pill = col()
+        .gap(4.)
+        .padding(8.)
+        .radius(999.)
+        .items_center()
+        .fill(t.c.background.alpha_mul(0.8))
+        .border(1., t.c.border.alpha_mul(0.5))
+        .child(rail_button("Home", &icons::HOUSE, !ready, t, |s| {
+            if let Some(input) = input(s) {
+                input.button("home");
+            }
+        }))
+        .child(rail_button("Rotate device", &icons::ROTATE_CW, !ready, t, |s| {
+            if let Some(input) = input(s) {
+                input.rotate();
+            }
+        }))
+        .child(rail_button(format!("Switch device to {next} mode"), if appearance == Some("dark") { &icons::SUN } else { &icons::MOON }, busy || appearance.is_none(), t, move |s| {
+            act(s, json!({"type": "setAppearance", "value": next}));
+        }))
+        .child(rail_button(if capturing { "Capturing screenshot" } else { "Save screenshot" }, &icons::CAMERA, !streaming || capturing, t, move |s| screenshot(s, &shot)))
+        .child(menu);
+    col().key("device-controls").label("Device controls").w(56.).h_full().pr(8.).py(12.).center().child(pill)
+}
+
+fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>) -> El {
     let device = state["devices"].as_array().into_iter().flatten().find(|d| d["id"] == session["deviceId"] && d["hostId"] == session["hostId"]);
     let name = device.map_or_else(|| data::s(session, "deviceId").to_owned(), |d| data::s(d, "name").to_owned());
     let back = icon_button("Back to devices", &icons::ARROW_LEFT).on_press(|s: &mut App| s.ui.panel.device.browsing = true).build(t).help("Back to devices");
@@ -406,23 +662,18 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T) -> El {
                 } else if shared.frames == 0 {
                     centered(vec![spinner(t), note("Connecting video\u{2026}", t)])
                 } else {
-                    col()
-                        .grow(1.)
-                        .min_h(0.)
-                        .min_w(0.)
-                        .padding(16.)
-                        .role("img")
-                        .label(format!("{name} screen"))
-                        .child(el().w_full().grow(1.).min_h(0.).pixels_fit(&stream.pixels, rune::SurfaceFit::Fit))
+                    screen(stream, stage, &name)
                 }
             }
             None => centered(vec![spinner(t), note("Connecting video\u{2026}", t)]),
         }
     };
+    let body = if mjpeg { row().grow(1.).min_h(0.).child(body.grow(1.).min_w(0.)).child(rail(app, app.ui.panel.device.stream.as_ref(), &name, t, overlays)) } else { body };
     col().grow(1.).min_h(0.).child(top).child(el().h(1.).w_full().fill(t.c.border)).child(body)
 }
 
-pub fn view(app: &App, t: &T) -> El {
+/// `stage`: the screen area's laid-out size, from the last frame.
+pub fn view(app: &App, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>) -> El {
     let ui = &app.ui.panel.device;
     let Some(state) = state(app) else {
         return centered(vec![spinner(t), note("Finding devices\u{2026}", t)]);
@@ -448,7 +699,7 @@ pub fn view(app: &App, t: &T) -> El {
         notices.push(row().w_full().px(12.).py(6.).child(text(format!("Starting {}\u{2026} This can take a minute.", booting.join(", "))).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.)));
     }
     let content = if let Some(session) = session(state, &thread, ui.selected.as_deref()).filter(|_| !ui.browsing) {
-        stream_view(app, state, session, t)
+        stream_view(app, state, session, t, stage, overlays)
     } else if state["devices"].as_array().is_some_and(|d| !d.is_empty()) {
         list(app, state, t)
     } else {
@@ -471,6 +722,11 @@ pub fn view(app: &App, t: &T) -> El {
     col().grow(1.).min_h(0.).children(notices).child(content)
 }
 
+/// The "More device actions" menu, open, for its scene.
+pub fn open_menu(app: &mut App) {
+    app.ui.panel.device.menu = true;
+}
+
 /// Recorded device states for the panel's scenes.
 pub fn fixture(app: &mut App, sessions: Value) {
     let thread = super::context(app).map(|(id, _)| id).unwrap_or_default();
@@ -486,6 +742,8 @@ pub fn fixture(app: &mut App, sessions: Value) {
         ],
         "sessions": sessions,
     }));
+    let ios = app.ui.panel.device.fixture.as_ref().and_then(|state| state["sessions"].as_array()?.iter().find(|s| s["platform"] == "ios").map(|s| key(data::s(s, "hostId"), data::s(s, "deviceId"))));
+    app.ui.panel.device.stream = ios.map(fixture_stream);
 }
 
 #[cfg(test)]

@@ -977,7 +977,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
         Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
-        Some(Surface::Device) => device::view(app, t),
+        Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Surface::Terminal) => col()
             .grow(1.)
             .min_h(0.)
@@ -1086,6 +1086,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-device-h264", |s| {
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-stream", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+    }),
+    ("panel-device-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::open_menu(s);
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
