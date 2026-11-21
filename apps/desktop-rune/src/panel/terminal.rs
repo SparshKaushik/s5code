@@ -287,6 +287,8 @@ pub struct Launch<'a> {
     pub cwd: &'a str,
     pub worktree: Option<&'a str>,
     pub root: Option<&'a str>,
+    /// The PTY's first size, before the view measures it (`cols`, `rows`).
+    pub size: Option<(u16, u16)>,
 }
 
 /// Attaches (opening when missing) the session for a terminal id, once.
@@ -325,6 +327,10 @@ pub fn run(app: &mut App, thread: &str, id: &str, at: &Launch, data: String) {
 /// The project's scripts read `T3CODE_PROJECT_ROOT` and `T3CODE_WORKTREE_PATH` (`projectScriptRuntimeEnv`).
 fn attach_payload(thread: &str, id: &str, at: &Launch) -> Value {
     let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":at.cwd});
+    if let Some((cols, rows)) = at.size {
+        payload["cols"] = json!(cols);
+        payload["rows"] = json!(rows);
+    }
     if let Some(path) = at.worktree {
         payload["worktreePath"] = json!(path);
     }
@@ -1618,13 +1624,16 @@ mod tests {
 
     #[test]
     fn attach_opens_a_closed_id_again_with_the_project_env() {
-        let payload = attach_payload("t", "term-2", &Launch { cwd: "/wt", worktree: Some("/wt"), root: Some("/repo") });
+        let payload = attach_payload("t", "term-2", &Launch { cwd: "/wt", worktree: Some("/wt"), root: Some("/repo"), size: None });
         assert!(payload.get("resume").is_none(), "{payload}");
         assert_eq!(payload["worktreePath"], "/wt");
         assert_eq!(payload["env"], json!({"T3CODE_PROJECT_ROOT": "/repo", "T3CODE_WORKTREE_PATH": "/wt"}));
-        let local = attach_payload("t", "term-2", &Launch { cwd: "/repo", worktree: None, root: Some("/repo") });
+        let local = attach_payload("t", "term-2", &Launch { cwd: "/repo", worktree: None, root: Some("/repo"), size: None });
         assert!(local.get("worktreePath").is_none());
         assert_eq!(local["env"], json!({"T3CODE_PROJECT_ROOT": "/repo"}));
+        assert!(local.get("cols").is_none(), "an ordinary terminal starts at the server's size");
+        let script = attach_payload("t", "term-3", &Launch { cwd: "/repo", worktree: None, root: None, size: Some((120, 30)) });
+        assert_eq!((script["cols"].as_u64(), script["rows"].as_u64()), (Some(120), Some(30)), "FAILED: a new script terminal opens at 120x30");
     }
 
     #[test]

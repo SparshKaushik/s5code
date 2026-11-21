@@ -381,7 +381,7 @@ fn allocate(app: &App, thread: &str) -> String {
 
 fn start(app: &mut App, thread: &str, id: &str, focus: bool) {
     if let Some((_, cwd, worktree, root)) = launch_context(app).filter(|(t, ..)| t == thread) {
-        terminal::ensure(app, thread, id, &terminal::Launch { cwd: &cwd, worktree: worktree.as_deref(), root: root.as_deref() });
+        terminal::ensure(app, thread, id, &terminal::Launch { cwd: &cwd, worktree: worktree.as_deref(), root: root.as_deref(), size: None });
     }
     if focus {
         terminal::focus(app, thread, id);
@@ -447,17 +447,35 @@ pub fn new_terminal(app: &mut App, owner: Owner) {
 
 /// Types `input` into an idle drawer terminal, the active one first, else a new one
 /// (`findReusableProjectScriptTerminal`); panel-owned terminals are never reused.
+/// A new script terminal's size until the drawer measures it (`SCRIPT_TERMINAL_COLS`/`ROWS`).
+const SCRIPT_TERMINAL_SIZE: (u16, u16) = (120, 30);
+
+/// `findReusableProjectScriptTerminal`: the active drawer terminal when idle, else the first idle
+/// one; right-panel terminals and ones running a process are never reused.
+fn reusable_script_terminal(drawer: &[String], active: &str, panel: &[String], running: &[String]) -> Option<String> {
+    let idle: Vec<&String> = drawer.iter().filter(|id| !panel.contains(id) && !running.contains(id)).collect();
+    idle.iter().find(|id| id.as_str() == active).or(idle.first()).map(|id| id.to_string())
+}
+
 pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
     let Some(thread) = current_or_draft(app) else {
         return;
     };
     let ui = &app.ui.panel;
-    let panel: Vec<&String> = ui.drawer.panel.get(&thread).map(|g| g.ids().collect()).unwrap_or_default();
-    let idle = |id: &&String| !panel.contains(id) && !ui.terminal.get(&thread, id).is_some_and(|s| s.running);
-    let reusable = ui.drawer.threads.get(&thread).and_then(|t| {
-        let ids: Vec<&String> = t.groups.ids().filter(idle).collect();
-        ids.iter().find(|id| ***id == t.groups.active).or(ids.first()).map(|id| id.to_string())
-    });
+    let panel: Vec<String> = ui.drawer.panel.get(&thread).map(|g| g.ids().cloned().collect()).unwrap_or_default();
+    let known = terminal::known(app, &thread);
+    let mut drawer: Vec<String> = ui.drawer.threads.get(&thread).map(|t| t.groups.ids().cloned().collect()).unwrap_or_default();
+    // Server sessions cover drawer terminals this client has not opened yet, such as a worktree setup shell.
+    for (id, ..) in &known {
+        if !drawer.contains(id) {
+            drawer.push(id.clone());
+        }
+    }
+    let running: Vec<String> = known.iter().filter(|k| k.2).map(|k| k.0.clone()).chain(drawer.iter().filter(|id| ui.terminal.get(&thread, id).is_some_and(|s| s.running)).cloned()).collect();
+    let active = ui.drawer.threads.get(&thread).map(|t| t.groups.active.clone()).unwrap_or_default();
+    // Reading back a reused terminal's scrollback needs terminal:read.
+    let reusable = crate::chat::details::grants(app, "terminal:read").then(|| reusable_script_terminal(&drawer, &active, &panel, &running)).flatten();
+    let size = reusable.is_none().then_some(SCRIPT_TERMINAL_SIZE);
     let id = reusable.unwrap_or_else(|| allocate(app, &thread));
     let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
     state.open = true;
@@ -466,7 +484,7 @@ pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
     }
     state.groups.activate(&id);
     let root = project_root(app);
-    terminal::run(app, &thread, &id, &terminal::Launch { cwd, worktree, root: root.as_deref() }, input);
+    terminal::run(app, &thread, &id, &terminal::Launch { cwd, worktree, root: root.as_deref(), size }, input);
     terminal::focus(app, &thread, &id);
     sync_topbar(app);
 }
@@ -1098,6 +1116,16 @@ pub fn fixture(app: &mut App, owner: Owner, groups: &[(&[(&str, &str)], bool)], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_reuses_the_idle_active_drawer_terminal_else_the_first_idle_one() {
+        let v = |ids: &[&str]| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        let drawer = v(&["term-1", "term-2", "term-3"]);
+        assert_eq!(reusable_script_terminal(&drawer, "term-2", &[], &[]).as_deref(), Some("term-2"));
+        assert_eq!(reusable_script_terminal(&drawer, "term-2", &[], &v(&["term-2"])).as_deref(), Some("term-1"), "a running terminal is skipped");
+        assert_eq!(reusable_script_terminal(&drawer, "term-1", &v(&["term-1"]), &v(&["term-2"])).as_deref(), Some("term-3"), "the right panel's terminal is skipped");
+        assert_eq!(reusable_script_terminal(&drawer, "term-1", &v(&["term-1"]), &v(&["term-2", "term-3"])), None);
+    }
 
     #[test]
     fn layouts_survive_a_restart_and_bad_state_is_normalized() {
