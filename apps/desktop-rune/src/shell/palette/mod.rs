@@ -35,6 +35,9 @@ pub struct Ui {
     picked: bool,
     add: add_project::State,
     act: actions::State,
+    /// `linkedThreadSearch`: a pull request's linked threads, shown while the query is still the
+    /// one the palette opened with: (query, environment, threads).
+    linked: Option<(String, String, Vec<serde_json::Value>)>,
 }
 struct Notice {
     title: String,
@@ -73,6 +76,8 @@ enum Action {
     /// "Add project" on one environment, from the environment list.
     AddProjectIn(String),
     NewProject,
+    /// The New project page's environment switcher.
+    NewProjectIn(String),
     Source(add_project::Source),
     Browse(String),
     TogglePublish,
@@ -93,6 +98,8 @@ enum Action {
     OpenFile(String),
     ProjectSettings(String),
     FocusWorkspace(bool),
+    /// A linked thread, on the environment that reported it.
+    OpenLinked(String, String),
     /// A message match: open its thread with find on the matched words.
     FindMessage(String, String),
 }
@@ -102,6 +109,8 @@ enum Trailing {
     /// Not ready: a "Setup Required" button that explains why.
     Setup(String),
     Check(bool),
+    /// The picked row of a switcher: a check mark.
+    Picked,
     /// The theme or appearance in use: "Current" in muted text.
     Current,
     /// A theme row: "Current" when in use, then a 12px preview per appearance it has.
@@ -161,6 +170,10 @@ struct Item {
     pick: (i64, bool),
     references: Vec<String>,
     usage: f32,
+    /// `shortcutCommand` for the jump keys: pressing it runs this row.
+    command: Option<String>,
+    /// Kept last in its group with no group weight: the thread already open.
+    secondary: bool,
 }
 /// `pickableProjectGroups` over the sidebar's grouping: one row per project however many machines
 /// have it, archived groups out, pinned first. "New thread in…" (`new_thread`) leaves out the
@@ -219,6 +232,14 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         }
         out.push(row);
     }
+    // Jump keys follow the project rows as shown; "No project" keeps its own shortcut.
+    if new_thread {
+        for (n, row) in out.iter_mut().take(9).enumerate() {
+            let command = format!("thread.jump.{}", n + 1);
+            row.shortcut = shortcut_label(s, &command);
+            row.command = Some(command);
+        }
+    }
     if new_thread && actions::scratch_available(s) {
         let mut none = item("No project", "Projects", &icons::MESSAGE_SQUARE_DASHED, &shortcut_label(s, "chat.newWithoutProject"), Action::NewWithoutProject);
         none.fields = keywords(&["no project", "without project", "none"]);
@@ -271,6 +292,8 @@ fn item(
         timestamp: None,
         pick: (0, false),
         references: vec![],
+        command: None,
+        secondary: false,
         fields: match &action {
             Action::Theme(..) | Action::Appearance(_) => vec![],
             Action::Restart(_) => [
@@ -529,7 +552,21 @@ fn reset(s: &mut App, open: bool) {
     ui.back.clear();
     ui.add.clone = None;
     ui.add.env = None;
+    ui.linked = None;
     set_query(s, "");
+}
+
+/// `openCommandPalette({query: url, linkedThreads})` from a pull request's linked-thread count.
+pub fn open_linked(s: &mut App, query: &str, env: &str, threads: Option<Vec<serde_json::Value>>) {
+    reset(s, true);
+    set_query(s, query);
+    s.ui.shell.palette.linked = threads.map(|threads| (query.to_owned(), env.to_owned(), threads));
+}
+
+/// The linked threads, while the query is the one they were opened with.
+fn linked_search(s: &App) -> Option<&(String, String, Vec<serde_json::Value>)> {
+    let ui = &s.ui.shell.palette;
+    ui.linked.as_ref().filter(|(query, ..)| ui.page.is_empty() && *query == ui.query.text)
 }
 
 fn items(s: &App) -> Vec<Item> {
@@ -579,8 +616,11 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
             .or_else(|| crate::chat::home::draft_project(s))
         {
+            // `activeProjectTitle`: the preferred entry's group name, as the sidebar shows it.
+            let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+            let name = by_project.get(data::s(p, "id")).map(|n| groups[*n].label.clone()).unwrap_or_else(|| data::s(p, "title").to_owned());
             let mut row = item(
-                format!("New thread in {}", data::s(p, "title")),
+                format!("New thread in {name}"),
                 "Actions",
                 &icons::SQUARE_PEN,
                 &shortcut_label(s, "chat.newLocal"),
@@ -684,11 +724,24 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             .collect();
         threads.sort_by_key(|v| std::cmp::Reverse(recent_use(v)));
 
-        let limit = if browsing {
+        let linked = linked_search(s);
+        let limit = if linked.is_some() {
+            0
+        } else if browsing {
             12
         } else {
             threads.len()
         };
+        // `buildLinkedThreadActionItems`: they stand in for the thread search.
+        for thread in linked.map(|(_, _, threads)| threads.as_slice()).unwrap_or_default() {
+            let (query, env) = linked.map(|(q, e, _)| (q.as_str(), e.as_str())).unwrap_or_default();
+            let title = thread["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("Untitled thread");
+            let mut row = item(title, "Threads", &icons::MESSAGE_SQUARE, "", Action::OpenLinked(data::s(thread, "id").into(), env.into()));
+            row.description = Some(if thread["archivedAt"].is_null() { "Linked thread" } else { "Archived thread" }.into());
+            row.fields = vec![SearchTerm::weighted(query, 1.), SearchTerm::weighted(title, 1.)];
+            row.references.push(query.into());
+            out.push(row);
+        }
         for v in threads.into_iter().take(limit) {
             out.push(item(
                 data::s(v, "title"),
@@ -744,18 +797,10 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 }
                 row.pick = active_pick(v, &normalize_query(typed), s.now_ms);
                 row.usage = usage_boost(v, s.now_ms);
-
-                let minutes =
-                    ((s.now_ms - data::ts(v, "updatedAt").unwrap_or(s.now_ms)) / 60_000).max(0);
-                row.timestamp = Some(if minutes == 0 {
-                    "now".into()
-                } else if minutes < 60 {
-                    format!("{minutes}m ago")
-                } else if minutes < 1440 {
-                    format!("{}h ago", minutes / 60)
-                } else {
-                    format!("{}d ago", minutes / 1440)
-                });
+                // Last in its group: picking the thread already open does nothing.
+                row.secondary = open_thread == Some(data::s(v, "id"));
+                let at = ["latestUserMessageAt", "updatedAt", "createdAt"].into_iter().find_map(|key| data::ts(v, key));
+                row.timestamp = at.map(|at| relative_time(s.now_ms, at));
             }
         }
     }
@@ -844,7 +889,9 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 } else {
                     0.
                 };
-            let group_quality = if thread {
+            let group_quality = if v.secondary {
+                0.
+            } else if thread {
                 quality.min(1.49)
             } else if !primary_matches {
                 quality.min(0.65)
@@ -902,6 +949,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                         .then_with(|| b.pick.0.cmp(&a.pick.0))
                         .then_with(|| (qb * b.usage).total_cmp(&(qa * a.usage)))
                 });
+                rows.sort_by_key(|(v, _, _)| v.secondary);
                 let limit = if !page.is_empty() {
                     usize::MAX
                 } else if rows.first().is_some_and(|(v, _, _)| v.group == "Threads") {
@@ -914,7 +962,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && page.is_empty() && !actions_only {
+        if ui.message_query == query && page.is_empty() && !actions_only && linked_search(s).is_none() {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -969,6 +1017,20 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
     }
     out
 }
+/// `formatRelativeTimeLabel`: "just now" under a minute, then "5m ago", "3h ago", "2d ago".
+fn relative_time(now: i64, at: i64) -> String {
+    let seconds = (now - at).max(0) / 1000;
+    let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
+    if seconds < 60 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if hours < 24 {
+        format!("{hours}h ago")
+    } else {
+        format!("{days}d ago")
+    }
+}
 /// The palette lists top-level threads and forks, not subagents or side chats.
 fn listed(thread: &serde_json::Value) -> bool {
     thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
@@ -1007,13 +1069,9 @@ fn suggestions(s: &App, top: &[Item], query: &str) -> Vec<Item> {
     let mut out = vec![];
     for parent in top {
         let Action::Page(page) = &parent.action else { continue };
-        let children = match *page {
-            "projects" => s
-                .state()
-                .projects
-                .iter()
-                .map(|p| item(data::s(p, "title"), "", &icons::FOLDER_GIT_2, "", Action::Navigate(Route::Home { project_id: Some(data::s(p, "id").into()) })))
-                .collect(),
+        let children: Vec<Item> = match *page {
+            // The submenu's own rows, so names, jump keys and pins carry over.
+            "projects" => project_items(s, true).into_iter().filter(|v| !matches!(v.action, Action::AddProject)).collect(),
             "themes" => theme_items(s),
             "appearance" => appearance_items(s),
             _ => continue,
@@ -1533,7 +1591,8 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::AddProject if !add_project::any_connected(s) => crate::shell::sidebar::go(s, Route::Settings("connections".into())),
         Action::AddProject => return add_project::open(s),
         Action::AddProjectIn(key) => return add_project::open_in(s, &key),
-        Action::NewProject => return add_project::choose(s, add_project::Source::New),
+        Action::NewProject => return add_project::start_new(s),
+        Action::NewProjectIn(key) => return add_project::switch_new(s, &key),
         Action::Source(source) => return add_project::choose(s, source),
         Action::Browse(to) => {
             set_query(s, &to);
@@ -1588,6 +1647,10 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                 }
             }
             crate::shell::sidebar::go(s, route)
+        }
+        Action::OpenLinked(thread, env) => {
+            crate::env::adopt(s, &thread, &env);
+            execute(s, Action::Navigate(Route::Thread(thread)), tx);
         }
         Action::FindMessage(thread, query) => {
             execute(s, Action::Navigate(Route::Thread(thread)), tx);
@@ -1774,6 +1837,22 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let rows = items(s);
     let raw = add_project::raw(s);
+    // A jump key runs the row showing it; `thread.pin` toggles the highlighted project's pin.
+    if let Some(command) = (1..=9).map(|n| format!("thread.jump.{n}")).find(|c| crate::panel::shortcut(s, e, c)) {
+        if let Some(row) = rows.iter().find(|v| v.command.as_deref() == Some(command.as_str()) && !v.disabled) {
+            execute(s, row.action.clone(), tx);
+            return true;
+        }
+    }
+    if crate::panel::shortcut(s, e, "thread.pin")
+        && let Some(Trailing::Pin(members, pinned)) = rows.get(s.ui.shell.palette.selected).map(|v| &v.trailing)
+    {
+        let pinned = *pinned;
+        for project in members {
+            actions::pin_project(s, project, !pinned);
+        }
+        return true;
+    }
     match &e.key {
         // Web closes from any submenu; only the file search returns to the commands.
         Key::Escape => {
@@ -1921,6 +2000,7 @@ fn summary(s: &App, t: &T) -> Option<El> {
         } else {
             (name.to_string(), format!("Creates {}", add_project::clone_destination(&root, &add_project::folder_name(name))))
         };
+        let description = description + &add_project::new_project_suffix(s);
         let glyph = icon(&icons::FOLDER_GIT_2, 16.).color(t.c.contrast_icon_muted);
         return Some(col().w_full().padding(8.).pb(0.).child(summary_row(glyph, title, description, t)));
     }
@@ -1961,6 +2041,8 @@ fn empty_text(s: &App) -> String {
         let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
         return if confirm {
             "Choose a destination path and press Enter to clone."
+        } else if add_project::view(s).needs_project {
+            "Relative paths require an active project."
         } else if add_project::will_create(s) {
             "Press Enter to create this folder and add it as a project."
         } else {
@@ -2128,6 +2210,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     .help(hint.clone()),
             )
         }
+        Trailing::Picked => entry = entry.child(icon(&icons::CHECK, 14.).color(t.c.contrast_icon_muted)),
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
         Trailing::Theme(current, theme, modes) => {
@@ -2140,6 +2223,8 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         Trailing::Pin(members, pinned) if *pinned || selected => {
             let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
+            let shortcut = shortcut_label(s, "thread.pin");
+            let help = if shortcut.is_empty() { label.clone() } else { format!("{label} ({shortcut})") };
             entry = entry.child(
                 kit::Button::new(label.clone())
                     .icon(&icons::PIN)
@@ -2152,7 +2237,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     })
                     .build(t)
                     .key(format!("palette-pin-{i}"))
-                    .help(label),
+                    .help(help),
             );
         }
         Trailing::Pin(..) => {}
@@ -2376,6 +2461,39 @@ mod tests {
         s.client_settings.error = Some("Could not save client settings: denied".into());
         execute(&mut s, grove, &mut Tx::default());
         assert_eq!(toast_title(&s), Some("Couldn't save theme selection"));
+    }
+
+    #[test]
+    fn thread_times_read_like_web_and_linked_threads_answer_their_own_query() {
+        let minute = 60_000;
+        let labels: Vec<_> = [0, 59_000, 5 * minute, 3 * 60 * minute, 2 * 1440 * minute].iter().map(|ago| relative_time(10_000_000_000, 10_000_000_000 - ago)).collect();
+        assert_eq!(labels, ["just now", "just now", "5m ago", "3h ago", "2d ago"]);
+
+        let mut s = App::new();
+        let url = "https://github.com/acme/api/pull/7";
+        let threads = vec![serde_json::json!({"id":"a","title":"","archivedAt":null}), serde_json::json!({"id":"b","title":"Fix","archivedAt":"2026-11-01T00:00:00Z"})];
+        open_linked(&mut s, url, "", Some(threads));
+        let rows: Vec<_> = items(&s).into_iter().filter(|v| v.group == "Threads").map(|v| (v.title, v.description.unwrap_or_default())).collect();
+        assert_eq!(rows, [("Untitled thread".to_owned(), "Linked thread".to_owned()), ("Fix".to_owned(), "Archived thread".to_owned())]);
+        set_query(&mut s, "fix");
+        assert!(items(&s).iter().all(|v| !matches!(v.action, Action::OpenLinked(..))), "FAILED: a new query drops the linked threads");
+    }
+
+    #[test]
+    fn project_rows_carry_jump_keys_into_new_thread_suggestions() {
+        let s = App::new();
+        let rows = project_items(&s, true);
+        let projects: Vec<_> = rows.iter().filter(|v| matches!(v.action, Action::Navigate(_))).collect();
+        assert!(!projects.is_empty());
+        for (n, row) in projects.iter().take(9).enumerate() {
+            assert_eq!(row.command.as_deref(), Some(format!("thread.jump.{}", n + 1).as_str()));
+        }
+        assert!(rows.iter().filter(|v| matches!(v.action, Action::NewWithoutProject)).all(|v| v.command.is_none()), "FAILED: No project keeps its own shortcut");
+        let top = vec![item("New thread in...", "Actions", &icons::SQUARE_PEN, "", Action::Page("projects"))];
+        let first = projects[0].title.clone();
+        let suggested = suggestions(&s, &top, &fold(&first));
+        let row = suggested.iter().find(|v| v.title == format!("New thread in {first}")).expect("FAILED: the submenu row is suggested");
+        assert_eq!((row.group, row.command.as_deref()), ("Suggestions", Some("thread.jump.1")));
     }
 
     #[test]
