@@ -146,6 +146,10 @@ pub struct Ui {
     dialog: Option<Dialog>,
     /// A server page's `<input multiple>` picker, collecting files to upload.
     chooser: Option<Chooser>,
+    /// Electron's permission prompt: a clipboard read or an external link, one at a time.
+    prompt: Option<Prompt>,
+    /// Each origin's clipboard-read answer, kept for the session as Electron keeps it.
+    clipboard_reads: HashMap<String, bool>,
     /// The page's right-click menu.
     context: Option<Context>,
     /// Chrome starts after a failed start; part of the viewport key so the new worker gets it.
@@ -203,6 +207,91 @@ fn choose(files: &mut Vec<std::path::PathBuf>, picked: impl IntoIterator<Item = 
             files.push(path);
         }
     }
+}
+
+struct Prompt {
+    tab: TabId,
+    ask: Ask,
+}
+
+enum Ask {
+    ClipboardRead { id: u64, origin: String },
+    External { url: String },
+}
+
+/// Electron's `MAX_PROMPT_URL_LENGTH`.
+fn truncate_for_prompt(text: &str) -> String {
+    if text.chars().count() > 300 { text.chars().take(300).chain(['…']).collect() } else { text.to_owned() }
+}
+
+/// A page's clipboard read: the origin's remembered answer, else a prompt, else (while another
+/// prompt is open) refused, as Electron auto-denies a second prompt.
+fn clipboard_read(app: &mut App, tx: &mut Tx, tab: TabId, id: u64, origin: String) {
+    let remembered = app.ui.panel.browser.clipboard_reads.get(&origin).copied();
+    match remembered {
+        Some(true) => read_for_page(tx, tab, id),
+        None if app.ui.panel.browser.prompt.is_none() => app.ui.panel.browser.prompt = Some(Prompt { tab, ask: Ask::ClipboardRead { id, origin } }),
+        _ => send(app, Cmd::ClipboardAnswer(tab, id, None)),
+    }
+}
+
+fn read_for_page(tx: &mut Tx, tab: TabId, id: u64) {
+    tx.read_clipboard(move |s: &mut App, content, _| send(s, Cmd::ClipboardAnswer(tab, id, Some(content.text().to_string()))));
+}
+
+/// The prompt's answer; Escape and closing the tab refuse it.
+fn answer_prompt(app: &mut App, tx: &mut Tx, allow: bool) {
+    let Some(p) = app.ui.panel.browser.prompt.take() else { return };
+    match p.ask {
+        Ask::ClipboardRead { id, origin } => {
+            app.ui.panel.browser.clipboard_reads.insert(origin, allow);
+            if allow {
+                read_for_page(tx, p.tab, id);
+            } else {
+                send(app, Cmd::ClipboardAnswer(p.tab, id, None));
+            }
+        }
+        Ask::External { url } if allow => {
+            if let Err(e) = tx.open_url(&url) {
+                crate::shell::palette::toast(app, "Unable to open the link", Some(&e.to_string()));
+            }
+        }
+        Ask::External { .. } => {}
+    }
+}
+
+/// Electron's native permission box, drawn over the page as the page's own dialogs are.
+fn permission_prompt(t: &T, p: &Prompt) -> El {
+    let (title, detail, yes, no) = match &p.ask {
+        Ask::ClipboardRead { origin, .. } => (format!("{} wants to see text and images copied to the clipboard", truncate_for_prompt(origin)), None, "Allow", "Block"),
+        Ask::External { url } => {
+            let scheme = url.split(':').next().unwrap_or_default();
+            (format!("Open this {scheme} link?"), Some(format!("A page in the browser wants to open another application:\n\n{}", truncate_for_prompt(url))), "Open", "Cancel")
+        }
+    };
+    let card = col()
+        .key("browser-permission")
+        .role("alertdialog")
+        .label(title.clone())
+        .w(400.)
+        .padding(16.)
+        .gap(12.)
+        .radius(12.)
+        .border(1., t.c.border)
+        .fill(t.c.popover)
+        .shadow(8., 24., Color::BLACK.alpha(0.25))
+        .child(text(title).font(theme::SM_MEDIUM).color(t.c.contrast_foreground).wrap().w_full())
+        .children(detail.map(|d| text(d).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w_full()))
+        .child(
+            row()
+                .w_full()
+                .gap(8.)
+                .center_y()
+                .child(el().grow(1.))
+                .child(kit::Button::new(no).variant("outline").size("sm").build(t).on_press_tx(|s: &mut App, tx: &mut Tx| answer_prompt(s, tx, false)))
+                .child(kit::Button::new(yes).size("sm").build(t).on_press_tx(|s: &mut App, tx: &mut Tx| answer_prompt(s, tx, true))),
+        );
+    row().pin(Some(0.), Some(0.), Some(0.), Some(0.)).fill(Color::BLACK.alpha(0.2)).items_start().pt(24.).child(el().grow(1.)).child(card).child(el().grow(1.))
 }
 
 struct Dialog {
@@ -507,6 +596,9 @@ pub fn close(app: &mut App, tab: TabId) {
     }
     if ui.chooser.as_ref().is_some_and(|c| c.tab == tab) {
         ui.chooser = None;
+    }
+    if ui.prompt.as_ref().is_some_and(|p| p.tab == tab) {
+        ui.prompt = None;
     }
     if ui.popout == Some(tab) {
         ui.popout = None;
@@ -1113,6 +1205,12 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             }
             browser::Event::Context { tab, at, info } => app.ui.panel.browser.context = Some(Context { tab, at, info }),
             browser::Event::Clipboard(text) => tx.copy(text),
+            browser::Event::ClipboardRead { tab, id, origin } => clipboard_read(app, tx, tab, id, origin),
+            browser::Event::External { tab, url } => {
+                if app.ui.panel.browser.prompt.is_none() {
+                    app.ui.panel.browser.prompt = Some(Prompt { tab, ask: Ask::External { url } });
+                }
+            }
             browser::Event::Image(png) => match rune::ClipboardImage::from_png(png) {
                 Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
                 None => crate::shell::palette::toast(app, "Unable to copy image", None),
@@ -1209,7 +1307,9 @@ fn sync_remote(app: &mut App) -> bool {
 fn stream_status(snapshot: &Value, state: &super::stream::State) -> Status {
     let nav = &snapshot["navStatus"];
     let url = nav["url"].as_str().unwrap_or_default().to_owned();
-    let failure = state.error.clone().filter(|_| state.ended).map(|description| browser::Failure { url: url.clone(), description });
+    // Web's `PreviewUnreachable` for a page that failed to load; a download has its own page.
+    let failed = (nav["_tag"] == "LoadFailed" && nav["download"].is_null()).then(|| nav["description"].as_str().unwrap_or_default().to_owned());
+    let failure = state.error.clone().filter(|_| state.ended).or(failed).map(|description| browser::Failure { url: url.clone(), description });
     Status {
         title: nav["title"].as_str().unwrap_or_default().to_owned(),
         loading: nav["_tag"] == "Loading",
@@ -1767,7 +1867,8 @@ fn profile_badge(app: &App, t: &T, tab: TabId) -> Option<El> {
 }
 
 /// A headless scene's tab on a painted page, without Chrome or a server: `annotation`, `rails`,
-/// `stream-dialog`, `host-setup`, `more` (a Work-profile server tab's More menu) or `chooser`.
+/// `stream-dialog`, `host-setup`, `more` (a Work-profile server tab's More menu), `chooser`, the
+/// permission prompts, or a server page that failed or downloaded.
 pub fn scene(app: &mut App, kind: &str) -> TabId {
     app.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
     let url = "http://localhost:5173/login";
@@ -1796,6 +1897,18 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
         }
         "host-setup" => {
             fresh.stream = streamed(Some(("The server's machine is missing the libraries Chrome needs.".into(), Some("npx playwright install-deps chromium".into()))));
+        }
+        "clipboard-prompt" => ui.prompt = Some(Prompt { tab, ask: Ask::ClipboardRead { id: 1, origin: "http://localhost:5173".into() } }),
+        "external-prompt" => ui.prompt = Some(Prompt { tab, ask: Ask::External { url: "mailto:support@example.com?subject=Login%20help".into() } }),
+        "file-not-shown" | "server-unreachable" => {
+            fresh.stream = streamed(None);
+            let nav = if kind == "file-not-shown" {
+                json!({ "_tag": "LoadFailed", "url": "http://localhost:5173/export/report.zip", "title": "", "code": -3, "description": "", "download": { "id": "d1", "fileName": "report.zip" } })
+            } else {
+                json!({ "_tag": "LoadFailed", "url": "http://localhost:5173/login", "title": "", "code": -102, "description": "ERR_CONNECTION_REFUSED" })
+            };
+            fresh.snapshot = json!({ "profileId": "default", "navStatus": nav });
+            status = stream_status(&fresh.snapshot, &fresh.stream.as_ref().map(|s| s.state()).unwrap_or_default());
         }
         _ => {
             fresh.stream = streamed(None);
@@ -2758,7 +2871,8 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             .child(content)
             .children(zoom_pill)
             .children(ui.dialog.as_ref().filter(|d| d.tab == tab).map(|d| js_dialog(t, d, &status.url)))
-            .children(ui.chooser.as_ref().filter(|c| c.tab == tab).map(|c| chooser_sheet(t, c))),
+            .children(ui.chooser.as_ref().filter(|c| c.tab == tab).map(|c| chooser_sheet(t, c)))
+            .children(ui.prompt.as_ref().filter(|p| p.tab == tab).map(|p| permission_prompt(t, p))),
     )
 }
 
@@ -3118,6 +3232,9 @@ fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
         return Some(host_setup(t, need, command));
     }
     let nav = &ui.tabs.get(&tab)?.snapshot["navStatus"];
+    if let (Some(url), Some(id), Some(name)) = (nav["url"].as_str().filter(|_| nav["_tag"] == "LoadFailed"), nav["download"]["id"].as_str(), nav["download"]["fileName"].as_str()) {
+        return Some(file_not_shown(t, tab, url, id, name));
+    }
     if let Some(pdf) = nav["url"].as_str().filter(|_| nav["_tag"] == "Success").and_then(|url| pdf_asset_url(url, stream.base())) {
         return Some(stream_pdf(t, pdf));
     }
@@ -3142,6 +3259,39 @@ fn stream_pdf(t: &T, url: String) -> El {
     });
     let notice = col().max_w(360.).gap(10.).padding(16.).center().child(icon(&icons::FILE, 24.).color(t.c.muted_foreground)).child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground).wrap()).child(text("This PDF opens in your system's viewer.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()).child(open);
     col().key("browser-stream-pdf").grow(1.).min_h(0.).w_full().center().child(notice)
+}
+
+/// Web's `PreviewFileNotShown`: a server page that turned out to be a download.
+fn file_not_shown(t: &T, tab: TabId, url: &str, id: &str, name: &str) -> El {
+    let host = host(url).unwrap_or(url).to_owned();
+    let message = format!("{name} from {host} was downloaded instead.");
+    let (open, id, file) = (url.to_owned(), id.to_owned(), name.to_owned());
+    let buttons = row()
+        .w_full()
+        .gap(8.)
+        .pt(32.)
+        .center_y()
+        .child(el().grow(1.))
+        .child(kit::Button::new("Open in browser").variant("outline").size("sm").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            if let Err(e) = tx.open_url(&open) {
+                crate::shell::palette::toast(s, "Unable to open the link", Some(&e.to_string()));
+            }
+        }))
+        .child(kit::Button::new("Download").size("sm").build(t).on_press(move |s: &mut App| {
+            if let Some(stream) = s.ui.panel.browser.tabs.get(&tab).and_then(|t| t.stream.as_ref()) {
+                stream.save(&id, file.clone());
+            }
+        }));
+    let body = col()
+        .w_full()
+        .max_w(576.)
+        .px(32.)
+        .py(64.)
+        .child(icon(&ERROR_ICON, 48.).size(48., 48.).color(t.c.muted_foreground.alpha_mul(0.7)).mb(24.))
+        .child(text("This file can’t be shown here").font(theme::weight(theme::TEXT_2XL, theme::SEMIBOLD)).color(t.c.contrast_foreground).mb(12.))
+        .child(rich(message, vec![Span::new(0, name.len()).weight(theme::SEMIBOLD).color(t.c.contrast_foreground)]).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full())
+        .child(buttons);
+    col().key("browser-file-not-shown").grow(1.).min_h(0.).w_full().items_center().child(body)
 }
 
 /// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
@@ -3391,7 +3541,20 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
     el().pixels(pixels)
         .focusable(true)
         .key(key.to_string())
-        .on_drag(move |s: &mut App, d, _| {
+        // A mouse's back and forward buttons go back and forward, as on Electron's page.
+        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
+        .on_press_tx(|s: &mut App, tx: &mut Tx| {
+            let Some(tab) = s.ui.panel.browser.shown else { return };
+            match tx.button() {
+                rune::PointerButton::Back => send(s, Cmd::Back(tab)),
+                rune::PointerButton::Forward => send(s, Cmd::Forward(tab)),
+                _ => {}
+            }
+        })
+        .on_drag(move |s: &mut App, d, tx| {
+            if tx.button() != rune::PointerButton::Primary {
+                return;
+            }
             send(
                 s,
                 Cmd::Mouse {
@@ -3419,6 +3582,13 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             // Web's way out of a page that takes every key.
             if matches!(e.key, Key::Escape) && e.mods.shift {
                 tx.blur();
+                return true;
+            }
+            // A permission prompt blocks the page too; Escape refuses it, as Electron's default.
+            if s.ui.panel.browser.prompt.as_ref().is_some_and(|p| Some(p.tab) == s.ui.panel.browser.shown) {
+                if matches!(e.key, Key::Escape) {
+                    answer_prompt(s, tx, false);
+                }
                 return true;
             }
             // An open dialog blocks the page: Enter accepts it, Escape cancels it.
@@ -4250,6 +4420,17 @@ mod tests {
         assert_eq!(viewport_size(&json!({ "_tag": "freeform", "width": 800, "height": 600 })), Some(Some((800, 600))));
         assert_eq!(viewport_size(&json!({ "_tag": "fill" })), Some(None));
         assert_eq!(viewport_size(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_server_page_that_failed_shows_webs_unreachable_page_unless_it_downloaded() {
+        let state = super::super::stream::State { painted: true, ..Default::default() };
+        let failed = json!({ "navStatus": { "_tag": "LoadFailed", "url": "http://localhost:9/", "title": "", "code": -102, "description": "ERR_CONNECTION_REFUSED" } });
+        let failure = stream_status(&failed, &state).failure.expect("a failed load is unreachable");
+        assert_eq!((failure.url.as_str(), failure.description.as_str()), ("http://localhost:9/", "ERR_CONNECTION_REFUSED"));
+        let downloaded = json!({ "navStatus": { "_tag": "LoadFailed", "url": "http://localhost:9/a.zip", "title": "", "code": -3, "description": "", "download": { "id": "d1", "fileName": "a.zip" } } });
+        assert!(stream_status(&downloaded, &state).failure.is_none(), "a download shows its own page");
+        assert!(stream_status(&json!({ "navStatus": { "_tag": "Success", "url": "http://a/" } }), &state).failure.is_none());
     }
 
     #[test]

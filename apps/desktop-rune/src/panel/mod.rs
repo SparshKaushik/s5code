@@ -964,7 +964,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 .role("tab")
                 .label(title.clone())
                 .focusable(true)
-                .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                // Web closes a tab on a middle click.
+                .pointer_buttons([rune::PointerButton::Middle])
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| match tx.button() {
+                    rune::PointerButton::Middle => close(s, surface),
+                    _ => s.ui.panel.active = Some(surface),
+                })
                 .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
                 .children(speaker)
@@ -1070,6 +1075,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-host-setup", |s| browser_scene(s, "host-setup")),
     ("browser-more-menu", |s| browser_scene(s, "more")),
     ("browser-file-chooser", |s| browser_scene(s, "chooser")),
+    ("browser-clipboard-prompt", |s| browser_scene(s, "clipboard-prompt")),
+    ("browser-external-prompt", |s| browser_scene(s, "external-prompt")),
+    ("browser-file-not-shown", |s| browser_scene(s, "file-not-shown")),
+    ("browser-server-unreachable", |s| browser_scene(s, "server-unreachable")),
     ("panel-launcher-profiles", |s| {
         scene(s, None);
         s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));

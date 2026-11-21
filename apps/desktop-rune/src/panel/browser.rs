@@ -81,6 +81,8 @@ pub enum Cmd {
     CaptureMarks(TabId),
     /// The elements a region drag encloses, in viewport CSS pixels, as `Event::Enclosed`.
     Enclosed(TabId, [f32; 4]),
+    /// Answers the page's `navigator.clipboard.readText()`: the text, or None to refuse it.
+    ClipboardAnswer(TabId, u64, Option<String>),
     /// Stops this profile's Chrome; `wipe` deletes the profile's data after.
     Quit { wipe: bool },
 }
@@ -88,7 +90,7 @@ pub enum Cmd {
 /// Which tab a command acts on, when it names one.
 fn cmd_tab(cmd: &Cmd) -> Option<TabId> {
     match cmd {
-        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) | Cmd::Enclosed(tab, _) => Some(*tab),
+        Cmd::Open(tab, _) | Cmd::Adopt(tab, ..) | Cmd::Close(tab) | Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::ColorScheme(tab, _) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::Mark(tab, _) | Cmd::Erase(tab, ..) | Cmd::CaptureMarks(tab) | Cmd::Enclosed(tab, _) | Cmd::ClipboardAnswer(tab, ..) => Some(*tab),
         _ => None,
     }
 }
@@ -150,6 +152,10 @@ pub enum Event {
     /// A right-click's link, image rect, editable and selection, at the menu's window point.
     Context { tab: TabId, at: (f32, f32), info: Value },
     Clipboard(String),
+    /// The page asked to read the clipboard, answered with `Cmd::ClipboardAnswer`.
+    ClipboardRead { tab: TabId, id: u64, origin: String },
+    /// A link to another application (`mailto:`, `slack:`), which Electron confirms first.
+    External { tab: TabId, url: String },
     Image(Vec<u8>),
     /// A finished download, moved to the Downloads folder, as Electron does for a person's.
     Download(Result<PathBuf, String>),
@@ -1006,6 +1012,10 @@ impl Worker {
                     self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
                 }
             }
+            Cmd::ClipboardAnswer(tab, id, text) => {
+                let expression = format!("window.__s5Resolve && __s5Resolve({id}, {})", json!(text));
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression }), None);
+            }
             // The run loop takes it before a command reaches here.
             Cmd::Quit { .. } => {}
         }
@@ -1203,6 +1213,11 @@ impl Worker {
                     self.event(Event::Dialog { tab, kind, message, default });
                 }
             }
+            "Runtime.bindingCalled" if p["name"] == "__s5Page" => {
+                if let Some(event) = page_message(tab, p["payload"].as_str().unwrap_or_default()) {
+                    self.event(event);
+                }
+            }
             "Runtime.bindingCalled" if p["name"] == "__s5Audio" => {
                 let audible = p["payload"] == "1";
                 self.update(tab, |s| s.audible = audible);
@@ -1299,6 +1314,8 @@ impl Worker {
                 self.send(Some(&session), "Runtime.enable", json!({}), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
+                self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Page" }), None);
+                self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": PAGE_JS, "runImmediately": true }), None);
                 // A Chrome with its own PDF viewer shows PDFs itself; the headless shell has none,
                 // so there a PDF page arrives as the bundled pdf.js.
                 match self.native_pdf {
@@ -1892,6 +1909,63 @@ canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;heigh
 })();
 </script></body></html>"#;
 
+/// What the page script reports: a copy, a clipboard read to answer, or an external link.
+fn page_message(tab: TabId, payload: &str) -> Option<Event> {
+    let m: Value = serde_json::from_str(payload).ok()?;
+    match m["kind"].as_str()? {
+        "copy" => m["text"].as_str().filter(|t| !t.is_empty()).map(|t| Event::Clipboard(t.to_owned())),
+        "read" => Some(Event::ClipboardRead { tab, id: m["id"].as_u64()?, origin: m["origin"].as_str().filter(|o| !o.is_empty() && *o != "null")?.to_owned() }),
+        "external" => {
+            let url = s5_net::url::Url::parse(m["url"].as_str()?).ok()?;
+            let never = ["about", "blob", "chrome", "data", "devtools", "file", "filesystem", "http", "https", "javascript", "view-source"];
+            (!never.contains(&url.scheme())).then(|| Event::External { tab, url: url.to_string() })
+        }
+        _ => None,
+    }
+}
+
+/// Electron's clipboard and external-protocol hooks, which the headless shell lacks: copies
+/// reach the system clipboard, reads ask first, and links to other applications are confirmed.
+const PAGE_JS: &str = r#"(() => {
+  if (window.__s5PageHooks) return;
+  window.__s5PageHooks = true;
+  const send = (m) => { try { __s5Page(JSON.stringify(m)); } catch {} };
+  const clip = navigator.clipboard;
+  if (clip) {
+    const writeText = clip.writeText && clip.writeText.bind(clip);
+    clip.writeText = (text) => { send({ kind: "copy", text: String(text) }); return writeText ? writeText(text).catch(() => {}) : Promise.resolve(); };
+    const write = clip.write && clip.write.bind(clip);
+    clip.write = async (items) => {
+      for (const item of items || []) {
+        if (item.types && item.types.includes("text/plain")) { send({ kind: "copy", text: await (await item.getType("text/plain")).text() }); break; }
+      }
+      return write ? write(items).catch(() => {}) : undefined;
+    };
+    let next = 0;
+    const waiting = new Map();
+    window.__s5Resolve = (id, text) => {
+      const w = waiting.get(id);
+      waiting.delete(id);
+      if (w) text === null ? w.reject(new DOMException("Read permission denied.", "NotAllowedError")) : w.resolve(text);
+    };
+    clip.readText = () => new Promise((resolve, reject) => { const id = ++next; waiting.set(id, { resolve, reject }); send({ kind: "read", id, origin: location.origin }); });
+  }
+  let set = null;
+  const setData = DataTransfer.prototype.setData;
+  DataTransfer.prototype.setData = function (type, value) { if (/^text(\/plain)?$/i.test(type)) set = String(value); return setData.call(this, type, value); };
+  for (const type of ["copy", "cut"]) {
+    addEventListener(type, () => { set = null; }, true);
+    addEventListener(type, (e) => { const text = e.defaultPrevented ? set : String(getSelection() || ""); if (text) send({ kind: "copy", text }); });
+  }
+  addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0) return;
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    if (!a || /^(https?|about|blob|chrome|data|devtools|file|filesystem|javascript|view-source):/i.test(a.href)) return;
+    e.preventDefault();
+    send({ kind: "external", url: a.href });
+  });
+})()"#;
+
 const AUDIO_JS: &str = r#"(() => {
   if (window !== top || window.__s5Mute) return;
   const mine = new WeakSet();
@@ -2115,6 +2189,18 @@ fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_script_reports_copies_reads_and_links_to_other_apps() {
+        assert!(matches!(page_message(1, r#"{"kind":"copy","text":"npm i"}"#), Some(Event::Clipboard(t)) if t == "npm i"));
+        assert!(page_message(1, r#"{"kind":"copy","text":""}"#).is_none());
+        assert!(matches!(page_message(2, r#"{"kind":"read","id":7,"origin":"http://localhost:5173"}"#), Some(Event::ClipboardRead { tab: 2, id: 7, origin }) if origin == "http://localhost:5173"));
+        assert!(page_message(2, r#"{"kind":"read","id":7,"origin":"null"}"#).is_none(), "an opaque origin is refused, as Electron does");
+        assert!(matches!(page_message(3, r#"{"kind":"external","url":"mailto:dev@example.com"}"#), Some(Event::External { tab: 3, url }) if url == "mailto:dev@example.com"));
+        for url in ["https://example.com/", "javascript:alert(1)", "file:///etc/passwd", "not a url"] {
+            assert!(page_message(3, &json!({ "kind": "external", "url": url }).to_string()).is_none(), "{url}");
+        }
+    }
 
     #[test]
     fn each_profile_gets_its_tabs_commands_and_quits_with_its_last_tab() {
