@@ -76,6 +76,8 @@ pub struct Ui {
     /// Saved servers older than this client that can update themselves (web `serverUpdateRequired`),
     /// with the descriptor they paired with. They connect for requests only, so they can update.
     pub outdated: HashMap<String, Value>,
+    /// Each outdated server's descriptor, fetched again once per reconnect: `None` once read.
+    recheck: HashMap<String, Option<Receiver<Result<Value, String>>>>,
 }
 
 fn path() -> PathBuf {
@@ -327,13 +329,14 @@ pub fn base_url(s: &App, key: &str) -> Option<String> {
 }
 
 /// The server refused the bearer during the WebSocket upgrade (tungstenite's "HTTP error: 401 …").
-fn rejected(reason: &str) -> bool {
+pub(crate) fn rejected(reason: &str) -> bool {
     reason.starts_with("HTTP error: 401") || reason.starts_with("HTTP error: 403")
 }
 
 /// Makes `key`'s environment the one `App::src` talks to; the others' rows are copied back in.
 pub fn switch(s: &mut App, key: &str) {
-    if s.ui.env.active == key {
+    // An outdated server carries only update requests, so it has no state to show.
+    if s.ui.env.active == key || s.ui.env.outdated.contains_key(key) {
         return;
     }
     let Some(i) = s.ui.env.parked.iter().position(|(k, _)| k == key) else { return };
@@ -624,6 +627,52 @@ pub(crate) fn server_updated(s: &mut App, key: &str) {
         }
     }
     s.ui.env.error = persist(s);
+}
+
+/// Web `updateOutdatedHost`'s compatible check: a server updated by hand connects again. Each time
+/// an outdated server's socket opens, its descriptor is read once more.
+fn recheck_outdated(s: &mut App) -> bool {
+    let keys: Vec<String> = s.ui.env.outdated.keys().cloned().collect();
+    s.ui.env.recheck.retain(|k, _| keys.contains(k));
+    let mut changed = false;
+    for key in keys {
+        let base = match source(s, &key) {
+            Some(Source::Live(net)) if net.state().conn == s5_net::Conn::Open => net.base_url().to_owned(),
+            _ => {
+                s.ui.env.recheck.remove(&key);
+                continue;
+            }
+        };
+        match s.ui.env.recheck.get(&key) {
+            None if !rune::is_headless() => {
+                let (tx, rx) = channel();
+                let waker = s.ui.panel.waker.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(s5_net::fetch_descriptor(&base));
+                    if let Some(w) = waker {
+                        w();
+                    }
+                });
+                s.ui.env.recheck.insert(key, Some(rx));
+            }
+            Some(Some(rx)) => {
+                let Ok(result) = rx.try_recv() else { continue };
+                s.ui.env.recheck.insert(key.clone(), None);
+                changed |= recheck_landed(s, &key, result);
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn recheck_landed(s: &mut App, key: &str, result: Result<Value, String>) -> bool {
+    let Ok(descriptor) = result.filter(|d| d["environmentId"] == key) else { return false };
+    if protocol(&descriptor) == PROTOCOL {
+        server_updated(s, key);
+        return true;
+    }
+    false
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
@@ -1046,7 +1095,7 @@ fn fall_back(s: &mut App) -> bool {
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
 pub fn poll(s: &mut App) -> bool {
-    let changed = ssh::poll(s) | adopt_catalog(s) | fall_back(s) | return_to_preferred(s);
+    let changed = ssh::poll(s) | adopt_catalog(s) | fall_back(s) | return_to_preferred(s) | recheck_outdated(s);
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return changed };
     s.ui.env.pairing = None;
     paired(s, result);
@@ -1149,6 +1198,28 @@ mod tests {
         assert_eq!(pairing_refusal(&older("boot-service", false), "https://new.example", &known, false), None, "FAILED: an outdated server that updates itself is saved to be updated");
         assert_eq!(pairing_refusal(&older("desktop-managed", true), "https://new.example", &known, false), None);
         assert!(pairing_refusal(&older("desktop-managed", false), "https://new.example", &known, false).is_some(), "a desktop host that can't update its app needs a manual update");
+    }
+
+    #[test]
+    fn an_outdated_server_is_not_switched_to_and_connects_again_once_current() {
+        // SAFETY: the same file every_environment_is_listed_and_commands_follow_the_owner uses.
+        unsafe { std::env::set_var("S5_ENVIRONMENTS", std::env::temp_dir().join(format!("s5-env-{}.json", std::process::id()))) };
+        let mut s = App::new();
+        s.ui.env.saved.push(saved("a"));
+        // Switched off, so coming back does not dial a real socket.
+        s.ui.env.off.push("a".into());
+        s.ui.env.parked.push(("a".into(), Source::Fixture(crate::data::empty_state())));
+        s.ui.env.outdated.insert("a".into(), json!({"environmentId": "a"}));
+        let home = s.ui.env.active.clone();
+        switch(&mut s, "a");
+        assert_eq!(s.ui.env.active, home, "FAILED: switched to a server that can only be updated");
+        assert!(!recheck_landed(&mut s, "a", Ok(json!({"environmentId": "a"}))), "still on the first protocol");
+        assert!(!recheck_landed(&mut s, "a", Ok(json!({"environmentId": "b", "orchestrationProtocolVersion": PROTOCOL}))), "another machine answers there");
+        assert!(!recheck_landed(&mut s, "a", Err("refused".into())));
+        assert!(recheck_landed(&mut s, "a", Ok(json!({"environmentId": "a", "orchestrationProtocolVersion": PROTOCOL}))));
+        assert!(outdated(&s, "a").is_none(), "FAILED: a server updated by hand stays flagged");
+        switch(&mut s, "a");
+        assert_eq!(s.ui.env.active, "a");
     }
 
     #[test]
