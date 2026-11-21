@@ -76,15 +76,24 @@ pub struct Ui {
     pub delete_confirm: bool,
     /// The header's checkout menu is open.
     pub checkout_menu: bool,
-    /// `git.preparePullRequestThread` in flight: the request, its mode, and the project the
-    /// thread opens in.
-    checkout: Option<(u64, &'static str, String)>,
+    /// `git.preparePullRequestThread` in flight (startHandoff).
+    checkout: Option<Checkout>,
     /// The detail's error was the host's not-found.
     pub not_found: bool,
     /// A copyable value reading "Copied" until the given time.
     pub copied: Option<(&'static str, i64)>,
     pub(super) live: super::pull_requests::Live,
     pub meta: super::pr_meta::Ui,
+}
+
+/// A checkout being prepared: the thread opens in `project` on it, its composer holding `task`
+/// (none for the checkout menu's bare checkout).
+#[derive(Clone)]
+struct Checkout {
+    request: u64,
+    mode: &'static str,
+    project: String,
+    task: Option<String>,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -404,9 +413,19 @@ fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
     can("source-control:write") && (mode == "local" || can("orchestration:operate"))
 }
 
-/// startHandoff with no task (startCheckout): prepares the checkout for the project's draft
-/// thread, which then opens on it.
+/// startCheckout: the checkout alone.
 fn start_checkout(s: &mut App, mode: &'static str) {
+    start_handoff(s, mode, None);
+}
+
+/// startResolveConflicts: a worktree checkout whose thread then holds the resolve prompt.
+fn resolve_conflicts(s: &mut App) {
+    let Some(d) = ui(s).detail.clone() else { return };
+    start_handoff(s, "worktree", Some(resolve_text(&d)));
+}
+
+/// startHandoff: prepares the checkout for the project's draft thread, which then opens on it.
+fn start_handoff(s: &mut App, mode: &'static str, task: Option<String>) {
     let u = ui(s);
     u.checkout_menu = false;
     let Some(entry) = u.entry.clone().filter(|_| u.checkout.is_none()) else { return };
@@ -422,19 +441,20 @@ fn start_checkout(s: &mut App, mode: &'static str) {
     let input = json!({"cwd": root, "reference": field(&d, "url"), "mode": mode, "threadId": thread});
     match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
-            let id = net.request("git.preparePullRequestThread", input);
-            ui(s).checkout = Some((id, mode, project));
+            let request = net.request("git.preparePullRequestThread", input);
+            ui(s).checkout = Some(Checkout { request, mode, project, task });
             crate::shell::palette::toast(s, &format!("Preparing the {term} checkout..."), None);
         }
         None => crate::shell::palette::toast_error_brief(s, &format!("Could not prepare the {term} checkout"), Some("Actions need a connected environment.")),
     }
 }
 
-/// The checkout's answer: the draft thread opens on the prepared branch, or the toast says why not.
+/// The checkout's answer: the draft thread opens on the prepared branch holding the task, or the
+/// toast says why not.
 fn poll_checkout(s: &mut App) -> bool {
     let u = ui(s);
-    let (Some((id, mode, project)), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
-    let Some(reply) = super::pull_requests::net_for(s, &entry).and_then(|net| net.take_reply(id)) else { return false };
+    let (Some(Checkout { request, mode, project, task }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
+    let Some(reply) = super::pull_requests::net_for(s, &entry).and_then(|net| net.take_reply(request)) else { return false };
     ui(s).checkout = None;
     let term = super::pr_row::term(&entry);
     let prepared = match reply {
@@ -453,8 +473,19 @@ fn poll_checkout(s: &mut App) -> bool {
     }
     crate::chat::home::start_on_branch(s, &project, &branch, prepared["worktreePath"].as_str());
     crate::chat::details::reset_draft_run(s);
-    let (title, description) = super::pr_actions::checkout_toast(mode, term, prepared["isOnPullRequestHead"] != false);
-    crate::shell::palette::toast(s, &title, Some(&description));
+    let on_head = prepared["isOnPullRequestHead"] != false;
+    let (title, description) = match task {
+        Some(task) => {
+            compose(s, Route::Home { project_id: Some(project) }, task, None);
+            if on_head { ("Checkout ready".into(), "The task is in the composer. Read it over, then send.".into()) } else { super::pr_actions::checkout_toast(mode, term, false) }
+        }
+        None => super::pr_actions::checkout_toast(mode, term, on_head),
+    };
+    if on_head {
+        crate::shell::palette::toast(s, &title, Some(&description));
+    } else {
+        crate::shell::palette::toast_warning(s, &title, Some(&description), Vec::new(), false);
+    }
     true
 }
 
@@ -489,11 +520,8 @@ fn refresh_from_host(s: &mut App) {
     if ui(s).pending_invalidate.is_some() {
         return;
     }
-    match super::pull_requests::net_for(s, &entry) {
-        Some(net) => {
-            let id = net.request("pullRequests.invalidate", json!({"reference": reference(&entry)}));
-            ui(s).pending_invalidate = Some(id);
-        }
+    match super::pull_requests::request_for(s, &entry, "pullRequests.invalidate", json!({"reference": reference(&entry)})) {
+        Some(id) => ui(s).pending_invalidate = Some(id),
         None => reload(s),
     }
 }
@@ -819,7 +847,11 @@ pub(crate) fn resolve_text(d: &Value) -> String {
 pub(super) fn handoff(s: &mut App, text: String, chip: Option<Value>) {
     let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
     ui(s).menu = false;
-    let route = Route::Home { project_id: project };
+    compose(s, Route::Home { project_id: project }, text, chip);
+}
+
+/// Opens `route`'s draft holding `text`, and `chip` when there is one.
+fn compose(s: &mut App, route: Route, text: String, chip: Option<Value>) {
     let key = crate::chat::composer::draft_key(s, &route);
     crate::shell::sidebar::go(s, route);
     let draft = s.ui.chat.composer.drafts.entry(key).or_default();
@@ -982,7 +1014,7 @@ const TOP: &str = "pr-detail-top";
 fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
     let entry = u.entry.as_ref().unwrap_or(d);
-    let label = if u.checkout.is_some() { "Checking out..." } else { "Check out" };
+    let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_none()) { "Checking out..." } else { "Check out" };
     let trigger = kit::Button::new(if compact { "" } else { label })
         .variant("outline")
         .size("xs")
@@ -993,23 +1025,28 @@ fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El
         .child(icon(&i::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground))
         .label(label)
         .help(format!("Check out this {}", super::pr_row::term(d)));
+    const WORKTREE: &str = "Its own folder and thread. Nothing you have open moves.";
+    const HERE: &str = "Switches the branch you are working in.";
+    // MenuPopup grows to its longest line, and a menu measures its height before a description
+    // wraps: the menu holds each one on a line (menu padding, item padding, borders).
+    let width = if u.checkout_menu { [WORKTREE, HERE].map(|v| rune::text::measure(v, &[], theme::TEXT_XS, None).0 + 32.0).into_iter().fold(160.0, f32::max) } else { 160.0 };
     Menu::new("pr-checkout")
         .trigger(trigger)
         .placement(Placement::BottomEnd)
-        .min_width(260.0)
+        .min_width(width)
         .open(u.checkout_menu)
         .on_close(|s: &mut App| ui(s).checkout_menu = false)
         .item(
             MenuItem::new("In a separate worktree")
                 .icon(&i::GIT_BRANCH)
-                .description("Its own folder and thread. Nothing you have open moves.")
+                .description(WORKTREE)
                 .disabled(!checkout_allowed(s, entry, "worktree"))
                 .on_select(|s: &mut App| start_checkout(s, "worktree")),
         )
         .item(
             MenuItem::new("In this repository")
                 .icon(&i::FOLDER_GIT_2)
-                .description("Switches the branch you are working in.")
+                .description(HERE)
                 .disabled(!checkout_allowed(s, entry, "local"))
                 .on_select(|s: &mut App| start_checkout(s, "local")),
         )
@@ -1063,15 +1100,17 @@ fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr
         Primary::Merged => state_badge("Merged", &i::GIT_MERGE),
         Primary::Closed => state_badge("Closed", &i::GIT_PULL_REQUEST_CLOSED),
         Primary::Resolve => {
-            let prompt = resolve_text(d);
-            kit::Button::new(shown("Resolve conflicts"))
-                .variant("warning-outline")
+            let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_some()) { "Preparing..." } else { "Resolve conflicts" };
+            let unavailable = checkout_root(s, d).is_none() || !checkout_allowed(s, u.entry.as_ref().unwrap_or(d), "worktree");
+            kit::Button::new(shown(label))
+                .variant("destructive-outline")
                 .size("xs")
                 .icon(&i::TRIANGLE_ALERT)
-                .on_press(move |s: &mut App| handoff(s, prompt.clone(), None))
+                .disabled(u.checkout.is_some() || unavailable)
+                .on_press(resolve_conflicts)
                 .build(t)
-                .label("Resolve conflicts")
-                .help("Resolve conflicts")
+                .label(label)
+                .help(label)
         }
         Primary::Ready => kit::Button::new(shown("Ready for review"))
             .variant("default")
@@ -1242,26 +1281,13 @@ fn delete_branch_dialog(t: &T, d: &Value, overlays: &mut Vec<El>) {
 
 /// Title, author and checkout, then the branches and the change size.
 fn header_body(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
-    let author = &d["author"];
-    let login = author["login"].as_str().unwrap_or("ghost").to_string();
-    let profile = profile_url(d);
-    let who = match author["name"].as_str().filter(|n| !n.is_empty() && *n != login) {
-        Some(name) => format!("{name} (@{login})"),
-        None => login.clone(),
-    };
-    let mut actor = row().gap(6.0).center_y().shrink().help(if profile.is_some() { format!("{who} · Open profile") } else { who });
-    if let Some(url) = profile {
-        actor = actor.key("pr-detail-author").cursor(Cursor::Pointer).role("link").label(format!("Open {login}'s profile")).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&url);
-        });
-    }
     let mut meta = row()
         .w_full()
         .mt(8.0)
         .h(20.0)
         .gap(8.0)
         .center_y()
-        .child(actor.child(avatar(&s.ui.pages.avatars, author, 16.0, t)).child(text(login).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.85))));
+        .child(actor_label(s, t, d, &d["author"], "pr-detail-author".into(), t.c.foreground.alpha_mul(0.85)));
     if let Some(at) = ts(d, "updatedAt") {
         meta = meta.child(text(format!("updated {}", relative(at, s.now_ms))).font(theme::TEXT_XS).color(t.c.muted_foreground).shrink());
     }
@@ -1689,12 +1715,8 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
     let resolved = item.thread.is_some_and(|th| th["isResolved"] == true);
     let label = if resolved { "Resolved" } else { "Review dismissed" };
     let muted = t.c.muted_foreground;
-    let mut head = row()
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(avatar(&s.ui.pages.avatars, &c["author"], 16.0, t))
-        .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink());
+    let d = s.ui.pages.detail.detail.as_ref().unwrap_or(&Value::Null);
+    let mut head = row().w_full().gap(8.0).center_y().child(actor_label(s, t, d, &c["author"], format!("pr-comment-author-{}", field(c, "id")), t.c.foreground));
     if let Some(at) = ts(c, "createdAt") {
         head = head.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
     }
@@ -1759,8 +1781,8 @@ fn on_host(s: &App) -> String {
 
 /// The host's `authorProfileUrl`: GitHub's sits beside the repository; bots and other hosts have
 /// none.
-fn profile_url(d: &Value) -> Option<String> {
-    let login = d["author"]["login"].as_str().filter(|l| !l.is_empty() && !l.ends_with("[bot]"))?;
+fn profile_url(d: &Value, actor: &Value) -> Option<String> {
+    let login = actor["login"].as_str().filter(|l| !l.is_empty() && !l.ends_with("[bot]"))?;
     let github = match field(d, "provider") {
         "" => field(d, "url").contains("github.com"),
         p => p == "github",
@@ -1768,6 +1790,24 @@ fn profile_url(d: &Value) -> Option<String> {
     let url = field(d, "url");
     let origin = url.find("://").map(|at| at + 3).and_then(|at| url[at..].find('/').map(|end| at + end))?;
     github.then(|| format!("{}/{login}", &url[..origin]))
+}
+
+/// PullRequestActorLabel: the avatar and login, named in full on hover; a press opens the
+/// actor's profile where the host has one.
+fn actor_label(s: &App, t: &T, d: &Value, actor: &Value, key: String, ink: Color) -> El {
+    let login = actor["login"].as_str().unwrap_or("ghost").to_string();
+    let profile = profile_url(d, actor);
+    let who = match actor["name"].as_str().filter(|n| !n.is_empty() && *n != login) {
+        Some(name) => format!("{name} (@{login})"),
+        None => login.clone(),
+    };
+    let mut label = row().gap(6.0).center_y().shrink().help(if profile.is_some() { format!("{who} · Open profile") } else { who });
+    if let Some(url) = profile {
+        label = label.key(key).cursor(Cursor::Pointer).role("link").label(format!("Open {login}'s profile")).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        });
+    }
+    label.child(avatar(&s.ui.pages.avatars, actor, 16.0, t)).child(text(login).font(theme::XS_MEDIUM).color(ink).shrink())
 }
 
 /// The source control definition's `checkoutCommand`, when the host has one for this pull request.
@@ -1826,13 +1866,19 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
         Surface::Summary(thread) => card_finding(c, thread),
         Surface::Timeline => None,
     };
+    let d = s.ui.pages.detail.detail.as_ref().unwrap_or(&Value::Null);
+    // CommentIdentity names and links the Summary's authors; the Timeline shows the login alone.
     let head_line = |c: &Value, path: Option<String>, fix: Option<Finding>| {
-        let mut h = row()
-            .w_full()
-            .gap(6.0)
-            .center_y()
-            .child(avatar(avatars, &c["author"], 16.0, t))
-            .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink());
+        let who = match surface {
+            Surface::Summary(_) => actor_label(s, t, d, &c["author"], format!("pr-comment-author-{}", field(c, "id")), t.c.foreground),
+            Surface::Timeline => row()
+                .gap(6.0)
+                .center_y()
+                .shrink()
+                .child(avatar(avatars, &c["author"], 16.0, t))
+                .child(text(c["author"]["login"].as_str().unwrap_or("ghost").to_string()).font(theme::XS_MEDIUM).color(t.c.foreground).shrink()),
+        };
+        let mut h = row().w_full().gap(6.0).center_y().child(who);
         let state = field(c, "reviewState");
         if let Some(outcome) = conv::outcome(state) {
             h = h.child(conv::outcome_badge(t, outcome));
@@ -2120,6 +2166,14 @@ fn diff_details(t: &T, error: &str, open: bool) -> El {
     out
 }
 
+/// The scene's conflicting pull request while Resolve conflicts prepares its checkout.
+pub(super) fn scene_resolving(u: &mut Ui) {
+    if let Some(d) = &mut u.detail {
+        d["mergeability"] = json!("conflicting");
+    }
+    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), task: Some(String::new()) });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2281,11 +2335,14 @@ mod tests {
     #[test]
     fn only_a_github_author_who_is_not_a_bot_has_a_profile() {
         let pr = |provider: &str, login: &str| json!({"provider": provider, "url": "https://github.com/o/r/pull/7", "author": {"login": login}});
-        assert_eq!(profile_url(&pr("github", "theo")).as_deref(), Some("https://github.com/theo"));
-        assert_eq!(profile_url(&pr("", "theo")).as_deref(), Some("https://github.com/theo"), "a github.com URL names the host");
-        assert_eq!(profile_url(&pr("github", "dependabot[bot]")), None);
-        assert_eq!(profile_url(&pr("gitlab", "theo")), None);
-        assert_eq!(profile_url(&json!({"provider": "github", "url": "https://github.com/o/r/pull/7", "author": null})), None);
+        let author = |d: Value| profile_url(&d, &d["author"]);
+        assert_eq!(author(pr("github", "theo")).as_deref(), Some("https://github.com/theo"));
+        assert_eq!(author(pr("", "theo")).as_deref(), Some("https://github.com/theo"), "a github.com URL names the host");
+        assert_eq!(author(pr("github", "dependabot[bot]")), None);
+        assert_eq!(author(pr("gitlab", "theo")), None);
+        assert_eq!(author(json!({"provider": "github", "url": "https://github.com/o/r/pull/7", "author": null})), None);
+        let d = pr("github", "theo");
+        assert_eq!(profile_url(&d, &json!({"login": "julius"})).as_deref(), Some("https://github.com/julius"), "a commenter links to their own profile");
     }
 
     #[test]
@@ -2382,6 +2439,40 @@ mod tests {
         s.ui.pages.detail.detail = Some(d);
         ask(&mut s, "Why?".into(), Vec::new());
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not open a thread"));
+    }
+
+    #[test]
+    fn resolving_conflicts_checks_out_a_worktree_before_the_thread_holds_the_prompt() {
+        let mut s = App::new();
+        crate::env::park(&mut s, "box", crate::data::Source::Live(s5_net::Net::offline()));
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "scopes": ["source-control:write", "orchestration:operate"]}));
+        let mut d = recorded()["detail"].clone();
+        d["mergeability"] = json!("conflicting");
+        d[crate::env::TAG] = json!("box");
+        s.ui.pages.detail.entry = Some(d.clone());
+        s.ui.pages.detail.detail = Some(d.clone());
+        resolve_conflicts(&mut s);
+        let Some(Checkout { request, mode, task, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the checkout is prepared first") };
+        assert_eq!((mode, task.as_deref()), ("worktree", Some(resolve_text(&d).as_str())));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Preparing the pull request checkout..."));
+        resolve_conflicts(&mut s);
+        assert_eq!(s.ui.pages.detail.checkout.as_ref().map(|c| c.request), Some(request), "one handoff at a time");
+
+        let prepared = json!({"branch": "feat/rune-pull-requests-usage-pages", "worktreePath": "/w/pr-2481", "isOnPullRequestHead": true});
+        crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(prepared));
+        assert!(poll_checkout(&mut s));
+        assert!(s.ui.pages.detail.checkout.is_none());
+        let project = field(&d, "projectId").to_string();
+        assert!(matches!(&s.route, Route::Home { project_id: Some(p) } if *p == project), "FAILED: the project's draft thread opens");
+        let draft = &s.ui.chat.composer.drafts[&crate::chat::composer::home_key(&project)];
+        assert_eq!(draft.edit.text, resolve_text(&d));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Checkout ready"));
+
+        resolve_conflicts(&mut s);
+        let request = s.ui.pages.detail.checkout.as_ref().unwrap().request;
+        crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(json!({"branch": "x", "worktreePath": null, "isOnPullRequestHead": false})));
+        poll_checkout(&mut s);
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Checked out, but not confirmed on the latest commit"));
     }
 
     #[test]
