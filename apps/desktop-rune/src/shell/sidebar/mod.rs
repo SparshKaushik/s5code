@@ -9,7 +9,7 @@ pub mod favicon;
 pub(crate) mod folders;
 pub mod logic;
 mod menu;
-mod row;
+pub(crate) mod row;
 pub mod share;
 mod snooze;
 mod updates;
@@ -357,9 +357,11 @@ impl Model {
         let state = s.state();
         let ui = &s.ui.shell.sidebar;
         let scope = &ui.project_scope;
+        let (hidden, _) = tag_hidden(s);
         let threads = state
             .threads
             .iter()
+            .filter(|v| hidden.is_empty() || !hidden.contains(&logic::thread_key(&crate::env::of(s, v), crate::data::s(v, "id"))))
             .map(|v| patched(Thread::from_shell(v), &ui.patches))
             .filter(|t| scope.is_empty() || scope.contains(&t.project_id))
             .collect::<Vec<_>>();
@@ -532,6 +534,28 @@ fn patched(mut t: Thread, patches: &HashMap<String, Patch>) -> Thread {
 // --- Commands ---------------------------------------------------------------------------------
 
 /// The environment key a row acts on.
+/// The tag filter over every loaded environment (`useHiddenThreadKeys`): the hidden thread keys,
+/// and whether any environment hides tags (`useAnyEnvironmentHiding`).
+pub fn tag_hidden(s: &App) -> (HashSet<String>, bool) {
+    let mut tags = HashMap::new();
+    for key in crate::env::keys(s) {
+        let found = if key == s.ui.env.active {
+            logic::hidden_tags(crate::settings::server_settings(s))
+        } else {
+            crate::env::source(s, &key).and_then(|src| src.state().config.as_ref().and_then(|c| logic::hidden_tags(&c["settings"])))
+        };
+        if let Some(found) = found {
+            tags.insert(key, found);
+        }
+    }
+    if tags.is_empty() {
+        return (HashSet::new(), false);
+    }
+    let keys: Vec<String> = s.state().threads.iter().map(|v| crate::env::of(s, v)).collect();
+    let rows: Vec<(&str, &Value)> = keys.iter().map(String::as_str).zip(s.state().threads.iter()).collect();
+    (logic::hidden_threads(&rows, &tags), true)
+}
+
 pub fn env_key<'a>(s: &'a App, th: &'a Thread) -> &'a str {
     th.env.as_deref().unwrap_or(&s.ui.env.active)
 }

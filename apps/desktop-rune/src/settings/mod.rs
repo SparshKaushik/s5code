@@ -48,6 +48,7 @@ mod licenses;
 mod secrets;
 pub(crate) mod tasks;
 pub(crate) mod themes;
+mod vivid;
 pub use themes::apply as apply_theme;
 
 use crate::theme::{self, AlphaMul, T};

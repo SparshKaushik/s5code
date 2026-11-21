@@ -47,17 +47,22 @@ pub(super) fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
 /// The provider mark at 14px, 60% opaque (`ProviderInstanceIcon`).
 fn provider_icon(t: &T, model: &Model, th: &Thread, text_color: Color) -> Option<El> {
     let driver = model.drivers.get(&th.provider).map(String::as_str).unwrap_or(th.provider.as_str());
+    provider_mark(t, driver, text_color, 14.0)
+}
+
+/// `ProviderInstanceIcon` for a driver at `size`, 60% opaque.
+pub(crate) fn provider_mark(t: &T, driver: &str, text_color: Color, size: f32) -> Option<El> {
     let mark = match driver {
-        "codex" => icon(&brand::OPENAI, 14.0).color(text_color),
-        "claudeAgent" => icon(&brand::CLAUDE, 14.0).color(rune::color::hex("#d97757").unwrap_or(text_color)),
-        "acpRegistry" => icon(&brand::ACP_REGISTRY, 14.0).color(if t.dark { Color::WHITE } else { Color::BLACK }),
+        "codex" => icon(&brand::OPENAI, size).color(text_color),
+        "claudeAgent" => icon(&brand::CLAUDE, size).color(rune::color::hex("#d97757").unwrap_or(text_color)),
+        "acpRegistry" => icon(&brand::ACP_REGISTRY, size).color(if t.dark { Color::WHITE } else { Color::BLACK }),
         "opencode" => {
             let (frame, inner) = if t.dark { ("#F1ECEC", "#4B4646") } else { ("#211E1E", "#CFCECD") };
-            el().size(14.0, 14.0)
-                .child(icon(&brand::OPENCODE, 14.0).color(rune::color::hex(frame).unwrap_or(text_color)).absolute(0.0, 0.0))
-                .child(icon(&brand::OPENCODE_INNER, 14.0).color(rune::color::hex(inner).unwrap_or(text_color)).absolute(0.0, 0.0))
+            el().size(size, size)
+                .child(icon(&brand::OPENCODE, size).color(rune::color::hex(frame).unwrap_or(text_color)).absolute(0.0, 0.0))
+                .child(icon(&brand::OPENCODE_INNER, size).color(rune::color::hex(inner).unwrap_or(text_color)).absolute(0.0, 0.0))
         }
-        _ => crate::chat::composer::provider_mark(t, driver, 14.0)?,
+        _ => crate::chat::composer::provider_mark(t, driver, size)?,
     };
     Some(mark.shrink().opacity(0.6))
 }
@@ -558,7 +563,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
 }
 
 /// A pull request state's glyph and tone (`resolvePullRequestState` presentation).
-fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
+pub(crate) fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
     let dark = t.dark;
     match state {
         Some("draft") => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),

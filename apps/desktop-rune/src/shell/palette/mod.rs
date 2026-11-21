@@ -9,6 +9,7 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 pub(crate) mod actions;
 pub(crate) mod add_project;
 mod scenes;
+mod thread_row;
 pub use scenes::SCENES;
 
 #[derive(Default)]
@@ -38,6 +39,9 @@ pub struct Ui {
     /// `linkedThreadSearch`: a pull request's linked threads, shown while the query is still the
     /// one the palette opened with: (query, environment, threads).
     linked: Option<(String, String, Vec<serde_json::Value>)>,
+    /// `useOrderWhileOpen`: project group keys in the order the project and "New thread in"
+    /// lists had when the palette opened; emptied while it is closed.
+    order: std::cell::RefCell<[Vec<String>; 2]>,
 }
 struct Notice {
     title: String,
@@ -174,6 +178,8 @@ struct Item {
     command: Option<String>,
     /// Kept last in its group with no group weight: the thread already open.
     secondary: bool,
+    /// The row's thread, as an index into `state().threads` for this frame.
+    thread: Option<usize>,
 }
 /// `pickableProjectGroups` over the sidebar's grouping: one row per project however many machines
 /// have it, archived groups out, pinned first. "New thread in…" (`new_thread`) leaves out the
@@ -199,6 +205,13 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         let preferred = groups.remove(at);
         let pinned = groups.iter().filter(|g| g.pinned).count();
         groups.insert(pinned, preferred);
+    }
+    // Rows keep the order they had when the palette opened, so a pin cannot move a row (or its
+    // jump number) under the pointer; rows that arrive later join at the end.
+    if s.ui.shell.palette.open {
+        let mut orders = s.ui.shell.palette.order.borrow_mut();
+        let order = &mut orders[new_thread as usize];
+        groups = keep_order(groups, order, |g| g.key.as_str());
     }
     let scratch_of = |g: &crate::shell::sidebar::folders::Group| by_id(&g.representative).is_some_and(|p| actions::is_scratch_project(s, p));
     let no_project_at = no_project_index(&groups.iter().map(|g| (scratch_of(g), g.pinned, is_preferred(g))).collect::<Vec<_>>());
@@ -251,6 +264,17 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
     out
 }
 
+/// `keepOrder` then `withArrivedKeys`: `items` sorted into `order` by key, unknown ones after in
+/// their own order, and `order` extended with them.
+fn keep_order<T>(items: Vec<T>, order: &mut Vec<String>, key: impl Fn(&T) -> &str) -> Vec<T> {
+    let rank: std::collections::HashMap<&str, usize> = order.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+    let mut ranked: Vec<(usize, T)> = items.into_iter().enumerate().map(|(i, item)| (rank.get(key(&item)).copied().unwrap_or(order.len() + i), item)).collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let arrived: Vec<String> = ranked.iter().map(|(_, item)| key(item)).filter(|k| !rank.contains_key(k)).map(str::to_owned).collect();
+    order.extend(arrived);
+    ranked.into_iter().map(|(_, item)| item).collect()
+}
+
 /// `newThreadNoProjectIndex` over `(scratch, pinned, preferred)` picker entries: a pinned or
 /// preferred scratch project keeps its place, else "No project" follows the pinned projects.
 fn no_project_index(entries: &[(bool, bool, bool)]) -> usize {
@@ -294,6 +318,7 @@ fn item(
         references: vec![],
         command: None,
         secondary: false,
+        thread: None,
         fields: match &action {
             Action::Theme(..) | Action::Appearance(_) => vec![],
             Action::Restart(_) => [
@@ -553,6 +578,7 @@ fn reset(s: &mut App, open: bool) {
     ui.add.clone = None;
     ui.add.env = None;
     ui.linked = None;
+    *ui.order.get_mut() = Default::default();
     set_query(s, "");
 }
 
@@ -715,14 +741,19 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             Route::Thread(id) => Some(id.as_str()),
             _ => None,
         };
-        // RECENT_THREAD_LIMIT; the open thread is not a place to go back to.
+        // RECENT_THREAD_LIMIT; the open thread is not a place to go back to. Threads the tag
+        // filter hides in the sidebar stay out here too.
+        use crate::shell::sidebar::logic::{thread_key, visible_linked};
+        let (hidden, hiding) = crate::shell::sidebar::tag_hidden(s);
         let mut threads: Vec<_> = s
             .state()
             .threads
             .iter()
-            .filter(|v| v["archivedAt"].is_null() && listed(v) && !(browsing && open_thread == Some(data::s(v, "id"))))
+            .enumerate()
+            .filter(|(_, v)| v["archivedAt"].is_null() && listed(v) && !(browsing && open_thread == Some(data::s(v, "id"))))
+            .filter(|(_, v)| hidden.is_empty() || !hidden.contains(&thread_key(&crate::env::of(s, v), data::s(v, "id"))))
             .collect();
-        threads.sort_by_key(|v| std::cmp::Reverse(recent_use(v)));
+        threads.sort_by_key(|(_, v)| std::cmp::Reverse(recent_use(v)));
 
         let linked = linked_search(s);
         let limit = if linked.is_some() {
@@ -733,7 +764,13 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             threads.len()
         };
         // `buildLinkedThreadActionItems`: they stand in for the thread search.
-        for thread in linked.map(|(_, _, threads)| threads.as_slice()).unwrap_or_default() {
+        let linked_rows = linked
+            .map(|(_, env, rows)| {
+                let loaded: std::collections::HashSet<&str> = s.state().threads.iter().filter(|v| crate::env::of(s, v) == *env).map(|v| data::s(v, "id")).collect();
+                visible_linked(rows, env, &loaded, &hidden, hiding)
+            })
+            .unwrap_or_default();
+        for thread in &linked_rows {
             let (query, env) = linked.map(|(q, e, _)| (q.as_str(), e.as_str())).unwrap_or_default();
             let title = thread["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("Untitled thread");
             let mut row = item(title, "Threads", &icons::MESSAGE_SQUARE, "", Action::OpenLinked(data::s(thread, "id").into(), env.into()));
@@ -742,7 +779,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             row.references.push(query.into());
             out.push(row);
         }
-        for v in threads.into_iter().take(limit) {
+        for (at, v) in threads.into_iter().take(limit) {
             out.push(item(
                 data::s(v, "title"),
                 if browsing {
@@ -755,6 +792,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 Action::Navigate(Route::Thread(data::s(v, "id").into())),
             ));
             if let Some(row) = out.last_mut() {
+                row.thread = Some(at);
                 let project = s
                     .state()
                     .projects
@@ -2144,8 +2182,29 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
             None => text(v.title.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate(),
         },
     };
+    let state = s.state();
+    let thread = v.thread.and_then(|at| state.threads.get(at)).map(|value| (value, crate::shell::sidebar::logic::Thread::from_shell(value)));
+    // `titleLeadingContent` / `titleTrailingContent` sit on the title line, beside the title.
+    let title = match (&v.trailing, &thread) {
+        (Trailing::Theme(current, theme, modes), _) => {
+            let mut line = row().gap(8.0).center_y().min_w(0.0).child(title.shrink());
+            if *current {
+                line = line.child(text("Current").font(theme::TEXT_XS).color(muted.alpha_mul(0.7)));
+            }
+            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
+            line.child(row().gap(4.0).center_y().children(circles))
+        }
+        (_, Some((_, th))) => match thread_row::leading(t, th) {
+            Some(leading) => row().gap(6.0).center_y().min_w(0.0).child(leading).child(title.shrink()),
+            None => title,
+        },
+        _ => title,
+    };
     let mut label = col().grow(1.).shrink().child(title);
-    if let Some(subtitle) = &v.subtitle {
+    let rich = thread.as_ref().and_then(|(value, th)| thread_row::subtitle(s, t, value, th, matches!(&s.route, Route::Thread(id) if *id == th.id)));
+    if let Some(rich) = rich {
+        label = label.child(rich);
+    } else if let Some(subtitle) = &v.subtitle {
         label = label.child(text(subtitle).font(theme::TEXT_XS).color(muted).truncate());
     } else if let Some(description) = &v.description {
         let color = muted.alpha_mul(0.7);
@@ -2188,6 +2247,9 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         let action = v.action.clone();
         entry = entry.hover(t.c.accent).on_press_tx(move |s: &mut App, tx| execute(s, action.clone(), tx));
     }
+    if let Some((value, th)) = &thread {
+        entry = entry.children(thread_row::trailing(s, t, value, th, &ui.query));
+    }
     if let Some(timestamp) = &v.timestamp {
         entry = entry.child(text(timestamp).font(theme::TEXT_XS).color(muted));
     }
@@ -2213,13 +2275,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         Trailing::Picked => entry = entry.child(icon(&icons::CHECK, 14.).color(t.c.contrast_icon_muted)),
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
-        Trailing::Theme(current, theme, modes) => {
-            if *current {
-                entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7)));
-            }
-            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
-            entry = entry.child(row().gap(4.0).center_y().children(circles));
-        }
+        Trailing::Theme(..) => {}
         Trailing::Pin(members, pinned) if *pinned || selected => {
             let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
@@ -2248,6 +2304,10 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut out = vec![];
     if s.ui.shell.palette.open {
         out.extend(palette(s, t));
+    } else if let Ok(mut orders) = s.ui.shell.palette.order.try_borrow_mut()
+        && orders.iter().any(|o| !o.is_empty())
+    {
+        *orders = Default::default();
     }
     actions::link_dialog(s, t, &mut out);
     if let Some(notice) = &s.ui.shell.palette.notice {
@@ -2477,6 +2537,15 @@ mod tests {
         assert_eq!(rows, [("Untitled thread".to_owned(), "Linked thread".to_owned()), ("Fix".to_owned(), "Archived thread".to_owned())]);
         set_query(&mut s, "fix");
         assert!(items(&s).iter().all(|v| !matches!(v.action, Action::OpenLinked(..))), "FAILED: a new query drops the linked threads");
+    }
+
+    #[test]
+    fn rows_keep_their_opening_order_and_new_ones_join_at_the_end() {
+        let mut order = vec![];
+        assert_eq!(keep_order(vec!["a", "b", "c"], &mut order, |k| *k), ["a", "b", "c"]);
+        // Pinning "c" moved it first; the open palette keeps it (and its jump number) in place.
+        assert_eq!(keep_order(vec!["c", "a", "d", "b"], &mut order, |k| *k), ["a", "b", "c", "d"]);
+        assert_eq!(order, ["a", "b", "c", "d"]);
     }
 
     #[test]

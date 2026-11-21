@@ -58,18 +58,18 @@ fn overlay_colors(colors: &mut Value, overrides: &Value) -> usize {
 }
 
 /// `environmentThemeDefinition`: a published theme over the stock roles of each appearance. A
-/// canvas and accent seed set those roles; Rune does not port web's vivid role generator.
+/// canvas and accent seed generates its own appearance's roles (`createVividThemeColors`).
 pub(crate) fn environment_theme(theme: &Value) -> Option<Value> {
     let id = theme["id"].as_str().filter(|id| !id.is_empty() && !RESERVED.contains(id))?;
     let appearance = theme["appearance"].as_str().filter(|a| matches!(*a, "light" | "dark"))?;
     let other = if appearance == "dark" { "light" } else { "dark" };
     let seed = |key: &str| theme[key].as_str().filter(|css| color(css).is_some());
     let seeded = seed("canvas").is_some() && seed("accent").is_some();
-    let mut colors = palette(&builtins()[0], appearance == "dark").clone();
-    if seeded {
-        let seeds = json!({"canvas": seed("canvas"), "accent": seed("accent"), "focus": seed("accent")});
-        overlay_colors(&mut colors, &seeds);
-    }
+    let stock = palette(&builtins()[0], appearance == "dark");
+    let mut colors = match (seed("canvas"), seed("accent")) {
+        (Some(canvas), Some(accent)) => super::vivid::colors(stock, appearance == "dark", canvas, accent),
+        _ => stock.clone(),
+    };
     let own = overlay_colors(&mut colors, &theme["colors"]);
     let mut variant = palette(&builtins()[0], other == "dark").clone();
     let theirs = overlay_colors(&mut variant, &theme["variants"][other]);
@@ -1073,9 +1073,16 @@ mod tests {
         let mono = environment_theme(&json!({"id":"dusk","name":"Dusk","appearance":"dark","colors":{"accent":"#123456"}})).unwrap();
         assert_eq!((mono["label"].as_str(), modes(&mono)), (Some("Dusk"), vec!["dark"]));
         assert_eq!(mono["colors"]["accent"], "#123456");
-        let both = environment_theme(&json!({"id":"dawn","name":"Dawn","appearance":"light","canvas":"#fafafa","accent":"#aa3355","variants":{"dark":{}}})).unwrap();
+        let both = environment_theme(&json!({"id":"dawn","name":"Dawn","appearance":"light","canvas":"#fafafa","accent":"#aa3355","colors":{"border":"#010203"},"variants":{"dark":{}}})).unwrap();
         assert_eq!(modes(&both), vec!["light", "dark"]);
-        assert_eq!(both["colors"]["canvas"], "#fafafa");
+        // The seed generates the light roles (web's vivid generator), overrides land on top, and the
+        // dark variant stays the stock dark palette.
+        let stock = palette(&builtins()[0], false);
+        assert!(both["colors"]["canvas"].as_str().unwrap().starts_with("oklch(0.98"));
+        assert_ne!(both["colors"]["sidebar"], stock["sidebar"]);
+        assert_ne!(both["colors"]["text"], stock["text"]);
+        assert_eq!(both["colors"]["border"], "#010203");
+        assert_eq!(&both["variants"]["dark"], palette(&builtins()[0], true));
         for rejected in [
             json!({"id":"grove","name":"Taken","appearance":"dark","colors":{"accent":"#123456"}}),
             json!({"id":"empty","name":"Empty","appearance":"dark","colors":{"accent":"url(x)"}}),

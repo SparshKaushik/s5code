@@ -113,8 +113,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_thread(s);
         park_box(s);
         open(s);
-        s.ui.shell.palette.add.discovery = Some(discovery());
+        // Starting picks the first environment, which drops any discovery from before.
         add_project::start_new(s);
+        s.ui.shell.palette.add.discovery = Some(discovery());
         set_query(s, "My App");
     }),
     ("palette-themes", |s| {
