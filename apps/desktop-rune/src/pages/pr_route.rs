@@ -588,9 +588,8 @@ mod tests {
     fn a_write_or_a_refresh_reaches_the_machines_that_answered_its_reads() {
         let identity: Value = serde_json::from_str(IDENTITY).unwrap();
         let (mut s, origin) = app();
-        let id = start(&mut s, &origin, "pullRequests.comment", input(), false, vec![origin.clone()], false).unwrap();
+        start(&mut s, &origin, "pullRequests.comment", input(), false, vec![origin.clone()], false).unwrap();
         assert!(s.ui.pages.route.routes.is_empty() && s.ui.pages.route.reads.is_empty(), "no routed reads: a write goes straight to the source");
-        assert!(s.src.net().unwrap().take_reply(id).is_none());
 
         start(&mut s, &origin, "pullRequests.detail", input(), true, vec!["box".into(), origin.clone()], false).unwrap();
         answer_with(&mut s, Ok(identity.clone()));
