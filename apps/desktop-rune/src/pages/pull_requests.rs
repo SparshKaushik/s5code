@@ -587,6 +587,12 @@ pub(super) fn take(s: &mut App, env: &str, id: u64) -> Option<Result<Value, Valu
     crate::env::net_of(s, env).and_then(|n| n.take_reply(id))
 }
 
+/// Sends `method` for `entry` from the environment that listed it, through the pull request router.
+pub(crate) fn request_for(s: &mut App, entry: &Value, method: &str, input: Value) -> Option<u64> {
+    let env = entry[TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_owned);
+    super::pr_route::send(s, &env, method, input)
+}
+
 /// The client of the environment that listed `entry`, where its actions and detail go.
 pub(super) fn net_for<'a>(s: &'a mut App, entry: &Value) -> Option<&'a mut s5_net::Net> {
     match entry[TAG].as_str() {
@@ -1979,8 +1985,9 @@ fn top_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let title = || text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0);
     let bar = row().key("pr-header").w_full().h(layout::TOPBAR_H).shrink().px(20.0).gap(8.0).center_y().window_drag();
     let panel = u.selected.is_none().then(|| panel_control(s, t));
+    let crumbs = |label: &str| row().role("navigation").label(label).gap(12.0).center_y().shrink().min_w(0.0);
     if !u.condensed {
-        return bar.child(title()).child(spacer()).children(panel);
+        return bar.child(crumbs("Pull requests breadcrumb").child(title())).child(spacer()).children(panel);
     }
     let mut scope = row()
         .gap(6.0)
@@ -2003,7 +2010,7 @@ fn top_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         scope = scope.child(compact_menu(t, "scope-host", "Filter by host", current, u.menu == Some("scope-host"), host_entries(s, t, "pr-scope-host", false), overlays));
     }
     let expanded = search_expanded(u);
-    let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
+    let mut crumbs = crumbs("Pull request scope");
     if !expanded {
         crumbs = crumbs.child(title()).child(text("/").font(theme::SM_MEDIUM).color(t.c.icon_muted));
     }
@@ -2042,7 +2049,7 @@ fn toolbar(s: &App, t: &T, inline: bool, overlays: &mut Vec<El>) -> El {
     let search = if inline { search.grow(1.0).min_w(0.0) } else { search.w_full() };
     let open = |name| u.menu == Some(name);
 
-    let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle_menu("sort")).build(t)).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close_menu);
+    let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle_menu("sort")).build(t).label("Sort pull requests")).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close_menu);
     for &(id, label, glyph) in SORTS {
         // Radio items keep the menu open (Base UI's `closeOnClick` is off for them).
         sort = sort.item(MenuItem::new(label).icon(glyph).radio(u.filters.sort == id).on_select(move |s: &mut App| ui(s).filters.sort = id));
@@ -2401,7 +2408,18 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
     let meta = theme::TEXT_2XS;
     let matched = matched_elsewhere(e, &parse_query(&s.ui.pages.pull_requests.query.text).0);
     let meta_key = format!("pr-meta-{url}");
-    let wide = matched && rune::memo::layout_with(&meta_key, super::pr_row::meta_wide).unwrap_or(false);
+    let tier = rune::memo::layout_with(&meta_key, super::pr_row::meta_tier).unwrap_or(1);
+    let wide = tier >= 1;
+    let author = row()
+        .gap(4.0)
+        .center_y()
+        .shrink()
+        .min_w(14.0)
+        .max_w(160.0)
+        .help(author_tip)
+        .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t));
+    // Below `@xs` the login is only the author's accessible name (sr-only on web).
+    let author = if wide { author.child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()) } else { author.label(login) };
     let mut line2 = row()
         .key(meta_key)
         .w_full()
@@ -2410,21 +2428,12 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
         .center_y()
         .children(matched.then(|| super::pr_row::matched_badge(t, wide)))
         .children(super::pr_row::provider_mark(s, t, result, e))
-        .child(
-            row()
-                .gap(4.0)
-                .center_y()
-                .shrink()
-                .min_w(14.0)
-                .max_w(160.0)
-                .help(author_tip)
-                .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
-                .child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()),
-        )
+        .child(author)
         .child(text(field(e, "repository").to_string()).font(meta).color(t.c.muted_foreground).truncate().shrink())
         .children(environment_label(s, e, spans).map(|place| text(place).font(meta).color(t.c.muted_foreground).truncate().shrink().min_w(0.0).max_w(128.0)));
     let labels = e["labels"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    for (n, label) in labels.iter().take(3).enumerate() {
+    let shown = super::pr_row::shown_labels(labels.len(), tier);
+    for (n, label) in labels.iter().take(shown).enumerate() {
         let hue = rune::color::hex(&format!("#{}", field(label, "color"))).unwrap_or(t.c.muted_foreground);
         let fg = mix(hue, t.c.foreground, if t.dark { 0.45 } else { 0.3 });
         let mut chip = row()
@@ -2438,7 +2447,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
             .max_w(160.0)
             .child(text(field(label, "name").to_string()).font(theme::weight(theme::TEXT_3XS, theme::MEDIUM)).color(fg).truncate().shrink());
         let remaining = labels.len().saturating_sub(n + 1);
-        if n == 2 && remaining > 0 {
+        if n + 1 == shown && remaining > 0 {
             chip = chip.child(text(format!("+{remaining}")).font(theme::weight(theme::TEXT_3XS, theme::MEDIUM)).color(fg));
         }
         line2 = line2.child(chip);
@@ -2642,10 +2651,15 @@ static BRANCH_MARK: rune::Icon = rune::Icon {
 <circle cx=\"60\" cy=\"32\" r=\"4\" stroke=\"currentColor\" stroke-opacity=\"0.75\" stroke-width=\"2\" fill=\"none\"/>",
 };
 
+/// PullRequestListEmptyState quotes a search cut to its first 48 characters.
+fn quoted_query(query: &str) -> String {
+    if query.chars().count() > 48 { format!("{}…", query.chars().take(48).collect::<String>()) } else { query.to_string() }
+}
+
 fn empty(s: &App, t: &T, result: &Value) -> El {
     let u = &s.ui.pages.pull_requests;
     let query = u.query.text.as_str();
-    let shown = if query.chars().count() > 48 { format!("{}…", query.chars().take(48).collect::<String>()) } else { query.to_string() };
+    let shown = quoted_query(query);
     let mark = el().w(128.0).h(80.0).clip_rounded(0.0).mb(8.0).child(icon(&BRANCH_MARK, 128.0).color(t.c.muted_foreground.alpha_mul(0.6)).absolute(0.0, 1.6));
     if s.state().projects.iter().all(|p| !p["archivedAt"].is_null()) {
         let add = kit::Button::new("Add project").size("sm").icon(&i::PLUS).on_press(crate::shell::palette::open_add_project).build(t);
@@ -2943,6 +2957,14 @@ mod tests {
     fn copying_names_the_change_request_by_its_host() {
         assert_eq!(short_label("https://gitlab.com/acme/app/-/merge_requests/3"), "MR");
         assert_eq!(short_label("https://github.com/acme/app/pull/3"), "PR");
+    }
+
+    #[test]
+    fn the_empty_state_quotes_a_long_search_cut_to_48_characters() {
+        let exact = "a".repeat(48);
+        assert_eq!(quoted_query(&exact), exact);
+        assert_eq!(quoted_query(&"é".repeat(49)), format!("{}…", "é".repeat(48)));
+        assert_eq!(quoted_query("login"), "login");
     }
 
     #[test]

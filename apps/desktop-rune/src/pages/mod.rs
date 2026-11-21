@@ -10,6 +10,7 @@ pub mod pr_edit;
 pub mod pr_filters;
 pub mod pr_meta;
 pub mod pr_guide;
+pub mod pr_route;
 pub mod pr_row;
 pub mod pr_tabs;
 pub mod pull_requests;
@@ -34,12 +35,13 @@ pub struct Ui {
     pub guide: pr_guide::Ui,
     pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
+    pub route: pr_route::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
     pub main_route: Option<Route>,
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
+    let changed = pr_route::pump(s) | pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | pr_meta::poll(s) | pr_guide::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -370,10 +372,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "threads");
     }),
+    ("pull-requests-detail-code-thread-edit", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "thread-edit");
+    }),
+    ("pull-requests-detail-code-thread-reactions", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "thread-reactions");
+    }),
     ("pull-requests-detail-code-options-menu", |s| {
         open_detail(s, 2, |_| {});
-        pr_tabs::scene(s, 1, Some(4000.0));
+        pr_tabs::scene(s, 1, Some(360.0));
         pr_code::scene(s, "options");
+    }),
+    ("pull-requests-detail-code-tree-resized", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "tree-resized");
     }),
     ("pull-requests-detail-code-more-files", |s| {
         open_detail(s, 2, |_| {});
@@ -410,6 +424,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
                 let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
                 threads.push(json!({"id": "t-resolved", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": false, "comments": [{"id": "tr1", "author": julius, "body": "Nit: rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": null}]}));
             }
+        })
+    }),
+    ("pull-requests-detail-summary-more-replies", |s| {
+        open_detail(s, 0, |u| {
+            u.description_closed = true;
+            u.checks_open = true;
+            if let Some(d) = &mut u.detail {
+                d["checks"][1]["status"] = json!("failure");
+            }
+            let Some(threads) = u.activity.as_mut().and_then(|a| a["reviewThreads"].as_array_mut()) else { return };
+            if let Some(first) = threads.first_mut() {
+                first["commentCount"] = json!(6);
+            }
+            let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+            threads.push(json!({"id": "t-resolved", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": true, "nextCommentsCursor": "next", "comments": [{"id": "tr1", "author": julius, "body": "Nit: rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": "https://github.com/s5labs/s5code/pull/2481#discussion_r1"}]}));
         })
     }),
     ("pull-requests-detail-reviewers-verdicts", |s| {
@@ -526,6 +555,28 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
                 d["autoMergeEnabled"] = json!(true);
                 d["autoMergeMethod"] = json!("squash");
             }
+        });
+    }),
+    ("pull-requests-detail-narrow-header", |s| {
+        open_detail(s, 0, |u| {
+            if let Some(d) = &mut u.detail {
+                d["autoMergeEnabled"] = json!(true);
+                d["autoMergeMethod"] = json!("squash");
+            }
+        });
+        pr_tabs::scene(s, 1, Some(360.0));
+    }),
+    ("pull-requests-detail-checkout-menu", |s| open_detail(s, 0, |u| u.checkout_menu = true)),
+    ("pull-requests-detail-checks-stale", |s| {
+        open_detail(s, 0, |u| u.checks_popover = true);
+        if let Some(list) = &mut s.ui.pages.pull_requests.result {
+            list["entries"][0]["checksState"] = json!("passing");
+        }
+    }),
+    ("pull-requests-detail-loading", |s| {
+        open_detail(s, 0, |u| {
+            u.detail = None;
+            u.activity = None;
         });
     }),
     ("pull-requests-detail-delete-branch-confirm", |s| {
@@ -765,6 +816,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-provider-loading", |s| {
         open_usage(s, "cost");
         usage::updating_scene(s);
+    }),
+    ("usage-breakdown-day-loading", |s| {
+        open_usage(s, "cost");
+        usage::updating_scene(s);
+        s.ui.pages.usage.by_period = true;
     }),
     ("usage-compact-header", |s| {
         open_usage(s, "cost");

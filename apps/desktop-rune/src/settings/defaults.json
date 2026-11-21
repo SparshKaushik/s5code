@@ -68,6 +68,7 @@
   "timestampFormat": "locale",
   "snapShotEnabled": false,
   "snapShotIncludeAccessibility": true,
+  "snapShotShortcut": {"kind": "both-shift-keys"},
   "snapShotPlaySound": true,
   "snapShotSound": "soft-pop",
   "snapShotFlash": true,
