@@ -10,7 +10,8 @@ use crate::{App, data, icons, kit};
 
 const DEBOUNCE_MS: i64 = 120;
 const LIMIT: u64 = 500;
-/// Laying out every one of 500 rows at once stalls a frame; more load as the list scrolls.
+/// Laying out every one of 500 rows at once stalls a frame; more load as the list scrolls
+/// near its end (web's `VISIBLE_MATCH_WINDOW` and load-more sentinel).
 const VISIBLE_WINDOW: usize = 100;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +44,9 @@ pub struct Ui {
     due: Option<i64>,
     pending: Option<(u64, Params)>,
     results: Results,
+    /// Set by the list's scroll callback, which can't reach the app, and read by `poll`.
+    near_end: std::rc::Rc<std::cell::Cell<bool>>,
+    last_scroll: std::rc::Rc<std::cell::Cell<Option<f32>>>,
 }
 
 /// `useActiveProjectTarget`: the open thread's checkout, else the draft's project.
@@ -69,6 +73,20 @@ pub fn open(s: &mut App) {
     let mut query = TextEdit::default();
     query.focused = true;
     s.ui.search = Ui { open: true, query, visible: VISIBLE_WINDOW, ..Ui::default() };
+}
+
+/// Scene: settled results across a Rust and a TypeScript file, for their syntax colours.
+pub(crate) fn scene_results(s: &mut App) {
+    open(s);
+    s.ui.search.query = TextEdit::new("needle");
+    s.ui.search.query.focused = true;
+    let line = |path: &str, n: u64, content: &str, at: u64| json!({"path": path, "lineNumber": n, "lineContent": content, "matchRanges": [{"start": at, "end": at + 6}]});
+    let matches = vec![
+        line("src/lib.rs", 12, "    let needle = haystack.find(|x| x.is_some());", 8),
+        line("src/lib.rs", 40, "fn needle_count(items: &[Item]) -> usize { items.len() }", 3),
+        line("web/search.ts", 7, "export const needle = (query: string): number => 42;", 13),
+    ];
+    s.ui.search.results = Results { params: params(s).unwrap_or_default(), matches, ..Results::default() };
 }
 
 fn close(s: &mut App) {
@@ -117,6 +135,8 @@ pub fn poll(s: &mut App) -> bool {
         ui.pending = None;
         ui.selected = 0;
         ui.visible = VISIBLE_WINDOW;
+        ui.last_scroll.set(None);
+        ui.near_end.set(false);
         ui.results = match reply {
             Ok(v) => Results {
                 matches: v["matches"].as_array().cloned().unwrap_or_default(),
@@ -127,6 +147,11 @@ pub fn poll(s: &mut App) -> bool {
             },
             Err(cause) => Results { error: Some(crate::shell::palette::error_message(&cause, "Search failed.")), params: p, ..Results::default() },
         };
+        changed = true;
+    }
+    let ui = &mut s.ui.search;
+    if ui.near_end.replace(false) && ui.results.matches.len() > ui.visible {
+        ui.visible += VISIBLE_WINDOW;
         changed = true;
     }
     changed
@@ -310,7 +335,16 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
         };
         col().w_full().grow(1.0).min_h(0.).px(24.).center().child(text(label.to_string()).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
     } else {
-        kit::scroll_area("content-search-results", results(s, matches, pending, t).grow(1.0).min_h(0.).scroll(ScrollSpec { stick_bottom: false }), t)
+        let (near_end, last) = (ui.near_end.clone(), ui.last_scroll.clone());
+        let waker = s.ui.panel.waker.clone();
+        let list = results(s, matches, pending, t).grow(1.0).min_h(0.).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
+            if crate::chat::details::next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true)
+                && let Some(w) = &waker
+            {
+                w();
+            }
+        });
+        kit::scroll_area("content-search-results", list, t)
     };
     let footer = row()
         .w_full()
@@ -382,7 +416,7 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
         let mut section = col().w_full().pb(8.).child(heading);
         for (i, m) in shown.iter().enumerate().take(end).skip(index) {
             let line = data::s(m, "lineContent");
-            let spans = byte_ranges(line, &m["matchRanges"]).into_iter().map(|(a, b)| Span::new(a, b).bg(t.c.primary.alpha_mul(0.25), 1.)).collect::<Vec<_>>();
+            let spans = line_spans(name, line, &m["matchRanges"], t.dark, t.c.primary.alpha_mul(0.25));
             let selected = i == ui.selected;
             let mut r = row()
                 .key(format!("content-match-{i}"))
@@ -410,20 +444,15 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
         list = list.child(section);
         index = end;
     }
-    if matches.len() > ui.visible {
-        list = list.child(
-            row()
-                .w_full()
-                .h(32.)
-                .center()
-                .role("button")
-                .label("Show more results")
-                .cursor(Cursor::Pointer)
-                .child(text("Show more results").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground))
-                .on_press(|s: &mut App| s.ui.search.visible += VISIBLE_WINDOW),
-        );
-    }
     list
+}
+
+/// Web `HighlightedSearchLine`: the line coloured as its file's language, under the matches.
+fn line_spans(name: &str, line: &str, ranges: &Value, dark: bool, mark: rune::Color) -> Vec<Span> {
+    let lang = name.rsplit_once('.').map(|(_, ext)| ext);
+    let mut spans = rune_kit::syntax::SyntaxTheme::neutral(dark).spans(&rune_kit::syntax::highlight(lang, line), 0);
+    spans.extend(byte_ranges(line, ranges).into_iter().map(|(a, b)| Span::new(a, b).bg(mark, 1.)));
+    spans
 }
 
 #[cfg(test)]
@@ -439,6 +468,31 @@ mod tests {
         assert_eq!(&line[7..13], "needle");
         assert!(byte_ranges(line, &json!([{"start": 3, "end": 3}])).is_empty());
         assert_eq!(byte_ranges("abc", &json!([{"start": 1, "end": 99}])), vec![(1, 3)]);
+    }
+
+    #[test]
+    fn result_lines_are_coloured_as_their_language_under_the_match() {
+        let mark = rune::Color::BLACK;
+        let spans = line_spans("main.rs", "let needle = 1;", &json!([{"start": 4, "end": 10}]), true, mark);
+        assert!(spans.iter().any(|sp| sp.color.is_some()), "FAILED: a Rust line gets syntax colours");
+        assert!(spans.iter().any(|sp| (sp.start, sp.end) == (4, 10) && sp.bg.is_some()), "the match keeps its mark");
+        let plain = line_spans("notes", "let needle = 1;", &json!([{"start": 4, "end": 10}]), true, mark);
+        assert_eq!(plain.len(), 1, "a file of no known language is only marked");
+    }
+
+    #[test]
+    fn scrolling_near_the_end_shows_the_next_window() {
+        let mut s = App::new();
+        s.ui.search.open = true;
+        s.ui.search.visible = VISIBLE_WINDOW;
+        s.ui.search.results.matches = vec![json!({}); 250];
+        assert!(!poll(&mut s));
+        s.ui.search.near_end.set(true);
+        assert!(poll(&mut s), "FAILED: reaching the end of the list loads more rows");
+        assert_eq!(s.ui.search.visible, 2 * VISIBLE_WINDOW);
+        s.ui.search.visible = 300;
+        s.ui.search.near_end.set(true);
+        assert!(!poll(&mut s), "every match already shows");
     }
 
     #[test]

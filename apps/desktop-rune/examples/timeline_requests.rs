@@ -42,6 +42,15 @@ mod data {
         None
     }
 }
+mod chat {
+    pub mod details {
+        pub mod html_render {
+            pub fn reference(_: &serde_json::Value) -> Option<(String, String)> {
+                None
+            }
+        }
+    }
+}
 fn main() {
     let base = std::env::var("S5_SERVER_URL").unwrap_or("http://127.0.0.1:13773".into());
     let token = std::fs::read_to_string(

@@ -85,6 +85,13 @@ impl Stream {
         Stream { tx, state, inbox, pressed: AtomicBool::new(false), base, bearer, query, waker }
     }
 
+    /// A stream already in `state`, connected to nothing, for headless scenes.
+    pub fn fixture(state: State) -> Stream {
+        let (tx, _) = channel();
+        let waker: rune::Waker = Arc::new(|| {});
+        Stream { tx, state: Arc::new(Mutex::new(state)), inbox: Arc::default(), pressed: AtomicBool::new(false), base: String::new(), bearer: String::new(), query: String::new(), waker }
+    }
+
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
     }

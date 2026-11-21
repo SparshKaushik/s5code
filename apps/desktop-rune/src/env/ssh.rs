@@ -395,7 +395,7 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
                 s.ui.env.ssh.targets.retain(|(k, _)| *k != id);
                 s.ui.env.ssh.targets.push((id.clone(), target.clone()));
             }
-            super::paired(s, Ok(env));
+            super::paired(s, Ok((env, None)));
             let landed = if route.is_some() { s.ui.env.route_added.is_some() } else { s.ui.env.saved.iter().any(|e| e.id == id) };
             if !landed && route.is_some() {
                 s.ui.env.ssh.targets.retain(|(k, _)| *k != id);

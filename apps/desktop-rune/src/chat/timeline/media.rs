@@ -18,6 +18,10 @@ const AUDIO_EXTENSIONS: [&str; 11] = ["mp3", "wav", "ogg", "oga", "flac", "aac",
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 /// 30rem: Markdown media never draws wider or taller.
 const MAX_SIDE: f32 = 480.0;
+/// Pictures decode to the size they draw at on a 2x display, never their originals: Markdown
+/// media at 30rem. The original bytes are dropped once decoded; Save and Copy image read the
+/// source again, as web does.
+pub const MARKDOWN_DECODE: u32 = 960;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -64,29 +68,24 @@ pub struct Loaded {
     pub name: String,
     pub kind: Option<Kind>,
     pub pixels: Pixels,
-    bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
     broken: Arc<AtomicBool>,
     player: Option<Player>,
 }
 
 impl Loaded {
-    pub fn new(url: String, name: String, kind: Option<Kind>, waker: Option<rune::Waker>) -> Self {
-        let mut loaded = Self { url, name, kind, pixels: Pixels::new(), bytes: Arc::default(), broken: Arc::default(), player: None };
+    /// `side`: the longest side a picture decodes to.
+    pub fn new(url: String, name: String, kind: Option<Kind>, side: u32, waker: Option<rune::Waker>) -> Self {
+        let mut loaded = Self { url, name, kind, pixels: Pixels::new(), broken: Arc::default(), player: None };
         match kind {
             Some(Kind::Image) => {
-                let (url, pixels, bytes, broken) = (loaded.url.clone(), loaded.pixels.clone(), loaded.bytes.clone(), loaded.broken.clone());
-                std::thread::spawn(move || match fetch(&url).and_then(|data| decode(&data).map(|image| (data, image))) {
-                    Ok((data, image)) => {
-                        if let Ok(mut slot) = bytes.lock() {
-                            *slot = Some(Arc::new(data));
-                        }
-                        pixels.set(image.width(), image.height(), image.into_raw());
+                let (url, pixels, broken) = (loaded.url.clone(), loaded.pixels.clone(), loaded.broken.clone());
+                std::thread::spawn(move || {
+                    match fetch(&url).and_then(|data| decode(&data, side)) {
+                        Ok(image) => pixels.set(image.width(), image.height(), image.into_raw()),
+                        Err(_) => broken.store(true, Ordering::Relaxed),
                     }
-                    Err(_) => {
-                        broken.store(true, Ordering::Relaxed);
-                        if let Some(wake) = &waker {
-                            wake();
-                        }
+                    if let Some(wake) = &waker {
+                        wake();
                     }
                 });
             }
@@ -107,29 +106,6 @@ impl Loaded {
         self.broken.load(Ordering::Relaxed) || self.player.as_ref().is_some_and(|p| matches!(p.state(), PlayerState::Failed(_)))
     }
 
-    fn cached(&self) -> Option<Arc<Vec<u8>>> {
-        self.bytes.lock().ok().and_then(|b| b.clone())
-    }
-
-    /// Save and Copy image work once a picture's bytes are in; a video saves from its URL.
-    fn available(&self) -> bool {
-        match self.kind {
-            Some(Kind::Image) => self.cached().is_some(),
-            _ => true,
-        }
-    }
-
-    /// `readMediaPng`: the picture as PNG for the clipboard.
-    fn png(&self) -> Result<Vec<u8>, String> {
-        let bytes = self.cached().ok_or_else(|| "This media is unavailable. Try reopening the preview.".to_owned())?;
-        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Ok(bytes.to_vec());
-        }
-        let image = image::load_from_memory(&bytes).map_err(|_| "The image could not be decoded for copying. Try saving it instead.".to_owned())?;
-        let mut out = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-        Ok(out.into_inner())
-    }
 
     /// What a memoized view of this media reads, so it rebuilds when it changes.
     fn stamp(&self) -> String {
@@ -138,10 +114,25 @@ impl Loaded {
     }
 }
 
-fn decode(data: &[u8]) -> Result<image::RgbaImage, String> {
+fn decode(data: &[u8], side: u32) -> Result<image::RgbaImage, String> {
     let image = image::load_from_memory(data).map_err(|e| e.to_string())?;
-    let image = if image.width() > 960 || image.height() > 960 { image.thumbnail(960, 960) } else { image };
+    let image = if image.width() > side || image.height() > side { image.thumbnail(side, side) } else { image };
     Ok(image.to_rgba8())
+}
+
+/// `readMediaPng`: the source read again, as PNG for the clipboard.
+fn read_png(url: &str) -> Result<Vec<u8>, String> {
+    let bytes = fetch(url)?;
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok(bytes);
+    }
+    let image = image::load_from_memory(&bytes).map_err(|_| "The image could not be decoded for copying. Try saving it instead.".to_owned())?;
+    if image.width() == 0 || image.height() == 0 || u64::from(image.width()) * u64::from(image.height()) > 64_000_000 {
+        return Err("This image is too large or has no usable dimensions. Try saving it instead.".to_owned());
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut out, image::ImageFormat::Png).map_err(|_| "The image could not be converted to PNG.".to_owned())?;
+    Ok(out.into_inner())
 }
 
 /// `safeDecodeURIComponent`'s bytes: malformed escapes stay as written.
@@ -180,10 +171,22 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
         };
     }
     use std::io::Read;
-    let response = ureq::get(url).call().map_err(|e| e.to_string())?;
+    let response = get(url)?;
     let mut data = Vec::new();
     response.into_reader().take(MAX_BYTES).read_to_end(&mut data).map_err(|e| e.to_string())?;
     Ok(data)
+}
+
+/// `fetchMediaBlob`: the response at an http(s) URL, or web's reason it can't be read.
+fn get(url: &str) -> Result<ureq::Response, String> {
+    let response = ureq::get(url).call().map_err(|e| match e {
+        ureq::Error::Status(code, _) => format!("The file could not be fetched (HTTP {code})."),
+        ureq::Error::Transport(_) => "The file could not be fetched. Check the connection and try again.".to_owned(),
+    })?;
+    if response.content_type() == "text/html" {
+        return Err("This link returned a web page instead of media. Open the original URL.".to_owned());
+    }
+    Ok(response)
 }
 
 /// `downloadMedia`, to a path the save dialog picked; a video streams to disk.
@@ -191,7 +194,7 @@ fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
     if url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
         return std::fs::write(path, fetch(url)?).map_err(|e| e.to_string());
     }
-    let response = ureq::get(url).call().map_err(|e| e.to_string())?;
+    let response = get(url)?;
     let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     std::io::copy(&mut response.into_reader(), &mut file).map(drop).map_err(|e| e.to_string())
 }
@@ -413,11 +416,21 @@ pub struct State {
     pub menu: Option<(String, f32, f32)>,
     /// Failures from save threads, to toast: title and description.
     errors: Arc<Mutex<Vec<(String, String)>>>,
+    /// Copy image's PNGs read off-thread, for `poll` to put on the clipboard.
+    copied: Arc<Mutex<Vec<Result<Vec<u8>, String>>>>,
 }
 
-/// Starts loading the media views asked for and folds in signed URLs. Called from
-/// `attachments::poll`.
-pub fn poll(app: &mut App) -> bool {
+impl State {
+    /// Drops every decoded picture but those still being signed, whose replies are still taken.
+    pub(super) fn forget(&mut self) {
+        self.entries.retain(|_, e| e.request.is_some());
+        self.menu = None;
+    }
+}
+
+/// Starts loading the media views asked for, folds in signed URLs, and copies the images read.
+/// Called from `attachments::poll`.
+pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let waker = app.ui.panel.waker.clone();
     let wanted = std::mem::take(app.ui.chat.timeline.assets.media.wanted.get_mut());
     let mut net = app.src.net();
@@ -429,7 +442,7 @@ pub fn poll(app: &mut App) -> bool {
         }
         let mut entry = Entry { media, request: None, loaded: None, failed: false };
         match access {
-            Access::Direct(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), waker.clone())),
+            Access::Direct(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
             Access::Asset(resource) => match net.as_deref_mut() {
                 Some(net) => entry.request = Some(net.request("assets.createUrl", json!({ "resource": resource }))),
                 None => entry.failed = true,
@@ -446,15 +459,26 @@ pub fn poll(app: &mut App) -> bool {
             match reply {
                 Ok(reply) => {
                     let url = format!("{}{}", net.base_url().trim_end_matches('/'), s(&reply, "relativeUrl"));
-                    entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), waker.clone()));
+                    entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone()));
                 }
                 Err(_) => entry.failed = true,
             }
         }
     }
     let errors = state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
+    let copied = state.copied.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
     for (title, description) in errors {
         crate::shell::palette::toast_error(app, &title, Some(&description));
+        changed = true;
+    }
+    for png in copied {
+        match png.and_then(|png| rune::ClipboardImage::from_png(png).ok_or_else(|| "The image could not be converted to PNG.".to_owned())) {
+            Ok(image) => {
+                tx.copy_rich(rune::ClipboardContent::default().with_image(image));
+                crate::shell::palette::toast(app, "Image copied", None);
+            }
+            Err(e) => crate::shell::palette::toast_error(app, "Could not copy image", Some(&e)),
+        }
         changed = true;
     }
     changed
@@ -702,7 +726,7 @@ pub fn with_actions(content: El, key: &str, media: &Media, tooltip: bool) -> El 
 pub fn menu(app: &App, k: &rune_kit::Kit, layers: &mut Vec<El>) {
     let Some((key, x, y)) = app.ui.chat.timeline.assets.media.menu.clone() else { return };
     let Some((media, loaded)) = find(app, &key) else { return };
-    let available = loaded.as_ref().is_some_and(Loaded::available);
+    let available = loaded.is_some();
     let close = |app: &mut App| app.ui.chat.timeline.assets.media.menu = None;
     let mut menu = kit::Menu::new("media-actions-menu").native(true).width(198.0).open(true).on_close(close).at(x, y);
     for (action, label, disabled) in actions(&media, available) {
@@ -735,20 +759,23 @@ fn run(app: &mut App, key: &str, action: Action, tx: &mut Tx) {
         }
         (Action::Save, _) => save(app, &media, loaded, tx),
         (Action::CopyImage, _) => {
-            let png = loaded.ok_or_else(|| "This media is unavailable. Try reopening the preview.".to_owned()).and_then(|l| l.png());
-            match png.and_then(|png| rune::ClipboardImage::from_png(png).ok_or_else(|| "The image could not be converted to PNG.".to_owned())) {
-                Ok(image) => {
-                    tx.copy_rich(rune::ClipboardContent::default().with_image(image));
-                    crate::shell::palette::toast(app, "Image copied", None);
+            let Some(url) = loaded.map(|l| l.url) else { return };
+            let (copied, waker) = (app.ui.chat.timeline.assets.media.copied.clone(), app.ui.panel.waker.clone());
+            std::thread::spawn(move || {
+                let png = read_png(&url);
+                if let Ok(mut list) = copied.lock() {
+                    list.push(png);
                 }
-                Err(e) => crate::shell::palette::toast_error(app, "Could not copy image", Some(&e)),
-            }
+                if let Some(wake) = &waker {
+                    wake();
+                }
+            });
         }
         _ => {}
     }
 }
 
-/// Save image / Save video: a save dialog, then the bytes in hand or a download.
+/// Save image / Save video: a save dialog, then a download of the source.
 fn save(app: &mut App, media: &Media, loaded: Option<Loaded>, tx: &mut Tx) {
     let Some(loaded) = loaded else { return };
     let noun = media.kind.noun();
@@ -759,13 +786,6 @@ fn save(app: &mut App, media: &Media, loaded: Option<Loaded>, tx: &mut Tx) {
     tx.save_file(options, move |app: &mut App, picked: rune::FileDialogResult, _| {
         let Ok(Some(path)) = picked else { return };
         let title = format!("Could not save {noun}");
-        if let Some(bytes) = loaded.cached() {
-            match std::fs::write(&path, bytes.as_slice()) {
-                Ok(()) => crate::shell::palette::toast(app, "Download started", None),
-                Err(e) => crate::shell::palette::toast_error(app, &title, Some(&e.to_string())),
-            }
-            return;
-        }
         crate::shell::palette::toast(app, "Download started", None);
         let (url, errors, waker) = (loaded.url.clone(), errors.clone(), waker.clone());
         std::thread::spawn(move || {
@@ -790,13 +810,10 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
     };
     let (key, media, _) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
     let loaded = (!failed).then(|| {
-        let loaded = Loaded::new(String::new(), media.name.clone(), None, None);
+        let loaded = Loaded::new(String::new(), media.name.clone(), None, MARKDOWN_DECODE, None);
         let (w, h) = (640u32, 360u32);
         let rgba = (0..w * h).flat_map(|i| if (i % w / 40 + i / w / 40) % 2 == 0 { [96, 125, 180, 255] } else { [140, 170, 220, 255] }).collect();
         loaded.pixels.set(w, h, rgba);
-        if let Ok(mut b) = loaded.bytes.lock() {
-            *b = Some(Arc::new(Vec::new()));
-        }
         Loaded { kind: Some(media.kind), ..loaded }
     });
     app.ui.chat.timeline.assets.media.entries.insert(key.clone(), Entry { media, request: None, loaded, failed });
@@ -865,6 +882,25 @@ mod tests {
         assert_eq!(open_link(Some("https://x.dev/a.mp4"), Some("http://host/asset")), Some(("Open original", "https://x.dev/a.mp4".into())));
         assert_eq!(open_link(None, Some("http://host/asset")), Some(("Open in browser", "http://host/asset".into())));
         assert_eq!(open_link(None, Some("data:video/mp4;base64,AA")), None);
+    }
+
+    #[test]
+    fn pictures_decode_small_and_copy_reads_the_source_again() {
+        use base64::Engine;
+        let encoded = |format: image::ImageFormat| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image::RgbaImage::new(1200, 300)).write_to(&mut out, format).unwrap();
+            out.into_inner()
+        };
+        let (png, bmp) = (encoded(image::ImageFormat::Png), encoded(image::ImageFormat::Bmp));
+        let thumb = decode(&png, 480).unwrap();
+        assert_eq!((thumb.width(), thumb.height()), (480, 120));
+        assert_eq!(decode(&png, MARKDOWN_DECODE).unwrap().width(), 960);
+        let data_url = |mime: &str, bytes: &[u8]| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+        assert_eq!(read_png(&data_url("image/png", &png)).unwrap(), png);
+        let converted = image::load_from_memory_with_format(&read_png(&data_url("image/bmp", &bmp)).unwrap(), image::ImageFormat::Png).unwrap();
+        assert_eq!((converted.width(), converted.height()), (1200, 300));
+        assert_eq!(read_png("data:image/png;base64,!!").unwrap_err(), "This inline media could not be decoded.");
     }
 
     #[test]

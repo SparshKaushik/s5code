@@ -669,8 +669,12 @@ fn targets(s: &App) -> Vec<Target> {
         .iter()
         .filter(|e| !s.ui.env.off.contains(&e.id))
         .filter_map(|e| {
-            let config = env::source(s, &e.id)?.state().config.as_ref()?;
-            target_for(&e.id, &e.label, config, &client, env::connected(s, &e.id))
+            let state = env::source(s, &e.id)?.state();
+            // Web `OutdatedServerUpdateAction`: an outdated server's descriptor stands in for its config.
+            if let Some(descriptor) = env::outdated(s, &e.id) {
+                return target_for(&e.id, &e.label, &json!({"environment": descriptor}), &client, state.conn == s5_net::Conn::Open);
+            }
+            target_for(&e.id, &e.label, state.config.as_ref()?, &client, env::connected(s, &e.id))
         })
         .collect()
 }
@@ -688,7 +692,11 @@ fn update_all(s: &mut App) {
 /// Web `resolveServerConfigVersionMismatch`: `(server, client)` while this server is behind.
 pub(super) fn version_gap(s: &App, key: &str) -> Option<(String, String)> {
     let client = client_version(s)?;
-    let server = env::source(s, key)?.state().config.as_ref()?["environment"]["serverVersion"].as_str()?.trim().to_owned();
+    let environment = match env::outdated(s, key) {
+        Some(descriptor) => descriptor,
+        None => &env::source(s, key)?.state().config.as_ref()?["environment"],
+    };
+    let server = environment["serverVersion"].as_str()?.trim().to_owned();
     behind(&server, &client).then(|| (server, client.trim().to_owned()))
 }
 
@@ -720,8 +728,9 @@ pub(super) fn update_row(s: &mut App, key: &str) {
 fn start(s: &mut App, targets: Vec<Target>) {
     for target in targets {
         s.ui.settings.connections.machines.failed.remove(&target.key);
-        // Web `canUpdateServer`: the session there must hold environment:maintain.
-        if !super::permissions::can_on(s, &target.key, "environment:maintain") {
+        // Web `canUpdateServer`: the session there must hold environment:maintain. An outdated
+        // server's session can't be read, and web's `OutdatedServerUpdateAction` leaves it to the server.
+        if env::outdated(s, &target.key).is_none() && !super::permissions::can_on(s, &target.key, "environment:maintain") {
             continue;
         }
         let Some(id) = env::net_of(s, &target.key).map(|net| net.request("server.updateServer", json!({"targetVersion": target.target_version}))) else { continue };
@@ -743,6 +752,13 @@ pub(super) fn poll(s: &mut App) -> bool {
             continue;
         };
         changed = true;
+        // Web `updateOutdatedHost`: a restarting server can drop the socket before it acknowledges.
+        let reply = match reply {
+            Err(cause) if crate::chat::server_update::transport_lost(&cause) && matches!(target.self_update.as_str(), "boot-service" | "respawn") => {
+                Ok(json!({"targetVersion": target.target_version}))
+            }
+            reply => reply,
+        };
         match reply {
             Ok(result) => {
                 let version = result["targetVersion"].as_str().unwrap_or(&target.target_version).to_owned();
@@ -752,6 +768,7 @@ pub(super) fn poll(s: &mut App) -> bool {
                     format!("Reconnected on t3@{version}.")
                 };
                 toast(s, &format!("{} updated", target.label), Some(&description));
+                env::server_updated(s, &target.key);
             }
             Err(error) => {
                 let message = error["message"].as_str().unwrap_or("Server update failed.").to_owned();
@@ -926,5 +943,27 @@ mod tests {
         assert!(target_for("k", "Box", &config("desktop-managed", true, "auto"), "0.1.7", true).is_some());
         assert!(target_for("k", "Box", &config("binary", false, "off"), "0.1.7", true).is_none(), "managed updates off");
         assert!(target_for("k", "Box", &config("binary", false, "auto"), "0.1.6", true).is_none(), "current");
+    }
+
+    #[test]
+    fn an_outdated_server_gets_the_row_update_from_its_descriptor() {
+        use crate::data::Source;
+        let mut s = App::new();
+        let mut local = s5_net::Net::in_memory("http://local.test");
+        local.state_mut().config = Some(json!({"environment": {"serverVersion": "0.1.7"}}));
+        s.src = Source::Live(local);
+        s.ui.env.saved.push(env::Saved { id: "box".into(), label: "Box".into(), base: "http://box.test".into(), bearer: String::new() });
+        s.ui.env.outdated.insert("box".into(), json!({"label": "Box", "serverVersion": "0.1.5", "capabilities": {"serverSelfUpdate": "boot-service"}}));
+        let mut net = s5_net::Net::in_memory("http://box.test");
+        env::park(&mut s, "box", Source::Live(net));
+        assert!(!row_update(&s, "box"), "FAILED: no update offered before its socket opens");
+        net = s5_net::Net::in_memory("http://box.test");
+        net.state_mut().conn = s5_net::Conn::Open;
+        *env::source_mut(&mut s, "box").unwrap() = Source::Live(net);
+        assert_eq!(version_gap(&s, "box"), Some(("0.1.5".to_owned(), "0.1.7".to_owned())));
+        assert!(row_update(&s, "box"), "FAILED: an outdated server is offered the row's Update");
+        assert_eq!(env::short_status(&s, "box"), "Client not supported");
+        update_row(&mut s, "box");
+        assert!(row_updating(&s, "box"), "FAILED: the update goes out though the outdated server's session can't be read");
     }
 }
