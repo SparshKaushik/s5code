@@ -367,7 +367,7 @@ fn open_editor(s: &mut App, script: Option<&Value>) {
 pub fn scene_locked(s: &mut App) {
     (crate::shell::SCENES[1].1)(s);
     open_editor(s, Some(&serde_json::json!({"id": "test", "name": "Test", "command": "bun run test", "icon": "test"})));
-    super::set_session(s, Some(Ok(serde_json::json!({"authenticated": true, "scopes": ["orchestration:read", "terminal:operate"]}))));
+    super::set_session(s, Some(Ok(serde_json::json!({"authenticated": true, "scopes": ["orchestration:read", "terminal:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
 }
 
 /// Writes the project's next script list, then its keybinding changes (`persistProjectScripts`).
@@ -846,7 +846,8 @@ mod tests {
     #[test]
     fn a_connection_without_the_scopes_can_neither_run_nor_save_actions() {
         let mut s = App::new();
-        let session = |scopes: &[&str]| Some(Ok(json!({"authenticated": true, "scopes": scopes})));
+        // A modern session: a legacy one (no `auth`) lets orchestration:operate stand in for settings:write.
+        let session = |scopes: &[&str]| Some(Ok(json!({"authenticated": true, "scopes": scopes, "auth": {"serverUpdateScope": "environment:maintain"}})));
         open_editor(&mut s, None);
         editor_mut(&mut s).name = TextEdit::new("Test");
         editor_mut(&mut s).command = TextEdit::new("bun test");

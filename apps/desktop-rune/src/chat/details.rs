@@ -1597,6 +1597,11 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
 /// Scene: the Open in editor chooser, with web's editor names.
 pub fn scene_editor_menu(s: &mut App) {
     (crate::shell::SCENES[1].1)(s);
+    if let crate::data::Source::Fixture(state) = &mut s.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["availableEditors"] = json!(["cursor", "vscode", "zed", "file-manager"]);
+    }
     s.ui.chat.details.menu = Some(Menu::Editor);
 }
 
@@ -1892,7 +1897,7 @@ mod tests {
         assert!(!own_checkout("/repo-2", "/repo", None));
         let r = |worktree: Option<&str>| Ref { name: "feature".into(), remote: false, current: false, default: false, worktree: worktree.map(str::to_string) };
         let mut s = App::new();
-        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"]}))));
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
         assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
         assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
         assert!(!can_change_branch(&s));
@@ -1908,6 +1913,11 @@ mod tests {
         set_session(&mut s, None);
         s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example.com".into(), bearer: String::new() });
         s.ui.env.active = "box".into();
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = state.config.as_mut().and_then(|c| c.as_object_mut())
+        {
+            config.remove("remoteOpenTargets");
+        }
         assert!(!editor_denied(&s) && !can_open_editor(&s), "FAILED: no SSH route leaves nothing to open with");
         assert!(editors(&s).is_empty());
         assert_eq!(editor_label("vscode"), "VS Code");
