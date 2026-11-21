@@ -1240,8 +1240,8 @@ fn refresh(s: &mut App) {
     }
     let mut asked = Vec::new();
     for (env, _) in targets(s) {
-        if let Some(net) = crate::env::net_of(s, &env) {
-            asked.push((env, net.request("pullRequests.invalidate", json!({}))));
+        if let Some(id) = super::pr_route::send(s, &env, "pullRequests.invalidate", json!({})) {
+            asked.push((env, id));
         }
     }
     let u = ui(s);
@@ -1360,17 +1360,8 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         let u = ui(s);
         let Some(url) = u.selected.clone() else { return false };
         if !repeat {
-            super::pr_tabs::close(u, &url);
+            super::pr_tabs::close(s, &url);
         }
-        return true;
-    }
-    // ReopenClosedViewShortcut: the newest closed tab reopens; with none left the key goes on to
-    // the thread panel's closed views.
-    if crate::panel::shortcut(s, e, "view.reopenClosed")
-        && !tx.key_repeat()
-        && let Some(tab) = super::pr_tabs::reopen(ui(s))
-    {
-        tx.scroll_into_view_in(super::pr_tabs::STRIP, tab);
         return true;
     }
     if crate::panel::shortcut(s, e, "rightPanel.toggle") {

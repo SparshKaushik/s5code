@@ -393,6 +393,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "more-files");
     }),
+    ("pull-requests-detail-code-file-order", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "file-order");
+    }),
     ("pull-requests-detail-code-pending-review", |s| {
         open_detail(s, 0, |u| {
             pr_edit::scene_caps(u);
@@ -567,6 +571,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_tabs::scene(s, 1, Some(360.0));
     }),
     ("pull-requests-detail-checkout-menu", |s| open_detail(s, 0, |u| u.checkout_menu = true)),
+    ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
         open_detail(s, 0, |u| u.checks_popover = true);
         if let Some(list) = &mut s.ui.pages.pull_requests.result {
@@ -855,6 +860,12 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-limits-pooled-popover", |s| {
         open_usage(s, "limits");
         usage_limits::pooled_scene(s);
+        s.ui.pages.usage.limits.segment = Some(usage_limits::segment_key("codex", "session", "session", "local:codex_work"));
+    }),
+    ("usage-limits-pooled-popover-read-only", |s| {
+        open_usage(s, "limits");
+        usage_limits::pooled_scene(s);
+        crate::settings::permissions::set_session(s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
         s.ui.pages.usage.limits.segment = Some(usage_limits::segment_key("codex", "session", "session", "local:codex_work"));
     }),
     ("usage-limits-pooled-light", |s| {
