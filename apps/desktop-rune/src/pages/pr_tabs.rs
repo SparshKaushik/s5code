@@ -22,13 +22,8 @@ const WIDTH_KEY: &str = "pullRequestPanelWidth";
 /// SortableTabList's PointerSensor activation distance.
 const DRAG_DISTANCE: f32 = 6.0;
 const TAB_GAP: f32 = 4.0;
-/// closedViewStore keeps the 20 newest closed views.
-const CLOSED_CAP: usize = 20;
-/// closedViewStore's persisted `t3code:closed-views:v2`, beside the client settings as
-/// panel/closed.rs keeps the thread panel's.
-const CLOSED_FILE: &str = "pull-request-closed-views.json";
 /// The tab strip's horizontal scroll viewport.
-pub(super) const STRIP: &str = "pr-tab-scroll";
+pub(crate) const STRIP: &str = "pr-tab-scroll";
 
 #[derive(Default)]
 pub struct Tabs {
@@ -40,57 +35,6 @@ pub struct Tabs {
     drag: Option<(usize, f32)>,
     /// The width while the handle is dragged; it is saved when the drag ends.
     resizing: Option<f32>,
-    /// Closed tabs' entries for `view.reopenClosed`, newest first.
-    closed: Closed,
-}
-
-/// The closed tabs, read on first use and saved on each change so they outlive a restart.
-#[derive(Default)]
-struct Closed {
-    entries: Vec<Value>,
-    loaded: bool,
-}
-
-fn encode_closed(entries: &[Value]) -> Value {
-    json!({"version": 1, "entries": entries})
-}
-
-/// Rows that are not a pull request drop, as the web's `migrate` filters with `isClosedViewEntry`.
-fn decode_closed(v: &Value) -> Vec<Value> {
-    v["entries"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|e| !field(e, "url").is_empty() && e["number"].as_u64().is_some_and(|n| n > 0))
-        .take(CLOSED_CAP)
-        .cloned()
-        .collect()
-}
-
-impl Closed {
-    fn path() -> Option<std::path::PathBuf> {
-        (!cfg!(test)).then(|| crate::settings::client::sibling_path(CLOSED_FILE))
-    }
-
-    fn entries(&mut self) -> &mut Vec<Value> {
-        if !std::mem::replace(&mut self.loaded, true)
-            && let Some(saved) = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        {
-            self.entries = decode_closed(&saved);
-        }
-        &mut self.entries
-    }
-
-    fn save(&self) {
-        let Some(path) = Self::path() else { return };
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let written = serde_json::to_vec(&encode_closed(&self.entries)).ok().is_some_and(|bytes| {
-            path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &path).is_ok()
-        });
-        if !written {
-            eprintln!("pull requests: saving closed tabs failed");
-        }
-    }
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -139,91 +83,98 @@ fn activate(u: &mut Ui, url: &str) {
     }
 }
 
-/// closedViewStore.remember for the tabs a close removed: the shown tab goes last, so it
-/// reopens first, and a tab closed again replaces its older entry.
-fn remember(u: &mut Ui, removed: Vec<Value>) {
+/// The tabs a close removed in closedViewStore.remember order: the shown tab goes last, so it
+/// reopens first.
+fn closing_order(u: &Ui, removed: Vec<Value>) -> Vec<Value> {
     let active = u.selected.clone().or_else(|| u.hidden.clone());
     let (shown, rest): (Vec<Value>, Vec<Value>) = removed.into_iter().partition(|e| active.as_deref() == Some(field(e, "url")));
-    if shown.is_empty() && rest.is_empty() {
-        return;
-    }
-    let closed = u.tabs.closed.entries();
-    for e in rest.into_iter().chain(shown) {
-        let url = field(&e, "url").to_string();
-        closed.retain(|c| field(c, "url") != url);
-        closed.insert(0, e);
-    }
-    closed.truncate(CLOSED_CAP);
-    u.tabs.closed.save();
+    rest.into_iter().chain(shown).collect()
 }
 
-/// ReopenClosedViewShortcut (planNextReopen, openPullRequest): the newest closed tab that isn't
-/// already showing opens at the end of the strip and shows; the key of its tab, to reveal.
-pub(super) fn reopen(u: &mut Ui) -> Option<String> {
-    if u.tabs.closed.entries().is_empty() {
-        return None;
+/// Runs a close on the tabs and remembers what it removed in the closed views every surface
+/// shares (rightPanelStore's subscription, owned by `PULL_REQUESTS_PANEL_REF`).
+fn closing(s: &mut App, act: impl FnOnce(&mut Ui) -> Vec<Value>) {
+    use crate::panel::closed::{Closed, PAGE, View};
+    let removed = act(ui(s));
+    if !removed.is_empty() {
+        s.ui.panel.closed.remember(removed.into_iter().map(|e| Closed { thread: PAGE.into(), view: View::PullRequest(e) }));
     }
-    let mut found = None;
-    while found.is_none() && !u.tabs.closed.entries.is_empty() {
-        let e = u.tabs.closed.entries.remove(0);
-        let url = field(&e, "url").to_string();
-        let open = index(u, &url).is_some();
-        if open && u.selected.is_some() {
-            continue;
-        }
-        found = Some(tab_key(&e));
-        if !open {
-            u.tabs.open.push(e);
-        }
-        u.selected = Some(url);
-        u.hidden = None;
+}
+
+/// planNextReopen's `alreadyOpen` for a closed tab: it has a tab and the panel shows.
+pub(crate) fn showing(s: &App, entry: &Value) -> bool {
+    let u = &s.ui.pages.pull_requests;
+    u.selected.is_some() && index(u, field(entry, "url")).is_some()
+}
+
+/// reopenClosedView's openPullRequest, then the navigation to `/pull-requests`: the tab joins
+/// the end of the strip unless it is open, and shows; the key of its tab, to reveal.
+pub(crate) fn restore(s: &mut App, entry: Value) -> String {
+    if !matches!(s.route, crate::Route::PullRequests) {
+        s.navigate(crate::Route::PullRequests);
     }
-    u.tabs.closed.save();
-    found
+    let key = tab_key(&entry);
+    let url = field(&entry, "url").to_string();
+    let u = ui(s);
+    if index(u, &url).is_none() {
+        u.tabs.open.push(entry);
+    }
+    u.selected = Some(url);
+    u.hidden = None;
+    key
+}
+
+/// closeSurface on the shown or a clicked tab.
+pub(super) fn close(s: &mut App, url: &str) {
+    closing(s, |u| close_tab(u, url));
 }
 
 /// closeSurface: closing the shown tab shows the one that takes its place, else the one before;
 /// closing the last empties the panel.
-pub(super) fn close(u: &mut Ui, url: &str) {
-    let Some(at) = index(u, url) else { return };
+fn close_tab(u: &mut Ui, url: &str) -> Vec<Value> {
+    let Some(at) = index(u, url) else { return vec![] };
     let removed = u.tabs.open.remove(at);
-    remember(u, vec![removed]);
+    let removed = closing_order(u, vec![removed]);
     let next = u.tabs.open.get(at.min(u.tabs.open.len().saturating_sub(1))).map(|e| field(e, "url").to_string());
     if u.selected.as_deref() == Some(url) {
         u.selected = next;
     } else if u.hidden.as_deref() == Some(url) {
         u.hidden = next;
     }
+    removed
 }
 
 /// closeOtherSurfaces: the kept tab shows.
-fn close_others(u: &mut Ui, url: &str) {
-    let Some(at) = index(u, url) else { return };
+fn close_others(u: &mut Ui, url: &str) -> Vec<Value> {
+    let Some(at) = index(u, url) else { return vec![] };
     let kept = u.tabs.open.remove(at);
     let removed = std::mem::replace(&mut u.tabs.open, vec![kept]);
-    remember(u, removed);
+    let removed = closing_order(u, removed);
     activate(u, url);
+    removed
 }
 
 /// closeSurfacesToRight: the shown tab stays unless it was closed, when this one shows.
-fn close_right(u: &mut Ui, url: &str) {
-    let Some(at) = index(u, url) else { return };
+fn close_right(u: &mut Ui, url: &str) -> Vec<Value> {
+    let Some(at) = index(u, url) else { return vec![] };
     let removed = u.tabs.open.split_off(at + 1);
-    remember(u, removed);
+    let removed = closing_order(u, removed);
     if u.selected.as_deref().is_some_and(|a| index(u, a).is_none()) {
         u.selected = Some(url.to_string());
     }
     if u.hidden.as_deref().is_some_and(|a| index(u, a).is_none()) {
         u.hidden = Some(url.to_string());
     }
+    removed
 }
 
 /// closeAllSurfaces.
-fn close_all(u: &mut Ui) {
+fn close_all(u: &mut Ui) -> Vec<Value> {
     let removed = std::mem::take(&mut u.tabs.open);
-    remember(u, removed);
+    let removed = closing_order(u, removed);
     u.selected = None;
     u.hidden = None;
+    removed
 }
 
 /// moveSurface.
@@ -336,7 +287,7 @@ fn drag_tab(s: &mut App, d: &mut rune::Drag, tx: &mut Tx, n: usize, url: &str, s
     if tx.button() == rune::PointerButton::Middle {
         let over = (0.0..=d.w).contains(&d.x) && (0.0..=d.h).contains(&d.y);
         if d.phase == Phase::Up && !d.cancelled() && over {
-            close(ui(s), url);
+            close(s, url);
         }
         return;
     }
@@ -381,7 +332,7 @@ fn tab(s: &App, t: &T, n: usize, stored: &Value, spans: &[(f32, f32)]) -> El {
         .size(16.0, 16.0)
         .role("button")
         .label(format!("Close {title}"))
-        .on_press(move |s: &mut App| close(ui(s), &close_url))
+        .on_press(move |s: &mut App| close(s, &close_url))
         .child(el().absolute(2.0, 2.0).size(12.0, 12.0).group_opacity(1.0, 0.0).child(icon(glyph, 12.0).size(12.0, 12.0).color(tone)))
         .child(el().absolute(0.0, 0.0).size(16.0, 16.0).radius(4.0).center().hover(t.c.muted).group_opacity(0.0, 1.0).child(icon(&i::X, 12.0).size(12.0, 12.0).color(fg)));
     let (drag_url, key_url, menu_url) = (url.clone(), url.clone(), url);
@@ -426,12 +377,11 @@ fn tab_menu(s: &App, t: &T, url: &str, x: f32, y: f32, overlays: &mut Vec<El>) {
     let u = &s.ui.pages.pull_requests;
     let Some(at) = index(u, url) else { return };
     let count = u.tabs.open.len();
-    let pick = |act: fn(&mut Ui, &str)| {
+    let pick = |act: fn(&mut Ui, &str) -> Vec<Value>| {
         let url = url.to_string();
         move |s: &mut App| {
-            let u = ui(s);
-            u.tabs.menu = None;
-            act(u, &url);
+            ui(s).tabs.menu = None;
+            closing(s, |u| act(u, &url));
         }
     };
     kit::Menu::new("pr-tab-menu")
@@ -440,7 +390,7 @@ fn tab_menu(s: &App, t: &T, url: &str, x: f32, y: f32, overlays: &mut Vec<El>) {
         .open(true)
         .at(x, y)
         .on_close(|s: &mut App| ui(s).tabs.menu = None)
-        .item(kit::MenuItem::new("Close").on_select(pick(close)))
+        .item(kit::MenuItem::new("Close").on_select(pick(close_tab)))
         .item(kit::MenuItem::new("Close others").disabled(count <= 1).on_select(pick(close_others)))
         .item(kit::MenuItem::new("Close to the right").disabled(at + 1 >= count).on_select(pick(close_right)))
         .item(kit::MenuItem::new("Close all").on_select(pick(|u: &mut Ui, _: &str| close_all(u))))
@@ -558,17 +508,17 @@ mod tests {
     #[test]
     fn closing_shows_the_tab_that_takes_its_place_and_the_last_close_empties_the_panel() {
         let mut u = opened(&[1, 2, 3], 2);
-        close(&mut u, &url(2));
+        close_tab(&mut u, &url(2));
         assert_eq!((numbers(&u), u.selected.clone()), (vec![1, 3], Some(url(3))));
-        close(&mut u, &url(1));
+        close_tab(&mut u, &url(1));
         assert_eq!((numbers(&u), u.selected.clone()), (vec![3], Some(url(3))), "closing another tab keeps the shown one");
         u.tabs.open.push(pr(4));
         u.selected = Some(url(4));
-        close(&mut u, &url(4));
+        close_tab(&mut u, &url(4));
         assert_eq!(u.selected, Some(url(3)), "the last tab falls back to the one before");
 
         u.hidden = u.selected.take();
-        close(&mut u, &url(3));
+        close_tab(&mut u, &url(3));
         assert_eq!((u.tabs.open.len(), u.selected.clone(), u.hidden.clone()), (0, None, None), "a hidden panel's last tab leaves nothing to reopen");
     }
 
@@ -606,48 +556,48 @@ mod tests {
         assert_eq!((numbers(&u), u.selected.clone()), (vec![1, 2, 3], Some(url(1))), "moving never changes the shown tab");
     }
 
-    #[test]
-    fn reopening_brings_back_the_newest_closed_tab_and_skips_ones_already_showing() {
-        let reopened = |u: &mut Ui| reopen(u).and(u.selected.clone());
-        let mut u = opened(&[1, 2, 3, 4], 2);
-        close_all(&mut u);
-        assert_eq!(reopened(&mut u), Some(url(2)), "the shown tab is remembered last, so it reopens first");
-        assert_eq!(reopened(&mut u), Some(url(4)));
-        assert_eq!(numbers(&u), [2, 4], "reopened tabs join the end of the strip");
-        close(&mut u, &url(4));
-        assert_eq!(reopened(&mut u), Some(url(4)), "a tab closed again moves to the front");
-        u.tabs.open.push(pr(3));
-        assert_eq!(reopened(&mut u), Some(url(1)), "a tab already showing is dropped");
-        assert_eq!((reopen(&mut u), numbers(&u)), (None, vec![2, 4, 3, 1]));
+    /// The panel's `reopen_closed` for the page's entries: the newest that isn't showing restores.
+    fn reopened(s: &mut App) -> Option<String> {
+        use crate::panel::closed::{Closed, View};
+        let mut store = std::mem::take(&mut s.ui.panel.closed);
+        let next = store.next(|_: &str| true, |c| matches!(&c.view, View::PullRequest(e) if showing(s, e)));
+        s.ui.panel.closed = store;
+        let Closed { view: View::PullRequest(e), .. } = next? else { return None };
+        restore(s, e);
+        s.ui.pages.pull_requests.selected.clone()
+    }
 
-        let mut u = opened(&[1, 2, 3], 1);
-        close_right(&mut u, &url(1));
-        assert_eq!(reopened(&mut u), Some(url(3)), "of tabs closed together the rightmost reopens first");
-
-        let mut u = opened(&[1, 2], 2);
-        close(&mut u, &url(2));
-        u.tabs.open.push(pr(2));
-        u.hidden = u.selected.take();
-        assert_eq!(reopened(&mut u), Some(url(2)), "behind a hidden panel an open tab shows again");
-        assert_eq!((numbers(&u), u.hidden.clone()), (vec![1, 2], None));
-
-        let mut u = opened(&(1..=25).collect::<Vec<u64>>(), 1);
-        close_all(&mut u);
-        assert_eq!(u.tabs.closed.entries.len(), CLOSED_CAP);
-        assert_eq!(reopened(&mut u), Some(url(1)));
+    fn page(numbers: &[u64], shown: u64) -> App {
+        let mut s = App::new();
+        s.ui.pages.pull_requests = opened(numbers, shown);
+        s
     }
 
     #[test]
-    fn closed_tabs_read_back_and_rows_that_are_not_pull_requests_drop() {
-        let mut tagged = pr(2);
-        tagged[crate::env::TAG] = json!("remote");
-        let entries = vec![pr(1), tagged];
-        assert_eq!(decode_closed(&encode_closed(&entries)), entries, "the environment tag survives a restart");
-        let saved = json!({"entries": [{"url": "", "number": 3}, {"url": url(4)}, {"url": url(5), "number": 0}, "x", pr(6)]});
-        assert_eq!(decode_closed(&saved), vec![pr(6)]);
-        assert!(decode_closed(&json!(null)).is_empty());
-        let many: Vec<Value> = (1..=25).map(pr).collect();
-        assert_eq!(decode_closed(&encode_closed(&many)).len(), CLOSED_CAP);
+    fn reopening_brings_back_the_newest_closed_tab_and_skips_ones_already_showing() {
+        let mut s = page(&[1, 2, 3, 4], 2);
+        closing(&mut s, close_all);
+        assert_eq!(reopened(&mut s), Some(url(2)), "the shown tab is remembered last, so it reopens first");
+        assert!(matches!(s.route, crate::Route::PullRequests), "reopening a page tab goes to the page");
+        assert_eq!(reopened(&mut s), Some(url(4)));
+        assert_eq!(numbers(&s.ui.pages.pull_requests), [2, 4], "reopened tabs join the end of the strip");
+        close(&mut s, &url(4));
+        assert_eq!(reopened(&mut s), Some(url(4)), "a tab closed again moves to the front");
+        s.ui.pages.pull_requests.tabs.open.push(pr(3));
+        assert_eq!(reopened(&mut s), Some(url(1)), "a tab already showing is dropped");
+        assert_eq!((reopened(&mut s), numbers(&s.ui.pages.pull_requests)), (None, vec![2, 4, 3, 1]));
+
+        let mut s = page(&[1, 2, 3], 1);
+        closing(&mut s, |u| close_right(u, &url(1)));
+        assert_eq!(reopened(&mut s), Some(url(3)), "of tabs closed together the rightmost reopens first");
+
+        let mut s = page(&[1, 2], 2);
+        close(&mut s, &url(2));
+        let u = &mut s.ui.pages.pull_requests;
+        u.tabs.open.push(pr(2));
+        u.hidden = u.selected.take();
+        assert_eq!(reopened(&mut s), Some(url(2)), "behind a hidden panel an open tab shows again");
+        assert_eq!((numbers(&s.ui.pages.pull_requests), s.ui.pages.pull_requests.hidden.clone()), (vec![1, 2], None));
     }
 
     #[test]

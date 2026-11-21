@@ -1381,6 +1381,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
     body = body.child(divided(t, figures));
     if let Some(target) = a.redeem.clone().filter(|_| credit_count(a) > 0) {
         let busy = u.limits.redeeming.as_ref().is_some_and(|r| r.1 == seg.key);
+        let allowed = can_redeem(s, &target.0);
         let key = seg.key.clone();
         let line = row()
             .w_full()
@@ -1392,8 +1393,11 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
                 kit::Button::new(if busy { "Using…" } else { "Use reset" })
                     .size("xs")
                     .variant("outline")
-                    .disabled(busy)
+                    .disabled(busy || !allowed)
                     .on_press(move |s: &mut App| {
+                        if !can_redeem(s, &target.0) {
+                            return;
+                        }
                         let u = ui(s);
                         u.segment = None;
                         u.confirm = Some((key.clone(), target.clone()));
@@ -1409,7 +1413,8 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
 fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, target)) = s.ui.pages.usage.limits.confirm.clone() else { return };
     let cancel = kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| ui(s).confirm = None).build(t);
-    let confirm = kit::Button::new("Use credit").on_press(move |s: &mut App| redeem(s, &key, &target)).build(t);
+    let allowed = can_redeem(s, &target.0);
+    let confirm = kit::Button::new("Use credit").disabled(!allowed).on_press(move |s: &mut App| redeem(s, &key, &target)).build(t);
     kit::Dialog::new("usage-reset-credit", "Use a reset credit?")
         .alert()
         .width(448.0)
@@ -1420,9 +1425,17 @@ fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
         .build(t, overlays);
 }
 
+/// Web `useResetCredit`'s `providers:manage` gate on the environment holding the credit.
+fn can_redeem(s: &App, environment: &str) -> bool {
+    crate::settings::permissions::can_on(s, environment, "providers:manage")
+}
+
 /// Spends the credit on the environment that reported it.
 fn redeem(s: &mut App, key: &str, (environment, input): &Redeem) {
     ui(s).confirm = None;
+    if !can_redeem(s, environment) {
+        return;
+    }
     let Some(net) = env_net(s, environment) else { return };
     let id = net.request("provider.consumeResetCredit", input.clone());
     let u = ui(s);
@@ -1482,6 +1495,23 @@ mod tests {
         poll(&mut s);
         assert_eq!(s.ui.pages.usage.limits.redeeming, None);
         assert!(s.ui.pages.usage.limits.status.contains_key("codex"));
+    }
+
+    #[test]
+    fn a_reset_credit_spends_only_where_the_session_manages_providers() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        crate::env::park(&mut s, "lab", crate::data::Source::Live(s5_net::Net::offline()));
+        assert!(can_redeem(&s, crate::env::LOCAL), "fixtures grant everything");
+        assert!(!can_redeem(&s, "lab"), "denied until the session answers");
+        crate::settings::permissions::set_session(&mut s, "lab", json!({"authenticated": true, "permissions": ["orchestration:operate"]}));
+        assert!(!can_redeem(&s, "lab"));
+        redeem(&mut s, "codex", &("lab".to_string(), json!({"instanceId": "codex"})));
+        assert_eq!(s.ui.pages.usage.limits.redeeming, None);
+        crate::settings::permissions::set_session(&mut s, "lab", json!({"authenticated": true, "scopes": ["orchestration:operate"]}));
+        assert!(can_redeem(&s, "lab"), "legacy operate implies providers:manage");
+        crate::settings::permissions::set_session(&mut s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert!(!can_redeem(&s, crate::env::LOCAL), "each environment answers for its own credits");
     }
 
     const NOW: &str = "2026-11-06T10:30:00.000Z";

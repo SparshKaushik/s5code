@@ -2,7 +2,7 @@
 pub(crate) mod agent;
 pub(crate) mod stream;
 pub mod browser;
-mod closed;
+pub(crate) mod closed;
 mod device;
 pub(crate) mod diff;
 pub mod drawer;
@@ -71,7 +71,7 @@ pub struct Ui {
     /// The tab strip's right-click menu: its tab and window point.
     tab_menu: Option<(Surface, (f32, f32))>,
     thread: String,
-    closed: closed::Store,
+    pub(crate) closed: closed::Store,
     /// Each thread's surfaces, as web's right panel state is per thread; browser tabs stay
     /// alive while their thread is in the background.
     stash: std::collections::HashMap<String, Stash>,
@@ -329,25 +329,37 @@ fn close(app: &mut App, surface: Surface) {
     }
     remove_surface(app, surface);
 }
-/// `view.reopenClosed`: the newest closed view still worth reopening, on its thread.
-fn reopen_closed(app: &mut App) -> bool {
+/// `view.reopenClosed`: the newest closed view still worth reopening, on its thread or the pull
+/// requests page, from either.
+fn reopen_closed(app: &mut App, tx: &mut Tx) -> bool {
     let mut store = std::mem::take(&mut app.ui.panel.closed);
     let current = context(app).map(|(id, _)| id);
     let next = store.next(
-        |thread| app.state().threads.iter().any(|v| v["id"] == thread),
-        |c| {
-            app.ui.shell.panel_open
-                && current.as_deref() == Some(c.thread.as_str())
-                && match &c.view {
-                    closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
-                    closed::View::PullRequests => app.ui.panel.surfaces.contains(&Surface::PullRequests),
-                    closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
-                    closed::View::Browser(_) => false,
-                }
+        |thread| thread == closed::PAGE || app.state().threads.iter().any(|v| v["id"] == thread),
+        |c| match &c.view {
+            closed::View::PullRequest(entry) => crate::pages::pr_tabs::showing(app, entry),
+            view => {
+                app.ui.shell.panel_open
+                    && current.as_deref() == Some(c.thread.as_str())
+                    && match view {
+                        closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
+                        closed::View::PullRequests => app.ui.panel.surfaces.contains(&Surface::PullRequests),
+                        closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
+                        closed::View::Browser(_) | closed::View::PullRequest(_) => false,
+                    }
+            }
         },
     );
     app.ui.panel.closed = store;
-    let Some(c) = next else { return false };
+    let c = match next {
+        None => return false,
+        Some(closed::Closed { view: closed::View::PullRequest(entry), .. }) => {
+            let tab = crate::pages::pr_tabs::restore(app, entry);
+            tx.scroll_into_view_in(crate::pages::pr_tabs::STRIP, tab);
+            return true;
+        }
+        Some(c) => c,
+    };
     if current.as_deref() != Some(c.thread.as_str()) {
         app.navigate(Route::Thread(c.thread.clone()));
         // Swap in that thread's panel and switch its thread now, so the next poll neither
@@ -363,6 +375,7 @@ fn reopen_closed(app: &mut App) -> bool {
         closed::View::Files(path) if path.is_empty() => activate(app, Surface::Files),
         closed::View::Files(path) => open_file(app, path),
         closed::View::Browser(url) => open_preview(app, &url),
+        closed::View::PullRequest(_) => {}
     }
     true
 }
@@ -698,7 +711,7 @@ fn when_context(app: &App, name: &str) -> bool {
 }
 pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if !app.ui.panel.closed.is_empty() && !tx.key_repeat() && shortcut(app, e, "view.reopenClosed") {
-        return reopen_closed(app);
+        return reopen_closed(app, tx);
     }
     if shortcut(app, e, "rightPanel.toggle") {
         app.ui.shell.panel_open = !app.ui.shell.panel_open;
