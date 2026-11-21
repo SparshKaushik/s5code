@@ -420,6 +420,8 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
     let routes_open = s.ui.settings.connections.routes_open.contains(&saved.id);
     let (status, error) = match env::ssh::state(s, &saved.id).filter(|_| !off) {
         Some(state) => (state, false),
+        // Web `savedBackendStatus` "unsupported"; the reason is the tooltip.
+        None if env::outdated(s, &saved.id).is_some() => ("Client not supported".to_owned(), false),
         None => saved_status(off, &env::status(s, &saved.id)),
     };
     // Web `environmentTransportLabel`: SSH and its target, else the address.
@@ -516,7 +518,8 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
         })
         .build(&kit::theme(t));
     // Web's row `ServerUpdateAction` (icon appearance) while this server is behind the client.
-    let update = (connected && gap.is_some() && !updating && super::machines::row_update(s, &saved.id)).then(|| {
+    // An outdated server is not connected, but its requests-only socket can still update it.
+    let update = (gap.is_some() && !updating && super::machines::row_update(s, &saved.id)).then(|| {
         let label = if super::machines::row_failure(s, &saved.id).is_some() { "Retry update" } else { "Update" };
         let key = saved.id.clone();
         kit::icon_button(&icons::CIRCLE_ARROW_UP, label)

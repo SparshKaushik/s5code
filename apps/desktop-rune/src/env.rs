@@ -61,7 +61,7 @@ pub struct Ui {
     pub active: String,
     pub host: TextEdit,
     pub code: TextEdit,
-    pairing: Option<Receiver<Result<Saved, String>>>,
+    pairing: Option<Receiver<Result<(Saved, Option<Value>), String>>>,
     pub error: Option<String>,
     /// The environment the last finished pairing added, for the setup wizard to select.
     pub last_paired: Option<String>,
@@ -73,6 +73,9 @@ pub struct Ui {
     pub ssh: ssh::Ui,
     /// Saved environments switched off in Settings: kept, but not connected.
     pub off: Vec<String>,
+    /// Saved servers older than this client that can update themselves (web `serverUpdateRequired`),
+    /// with the descriptor they paired with. They connect for requests only, so they can update.
+    pub outdated: HashMap<String, Value>,
 }
 
 fn path() -> PathBuf {
@@ -122,7 +125,18 @@ fn decode_alternates(value: &Value) -> HashMap<String, Vec<Alt>> {
         .collect()
 }
 
-fn encode(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>) -> Value {
+/// Web's catalog `serverUpdateRequired` rows, with the descriptor Rune keeps to offer the update.
+fn decode_outdated(value: &Value) -> HashMap<String, Value> {
+    value["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["serverUpdateRequired"] == true && v["descriptor"].is_object())
+        .filter_map(|v| Some((v["environmentId"].as_str()?.to_owned(), v["descriptor"].clone())))
+        .collect()
+}
+
+fn encode(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>, outdated: &HashMap<String, Value>) -> Value {
     let rows: Vec<Value> = saved
         .iter()
         .map(|e| {
@@ -133,6 +147,11 @@ fn encode(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>
             if let Some(routes) = alternates.get(&e.id).filter(|r| !r.is_empty()) {
                 row["alternateRoutes"] = routes.iter().map(|r| json!({"httpBaseUrl": r.base, "bearerToken": r.bearer})).collect();
             }
+            if let Some(descriptor) = outdated.get(&e.id) {
+                row["unsupportedReason"] = json!(outdated_reason(descriptor, &e.label));
+                row["serverUpdateRequired"] = json!(true);
+                row["descriptor"] = descriptor.clone();
+            }
             row
         })
         .collect();
@@ -140,15 +159,17 @@ fn encode(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>
 }
 
 /// Bearer tokens are credentials: the file is the user's alone. Electron's catalog follows.
-fn save(saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>) -> Result<(), String> {
+fn save(s: &App) -> Result<(), String> {
+    let ui = &s.ui.env;
     let path = path();
     let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
-    write(&path, saved, off, alternates)?;
+    write(&path, &ui.saved, &ui.off, &ui.alternates, &ui.outdated)?;
+    let saved = &ui.saved;
     catalog::export(&old, saved);
     Ok(())
 }
 
-fn write(path: &std::path::Path, saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>) -> Result<(), String> {
+fn write(path: &std::path::Path, saved: &[Saved], off: &[String], alternates: &HashMap<String, Vec<Alt>>, outdated: &HashMap<String, Value>) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -158,21 +179,27 @@ fn write(path: &std::path::Path, saved: &[Saved], off: &[String], alternates: &H
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off, alternates)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off, alternates, outdated)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&temporary, path).map_err(|e| e.to_string())
 }
 
 fn connect(s: &App, env: &Saved) -> Source {
-    connect_to(s, &env.base, &env.bearer)
+    connect_to(s, &env.id, &env.base, &env.bearer)
 }
 
-fn connect_to(s: &App, base: &str, bearer: &str) -> Source {
+/// An outdated server would refuse this client's subscriptions, so it only carries requests.
+fn connect_to(s: &App, id: &str, base: &str, bearer: &str) -> Source {
     let waker = s.ui.panel.waker.clone();
-    Source::Live(s5_net::Net::connect(base, bearer, move || {
+    let wake = move || {
         if let Some(w) = &waker {
             w()
         }
-    }))
+    };
+    Source::Live(if s.ui.env.outdated.contains_key(id) {
+        s5_net::Net::connect_requests_only(base, bearer, wake)
+    } else {
+        s5_net::Net::connect(base, bearer, wake)
+    })
 }
 
 /// Loads the saved environments and connects each in the background; this machine stays active.
@@ -181,6 +208,7 @@ pub fn start(s: &mut App) {
     let saved = file.as_ref().map(decode).unwrap_or_default();
     let off = file.as_ref().map(decode_off).unwrap_or_default();
     s.ui.env.alternates.extend(file.as_ref().map(decode_alternates).unwrap_or_default());
+    s.ui.env.outdated.extend(file.as_ref().map(decode_outdated).unwrap_or_default());
     for env in saved.iter().filter(|e| !off.contains(&e.id)) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));
@@ -208,7 +236,7 @@ fn adopt_catalog(s: &mut App) -> bool {
         s.ui.env.parked.push((env.id.clone(), src));
         s.ui.env.saved.push(env);
     }
-    s.ui.env.error = save(&s.ui.env.saved, &s.ui.env.off, &s.ui.env.alternates).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.error = save(s).err().map(|e| format!("Could not save environments: {e}"));
     true
 }
 
@@ -261,6 +289,10 @@ pub fn label(s: &App, key: &str) -> String {
 
 /// What the row says about an environment's connection.
 pub fn status(s: &App, key: &str) -> String {
+    if let Some(descriptor) = s.ui.env.outdated.get(key) {
+        let label = s.ui.env.saved.iter().find(|e| e.id == key).map_or("", |e| e.label.as_str());
+        return outdated_reason(descriptor, label);
+    }
     let Some(src) = source(s, key) else { return "Not connected".into() };
     let st = src.state();
     match &st.conn {
@@ -276,6 +308,9 @@ pub fn status(s: &App, key: &str) -> String {
 
 /// The setup wizard's one-word state (`presentSavedCloudEnvironmentConnection`'s `buttonLabel`).
 pub fn short_status(s: &App, key: &str) -> &'static str {
+    if s.ui.env.outdated.contains_key(key) {
+        return "Client not supported";
+    }
     let Some(src) = source(s, key) else { return "Not connected" };
     let st = src.state();
     match &st.conn {
@@ -484,6 +519,7 @@ pub fn remove(s: &mut App, id: &str) {
     s.ui.env.saved.retain(|e| e.id != id);
     s.ui.env.off.retain(|k| k != id);
     s.ui.env.alternates.remove(id);
+    s.ui.env.outdated.remove(id);
     s.ui.env.error = persist(s);
     ssh::forget(s, id);
     saving_failed(s, "Could not remove backend");
@@ -498,7 +534,7 @@ fn saving_failed(s: &mut App, title: &str) {
 
 /// Writes the saved environments, returning the error the settings page shows.
 pub(crate) fn persist(s: &App) -> Option<String> {
-    save(&s.ui.env.saved, &s.ui.env.off, &s.ui.env.alternates).err().map(|e| format!("Could not save environments: {e}"))
+    save(s).err().map(|e| format!("Could not save environments: {e}"))
 }
 
 /// Web `setEnabled` on a saved environment: off disconnects it and keeps it saved; on reconnects.
@@ -544,16 +580,55 @@ fn pairing_refusal(descriptor: &Value, base: &str, known: &[Known], adding_route
         return Some(format!("That address claims to be {label}, which is already saved. Add it as a route from that environment's settings instead."));
     }
     let label = descriptor["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(base);
-    // Servers shipped before negotiation speak the first protocol.
-    match descriptor["orchestrationProtocolVersion"].as_u64().unwrap_or(1) {
+    match protocol(descriptor) {
         PROTOCOL => None,
         v if v > PROTOCOL => Some(format!("This client is not supported by this server. Update your app or use a compatible release to connect to {label}.")),
-        _ => Some(format!("This client requires a newer server. Update T3 Code on {label} to connect.")),
+        // An outdated server is still saved so it can be updated from this client.
+        _ if can_self_update(descriptor) => None,
+        _ => Some(outdated_reason(descriptor, label)),
     }
 }
 
+/// Servers shipped before negotiation speak the first protocol.
+fn protocol(descriptor: &Value) -> u64 {
+    descriptor["orchestrationProtocolVersion"].as_u64().unwrap_or(1)
+}
+
+/// Web `canSelfUpdate` on a descriptor.
+fn can_self_update(descriptor: &Value) -> bool {
+    let capabilities = &descriptor["capabilities"];
+    capabilities["serverSelfUpdate"].as_str().is_some_and(|m| m != "desktop-managed" || capabilities["desktopAppUpdate"] == true)
+}
+
+fn outdated_reason(descriptor: &Value, fallback: &str) -> String {
+    let label = descriptor["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(fallback);
+    format!("This client requires a newer server. Update T3 Code on {label} to connect.")
+}
+
+/// The descriptor of a saved server that needs updating before it can connect, if `key` is one.
+pub(crate) fn outdated<'a>(s: &'a App, key: &str) -> Option<&'a Value> {
+    s.ui.env.outdated.get(key)
+}
+
+/// An outdated server finished updating: it connects as any other from now on.
+pub(crate) fn server_updated(s: &mut App, key: &str) {
+    if s.ui.env.outdated.remove(key).is_none() {
+        return;
+    }
+    if let Some(env) = s.ui.env.saved.iter().find(|e| e.id == key).cloned()
+        && !s.ui.env.off.contains(&env.id)
+    {
+        let src = connect(s, &env);
+        if let Some(slot) = source_mut(s, key) {
+            *slot = src;
+        }
+    }
+    s.ui.env.error = persist(s);
+}
+
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
-fn pair(host: String, code: String, known: Vec<Known>, adding_route: bool) -> Result<Saved, String> {
+/// An outdated server pairs with its descriptor, to be updated before it connects.
+fn pair(host: String, code: String, known: Vec<Known>, adding_route: bool) -> Result<(Saved, Option<Value>), String> {
     let (base, credential) = s5_net::resolve_pairing(&host, &code)?;
     let descriptor = s5_net::fetch_descriptor(&base)?;
     if let Some(refusal) = pairing_refusal(&descriptor, &base, &known, adding_route) {
@@ -562,7 +637,8 @@ fn pair(host: String, code: String, known: Vec<Known>, adding_route: bool) -> Re
     let bearer = s5_net::exchange_bootstrap(&base, &credential).map_err(|e| format!("The pairing code was refused: {e}"))?;
     let id = descriptor["environmentId"].as_str().unwrap_or_default().to_owned();
     let label = descriptor["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(&base).to_owned();
-    Ok(Saved { id, label, base, bearer })
+    let outdated = (protocol(&descriptor) < PROTOCOL).then_some(descriptor);
+    Ok((Saved { id, label, base, bearer }, outdated))
 }
 
 pub fn pairing(s: &App) -> bool {
@@ -627,9 +703,9 @@ fn start_pairing(s: &mut App, host: String, code: String) {
 }
 
 /// Folds a finished pairing in, replacing an environment saved before (a fresh session).
-fn paired(s: &mut App, result: Result<Saved, String>) {
+fn paired(s: &mut App, result: Result<(Saved, Option<Value>), String>) {
     if let Some(id) = s.ui.env.route_for.take() {
-        match result.and_then(|env| route_paired(s, &id, env)) {
+        match result.and_then(|(env, _)| route_paired(s, &id, env)) {
             Ok(label) => {
                 s.ui.env.host.clear();
                 s.ui.env.code.clear();
@@ -640,11 +716,11 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
         return;
     }
     let env = match result {
-        Ok(env) if Some(&env.id) == local_id(s).as_ref() => Err("That address reaches this machine's own server.".to_owned()),
+        Ok((env, _)) if Some(&env.id) == local_id(s).as_ref() => Err("That address reaches this machine's own server.".to_owned()),
         other => other,
     };
-    let env = match env {
-        Ok(env) => env,
+    let (env, outdated) = match env {
+        Ok(paired) => paired,
         Err(e) => {
             s.ui.env.error = Some(e);
             return;
@@ -655,6 +731,10 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
         switch(s, LOCAL);
     }
     s.ui.env.parked.retain(|(k, _)| *k != env.id);
+    match outdated {
+        Some(descriptor) => s.ui.env.outdated.insert(env.id.clone(), descriptor),
+        None => s.ui.env.outdated.remove(&env.id),
+    };
     let src = connect(s, &env);
     s.ui.env.parked.push((env.id.clone(), src));
     s.ui.env.saved.retain(|e| e.id != env.id);
@@ -885,7 +965,7 @@ fn return_to_preferred(s: &mut App) -> bool {
                     let next = record(better, &checked, &answered, now).filter(|_| current.is_some_and(|c| c > 0));
                     if let Some(route) = next {
                         better.switched = Some(trimmed(&route.base).to_owned());
-                        let src = connect_to(s, &route.base, &route.bearer);
+                        let src = connect_to(s, &id, &route.base, &route.bearer);
                         if let Some(slot) = source_mut(s, &id) {
                             *slot = src;
                         }
@@ -956,7 +1036,7 @@ fn fall_back(s: &mut App) -> bool {
             better.cooldown.insert(from.clone(), now + BETTER_ROUTE_COOLDOWN);
         }
         s.ui.env.fell_back.insert(id.clone(), now);
-        let src = connect_to(s, &route.base, &route.bearer);
+        let src = connect_to(s, id, &route.base, &route.bearer);
         if let Some(slot) = source_mut(s, id) {
             *slot = src;
         }
@@ -1065,6 +1145,10 @@ mod tests {
             Some("This client requires a newer server. Update T3 Code on Box to connect."),
             "FAILED: a server from before negotiation speaks protocol 1"
         );
+        let older = |update: &str, desktop: bool| json!({"environmentId": "new", "label": "Box", "orchestrationProtocolVersion": 1, "capabilities": {"serverSelfUpdate": update, "desktopAppUpdate": desktop}});
+        assert_eq!(pairing_refusal(&older("boot-service", false), "https://new.example", &known, false), None, "FAILED: an outdated server that updates itself is saved to be updated");
+        assert_eq!(pairing_refusal(&older("desktop-managed", true), "https://new.example", &known, false), None);
+        assert!(pairing_refusal(&older("desktop-managed", false), "https://new.example", &known, false).is_some(), "a desktop host that can't update its app needs a manual update");
     }
 
     #[test]
@@ -1072,12 +1156,17 @@ mod tests {
         let list = vec![saved("a"), saved("b")];
         let off = vec!["b".to_owned()];
         let none = HashMap::new();
-        assert_eq!(decode(&encode(&list, &off, &none)), list);
-        assert_eq!(decode_off(&encode(&list, &off, &none)), off, "a switched-off environment stays off");
-        assert!(encode(&list, &[], &none).to_string().find("enabled").is_none(), "on is the default and omitted");
+        assert_eq!(decode(&encode(&list, &off, &none, &HashMap::new())), list);
+        assert_eq!(decode_off(&encode(&list, &off, &none, &HashMap::new())), off, "a switched-off environment stays off");
+        assert!(encode(&list, &[], &none, &HashMap::new()).to_string().find("enabled").is_none(), "on is the default and omitted");
         let alternates = HashMap::from([("a".to_owned(), vec![Alt { base: "https://a.ts.net".into(), bearer: "t2".into() }])]);
-        assert_eq!(decode_alternates(&encode(&list, &off, &alternates)), alternates, "web's alternateRoutes survive a save");
-        assert!(encode(&list, &off, &none).to_string().find("alternateRoutes").is_none());
+        assert_eq!(decode_alternates(&encode(&list, &off, &alternates, &HashMap::new())), alternates, "web's alternateRoutes survive a save");
+        assert!(encode(&list, &off, &none, &HashMap::new()).to_string().find("alternateRoutes").is_none());
+        let outdated = HashMap::from([("a".to_owned(), json!({"serverVersion": "0.1.5", "capabilities": {"serverSelfUpdate": "boot-service"}}))]);
+        let encoded = encode(&list, &off, &none, &outdated);
+        assert_eq!(decode_outdated(&encoded), outdated, "FAILED: an outdated server stays outdated across launches");
+        assert_eq!(encoded["environments"][0]["serverUpdateRequired"], true, "web's catalog field");
+        assert_eq!(decode(&encoded), list);
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
     }
