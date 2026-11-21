@@ -1232,6 +1232,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-fanout-uncertain", crate::chat::composer::fanout::scene_uncertain),
     ("composer-allow-retry", crate::chat::composer::fanout::scene_allow_retry),
     ("delete-worktree-too", crate::chat::details::cleanup::scene),
+    ("script-editor-locked", crate::chat::details::scripts::scene_locked),
+    ("details-editor-menu", crate::chat::details::scene_editor_menu),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);

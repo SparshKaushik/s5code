@@ -93,7 +93,6 @@ const SESSION_STALE_MS: i64 = 5 * 60_000;
 
 /// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
 /// leaves it to the server; a failed read denies, as web's guards do.
-#[cfg(test)]
 pub(crate) fn set_session(s: &mut App, session: Option<Result<Value, ()>>) {
     s.ui.chat.details.session = session;
 }
@@ -420,22 +419,22 @@ fn action(t: &T, key: &str, glyph: El, label: &str, color: Color) -> El {
 }
 
 fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
+    split_with(t, key, main, label, menu, true)
+}
+
+/// [`split`] whose chooser is disabled unless `enabled`.
+fn split_with(t: &T, key: &str, main: El, label: &str, menu: Menu, enabled: bool) -> El {
+    let chooser = el().key(key.to_string()).size(32.0, 32.0).center().corners([0.0, 8.0, 8.0, 0.0]).label(label.to_string()).help(label.to_string());
+    let chooser = if enabled {
+        chooser.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle_menu(s, menu))
+    } else {
+        chooser.opacity(0.64)
+    };
     row()
         .w_full()
         .gap(1.0)
         .child(main.w(229.0).corners([8.0, 0.0, 0.0, 8.0]))
-        .child(
-            el().key(key.to_string())
-                .size(32.0, 32.0)
-                .center()
-                .corners([0.0, 8.0, 8.0, 0.0])
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(label.to_string())
-                .help(label.to_string())
-                .child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground))
-                .on_press(move |s: &mut App| toggle_menu(s, menu)),
-        )
+        .child(chooser.child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground)))
 }
 
 /// A card menu row: icon, label, and the reason it is disabled as its tooltip.
@@ -733,10 +732,38 @@ fn pick_item(s: &mut App, item: Item) {
 
 /// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
 /// the thread there; anything else is switched to in the thread's checkout.
+/// `canUpdateThreadBranch`: a started thread's branch is orchestration metadata.
+fn can_update_branch(s: &App) -> bool {
+    composer::ctx(s).thread.is_none() || grants(s, "orchestration:operate")
+}
+
+/// `canChangeThreadBranch`: switching or creating a ref also writes source control.
+fn can_change_branch(s: &App) -> bool {
+    grants(s, "source-control:write") && can_update_branch(s)
+}
+
+/// `BranchPickerRefItem`'s `disabled`: moving to a ref's existing worktree needs no source control.
+fn ref_disabled(s: &App, r: &Ref) -> bool {
+    !can_update_branch(s) || (!grants(s, "source-control:write") && !selecting_base(s) && r.worktree.is_none())
+}
+
+/// `resolveBranchSelectionTarget`: a ref's worktree is the project's own checkout when it is the
+/// checkout root, or, until that root loads, when it holds the project.
+fn own_checkout(worktree: &str, project_cwd: &str, root: Option<&str>) -> bool {
+    let trim = |p: &str| p.trim_end_matches('/').to_string();
+    let worktree = trim(worktree);
+    match root {
+        Some(root) => worktree == trim(root),
+        None => {
+            let project = trim(project_cwd);
+            worktree == project || worktree.starts_with(&format!("{project}/"))
+        }
+    }
+}
+
 /// `runBranchAction`'s guard: changing the branch writes source control, and a thread's metadata.
 fn branch_denied(s: &mut App) -> bool {
-    let thread = composer::ctx(s).thread.is_some();
-    let denied = !grants(s, "source-control:write") || (thread && !grants(s, "orchestration:operate"));
+    let denied = !can_change_branch(s);
     if denied {
         palette::toast_error_brief(s, "Action unavailable", Some("This connection cannot change the thread's branch."));
     }
@@ -744,22 +771,23 @@ fn branch_denied(s: &mut App) -> bool {
 }
 
 fn select_ref(s: &mut App, r: &Ref) {
+    if ref_disabled(s, r) || switching(s) {
+        return;
+    }
     if selecting_base(s) {
         draft_run_mut(s).base = Some(r.name.clone());
-        return;
-    }
-    if branch_denied(s) {
-        return;
-    }
-    if switching(s) {
         return;
     }
     let c = composer::ctx(s);
     let project_cwd = c.project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
     let active = worktree_here(s);
     if let Some(path) = &r.worktree {
-        let own = path == &project_cwd || path.starts_with(&format!("{}/", project_cwd.trim_end_matches('/')));
+        let root = s.state().vcs.get(&project_cwd).and_then(|v| v["local"]["workingTree"]["rootPath"].as_str());
+        let own = own_checkout(path, &project_cwd, root);
         set_thread_branch(s, &r.name, (!own).then(|| path.clone()));
+        return;
+    }
+    if branch_denied(s) {
         return;
     }
     let next = if r.default { None } else { active };
@@ -927,8 +955,8 @@ fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
 
 fn visible_items(s: &App) -> Vec<Item> {
     let ui = &s.ui.chat.details;
-    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s));
-    if let Some(reference) = pr::parse_reference(&ui.branch_query.text) {
+    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s) && can_change_branch(s));
+    if let Some(reference) = pr::parse_reference(&ui.branch_query.text).filter(|_| can_change_branch(s)) {
         items.insert(0, Item::CheckoutPr(reference));
     }
     items
@@ -1011,6 +1039,9 @@ fn poll_branch(s: &mut App) -> bool {
 }
 
 fn open_in_editor(s: &mut App, editor: Option<String>) {
+    if !can_open_editor(s) {
+        return;
+    }
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
     if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
@@ -1021,10 +1052,36 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
     }
 }
 
-/// `(id, label)` for each editor the server found.
+fn editor_mode(s: &App) -> crate::env::ssh::OpenMode {
+    crate::env::ssh::open_mode(s, &s.ui.env.active)
+}
+
+/// OpenInPicker's `isHostEditorDenied`: the server's own editors need orchestration access.
+fn editor_denied(s: &App) -> bool {
+    editor_mode(s) == crate::env::ssh::OpenMode::Local && !grants(s, "orchestration:operate")
+}
+
+fn can_open_editor(s: &App) -> bool {
+    editor_mode(s) != crate::env::ssh::OpenMode::Unavailable && !editor_denied(s)
+}
+
+/// `editorLabelForPlatform`: the file manager takes this machine's name for it.
+fn editor_label(id: &str) -> String {
+    match id {
+        "file-manager" if cfg!(target_os = "macos") => "Finder".into(),
+        "file-manager" if cfg!(target_os = "windows") => "File Explorer".into(),
+        "file-manager" => "Files".into(),
+        id => crate::panel::diff::file_menu::label(id).to_string(),
+    }
+}
+
+/// `(id, label)` for each editor the server found; none without a route to the host.
 fn editors(s: &App) -> Vec<(String, String)> {
     if let Some(remote) = crate::env::ssh::editors(s) {
         return remote;
+    }
+    if editor_mode(s) == crate::env::ssh::OpenMode::Unavailable {
+        return Vec::new();
     }
     s.state()
         .config
@@ -1033,7 +1090,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .map(|v| {
             v.iter()
                 .map(|e| match e.as_str() {
-                    Some(id) => (id.to_string(), id.to_string()),
+                    Some(id) => (id.to_string(), editor_label(id)),
                     None => (data::s(e, "id").to_string(), data::s(e, "label").to_string()),
                 })
                 .collect()
@@ -1156,17 +1213,18 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
     let preferred = preferred_editor(s);
-    let editor = split(
+    let editor = split_with(
         t,
         "details-editor-menu",
         {
             let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
             let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
-            if preferred.is_none() { open.opacity(0.64) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
+            if preferred.is_none() || !can_open_editor(s) { open.opacity(0.64).cursor(Cursor::Default) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
         "Choose editor",
         Menu::Editor,
+        !editor_denied(s),
     );
     let on = |id: &str| items::visible(&s.client_settings.values, id);
     let general: Vec<El> = [(on("environment"), Some(run_context)), (on("openIn"), Some(editor)), (on("scripts"), None)]
@@ -1295,9 +1353,14 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         Menu::Editor => {
             let editors = editors(s);
             let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
-            if editors.is_empty() {
-                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No installed editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let note = |list: El, line: String| list.child(row().h(32.0).px(8.0).center_y().child(text(line).font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let mode = editor_mode(s);
+            if mode == crate::env::ssh::OpenMode::Unavailable {
+                list = note(list, format!("No SSH route to {}", crate::env::label(s, &s.ui.env.active)));
+            } else if editors.is_empty() {
+                list = note(list, "No installed editors found".into());
             }
+            let hint = matches!(mode, crate::env::ssh::OpenMode::Links(..)) && s.client_settings.values.get(crate::env::ssh::REMOTE_OPEN_HINT_SEEN) != Some(&json!(true));
             let preferred = preferred_editor(s).map(|e| e.0);
             let shortcut = palette::shortcut_label(s, "editor.openFavorite");
             // OpenInPicker's panel menu picks the button's editor; the button opens it.
@@ -1310,6 +1373,9 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
                     }), None)
                     .children(mark),
                 );
+            }
+            if hint {
+                list = note(list, format!("Opens over SSH. Needs your key on {}", crate::env::label(s, &s.ui.env.active)));
             }
             ("details-editor-menu", list)
         }
@@ -1441,7 +1507,8 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
                 s.ui.chat.details.branch_copy = Some((name.clone(), (at.x, at.y)));
             });
         }
-        let mut line = line.on_press(move |s: &mut App| pick_item(s, item.clone()));
+        let disabled = matches!(&item, Item::Ref(r) if ref_disabled(s, &refs[*r]));
+        let mut line = if disabled { line.opacity(0.64).cursor(Cursor::Default) } else { line.on_press(move |s: &mut App| pick_item(s, item.clone())) };
         if let Some(subtitle) = subtitle {
             line = line.child(text(subtitle).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).max_w(160.0));
         }
@@ -1527,12 +1594,23 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     out
 }
 
+/// Scene: the Open in editor chooser, with web's editor names.
+pub fn scene_editor_menu(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    if let crate::data::Source::Fixture(state) = &mut s.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["availableEditors"] = json!(["cursor", "vscode", "zed", "file-manager"]);
+    }
+    s.ui.chat.details.menu = Some(Menu::Editor);
+}
+
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
 /// showing the card first when it is closed. Web binds both outside the terminal.
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
     // `editor.openFavorite` opens the card's preferred editor, as its button does.
     if crate::panel::shortcut(s, e, "editor.openFavorite") {
-        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some()) else { return false };
+        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some() && can_open_editor(s)) else { return false };
         open_in_editor(s, Some(editor));
         return true;
     }
@@ -1807,6 +1885,43 @@ mod tests {
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
+    }
+
+    #[test]
+    fn a_ref_in_a_worktree_is_the_projects_own_only_at_its_checkout_root() {
+        use super::{can_change_branch, own_checkout, ref_disabled, set_session};
+        assert!(own_checkout("/repo/", "/repo/apps/web", Some("/repo")), "a subfolder project's checkout is the repository root");
+        assert!(!own_checkout("/repo/apps/web", "/repo/apps/web", Some("/repo")));
+        assert!(!own_checkout("/wt/feature", "/repo", Some("/repo")));
+        assert!(own_checkout("/repo/nested", "/repo", None), "until the root loads, one holding the project counts");
+        assert!(!own_checkout("/repo-2", "/repo", None));
+        let r = |worktree: Option<&str>| Ref { name: "feature".into(), remote: false, current: false, default: false, worktree: worktree.map(str::to_string) };
+        let mut s = App::new();
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
+        assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
+        assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
+        assert!(!can_change_branch(&s));
+    }
+
+    #[test]
+    fn open_in_editor_needs_orchestration_access_and_a_route() {
+        use super::{can_open_editor, editor_denied, editor_label, editors, set_session};
+        let mut s = App::new();
+        assert!(can_open_editor(&s));
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:read"]}))));
+        assert!(editor_denied(&s) && !can_open_editor(&s), "FAILED: the server's editors need orchestration:operate");
+        set_session(&mut s, None);
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+        s.ui.env.active = "box".into();
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = state.config.as_mut().and_then(|c| c.as_object_mut())
+        {
+            config.remove("remoteOpenTargets");
+        }
+        assert!(!editor_denied(&s) && !can_open_editor(&s), "FAILED: no SSH route leaves nothing to open with");
+        assert!(editors(&s).is_empty());
+        assert_eq!(editor_label("vscode"), "VS Code");
+        assert_eq!(editor_label("file-manager"), if cfg!(target_os = "macos") { "Finder" } else { "Files" });
     }
 
     #[test]

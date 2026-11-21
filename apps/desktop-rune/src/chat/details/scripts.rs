@@ -307,7 +307,26 @@ fn preferred<'a>(s: &App, scripts: &'a [Value]) -> Option<&'a Value> {
 }
 
 /// `runProjectScript`: types the command into an idle drawer terminal and remembers it.
+/// `hasTerminalWriteAccess`: running types into a terminal.
+fn can_run(s: &App) -> bool {
+    composer::ctx(s).thread.is_some() && super::grants(s, "terminal:operate")
+}
+
+/// Why this connection can't save the editor's change, as the editor's validation error.
+fn edit_denied(s: &App, changes_keybinding: bool) -> Option<&'static str> {
+    if !super::grants(s, "orchestration:operate") {
+        Some("This connection cannot change project actions.")
+    } else if changes_keybinding && !super::grants(s, "settings:write") {
+        Some("This connection cannot change keyboard shortcuts.")
+    } else {
+        None
+    }
+}
+
 pub fn run(s: &mut App, script: &Value) {
+    if !can_run(s) {
+        return;
+    }
     let c = composer::ctx(s);
     let (Some(thread), Some(project)) = (c.thread, c.project) else { return };
     let worktree = Some(data::s(thread, "worktreePath").to_string()).filter(|p| !p.is_empty());
@@ -342,6 +361,13 @@ fn open_editor(s: &mut App, script: Option<&Value>) {
     }
     e.name.focused = true;
     s.ui.chat.details.scripts.editor = Some(e);
+}
+
+/// Scene: the action editor on a connection that can read the project but not change it.
+pub fn scene_locked(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    open_editor(s, Some(&serde_json::json!({"id": "test", "name": "Test", "command": "bun run test", "icon": "test"})));
+    super::set_session(s, Some(Ok(serde_json::json!({"authenticated": true, "scopes": ["orchestration:read", "terminal:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
 }
 
 /// Writes the project's next script list, then its keybinding changes (`persistProjectScripts`).
@@ -380,12 +406,16 @@ fn persist(s: &mut App, next: Vec<Value>, command: String, keybinding: Option<Op
 
 fn save(s: &mut App) {
     let scripts = scripts(s);
+    let changes_keybinding = s.ui.chat.details.scripts.editor.as_ref().is_some_and(|e| Some(e.keybinding.trim()).filter(|k| !k.is_empty()) != e.initial_keybinding.as_deref());
+    let denied = edit_denied(s, changes_keybinding);
     let ui = &mut s.ui.chat.details.scripts;
     if ui.pending.is_some() {
         return;
     }
     let Some(e) = ui.editor.as_mut() else { return };
-    e.error = if e.name.text.trim().is_empty() {
+    e.error = if let Some(denied) = denied {
+        Some(denied.into())
+    } else if e.name.text.trim().is_empty() {
         Some("Name is required.".into())
     } else if e.command.text.trim().is_empty() {
         Some("Command is required.".into())
@@ -410,8 +440,13 @@ fn save(s: &mut App) {
 }
 
 fn delete(s: &mut App) {
+    let denied = edit_denied(s, false);
     let ui = &mut s.ui.chat.details.scripts;
     ui.confirm_delete = false;
+    if let (Some(denied), Some(e)) = (denied, ui.editor.as_mut()) {
+        e.error = Some(denied.into());
+        return;
+    }
     let Some(id) = ui.editor.take().and_then(|e| e.id) else { return };
     let scripts = scripts(s);
     let name = scripts.iter().find(|v| v["id"] == id.as_str()).map_or("Unknown", |v| data::s(v, "name")).to_string();
@@ -532,7 +567,7 @@ pub fn view(s: &App, t: &T) -> El {
     };
     let name = data::s(script, "name");
     let owned = script.clone();
-    let can_run = composer::ctx(s).thread.is_some();
+    let can_run = can_run(s);
     let main = super::action(t, "details-script-run", icon(icon_for(data::s(script, "icon")), 16.0).color(muted), name, fg).help(format!("Run {name}"));
     let main = if can_run { main.on_press(move |s: &mut App| run(s, &owned)) } else { main.opacity(0.64) };
     super::split(t, "details-scripts-menu", main, "Project scripts", super::Menu::Scripts)
@@ -540,7 +575,7 @@ pub fn view(s: &App, t: &T) -> El {
 
 /// The scripts menu's rows: each script with its shortcut and edit button, then "Add".
 pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
-    let can_run = composer::ctx(s).thread.is_some();
+    let can_run = can_run(s);
     let mut rows = vec![];
     for script in scripts(s) {
         let id = data::s(&script, "id").to_string();
@@ -608,19 +643,23 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
     let Some(e) = &ui.editor else { return };
     let k = kit::theme(t);
     let saving = ui.pending.is_some();
+    // Web's fieldset: everything but Cancel waits on orchestration access, the shortcut on settings.
+    let locked = saving || !super::grants(s, "orchestration:operate");
+    let shortcuts = !locked && super::grants(s, "settings:write");
     let field_label = |v: &str| text(v.to_string()).font(theme::SM_MEDIUM).color(t.c.foreground);
     let help = |v: &str| text(v.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let picker = kit::Button::new("Choose icon")
         .variant("outline")
         .size("icon-lg")
         .icon(icon_for(&e.icon))
+        .disabled(locked)
         .on_press(|s: &mut App| {
             let e = editor_mut(s);
             e.icons_open = !e.icons_open;
         })
         .build(t)
         .key("script-icon");
-    let name = kit::Input::new(&e.name).placeholder("Test").disabled(saving).on_edit(|s: &mut App| &mut editor_mut(s).name).on_submit(|s: &mut App, _| save(s)).build(t).single_line().grow(1.0).shrink().min_w(0.0);
+    let name = kit::Input::new(&e.name).placeholder("Test").disabled(locked).on_edit(|s: &mut App| &mut editor_mut(s).name).on_submit(|s: &mut App, _| save(s)).build(t).single_line().grow(1.0).shrink().min_w(0.0);
     let mut fields = col().w_full().gap(16.0).child(col().w_full().gap(6.0).child(field_label("Name")).child(row().w_full().gap(8.0).center_y().child(picker).child(name)));
     let icon_menu = e.icons_open.then(|| {
         let mut grid = col().gap(8.0);
@@ -657,7 +696,7 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
             .modal(true, |s: &mut App| editor_mut(s).icons_open = false)
     });
     let capturing = e.capturing && !(e.name.focused || e.command.focused || e.preview.focused);
-    let keybinding = row()
+    let mut keybinding = row()
         .key("script-keybinding")
         .w_full()
         .h(30.0)
@@ -669,40 +708,48 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
         .cursor(Cursor::Text)
         .role("textbox")
         .label("Keybinding")
-        .child(text(if e.keybinding.is_empty() { "Press shortcut".to_string() } else { e.keybinding.clone() }).font(theme::TEXT_SM).color(if e.keybinding.is_empty() { t.c.contrast_placeholder } else { t.c.foreground }))
-        .on_press(|s: &mut App| {
+        .child(text(if e.keybinding.is_empty() { "Press shortcut".to_string() } else { e.keybinding.clone() }).font(theme::TEXT_SM).color(if e.keybinding.is_empty() { t.c.contrast_placeholder } else { t.c.foreground }));
+    keybinding = if shortcuts {
+        keybinding.on_press(|s: &mut App| {
             let e = editor_mut(s);
             (e.name.focused, e.command.focused, e.preview.focused, e.capturing) = (false, false, false, true);
-        });
+        })
+    } else {
+        keybinding.opacity(0.64).cursor(Cursor::Default)
+    };
     fields = fields
         .child(col().w_full().gap(6.0).child(field_label("Keybinding")).child(keybinding).child(help(
             "Press a shortcut. Use Backspace to clear. Shortcuts are environment-wide. Projects using the same action share its shortcut.",
         )))
-        .child(col().w_full().gap(6.0).child(field_label("Command")).child(kit::TextArea::new(&e.command).placeholder("bun test").rows(3).on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k).w_full()))
+        .child(col().w_full().gap(6.0).child(field_label("Command")).child({
+            let command = kit::TextArea::new(&e.command).placeholder("bun test").rows(3);
+            // The fieldset is disabled as a whole; without its edit hook the command can't change.
+            if locked { command.build(&k).w_full().opacity(0.64) } else { command.on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k).w_full() }
+        }))
         .child(
             col()
                 .w_full()
                 .gap(6.0)
                 .child(field_label("Preview URL (optional)"))
-                .child(kit::Input::new(&e.preview).placeholder("http://localhost:5173").on_edit(|s: &mut App| &mut editor_mut(s).preview).build(t).single_line())
+                .child(kit::Input::new(&e.preview).placeholder("http://localhost:5173").disabled(locked).on_edit(|s: &mut App| &mut editor_mut(s).preview).build(t).single_line())
                 .child(help("Open this URL in the in-app preview when this action runs.")),
         )
-        .child(switch_row(t, "Run automatically on worktree creation", e.setup, saving, |e| e.setup = !e.setup))
-        .child(switch_row(t, "Wait for it to finish before the agent starts", e.wait, saving || !e.setup, |e| e.wait = !e.wait))
-        .child(switch_row(t, "Run in the thread's worktree when the thread settles", e.settle, saving, |e| e.settle = !e.settle))
-        .child(switch_row(t, "Open preview automatically when this action runs", e.auto_preview, saving || e.preview.text.trim().is_empty(), |e| e.auto_preview = !e.auto_preview));
+        .child(switch_row(t, "Run automatically on worktree creation", e.setup, locked, |e| e.setup = !e.setup))
+        .child(switch_row(t, "Wait for it to finish before the agent starts", e.wait, locked || !e.setup, |e| e.wait = !e.wait))
+        .child(switch_row(t, "Run in the thread's worktree when the thread settles", e.settle, locked, |e| e.settle = !e.settle))
+        .child(switch_row(t, "Open preview automatically when this action runs", e.auto_preview, locked || e.preview.text.trim().is_empty(), |e| e.auto_preview = !e.auto_preview));
     if let Some(error) = &e.error {
         fields = fields.child(text(error.clone()).font(theme::TEXT_SM).color(t.c.destructive).wrap());
     }
     let editing = e.id.is_some();
     let mut footer = row().w_full().gap(8.0).center_y();
     if editing {
-        footer = footer.child(kit::Button::new("Delete").variant("destructive-outline").disabled(saving).on_press(|s: &mut App| s.ui.chat.details.scripts.confirm_delete = true).build(t));
+        footer = footer.child(kit::Button::new("Delete").variant("destructive-outline").disabled(locked).on_press(|s: &mut App| s.ui.chat.details.scripts.confirm_delete = true).build(t));
     }
     footer = footer
         .child(el().grow(1.0))
         .child(kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
-        .child(kit::Button::new(if saving { "Saving…" } else if editing { "Save changes" } else { "Save action" }).disabled(saving).on_press(save).build(t));
+        .child(kit::Button::new(if saving { "Saving…" } else if editing { "Save changes" } else { "Save action" }).disabled(locked).on_press(save).build(t));
     kit::Dialog::new("script-editor", if editing { "Edit Action" } else { "Add Action" })
         .open(true)
         .description("Actions are project-scoped commands you can run from the top bar or keybindings.")
@@ -798,5 +845,29 @@ mod tests {
             imported("setup", &setup),
             json!({"id": "setup", "name": "Setup", "command": "bun i", "icon": "play", "runOnWorktreeCreate": true, "async": false, "previewUrl": "http://localhost:3000", "autoOpenPreview": false})
         );
+    }
+
+    #[test]
+    fn a_connection_without_the_scopes_can_neither_run_nor_save_actions() {
+        let mut s = App::new();
+        // A modern session: a legacy one (no `auth`) lets orchestration:operate stand in for settings:write.
+        let session = |scopes: &[&str]| Some(Ok(json!({"authenticated": true, "scopes": scopes, "auth": {"serverUpdateScope": "environment:maintain"}})));
+        open_editor(&mut s, None);
+        editor_mut(&mut s).name = TextEdit::new("Test");
+        editor_mut(&mut s).command = TextEdit::new("bun test");
+        editor_mut(&mut s).keybinding = "mod+shift+t".into();
+
+        super::super::set_session(&mut s, session(&["orchestration:read"]));
+        assert!(!can_run(&s), "FAILED: running needs terminal:operate");
+        save(&mut s);
+        assert_eq!(s.ui.chat.details.scripts.editor.as_ref().and_then(|e| e.error.as_deref()), Some("This connection cannot change project actions."));
+
+        super::super::set_session(&mut s, session(&["orchestration:operate"]));
+        save(&mut s);
+        assert_eq!(s.ui.chat.details.scripts.editor.as_ref().and_then(|e| e.error.as_deref()), Some("This connection cannot change keyboard shortcuts."), "FAILED: a new shortcut needs settings:write");
+        assert!(s.ui.chat.details.scripts.pending.is_none(), "FAILED: nothing was written");
+
+        editor_mut(&mut s).keybinding.clear();
+        assert_eq!(edit_denied(&s, false), None, "FAILED: without a shortcut, orchestration access is enough");
     }
 }
