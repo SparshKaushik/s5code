@@ -1096,6 +1096,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
         device::open_menu(s);
     }),
+    ("panel-add-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([]));
+        s.ui.panel.add_menu = true;
+    }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
         files::edit_fixture(s, None, false);
