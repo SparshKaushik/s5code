@@ -392,10 +392,14 @@ fn vcs<'a>(s: &'a App) -> Option<&'a Value> {
 
 /// Subscribes to the framed checkout's status, as the card's `useVcsStatus` does.
 pub fn watch(s: &mut App) {
-    if let Some(cwd) = cwd(s)
-        && let Some(net) = s.src.net()
-    {
-        net.watch_vcs(&cwd);
+    // The project checkout too (BranchToolbar's `projectStatusQuery`): its root tells a ref's own
+    // worktree from another one while the thread works in a worktree.
+    let project = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).filter(|p| !p.is_empty());
+    let cwd = cwd(s);
+    if let Some(net) = s.src.net() {
+        for path in cwd.iter().chain(project.iter()) {
+            net.watch_vcs(path);
+        }
     }
     scripts::load_file(s, false);
     servers::watch(s);
