@@ -74,6 +74,8 @@ pub struct Ui {
     #[cfg(unix)]
     pub cli: cli::State,
     zoom_level: f32,
+    /// Ctrl + wheel travel not yet turned into a zoom step.
+    wheel_zoom: f32,
     /// The window's size as the last view laid it out, for saving.
     window: Cell<Option<[f32; 2]>>,
     /// The content's desktop pixel origin as last reported; unknown on Wayland.
@@ -205,6 +207,9 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("check-for-updates"))
         .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("help-check-for-updates").menu("Help"))
         .menu_item(MenuItem::new(QUIT_TITLE, |s: &mut App, tx: &mut Tx| crate::shell::quit::menu_quit(s, tx)).id("quit").key_equivalent(key("cmd+q")).keys_first())
+        .menu_item(MenuItem::separator().menu("Edit"))
+        .menu_item(MenuItem::new("Start Speaking", |_: &mut App, tx: &mut Tx| macos::speak(Some(tx.text_selection().map_or("", |t| t.text())))).id("start-speaking").menu("Edit"))
+        .menu_item(MenuItem::new("Stop Speaking", |_: &mut App, _: &mut Tx| macos::speak(None)).id("stop-speaking").menu("Edit"))
         .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
         .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
         .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
@@ -275,6 +280,21 @@ fn zoom(s: &mut App, tx: &mut Tx, step: Option<f32>) {
     s.ui.desktop.set_zoom_level(level);
     tx.instant();
     let _ = prefs().set("zoomLevel", &level);
+}
+
+/// One wheel notch (40 points, a magnify of 0.2) is one zoom step. Rune hands Ctrl + wheel over as
+/// a magnify of `-dy / 200`, so a wheel turned up, which browsers zoom in on, arrives negative.
+fn wheel_zoom_step(travel: &mut f32, delta: f32) -> Option<f32> {
+    if travel.signum() != delta.signum() {
+        *travel = 0.0;
+    }
+    *travel += delta;
+    if travel.abs() < 0.19 {
+        return None;
+    }
+    let step = if *travel < 0.0 { ZOOM_STEP } else { -ZOOM_STEP };
+    *travel = 0.0;
+    Some(step)
 }
 
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
@@ -393,6 +413,13 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
     if cfg!(target_os = "macos") {
         return frame;
     }
+    // Electron's `zoom-changed`: Ctrl + wheel zooms the app off macOS (Chromium skips it there).
+    let frame = frame.on_magnify(|s: &mut App, e, tx: &mut Tx| {
+        if let Some(step) = wheel_zoom_step(&mut s.ui.desktop.wheel_zoom, e.delta) {
+            zoom(s, tx, Some(step));
+        }
+        true
+    });
     let scale = cx.env().scale;
     frame.on_screen_layout(move |s: &mut App, [x, y, _, _]| {
         s.ui.desktop.origin = Some([(x * scale).round() as i32, (y * scale).round() as i32]);
@@ -402,6 +429,18 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_ctrl_wheel_notch_is_one_zoom_step() {
+        let mut travel = 0.0;
+        assert_eq!(wheel_zoom_step(&mut travel, -0.2), Some(ZOOM_STEP), "a notch up zooms in");
+        assert_eq!(wheel_zoom_step(&mut travel, 0.2), Some(-ZOOM_STEP));
+        assert_eq!(wheel_zoom_step(&mut travel, 0.05), None, "a trackpad's small deltas add up");
+        assert_eq!(wheel_zoom_step(&mut travel, 0.05), None);
+        assert_eq!(wheel_zoom_step(&mut travel, -0.1), None, "turning back starts over");
+        assert_eq!(wheel_zoom_step(&mut travel, -0.1), Some(ZOOM_STEP));
+        assert_eq!(travel, 0.0);
+    }
 
     #[test]
     fn reload_reconnects_the_environment_on_screen() {
