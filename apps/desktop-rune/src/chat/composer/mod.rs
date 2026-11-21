@@ -165,18 +165,17 @@ pub fn route(s: &App) -> Route {
 }
 
 /// The side chat whose composer is being drawn or run.
-fn drawing(s: &App) -> Option<String> {
+pub(crate) fn drawing(s: &App) -> Option<String> {
     s.ui.chat.composer.target.borrow().clone()
 }
 
-/// A side chat's composer: route-bound parts that read the main thread (questions, plans,
-/// branch notices) stay with the main composer.
+/// A side chat's composer, which keys its elements apart.
 fn side(s: &App) -> bool {
     s.ui.chat.composer.target.borrow().is_some()
 }
 
 /// Draws (or reads) as the composer of side chat `target`; `None` is the route's composer.
-fn within<R>(s: &App, target: Option<String>, f: impl FnOnce() -> R) -> R {
+pub(crate) fn within<R>(s: &App, target: Option<String>, f: impl FnOnce() -> R) -> R {
     let previous = s.ui.chat.composer.target.replace(target);
     let out = f();
     s.ui.chat.composer.target.replace(previous);
@@ -193,24 +192,24 @@ pub fn acting<R>(s: &mut App, target: Option<String>, f: impl FnOnce(&mut App) -
 }
 
 /// A handler that runs for the composer being drawn, so a side chat's controls reach its draft.
-fn act(s: &App, f: impl Fn(&mut App) + 'static) -> impl Fn(&mut App) + 'static {
+pub(crate) fn act(s: &App, f: impl Fn(&mut App) + 'static) -> impl Fn(&mut App) + 'static {
     let at = drawing(s);
     move |s: &mut App| acting(s, at.clone(), |s| f(s))
 }
 
-fn act_tx(s: &App, f: impl Fn(&mut App, &mut Tx) + 'static) -> impl Fn(&mut App, &mut Tx) + 'static {
+pub(crate) fn act_tx(s: &App, f: impl Fn(&mut App, &mut Tx) + 'static) -> impl Fn(&mut App, &mut Tx) + 'static {
     let at = drawing(s);
     move |s: &mut App, tx: &mut Tx| acting(s, at.clone(), |s| f(s, tx))
 }
 
-fn act_key(s: &App, f: impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static) -> impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static {
+pub(crate) fn act_key(s: &App, f: impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static) -> impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static {
     let at = drawing(s);
     move |s: &mut App, e: &KeyEvent, tx: &mut Tx| acting(s, at.clone(), |s| f(s, e, tx))
 }
 
 /// `base` for the composer being drawn: a side chat's composer keys its elements apart, so
 /// layout reads and anchors find its own.
-fn keyed(s: &App, base: &str) -> String {
+pub(crate) fn keyed(s: &App, base: &str) -> String {
     if side(s) { format!("side-{base}") } else { base.to_owned() }
 }
 
@@ -219,17 +218,17 @@ fn side_owner(s: &App) -> Option<&str> {
     s.ui.chat.composer.owner.as_deref().filter(|o| crate::chat::side::open_beside(s) == Some(*o))
 }
 
-/// The main thread's pending question holds the editor; a side chat's composer never shows it.
+/// The pending question of the thread this composer writes into holds its editor.
 fn asking(s: &App) -> bool {
-    !side(s) && question::active(s).is_some()
+    question::active(s).is_some()
 }
 
 fn question_editor(s: &App) -> Option<question::Editor> {
-    if side(s) { None } else { question::editor(s) }
+    question::editor(s)
 }
 
 fn plan_follow_up(s: &App) -> Option<(String, String)> {
-    if side(s) { None } else { plan::follow_up(s) }
+    plan::follow_up(s)
 }
 
 /// Whether the composer being drawn is the one used last, which shows the shared drawers.
@@ -1667,9 +1666,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .placeholder(q.placeholder, t.c.placeholder)
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(move |s: &mut App| question::editor_edit(s, &key))
-            .on_submit(|s: &mut App, _| question::advance(s))
-            .on_input_key(on_key)
-            .on_input_change(|s: &mut App, _| question::on_editor_change(s))
+            .on_submit(act_tx(s, |s: &mut App, _: &mut Tx| question::advance(s)))
+            .on_input_key(act_key(s, on_key))
+            .on_input_change(act_tx(s, |s: &mut App, _: &mut Tx| question::on_editor_change(s)))
     } else {
         text_input(&d.edit, theme::TEXT_SM.lh(22.75))
             .key("composer-editor")
@@ -1728,18 +1727,17 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(stash));
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
-    // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let main = !side(s);
+    // on a wrapper: a full-width child with margins would shift rather than shrink. A side
+    // chat's composer docks its own thread's notices (SideChatPane's embedded ChatView).
     // On the draft hero web moves its notices below the composer (isDraftHeroState).
     let hero = matches!(s.frame_route(), Route::Home { .. });
     let detached = crate::add_to_machine::banner(s, t, true).filter(|_| hero);
     let docked = crate::chat::timeline::composer_requests(s, t)
-        .filter(|_| main)
-        .or_else(|| plan::banner(s, t).filter(|_| main))
+        .or_else(|| plan::banner(s, t))
         .or_else(|| crate::add_to_machine::banner(s, t, false).filter(|_| !hero))
-        .or_else(|| crate::chat::details::mismatch_banner(s, t).filter(|_| main));
+        .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
-    let docked = if main { usage_limits::banner(s, cx, t).or(docked) } else { docked };
+    let docked = usage_limits::banner(s, cx, t).or(docked);
     let docked = banners::dock(s, t, docked);
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !(s.ui.chat.composer.stash.open && owns(s)));
@@ -1769,12 +1767,14 @@ pub fn view_for(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane, side: &str) -> El
     within(s, Some(side.to_owned()), || view(s, cx, t, lane))
 }
 
-/// Side chat `side`'s composer overlays, while its composer was the one used last.
+/// Side chat `side`'s composer overlays, while its composer was the one used last, and its
+/// quote chip popovers.
 pub fn overlays_for(s: &App, cx: &mut Cx<App>, t: &T, side: &str) -> Vec<El> {
-    if side_owner(s) != Some(side) {
-        return Vec::new();
-    }
-    within(s, Some(side.to_owned()), || overlay_layers(s, cx, t))
+    within(s, Some(side.to_owned()), || {
+        let mut layers = if side_owner(s) == Some(side) { overlay_layers(s, cx, t) } else { Vec::new() };
+        layers.extend(chips::citation_popover(s, t));
+        layers
+    })
 }
 
 /// Composer chords pressed inside side chat `side`'s pane (useChatShortcuts' embedded composer).
@@ -2079,7 +2079,7 @@ fn primary_action(s: &App, t: &T) -> El {
     let typed = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty());
     let resume = show_resume(s);
     // With nothing typed, Resume wins over Implement (showPlanFollowUpPrompt && !canResume).
-    if (typed || !resume) && !side(s) {
+    if typed || !resume {
         if let Some(action) = plan::action(s, t, typed) {
             return action;
         }
@@ -2650,6 +2650,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
         }
     }),
+    // `/usage-limits` sent from a side chat's composer opens the panel on that composer.
+    ("chat-side-composer-usage-limits", |s| {
+        if let Some((_, setup)) = crate::chat::timeline::SCENES.iter().find(|(name, _)| *name == "chat-side-pane") {
+            setup(s);
+        }
+        patch_config(s, usage_limits::scene_limits);
+        acting(s, Some("scene-side".into()), |s| {
+            draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+            set_text(s, "/usage-limits");
+            send(s, false);
+        });
+        if let Some(open) = s.ui.chat.composer.usage.open.as_mut() {
+            open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
+        }
+    }),
     ("composer-draft-hero-centred", on_home),
     ("composer-attachments-reattach", |s| {
         stash_scene(s);
@@ -2953,6 +2968,14 @@ mod tests {
         send(&mut s, false);
         assert!(draft(&s).unwrap().edit.text.is_empty());
         assert!(s.ui.chat.composer.usage.open.is_some());
+        // From a side chat's composer the panel opens under that composer's key, not the chat's.
+        let side = data::s(&s.state().threads[1], "id").to_string();
+        acting(&mut s, Some(side.clone()), |s| {
+            draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+            set_text(s, "/usage-limits");
+            send(s, false);
+        });
+        assert!(s.ui.chat.composer.usage.open.as_ref().is_some_and(|(key, _)| key.starts_with(&format!("{side}:"))));
     }
 
     #[test]

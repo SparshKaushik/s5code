@@ -51,6 +51,8 @@ pub struct Ui {
     inspector: inspector::State,
     history: history::State,
     md_links: md_links::State,
+    /// A settled text selection in a reply, which the Cite toolbar quotes.
+    quote: Option<citation::Quote>,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
@@ -130,8 +132,24 @@ pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::det
         return None;
     }
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
+    let bottom = crate::chat::composer::BOTTOM + composer_h + 10.0 + banners::stack_h(cx);
+    Some(end_button(app, t, lane, thread, &app.ui.chat.timeline.follow, bottom).key("timeline-scroll-to-end"))
+}
+
+/// The side chat pane's own "Scroll to end", over its timeline above its composer, following
+/// that list's scrolling alone.
+pub fn side_scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::details::Lane, side: &str) -> Option<El> {
+    if is_empty(app, side) || !in_side_pane(app, side) {
+        return None;
+    }
+    let composer_h = cx.layout_with(crate::chat::composer::SIDE_LANE, |r| r[3].round()).unwrap_or(112.0);
+    let bottom = crate::chat::composer::BOTTOM + composer_h + 10.0;
+    Some(end_button(app, t, lane, side, &app.ui.chat.timeline.side_follow, bottom).key("side-timeline-scroll-to-end"))
+}
+
+/// ScrollToEndButton for `thread`'s list, `bottom` points above the pane's foot.
+fn end_button(app: &App, t: &T, lane: &crate::chat::details::Lane, thread: &str, follow: &Follow, bottom: f32) -> El {
     let list = format!("timeline-{thread}");
-    let follow = &app.ui.chat.timeline.follow;
     // The summary names what waits at the end, out of view while the button shows.
     let queued = app.state().thread_views.get(thread).map_or(0, |v| queue::workflow(&v.projection).queued.len());
     let mut button = crate::kit::button::Button::new("Scroll to end")
@@ -145,16 +163,13 @@ pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::det
             .label(format!("Scroll to end, {queued} queued"))
             .child(text(format!("· {queued} queued")).font(theme::XS_MEDIUM).color(t.c.muted_foreground).a11y_hidden());
     }
-    Some(
-        row()
-            .key("timeline-scroll-to-end")
-            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0 + banners::stack_h(cx)))
-            .w(lane.width)
-            .justify_center()
-            .live_opacity(&follow.opacity)
-            .live_offset(&follow.offset)
-            .child(button),
-    )
+    row()
+        .pin(Some(lane.left), None, None, Some(bottom))
+        .w(lane.width)
+        .justify_center()
+        .live_opacity(&follow.opacity)
+        .live_offset(&follow.offset)
+        .child(button)
 }
 
 /// `shouldCollapseUserMessage`: over 600 visible characters or 8 lines.
@@ -990,9 +1005,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         let foldable = collapses(&shown);
                         let folded = foldable && !found && !app.ui.chat.timeline.expanded.contains(&fold_key);
                         let rendered = rich.then(|| markdown::user(app, s(item, "text"), s(item, "id"), t, marks.as_ref()));
+                        // whitespace-pre-wrap wrap-break-word: `text` alone never wraps.
                         let mut body = text(shown)
                             .font(theme::TEXT_SM.lh(22.75))
                             .color(t.c.message_foreground)
+                            .wrap_anywhere()
                             .selectable(true)
                             .pills(pills)
                             .text_highlights(highlights);

@@ -401,15 +401,17 @@ pub fn citation_pill(href: &str) -> String {
 }
 
 /// The quote chip whose comment is being edited (AssistantCitationCommentEditor): its draft,
-/// where its pill started, the pill id, and the comment as typed.
+/// where its pill started, the pill id, and the comment as typed. A chip just cited from a reply
+/// keeps the spaces inserted before and after it, as cancelling takes them out with it.
 pub struct CommentEditor {
     target: Option<(String, usize, String)>,
     edit: TextEdit,
+    remove_on_cancel: Option<(bool, bool)>,
 }
 
 impl Default for CommentEditor {
     fn default() -> CommentEditor {
-        CommentEditor { target: None, edit: TextEdit::new("") }
+        CommentEditor { target: None, edit: TextEdit::new(""), remove_on_cancel: None }
     }
 }
 
@@ -462,13 +464,55 @@ fn open_comment(s: &mut App, start: usize, pill: &str) {
     }
     let mut edit = TextEdit::new(saved);
     edit.focused = true;
-    s.ui.chat.composer.citation = CommentEditor { target: Some((key, start, pill.to_owned())), edit };
+    s.ui.chat.composer.citation = CommentEditor { target: Some((key, start, pill.to_owned())), edit, remove_on_cancel: None };
+}
+
+/// citeAssistantText: the quote goes in at the caret as a chip, a space before it unless one is
+/// there and one after, and its comment editor opens.
+pub fn cite(s: &mut App, quote: &Citation) {
+    let d = super::draft_mut(s);
+    d.edit.set_caret(d.edit.focus);
+    let at = d.edit.range().1;
+    let before = at > 0 && !d.edit.text[..at].ends_with(char::is_whitespace);
+    let after = !d.edit.text[at..].starts_with(char::is_whitespace);
+    if before {
+        d.edit.insert(" ");
+    }
+    let start = d.edit.range().1;
+    let pill = citation_pill(&citation_href(quote));
+    d.edit.insert_pill(pill.clone(), &citation_label(quote));
+    if after {
+        d.edit.insert(" ");
+    }
+    open_comment(s, start, &pill);
+    s.ui.chat.composer.citation.remove_on_cancel = Some((before, after));
+}
+
+/// The chip at `pill` taken back out with the spaces its citing inserted.
+fn uncite(edit: &mut TextEdit, pill: &str, start: usize, (before, after): (bool, bool)) {
+    let Some(r) = find_pill(edit, pill, start) else { return };
+    let a = if before && edit.text[..r.start].ends_with(' ') { r.start - 1 } else { r.start };
+    let b = if after && edit.text[r.end..].starts_with(' ') { r.end + 1 } else { r.end };
+    edit.set_selection(a, b);
+    edit.insert("");
+}
+
+/// Escape and Cancel: a chip just cited goes again (onRemove), any other keeps its comment.
+fn cancel_comment(s: &mut App) {
+    let ui = &mut s.ui.chat.composer;
+    if let (Some((key, start, pill)), Some(spaces)) = (&ui.citation.target, ui.citation.remove_on_cancel)
+        && let Some(d) = ui.drafts.get_mut(key)
+    {
+        uncite(&mut d.edit, pill, *start, spaces);
+    }
+    close_comment(s, true);
 }
 
 /// Closes the editor; `refocus` puts the caret back in the prompt (the chip's onRestoreFocus).
 fn close_comment(s: &mut App, refocus: bool) {
     let ui = &mut s.ui.chat.composer;
     ui.citation.edit.focused = false;
+    ui.citation.remove_on_cancel = None;
     if let Some((key, ..)) = ui.citation.target.take()
         && refocus
         && let Some(d) = ui.drafts.get_mut(&key)
@@ -507,7 +551,7 @@ fn dismiss_comment(s: &mut App) {
 fn comment_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
     match e.key {
         Key::Escape => {
-            close_comment(s, true);
+            cancel_comment(s);
             true
         }
         Key::Enter if !e.mods.shift && (e.mods.cmd || e.mods.ctrl) => {
@@ -528,12 +572,14 @@ pub fn citation_popover(s: &App, t: &T) -> Option<El> {
         return None;
     }
     let ui = &s.ui.chat.composer.citation;
-    let editing = ui.target.as_ref().and_then(|(key, start, pill)| {
+    // Each composer (the chat's, a side chat's) shows only the editor it opened.
+    let mine = super::active_key(s);
+    let editing = ui.target.as_ref().filter(|(key, ..)| *key == mine).and_then(|(key, start, pill)| {
         find_pill(&s.ui.chat.composer.drafts.get(key)?.edit, pill, *start)?;
         parse_citation(pill.strip_prefix(CITE)?)
     });
     if let Some(quote) = editing {
-        return Some(comment_editor(t, &quote, &ui.edit));
+        return Some(comment_editor(s, t, &quote, &ui.edit));
     }
     let d = super::draft(s)?;
     if !d.edit.focused || d.edit.anchor != d.edit.focus {
@@ -549,11 +595,11 @@ pub fn citation_popover(s: &App, t: &T) -> Option<El> {
     let quote = parse_citation(&pill[CITE.len()..])?;
     let label = if quote.comment.is_some() { "Edit citation comment" } else { "Add comment to citation" };
     let (start, pill) = (range.start, pill.to_owned());
-    let pencil = crate::kit::icon_button(&icons::PENCIL, label).variant("outline").size("icon-sm").on_press(move |s: &mut App| open_comment(s, start, &pill)).build(t);
-    Some(citation_card(t, &quote, Some(pencil)).key("composer-citation-card").preserve_focus_on_press(true).anchored("composer", Side::Top, Align::Start, 8.0))
+    let pencil = crate::kit::icon_button(&icons::PENCIL, label).variant("outline").size("icon-sm").on_press(super::act(s, move |s: &mut App| open_comment(s, start, &pill))).build(t);
+    Some(citation_card(t, &quote, Some(pencil)).key("composer-citation-card").preserve_focus_on_press(true).anchored(super::keyed(s, "composer"), Side::Top, Align::Start, 8.0))
 }
 
-fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
+fn comment_editor(s: &App, t: &T, quote: &Citation, edit: &TextEdit) -> El {
     let long = too_long(&edit.text);
     let input = text_input(edit, theme::TEXT_SM.lh(20.0))
         .key("citation-comment-input")
@@ -567,13 +613,13 @@ fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
         .on_submit(|s: &mut App, _| {
             save_comment(s);
         })
-        .on_input_key(comment_key);
+        .on_input_key(super::act_key(s, comment_key));
     let mut body = col().w_full().gap(8.0).child(auto_grow(input, 2, 6));
     if long {
         let limit = super::context::thousands(MAX_COMMENT as u64);
         body = body.child(text(format!("Comments can contain up to {limit} characters.")).font(theme::TEXT_XS).color(t.c.destructive).role("status").wrap().w_full());
     }
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").size("xs").on_press(|s: &mut App| close_comment(s, true)).build(t);
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").size("xs").on_press(cancel_comment).build(t);
     let save = crate::kit::Button::new(if long { "Shorten comment" } else { "Save" }).size("xs").disabled(long).on_press(|s: &mut App| {
         save_comment(s);
     });
@@ -589,7 +635,7 @@ fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
         .role("dialog")
         .label(format!("Edit citation comment: {}", citation_label(quote)))
         .child(body.child(buttons))
-        .anchored("composer", Side::Top, Align::End, 8.0)
+        .anchored(super::keyed(s, "composer"), Side::Top, Align::End, 8.0)
         .modal(true, dismiss_comment)
 }
 
@@ -768,5 +814,31 @@ mod tests {
         assert_eq!(dismissal("new", Some("old")), Dismissal::Commit);
         assert_eq!(dismissal("", Some("old")), Dismissal::Commit);
         assert_eq!(dismissal(&"x".repeat(MAX_COMMENT + 1), None), Dismissal::KeepOpen);
+    }
+
+    #[test]
+    fn escape_closes_only_the_comment_editor_and_takes_back_a_fresh_cite() {
+        let mut s = App::new();
+        let href = citation_href(&quote(None));
+        super::super::append_with_chips(&mut s, &format!("see [Assistant quote]({href}) ok"), &[], "");
+        let prompt = super::super::draft(&s).unwrap().edit.text.clone();
+        open_comment(&mut s, 4, &citation_pill(&href));
+        s.ui.chat.composer.permissions_open = true;
+        s.ui.chat.timeline.chip = Some(("message".into(), "context".into()));
+        let escape = KeyEvent { key: Key::Escape, mods: rune::Mods::default() };
+        assert!(comment_key(&mut s, &escape, &mut Tx::default()), "FAILED: the editor takes Escape, so no modal behind it hears it");
+        assert!(s.ui.chat.composer.citation.target.is_none(), "FAILED: Escape closes the editor");
+        assert!(s.ui.chat.composer.permissions_open, "FAILED: the menu behind the editor stays open");
+        assert!(s.ui.chat.timeline.chip.is_some(), "FAILED: the timeline popover stays open");
+        let d = super::super::draft(&s).unwrap();
+        assert!(d.edit.focused, "FAILED: the caret goes back to the prompt");
+        assert_eq!((d.edit.text.as_str(), d.edit.pills().count()), (prompt.as_str(), 1), "FAILED: a chip already there keeps its place");
+
+        cite(&mut s, &quote(Some("Why?")));
+        assert!(s.ui.chat.composer.citation.target.is_some(), "FAILED: citing opens the comment editor");
+        assert_eq!(super::super::draft(&s).unwrap().edit.text, format!("{prompt} Why? "));
+        assert!(comment_key(&mut s, &escape, &mut Tx::default()));
+        assert!(s.ui.chat.composer.citation.target.is_none());
+        assert_eq!(super::super::draft(&s).unwrap().edit.text, prompt, "FAILED: cancelling a fresh cite takes the chip and its spaces back out");
     }
 }

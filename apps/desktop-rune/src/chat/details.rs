@@ -72,8 +72,8 @@ pub struct Ui {
     /// dismissed for this session.
     mismatch_shown: HashSet<String>,
     mismatch_dismissed: HashSet<String>,
-    /// "Switch to {branch}?" over uncommitted changes.
-    restore_confirm: Option<String>,
+    /// "Switch to {branch}?" over uncommitted changes, and the side chat whose notice asked.
+    restore_confirm: Option<(String, Option<String>)>,
     /// This connection's session (`GET /api/auth/session`): the reply, when it came, and the
     /// read in flight. Its grants gate git actions, branch changes and the diff panel.
     session: Option<Result<Value, ()>>,
@@ -148,7 +148,7 @@ fn scene_thread(s: &mut App) -> Option<String> {
 }
 
 /// ThreadDetailsSection: a titled list under a hairline when a section with content is above it.
-fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
+pub(crate) fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
     let heading = row()
         .w_full()
         .min_h(32.0)
@@ -825,15 +825,19 @@ fn mismatch(s: &App) -> Option<(String, String, String)> {
 }
 
 fn composer_has_content(s: &App) -> bool {
-    s.ui.chat.composer.drafts.get(&composer::draft_key(s, s.frame_route())).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
+    s.ui.chat.composer.drafts.get(&composer::draft_key(s, &composer::route(s))).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
 }
 
-/// The mismatch notice appears once the composer has content and stays for that mismatch.
+/// The mismatch notice appears once the composer has content and stays for that mismatch; the
+/// open side chat's composer notes its own.
 fn note_mismatch(s: &mut App) -> bool {
-    match mismatch(s) {
-        Some((key, ..)) if composer_has_content(s) => s.ui.chat.details.mismatch_shown.insert(key),
-        _ => false,
-    }
+    let app: &App = s;
+    let side = super::side::open_beside(app).map(str::to_owned);
+    let noted: Vec<String> = [None, side]
+        .into_iter()
+        .filter_map(|target| composer::within(app, target, || mismatch(app).filter(|_| composer_has_content(app)).map(|(key, ..)| key)))
+        .collect();
+    noted.into_iter().fold(false, |changed, key| s.ui.chat.details.mismatch_shown.insert(key) | changed)
 }
 
 fn restore_branch(s: &mut App, confirmed: bool) {
@@ -842,7 +846,7 @@ fn restore_branch(s: &mut App, confirmed: bool) {
         return;
     }
     if !confirmed && vcs(s).is_some_and(|v| v["local"]["hasWorkingTreeChanges"] == true) {
-        s.ui.chat.details.restore_confirm = Some(branch);
+        s.ui.chat.details.restore_confirm = Some((branch, composer::drawing(s)));
         return;
     }
     s.ui.chat.details.restore_confirm = None;
@@ -893,7 +897,7 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
                     .variant("ghost")
                     .size("xs")
                     .disabled(restoring)
-                    .on_press(|s: &mut App| restore_branch(s, false))
+                    .on_press(composer::act(s, |s: &mut App| restore_branch(s, false)))
                     .build(t),
             )
             .child(
@@ -908,14 +912,14 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
 }
 
 fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
-    let Some(branch) = s.ui.chat.details.restore_confirm.clone() else { return };
+    let Some((branch, side)) = s.ui.chat.details.restore_confirm.clone() else { return };
     let close = |s: &mut App| s.ui.chat.details.restore_confirm = None;
     let footer = row()
         .w_full()
         .gap(8.0)
         .child(el().grow(1.0))
         .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
-        .child(crate::kit::Button::new("Switch branch").on_press(|s: &mut App| restore_branch(s, true)).build(t));
+        .child(crate::kit::Button::new("Switch branch").on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
     crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
         .open(true)
         .alert()
@@ -1241,6 +1245,12 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         }
         if on("automations")
             && let Some(panel) = automations::view(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
+        if on("sideChats")
+            && let Some(panel) = super::side::details_list(s, t, id, divided)
         {
             body = body.child(panel);
             divided = true;

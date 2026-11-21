@@ -1381,6 +1381,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
     body = body.child(divided(t, figures));
     if let Some(target) = a.redeem.clone().filter(|_| credit_count(a) > 0) {
         let busy = u.limits.redeeming.as_ref().is_some_and(|r| r.1 == seg.key);
+        let allowed = can_redeem(s, &target.0);
         let key = seg.key.clone();
         let line = row()
             .w_full()
@@ -1392,11 +1393,12 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
                 kit::Button::new(if busy { "Using…" } else { "Use reset" })
                     .size("xs")
                     .variant("outline")
-                    .disabled(busy)
+                    .disabled(busy || !allowed)
                     .on_press(move |s: &mut App| {
-                        let u = ui(s);
-                        u.segment = None;
-                        u.confirm = Some((key.clone(), target.clone()));
+                        ui(s).segment = None;
+                        if can_redeem(s, &target.0) {
+                            ui(s).confirm = Some((key.clone(), target.clone()));
+                        }
                     })
                     .build(t),
             );
@@ -1407,15 +1409,21 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
 
 fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, target)) = s.ui.pages.usage.limits.confirm.clone() else { return };
-    reset_credit_dialog(t, overlays, |s: &mut App| ui(s).confirm = None, move |s: &mut App| redeem(s, &key, &target));
+    let disabled = !can_redeem(s, &target.0);
+    reset_credit_dialog(t, overlays, disabled, |s: &mut App| ui(s).confirm = None, move |s: &mut App| redeem(s, &key, &target));
+}
+
+/// useResetCredit's `canManageProviders`: the environment holding the credit grants `providers:manage`.
+pub(crate) fn can_redeem(s: &App, environment: &str) -> bool {
+    crate::settings::permissions::can_on(s, environment, "providers:manage")
 }
 
 /// ResetCreditDialog: redemption spends a credit, so it asks first. The composer's
 /// `/usage-limits` panel asks with it too.
-pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, cancel: impl Fn(&mut App) + Clone + 'static, confirm: impl Fn(&mut App) + 'static) {
+pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, disabled: bool, cancel: impl Fn(&mut App) + Clone + 'static, confirm: impl Fn(&mut App) + 'static) {
     let close = cancel.clone();
     let cancel = kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t);
-    let confirm = kit::Button::new("Use credit").on_press(confirm).build(t);
+    let confirm = kit::Button::new("Use credit").disabled(disabled).on_press(confirm).build(t);
     kit::Dialog::new("usage-reset-credit", "Use a reset credit?")
         .alert()
         .width(448.0)
@@ -1429,6 +1437,9 @@ pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, cancel: impl Fn
 /// Spends the credit on the environment that reported it.
 fn redeem(s: &mut App, key: &str, (environment, input): &Redeem) {
     ui(s).confirm = None;
+    if !can_redeem(s, environment) {
+        return;
+    }
     let Some(net) = env_net(s, environment) else { return };
     let id = net.request("provider.consumeResetCredit", input.clone());
     let u = ui(s);

@@ -210,12 +210,14 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink))
 }
 
-/// [`view`] with find-in-thread matches painted; rows with marks build fresh while the bar is open.
+/// A reply: [`view`] with find-in-thread matches painted (rows with marks build fresh while the
+/// bar is open), its text a quote source for the Cite toolbar.
 pub fn view_marked(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
-    match marks {
+    let body = match marks {
         None => view(app, source, id, t),
         Some(_) => build(app, source, id, t, marks, ink(t)),
-    }
+    };
+    super::citation::source(id, body)
 }
 
 /// A user message in its bubble's ink, each newline a line break (ChatMarkdown `lineBreaks`).

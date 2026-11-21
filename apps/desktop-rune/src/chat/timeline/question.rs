@@ -40,9 +40,10 @@ fn turn_items(p: &Value) -> impl Iterator<Item = &Value> {
     array(p, "visibleTurnItems").iter().map(|v| &v["item"]).chain(array(p, "turnItems"))
 }
 
+/// The first pending question of the thread the composer in use writes into (a side chat's own).
 pub fn active(app: &App) -> Option<Active<'_>> {
-    let Route::Thread(thread) = app.frame_route() else { return None };
-    let p = &app.state().thread_views.get(thread)?.projection;
+    let Route::Thread(thread) = crate::chat::composer::route(app) else { return None };
+    let p = &app.state().thread_views.get(&thread)?.projection;
     array(p, "runtimeRequests").iter().filter(|r| s(r, "status") == "pending").find_map(|request| {
         let item = turn_items(p).find(|i| s(i, "requestId") == s(request, "id") && !s(request, "id").is_empty());
         let question = s(request, "kind") == "user_input" || item.is_some_and(|i| s(i, "type") == "user_input_request");
@@ -129,7 +130,7 @@ fn composer_focused(app: &App, a: &Active) -> bool {
     if let Some(edit) = previous.and_then(|q| app.ui.chat.timeline.custom_answers.get(&custom_key(a.id(), s(q, "id")))) {
         return edit.focused;
     }
-    let key = crate::chat::composer::draft_key(app, app.frame_route());
+    let key = crate::chat::composer::draft_key(app, &crate::chat::composer::route(app));
     app.ui.chat.composer.drafts.get(&key).is_some_and(|d| d.edit.focused)
 }
 
@@ -233,9 +234,14 @@ pub fn poll(app: &mut App) -> bool {
         return false;
     }
     app.ui.chat.timeline.auto_advance = None;
-    let still = active(app).is_some_and(|a| a.id() == request && progress(app, &a).index == index);
-    if still {
-        advance(app);
+    // The question may be the open side chat's, whose composer answers it.
+    let shared: &App = app;
+    let side = crate::chat::side::open_beside(shared).map(str::to_owned);
+    let target = [None, side].into_iter().find(|target| {
+        crate::chat::composer::within(shared, target.clone(), || active(shared).is_some_and(|a| a.id() == request && progress(shared, &a).index == index))
+    });
+    if let Some(target) = target {
+        crate::chat::composer::acting(app, target, advance);
     }
     true
 }
@@ -292,7 +298,7 @@ pub fn panel(app: &App, t: &T) -> Option<El> {
                 .label("Dismiss question without answering")
                 .help("Dismiss question without answering")
                 .child(icon(&icons::X, 14.0).color(t.c.muted_foreground))
-                .on_press(dismiss),
+                .on_press(crate::chat::composer::act(app, dismiss)),
         );
     }
     let head = row()
@@ -356,7 +362,7 @@ pub fn panel(app: &App, t: &T) -> Option<El> {
             if !picked {
                 line = line.hover(t.c.muted.alpha_mul(0.3));
             }
-            line = line.cursor(Cursor::Pointer).focusable(true).on_press_tx(move |app: &mut App, tx| choose(app, &value, tx));
+            line = line.cursor(Cursor::Pointer).focusable(true).on_press_tx(crate::chat::composer::act_tx(app, move |app: &mut App, tx: &mut Tx| choose(app, &value, tx)));
         }
         options = options.child(line);
     }
@@ -410,7 +416,7 @@ pub fn actions(app: &App, t: &T, stop: Option<El>) -> Option<El> {
         if responding {
             back = back.opacity(0.64);
         } else {
-            back = back.hover(t.c.accent).cursor(Cursor::Pointer).on_press(previous);
+            back = back.hover(t.c.accent).cursor(Cursor::Pointer).on_press(crate::chat::composer::act(app, previous));
         }
         out = out.child(back);
     }
@@ -434,7 +440,7 @@ pub fn actions(app: &App, t: &T, stop: Option<El>) -> Option<El> {
         .label(label)
         .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_action_foreground));
     if enabled {
-        pill = pill.hover(t.c.message_action_hover).cursor(Cursor::Pointer).on_press(advance);
+        pill = pill.hover(t.c.message_action_hover).cursor(Cursor::Pointer).on_press(crate::chat::composer::act(app, advance));
     } else {
         pill = pill.opacity(0.64);
     }

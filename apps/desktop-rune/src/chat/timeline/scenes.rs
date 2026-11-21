@@ -213,6 +213,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-child-approval", child_approval),
     ("timeline-worktree-setup", worktree_setup),
     ("timeline-worktree-retry", worktree_retry),
+    ("timeline-worktree-work-locally", worktree_work_locally),
     ("timeline-tool-group", tool_group),
     ("timeline-tool-group-open", tool_group_open),
     ("timeline-tool-live", tool_live),
@@ -249,6 +250,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("chat-side-pane-composer", side_pane_composer),
     ("chat-side-pane-stop", side_pane_stop),
     ("chat-side-reopen", side_reopen),
+    ("chat-side-details-list", side_details_list),
+    ("chat-side-composer-banners", side_composer_question),
+    ("chat-side-composer-plan", side_composer_plan),
     ("timeline-work-icons", work_icons),
     ("timeline-interrupted-meta", interrupted_meta),
     ("timeline-attempt-nested", attempt_nested),
@@ -273,6 +277,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-html-render", html_render),
     ("timeline-subagent-remote", subagent_remote),
     ("composer-subagent-bar", subagent_bar),
+    ("composer-subagent-bar-instance", subagent_bar_instance),
     ("composer-usage-limits-reset-credits", usage_reset_credits),
 ];
 
@@ -322,7 +327,11 @@ fn citations_with_chips(app: &mut App) {
     });
     let terminal = crate::chat::composer::chips::samples().remove(0);
     let chip = format!("[{}](t3-context://v1/terminal/{})", crate::data::s(&terminal, "label"), crate::data::s(&terminal, "contextId"));
-    let text = format!("Why does {chip} fail? Compare [Assistant quote]({quote}) with the plan.");
+    // Long enough to wrap twice in the bubble, a chip landing near each line's end.
+    let text = format!(
+        "Why does {chip} fail after the grouped timeline landed? Compare [Assistant quote]({quote}) with the plan we agreed on, \
+         then tell me which step regressed and whether {chip} still reproduces once the header collapses."
+    );
     push_visible(app, vec![serde_json::json!({"id": "scene-citation-chips", "type": "user_message", "text": text,
         "createdAt": "2026-01-01T00:00:00Z", "attachments": [], "context": {"records": [terminal]}})]);
     app.ui.chat.timeline.md_links.citation = Some((super::chip::bubble_key("scene-citation-chips"), quote));
@@ -566,6 +575,18 @@ fn worktree_setup(app: &mut App) {
             {"id": "agent", "status": "pending"}]});
     app.ui.chat.timeline.worktree.details.insert(id.clone());
     app.ui.chat.timeline.worktree.held.insert(id, snapshot);
+}
+/// A new thread's first message waiting on its worktree, so it can move to the checkout.
+fn worktree_work_locally(app: &mut App) {
+    worktree_setup(app);
+    patch_shell(app, serde_json::json!({"latestRunStartedAt": null}));
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["turnItems"].as_array_mut())
+    {
+        let mut first = true;
+        items.retain(|i| i["type"] != "user_message" || std::mem::take(&mut first));
+    }
 }
 /// A run whose workspace preparation failed, with Retry on its error row.
 fn worktree_retry(app: &mut App) {
@@ -1059,6 +1080,61 @@ fn side_reopen(app: &mut App) {
     app.ui.chat.side.open.clear();
     crate::chat::side::open_tab(app, "scene-side");
 }
+/// The details card's "Side chats": eight of the showcase's side chats in each state, one
+/// running, the first six shown with "Show 2 more".
+fn side_details_list(app: &mut App) {
+    showcase(app);
+    let Route::Thread(parent) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let project = state.threads.iter().find(|r| crate::data::s(r, "id") == parent).map(|r| r["projectId"].clone()).unwrap_or_default();
+        let chats = [
+            ("Why does the retry back off?", "running", "running"),
+            ("Naming ideas for the cache", "idle", "completed"),
+            ("Is the lockfile drift real?", "idle", "failed"),
+            ("Quick check on the CI matrix", "idle", "interrupted"),
+            ("Summarise the review thread", "idle", "waiting"),
+            ("Compare the two parsers", "idle", ""),
+            ("What changed in the schema?", "idle", "completed"),
+            ("Draft the release note", "idle", "completed"),
+        ];
+        for (n, (title, status, activity)) in chats.into_iter().enumerate() {
+            let activity = if activity.is_empty() { serde_json::Value::Null } else { activity.into() };
+            state.threads.push(serde_json::json!({"id": format!("scene-side-{n}"), "title": title, "projectId": project, "status": status,
+                "activityRunStatus": activity, "createdAt": format!("2026-03-10T11:{:02}:00Z", 50 - n),
+                "lineage": {"parentThreadId": parent, "rootThreadId": parent, "relationshipToParent": "fork", "sideChat": true}}));
+        }
+    }
+}
+/// A side chat waiting on its own question: the drawer docks on the side chat's composer, while
+/// the chat's composer stays clear.
+fn side_composer_question(app: &mut App) {
+    side_pane(app);
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        let asked = state.thread_views.values().find(|v| crate::data::s(&v.projection["thread"], "title") == "Timeline question fixture").map(|v| v.projection.clone());
+        if let (Some(asked), Some(side)) = (asked, state.thread_views.get_mut("scene-side")) {
+            for key in ["runtimeRequests", "turnItems"] {
+                let extra: Vec<serde_json::Value> = asked[key].as_array().into_iter().flatten().filter(|v| key == "runtimeRequests" || v["type"] == "user_input_request").cloned().collect();
+                match side.projection[key].as_array_mut() {
+                    Some(list) => list.extend(extra),
+                    None => side.projection[key] = extra.into(),
+                }
+            }
+        }
+    }
+}
+/// A side chat in plan mode with a proposed plan: "Plan ready" and Implement on its composer.
+fn side_composer_plan(app: &mut App) {
+    side_pane(app);
+    if let crate::data::Source::Fixture(state) = &mut app.src {
+        if let Some(side) = state.threads.iter_mut().find(|r| crate::data::s(r, "id") == "scene-side") {
+            side["interactionMode"] = "plan".into();
+        }
+        if let Some(view) = state.thread_views.get_mut("scene-side") {
+            view.projection["plans"] = serde_json::json!([{"id": "scene-side-plan", "kind": "proposed_plan", "status": "active", "runId": null,
+                "markdown": "# Add jitter to the retry backoff\n\n- Spread retries with full jitter\n- Cap the delay at 30 seconds"}]);
+        }
+    }
+}
 /// A subagent's header: its parent in the breadcrumb, and the linked environment it came from.
 fn header_subagent(app: &mut App) {
     showcase(app);
@@ -1247,6 +1323,36 @@ fn subagent_bar(app: &mut App) {
     push_items(app, "nodes", vec![json!({"id": "scene-subagent-root", "kind": "root_turn", "runId": null, "status": "running", "startedAt": started})]);
     if let Some(start) = crate::data::iso_ms(started) {
         app.now_ms = start + 42_000;
+    }
+}
+
+/// The subagent bar for an Antigravity account with an accent: the instance badge on its mark,
+/// and the reasoning level the provider reports for a selection that states none.
+fn subagent_bar_instance(app: &mut App) {
+    use serde_json::json;
+    subagent_bar(app);
+    patch_config(app, |config| {
+        let providers = config["providers"].as_array_mut();
+        for p in providers.into_iter().flatten().filter(|p| p["instanceId"] == "scene-antigravity") {
+            p["displayName"] = json!("Studio Gemini");
+            p["accentColor"] = json!("#2563eb");
+        }
+    });
+    let selection = json!({"instanceId": "scene-antigravity", "model": "gemini-3-pro"});
+    patch_shell(app, json!({"modelSelection": selection.clone()}));
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        v.projection["thread"]["activeProviderThreadId"] = json!("scene-provider-thread");
+        v.projection["thread"]["modelSelection"] = selection.clone();
+        let mut reported = selection;
+        reported["options"] = json!([{"id": "reasoningEffort", "value": "low"}]);
+        let provider = json!({"id": "scene-provider-thread", "providerInstanceId": "scene-antigravity", "nativeMetadata": {"modelSelection": reported}});
+        match v.projection["providerThreads"].as_array_mut() {
+            Some(list) => list.push(provider),
+            None => v.projection["providerThreads"] = json!([provider]),
+        }
     }
 }
 

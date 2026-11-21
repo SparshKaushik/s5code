@@ -151,6 +151,7 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
     let name = title(if s(item, "title").is_empty() { "Subagent" } else { s(item, "title") });
     // A task running in a linked environment names it.
     let remote = [item, agent].into_iter().find(|v| v["remoteChild"].is_object()).map(|v| format!("on {}", s(&v["remoteChild"], "label")));
+    let target = target(app, agent, item, child);
     let mut body = row()
         .key(format!("subagent-{id}"))
         .w_full()
@@ -182,17 +183,35 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
         body = body.child(text(label).font(theme::TEXT_XS).color(tone));
     }
     body = body.child(text(time).font(theme::TEXT_XS).color(t.c.muted_foreground));
-    if !child.is_empty() {
-        let child = child.to_owned();
+    if let Some((key, thread)) = target {
         body = body
             .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)))
             .role("button")
             .focusable(true)
             .cursor(Cursor::Pointer)
             .hover(t.c.accent.alpha_mul(0.2))
-            .on_press(move |app: &mut App| crate::shell::sidebar::open_thread(app, &child));
+            .on_press(move |app: &mut App| open(app, key.as_deref(), &thread));
     }
     body.help(label)
+}
+
+/// The thread a task's row opens, with the environment to open it on: a task in a linked
+/// environment opens its thread there while this client is connected to it, else not at all.
+fn target(app: &App, agent: &Value, item: &Value, child: &str) -> Option<(Option<String>, String)> {
+    let Some(remote) = [item, agent].into_iter().map(|v| &v["remoteChild"]).find(|r| r.is_object()) else {
+        return (!child.is_empty()).then(|| (None, child.to_owned()));
+    };
+    let environment = s(remote, "environmentId");
+    let key = if crate::env::local_id(app).as_deref() == Some(environment) { crate::env::LOCAL.to_owned() } else { environment.to_owned() };
+    let thread = s(remote, "threadId");
+    (!thread.is_empty() && crate::env::connected(app, &key)).then(|| (Some(key), thread.to_owned()))
+}
+
+fn open(app: &mut App, key: Option<&str>, thread: &str) {
+    if let Some(key) = key {
+        crate::env::adopt(app, thread, key);
+    }
+    crate::shell::sidebar::open_thread(app, thread);
 }
 
 /// summarizeSubagentStatuses: "2 working · 1 done".
@@ -328,8 +347,36 @@ pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{notified_task, outcome, status_summary, title};
+    use super::{notified_task, open, outcome, status_summary, target, title};
+    use crate::{App, env};
     use serde_json::json;
+
+    #[test]
+    fn a_remote_task_opens_its_thread_on_the_machine_that_runs_it() {
+        let mut s = App::new();
+        let mut local = crate::data::empty_state();
+        local.config = Some(json!({"environment": {"environmentId": "local-id", "label": "Laptop"}, "settings": {}}));
+        local.shell_ready = true;
+        local.conn = s5_net::Conn::Open;
+        s.src = crate::data::Source::Fixture(local);
+        s.ui.env.active = env::LOCAL.into();
+        let remote = json!({"remoteChild": {"environmentId": "env-build", "threadId": "t-remote", "label": "Build box"}, "childThreadId": "t-copy"});
+        assert_eq!(target(&s, &remote, &remote, "t-copy"), None, "a machine this client is not connected to cannot open it");
+        let mut build = crate::data::empty_state();
+        build.shell_ready = true;
+        build.conn = s5_net::Conn::Open;
+        s.ui.env.saved.push(env::Saved { id: "env-build".into(), label: "Build box".into(), base: "https://build.example".into(), bearer: String::new() });
+        env::park(&mut s, "env-build", crate::data::Source::Fixture(build));
+        let Some((key, thread)) = target(&s, &remote, &remote, "t-copy") else { panic!("opens on the build box") };
+        assert_eq!((key.as_deref(), thread.as_str()), (Some("env-build"), "t-remote"));
+        open(&mut s, key.as_deref(), &thread);
+        assert_eq!(env::owner(&s, "t-remote"), "env-build");
+        assert_eq!(s.ui.env.active, "env-build");
+        assert_eq!(s.route, crate::Route::Thread("t-remote".into()));
+        let mine = json!({"remoteChild": {"environmentId": "local-id", "threadId": "t-here", "label": "Laptop"}});
+        assert_eq!(target(&s, &mine, &mine, ""), Some((Some(env::LOCAL.to_owned()), "t-here".to_owned())), "this machine's own id maps to its key");
+        assert_eq!(target(&s, &json!({}), &json!({}), "t-child"), Some((None, "t-child".to_owned())));
+    }
 
     #[test]
     fn notices_report_their_task_until_it_runs_again() {
