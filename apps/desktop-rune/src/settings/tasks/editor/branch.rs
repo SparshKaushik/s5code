@@ -7,6 +7,8 @@ use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, data, env, icons};
 use rune::{Cursor, El, TextEdit, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub(super) const ID: &str = "branch";
 /// `usePaginatedBranches`'s page.
@@ -24,10 +26,14 @@ pub(super) struct Refs {
     shown: Option<Want>,
     list: Vec<Value>,
     total: u64,
-    more: bool,
+    /// The next page's cursor.
+    next: Option<u64>,
     error: Option<String>,
-    /// The `vcs.listRefs` in flight.
-    asking: Option<(u64, Want)>,
+    /// The `vcs.listRefs` in flight, and whether it is a next page.
+    asking: Option<(u64, Want, bool)>,
+    /// Set by the list's scroll when it nears the end going down (`shouldLoadNextBranchPageAfterScroll`).
+    near_end: Rc<Cell<bool>>,
+    last_scroll: Rc<Cell<Option<f32>>>,
     /// The chosen ref's name and `isRemote`, as last listed.
     selected: Option<(String, bool)>,
     active: usize,
@@ -79,33 +85,42 @@ fn wanted(s: &App, e: &Editor) -> Option<Want> {
     (!value.is_empty()).then(|| (cwd, value.to_owned(), LOOKUP_LIMIT))
 }
 
-/// Folds a reply into the picker: refs by name, first one wins.
-fn land(refs: &mut Refs, want: Want, reply: Result<Value, Value>, value: &str) {
+/// Folds a reply into the picker: a first page replaces the list, a next one appends the refs it
+/// doesn't already have; refs by name, first one wins.
+fn land(refs: &mut Refs, want: Want, next: bool, reply: Result<Value, Value>, value: &str) {
     refs.asking = None;
+    if next && refs.shown.as_ref() != Some(&want) {
+        return;
+    }
+    if !next {
+        refs.list.clear();
+        refs.total = 0;
+        refs.active = 0;
+        refs.last_scroll.set(None);
+        refs.near_end.set(false);
+    }
     match reply {
         Ok(page) => {
-            let mut list: Vec<Value> = Vec::new();
             for r in page["refs"].as_array().into_iter().flatten() {
-                if !list.iter().any(|l| l["name"] == r["name"]) {
-                    list.push(r.clone());
+                if !refs.list.iter().any(|l| l["name"] == r["name"]) {
+                    refs.list.push(r.clone());
                 }
             }
-            refs.total = page["totalCount"].as_u64().unwrap_or(list.len() as u64);
-            refs.more = !page["nextCursor"].is_null();
+            let total = page["totalCount"].as_u64().unwrap_or(refs.list.len() as u64);
+            refs.total = refs.total.max(total);
+            refs.next = page["nextCursor"].as_u64();
             refs.error = None;
-            if let Some(r) = list.iter().find(|r| r["name"] == value) {
+            if let Some(r) = refs.list.iter().find(|r| r["name"] == value) {
                 refs.selected = Some((value.to_owned(), r["isRemote"] == true));
             }
-            refs.list = list;
         }
+        // A failed next page keeps the refs already listed, as web does.
         Err(error) => {
-            refs.list.clear();
-            refs.more = false;
+            refs.next = None;
             refs.error = Some(error_message(&error, "Failed to load refs."));
         }
     }
     refs.shown = Some(want);
-    refs.active = 0;
 }
 
 /// Lands the listing in flight, then asks for the one the picker wants, one at a time.
@@ -113,25 +128,35 @@ pub(super) fn poll(s: &mut App) -> bool {
     let Some(e) = s.ui.settings.tasks.editor.as_ref() else { return false };
     let key = e.env.clone();
     let mut changed = false;
-    if let Some((id, want)) = e.refs.asking.clone() {
+    if let Some((id, want, next)) = e.refs.asking.clone() {
         let Some(reply) = env::net_of(s, &key).and_then(|net| net.take_reply(id)) else { return false };
         if let Some(e) = editor_mut(s) {
             let value = e.draft.base_ref.text.trim().to_owned();
-            land(&mut e.refs, want, reply, &value);
+            land(&mut e.refs, want, next, reply, &value);
         }
         changed = true;
     }
     let Some(e) = s.ui.settings.tasks.editor.as_ref() else { return changed };
-    let Some(want) = wanted(s, e).filter(|w| e.refs.shown.as_ref() != Some(w)) else { return changed };
+    let Some(want) = wanted(s, e) else { return changed };
+    let cursor = match e.refs.shown.as_ref() == Some(&want) {
+        false => None,
+        // `fetchNextBranchPage`: only the open picker pages, once the list scrolls near its end.
+        true if want.2 == SEARCH_LIMIT && e.refs.next.is_some() && e.refs.near_end.replace(false) => e.refs.next,
+        true => return changed,
+    };
     let mut params = json!({"cwd": want.0, "limit": want.2});
     if !want.1.is_empty() {
         params["query"] = json!(want.1);
     }
+    if let Some(cursor) = cursor {
+        params["cursor"] = json!(cursor);
+    }
     let Some(id) = env::net_of(s, &key).map(|net| net.request("vcs.listRefs", params)) else { return changed };
     if let Some(e) = editor_mut(s) {
-        e.refs.asking = Some((id, want));
+        e.refs.asking = Some((id, want, cursor.is_some()));
     }
-    changed
+    // "Loading more refs..." shows while the next page is in flight.
+    changed || cursor.is_some()
 }
 
 fn toggle(s: &mut App) {
@@ -146,7 +171,10 @@ fn toggle(s: &mut App) {
     e.refs.shown = None;
     e.refs.list.clear();
     e.refs.error = None;
+    e.refs.next = None;
     e.refs.active = 0;
+    e.refs.last_scroll.set(None);
+    e.refs.near_end.set(false);
 }
 
 fn choose(s: &mut App, r: &Value) {
@@ -181,7 +209,7 @@ fn on_key(s: &mut App, ev: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
     true
 }
 
-/// Web's status line: the error, the first load, or how much of a long list shows.
+/// Web's status line: the error, the first load, the next page, or how much of a long list shows.
 fn status(refs: &Refs) -> Option<String> {
     if let Some(error) = &refs.error {
         return Some(error.clone());
@@ -189,8 +217,11 @@ fn status(refs: &Refs) -> Option<String> {
     if refs.shown.is_none() {
         return Some("Loading refs...".into());
     }
+    if matches!(refs.asking, Some((_, _, true))) {
+        return Some("Loading more refs...".into());
+    }
     let shown = crate::chat::details::thousands(refs.list.len() as u64);
-    refs.more.then(|| format!("Showing {shown} of {} refs", crate::chat::details::thousands(refs.total)))
+    refs.next.map(|_| format!("Showing {shown} of {} refs", crate::chat::details::thousands(refs.total)))
 }
 
 pub(super) fn picker(s: &App, t: &T, e: &Editor, disabled: bool, popups: &mut Vec<El>) -> El {
@@ -246,6 +277,8 @@ pub(super) fn picker(s: &App, t: &T, e: &Editor, disabled: bool, popups: &mut Ve
             .on_input_key(on_key),
     );
     let divider = || el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6));
+    let (near_end, last) = (refs.near_end.clone(), refs.last_scroll.clone());
+    let waker = s.ui.panel.waker.clone();
     let mut rows = col().w_full().padding(4.0).role("listbox").label("Refs");
     if refs.shown.is_some() && refs.error.is_none() && refs.list.is_empty() {
         rows = rows.child(row().h(28.0).px(8.0).center_y().child(text("No refs found.").font(theme::TEXT_SM).color(muted)));
@@ -306,7 +339,13 @@ pub(super) fn picker(s: &App, t: &T, e: &Editor, disabled: bool, popups: &mut Ve
         .min_h(0.0)
         .child(col().w_full().px(4.0).pt(4.0).child(search))
         .child(divider())
-        .child(rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }))
+        .child(rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
+            if crate::chat::details::next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
+                if let Some(w) = &waker {
+                    w();
+                }
+            }
+        }))
         .child(divider())
         .child(origin);
     if let Some(line) = status(refs) {
@@ -316,9 +355,10 @@ pub(super) fn picker(s: &App, t: &T, e: &Editor, disabled: bool, popups: &mut Ve
 }
 
 /// Scenes: a project's refs with the picker open.
-pub(super) fn scene(e: &mut Editor, list: Vec<Value>) {
+pub(super) fn scene(e: &mut Editor, list: Vec<Value>, total: u64, next: Option<u64>) {
     e.open = Some(ID.into());
-    e.refs.total = list.len() as u64;
+    e.refs.total = total;
+    e.refs.next = next;
     e.refs.shown = Some(Default::default());
     e.refs.list = list;
 }
@@ -342,15 +382,43 @@ mod tests {
         let mut refs = Refs::default();
         let want: Want = ("/repo".into(), "main".into(), LOOKUP_LIMIT);
         let page = json!({"refs": [{"name": "main", "isRemote": false}, {"name": "main", "isRemote": true}, {"name": "origin/main", "isRemote": true}], "totalCount": 240, "nextCursor": 100});
-        land(&mut refs, want.clone(), Ok(page), "main");
+        land(&mut refs, want.clone(), false, Ok(page), "main");
         assert_eq!(refs.list.len(), 2);
         assert_eq!(refs.selected, Some(("main".to_owned(), false)));
         assert_eq!(refs.shown, Some(want.clone()));
         assert_eq!(status(&refs).as_deref(), Some("Showing 2 of 240 refs"));
-        land(&mut refs, want, Err(json!({"message": "not a git repository"})), "main");
+        land(&mut refs, want, false, Err(json!({"message": "not a git repository"})), "main");
         assert!(refs.list.is_empty() && refs.error.is_some());
         // The chosen ref keeps its last known remote state through a failed lookup.
         assert_eq!(refs.selected, Some(("main".to_owned(), false)));
+    }
+
+    #[test]
+    fn next_pages_append_new_refs_until_the_cursor_runs_out() {
+        let mut refs = Refs::default();
+        let want: Want = ("/repo".into(), String::new(), SEARCH_LIMIT);
+        let page = |names: &[&str], total: u64, next: Option<u64>| json!({"refs": names.iter().map(|n| json!({"name": n})).collect::<Vec<_>>(), "totalCount": total, "nextCursor": next});
+        land(&mut refs, want.clone(), false, Ok(page(&["main", "dev"], 5, Some(2))), "");
+        assert_eq!((refs.next, status(&refs).as_deref()), (Some(2), Some("Showing 2 of 5 refs")));
+        refs.asking = Some((7, want.clone(), true));
+        assert_eq!(status(&refs).as_deref(), Some("Loading more refs..."));
+        land(&mut refs, want.clone(), true, Ok(page(&["dev", "feat/a"], 4, Some(4))), "");
+        let names = |refs: &Refs| refs.list.iter().map(|r| data::s(r, "name").to_owned()).collect::<Vec<_>>();
+        assert_eq!(names(&refs), ["main", "dev", "feat/a"], "a ref a page repeats stays once");
+        assert_eq!(refs.total, 5, "the largest total wins, as web's Math.max");
+        land(&mut refs, want.clone(), true, Ok(page(&["feat/b"], 5, None)), "");
+        assert_eq!((refs.list.len(), refs.next, status(&refs)), (4, None, None));
+        // A page for a search the picker has moved on from is dropped.
+        let stale: Want = ("/repo".into(), "old".into(), SEARCH_LIMIT);
+        land(&mut refs, stale, true, Ok(page(&["old/x"], 1, None)), "");
+        assert_eq!(refs.list.len(), 4);
+        // A failed next page keeps what is listed and stops paging.
+        refs.next = Some(4);
+        land(&mut refs, want.clone(), true, Err(json!({"message": "timed out"})), "");
+        assert_eq!((refs.list.len(), refs.next, status(&refs).as_deref()), (4, None, Some("timed out")));
+        // A new first page replaces the list.
+        land(&mut refs, want, false, Ok(page(&["main"], 1, None)), "");
+        assert_eq!(names(&refs), ["main"]);
     }
 
     #[test]
