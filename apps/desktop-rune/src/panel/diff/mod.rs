@@ -2,8 +2,8 @@
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 pub(crate) mod comments;
 pub(crate) mod file_menu;
-mod file_icons;
-mod find;
+pub(crate) mod file_icons;
+pub(crate) mod find;
 pub(crate) mod state;
 pub(crate) mod view;
 
@@ -688,7 +688,7 @@ pub fn poll(app: &mut App) -> bool {
             Err(e) => crate::shell::palette::toast_error(app, "Could not expand the diff", Some(&message(&e))),
         }
     }
-    changed |= comments::sync(app) | find::refresh(app);
+    changed |= comments::sync(app) | find::refresh(app, view::Host::Panel);
     if visible(app) && app.ui.panel.diff.pending.is_none() && app.ui.panel.diff.shown.is_some() {
         let scope = app.ui.panel.diff.scope.clone();
         if signature(app, &scope) != app.ui.panel.diff.seen {

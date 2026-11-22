@@ -175,7 +175,7 @@ fn source_label(source: &str) -> &'static str {
 }
 
 /// The source control kind a link's URL belongs to (findByChangeRequestUrl).
-fn provider(url: &str) -> &'static str {
+pub(crate) fn provider(url: &str) -> &'static str {
     let host = url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or("").to_lowercase();
     if url.contains("/-/merge_requests/") {
         "gitlab"

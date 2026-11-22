@@ -130,6 +130,8 @@ pub struct Ui {
     pub cursor_enabling: Vec<(String, u64)>,
     /// The modal's widest (AppRouteModal's 80rem); scenes narrow it to a small window's.
     pub max_w: f32,
+    /// The connected environments whose sessions the page last read again for their access.
+    sessions_for: Option<String>,
 }
 
 impl Default for Ui {
@@ -163,6 +165,7 @@ impl Default for Ui {
             environments: None,
             cursor_enabling: Vec::new(),
             max_w: 1280.0,
+            sessions_for: None,
         }
     }
 }
@@ -443,7 +446,14 @@ fn scan_at(s: &mut App, key: &str) -> usize {
 /// picks which answers merge.
 pub fn poll(s: &mut App) -> bool {
     if !matches!(s.route, Route::Usage) {
+        s.ui.pages.usage.sessions_for = None;
         return false;
+    }
+    // Access is read from each session, so entering the page or a connection landing asks again.
+    let connected = crate::env::keys(s).into_iter().filter(|k| crate::env::short_status(s, k) == "Connected").collect::<Vec<_>>().join(",");
+    if s.ui.pages.usage.sessions_for.as_deref() != Some(connected.as_str()) {
+        crate::settings::permissions::load(s);
+        ui(s).sessions_for = Some(connected);
     }
     let mut changed = super::usage_limits::poll(s) | super::usage_tags::poll(s);
     if !s.ui.pages.usage.preferences_read {
@@ -538,14 +548,14 @@ fn poll_scan(s: &mut App, key: &str) -> bool {
     let Some(requested) = s.ui.pages.usage.requested.clone() else { return changed };
     let settings = scan_settings(config(s, key));
     let want = (scan_input(&requested, &settings), settings);
-    let connected = crate::env::status(s, key) == "Connected";
+    let readable = can_read(s, key);
     let scan = &s.ui.pages.usage.scans[at];
-    if !connected && scan.refreshing {
+    if !readable && scan.refreshing {
         ui(s).scans[at].refreshing = false;
         changed = true;
     }
     let scan = &s.ui.pages.usage.scans[at];
-    if !connected || scan.rates.is_some() || scan.sent.as_ref() == Some(&want) {
+    if !readable || scan.rates.is_some() || scan.sent.as_ref() == Some(&want) {
         return changed;
     }
     let window = window_key(&want.0);
@@ -637,10 +647,11 @@ fn refresh(s: &mut App) {
     refresh_usage(s, true);
 }
 
-/// refreshUsage: each selected connected environment refreshes its model rates, then rescans.
+/// refreshUsage: each selected environment that can read usage refreshes its model rates, then
+/// rescans.
 fn refresh_usage(s: &mut App, from_header: bool) {
     for key in selected_environments(s) {
-        if crate::env::status(s, &key) != "Connected" {
+        if !can_read(s, &key) {
             continue;
         }
         let Some(net) = env_net(s, &key) else { continue };
@@ -705,31 +716,60 @@ fn reads_cursor_account(summary: &Value) -> bool {
     summary["sources"].as_array().into_iter().flatten().any(|src| src["fingerprint"]["provider"] == "cursor" && src["fingerprint"]["hostId"] == "cursor.com")
 }
 
+const NOT_CONNECTED: &str = "This environment is not connected.";
+
+/// resolveUsageAccess over the connection (`env::short_status`) and its session's last answer:
+/// `Ok` reads usage, `Err(None)` is still pending, `Err(Some(why))` cannot report. Only a
+/// connection still being attempted is pending; a blocked one (unsupported, refused) is not.
+/// Fixtures have no server and read everything.
+fn usage_access(status: &str, session: Option<&Result<Value, Value>>, fixture: bool) -> Result<(), Option<&'static str>> {
+    if status != "Connected" {
+        return Err((!matches!(status, "Connecting…" | "Reconnecting…")).then_some(NOT_CONNECTED));
+    }
+    match session {
+        Some(Err(_)) => Err(Some("Could not check this connection's access to diagnostics and usage.")),
+        Some(Ok(v)) if crate::settings::permissions::grants(v, "diagnostics:read") => Ok(()),
+        Some(Ok(_)) => Err(Some("This connection does not have access to diagnostics and usage.")),
+        None if fixture => Ok(()),
+        None => Err(None),
+    }
+}
+
+fn access(s: &App, key: &str) -> Result<(), Option<&'static str>> {
+    let fixture = matches!(crate::env::source(s, key), Some(crate::data::Source::Fixture(_)));
+    usage_access(crate::env::short_status(s, key), crate::settings::permissions::reply_on(s, key), fixture)
+}
+
+/// `canReadDiagnostics`: the environment is scanned, refreshed and searched for tags.
+pub(super) fn can_read(s: &App, key: &str) -> bool {
+    access(s, key).is_ok()
+}
+
 /// EnvironmentUsageStatus: one environment's connection and its answer for the requested window.
 struct EnvUsage<'a> {
     key: String,
     label: String,
     connected: bool,
+    can_read: bool,
     pending: bool,
     error: Option<String>,
     summary: Option<&'a Value>,
     needs_cursor: bool,
 }
 
-/// usageByWindowAtom: every environment; one still connecting is pending and a lost one reports
-/// an error (resolveUsageAccess).
+/// usageByWindowAtom: every environment; one still connecting or checking its access is pending,
+/// and a lost or unpermitted one reports why (resolveUsageAccess).
 fn environments(s: &App) -> Vec<EnvUsage<'_>> {
     let u = &s.ui.pages.usage;
     let window = u.requested.as_ref().map(window_key);
     crate::env::keys(s)
         .into_iter()
         .map(move |key| {
-            let status = crate::env::status(s, &key);
             let label = crate::env::label(s, &key);
-            if status != "Connected" {
-                let pending = status != "Not connected";
-                let error = (!pending).then(|| "This environment is not connected.".to_string());
-                return EnvUsage { key, label, connected: false, pending, error, summary: None, needs_cursor: false };
+            if let Err(why) = access(s, &key) {
+                let connected = crate::env::short_status(s, &key) == "Connected";
+                let error = why.map(str::to_string);
+                return EnvUsage { key, label, connected, can_read: false, pending: error.is_none(), error, summary: None, needs_cursor: false };
             }
             let scan = u.scans.iter().find(|x| x.key == key);
             let summary = scan.filter(|x| x.answered.is_some() && x.answered == window).and_then(|x| x.summary.as_ref());
@@ -737,7 +777,7 @@ fn environments(s: &App) -> Vec<EnvUsage<'_>> {
             let pending = scan.is_none_or(|x| x.pending.is_some() || (summary.is_none() && x.error.is_none()));
             let providers = config(s, &key).map(|c| &c["providers"]).unwrap_or(&Value::Null);
             let needs_cursor = summary.is_some_and(|v| needs_cursor_keychain(v, providers));
-            EnvUsage { key, label, connected: true, pending, error, summary, needs_cursor }
+            EnvUsage { key, label, connected: true, can_read: true, pending, error, summary, needs_cursor }
         })
         .collect()
 }
@@ -1077,6 +1117,14 @@ pub(super) fn offline_scene(s: &mut App) {
     remerge(s);
 }
 
+/// The `usage-read-only` scenes: this machine's session lacks `diagnostics:read`, so it is not
+/// scanned and says why in place of the overview.
+pub(super) fn read_only_scene(s: &mut App) {
+    crate::settings::permissions::set_session(s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+    ui(s).kept = None;
+    remerge(s);
+}
+
 /// CursorEnableRow: the overview's Cursor line, with an inline "Enable" in place of figures.
 fn cursor_enable_row(s: &App, t: &T, key: &str, label: &str, show_environment: bool) -> El {
     let mut enable = row()
@@ -1122,13 +1170,16 @@ fn unshifted(c: char) -> Option<char> {
 }
 
 pub fn close(s: &mut App) {
-    ui(s).menu = None;
+    let u = ui(s);
+    u.menu = None;
+    u.model = None;
+    u.by_period = false;
     super::usage_limits::closed(&mut ui(s).limits);
     let route = s.ui.settings.return_route.take().unwrap_or(Route::Home { project_id: None });
     s.navigate(route);
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if !matches!(s.route, Route::Usage) {
         return false;
     }
@@ -1138,15 +1189,16 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
     if !matches!(e.key, rune::Key::Escape) {
         let u = &s.ui.pages.usage;
         // Like resolveUsageShortcut: not while a dialog, menu or the palette has the keys.
-        if u.prices.open || u.model.is_some() || u.menu.is_some() || u.tags.target.is_some() || u.limits.confirm.is_some() || s.ui.shell.palette.open {
+        if tx.key_repeat() || u.prices.open || open_model(u).is_some() || u.menu.is_some() || u.tags.target.is_some() || u.limits.confirm.is_some() || s.ui.shell.palette.open {
             return false;
         }
         let Some(command) = shortcut(s, e) else { return false };
+        let now = s.now_ms;
         let u = ui(s);
         match command {
-            "usage.cost" => u.metric = "cost",
-            "usage.tokens" => u.metric = "tokens",
-            "usage.limits" => u.metric = "limits",
+            "usage.cost" => select_metric(u, "cost", now),
+            "usage.tokens" => select_metric(u, "tokens", now),
+            "usage.limits" => select_metric(u, "limits", now),
             _ if u.metric == "limits" => {}
             "usage.period.day" => u.window_days = 1,
             "usage.period.week" => u.window_days = 7,
@@ -1157,10 +1209,31 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
         return true;
     }
     let u = ui(s);
-    if u.model.take().is_none() && u.menu.take().is_none() {
+    if open_model(u).is_some() {
+        u.model = None;
+        u.model_hover = None;
+    } else if u.menu.take().is_none() && !tx.key_repeat() {
         close(s);
     }
     true
+}
+
+/// UsageModelDialogHost: the dialog shows only while its row is in the usage on screen, and
+/// returns if the row does.
+fn open_model(u: &Ui) -> Option<&str> {
+    let key = u.model.as_deref()?;
+    let summary = u.summary.as_ref().filter(|_| u.metric != "limits")?;
+    merge(summary, &u.hidden, u.answered.as_ref(), Some(key)).models.iter().any(|r| r.key == key).then_some(key)
+}
+
+/// selectMetric: Limits unmount the overview, so its breakdown and chosen model start over.
+fn select_metric(u: &mut Ui, metric: &'static str, now: i64) {
+    u.metric = metric;
+    if metric == "limits" {
+        u.limits.now = Some(now);
+        u.by_period = false;
+        u.model = None;
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -1352,7 +1425,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     } else if u.metric == "limits" {
         page.child(super::usage_limits::view(s, cx, t, &mut overlays))
     } else if let Some(summary) = &u.summary {
-        if selected.iter().any(|e| e.connected) {
+        if selected.iter().any(|e| e.can_read) {
             overview(s, t, summary, page, &mut overlays)
         } else {
             let mut lines = col().w_full().py(48.0).gap(8.0).items_center();
@@ -1366,7 +1439,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     } else {
         skeleton(t, page)
     };
-    if let (Some(key), Some(summary), false) = (&u.model, &u.summary, u.metric == "limits") {
+    if let (Some(key), Some(summary)) = (open_model(u), &u.summary) {
         model_dialog(s, t, summary, key, &mut overlays);
     }
     super::usage_prices::view(s, t, &mut overlays);
@@ -1510,7 +1583,7 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     if no_environments(s) {
         envs = envs.row(col().max_w(280.0).px(8.0).py(8.0).child(note("No environments connected.".into())));
     }
-    let can_read = selected.iter().any(|e| e.connected);
+    let readable = selected.iter().any(|e| e.can_read);
     let (answered, still) = reporting(&selected);
     if show_status && answered > 0 && still > 0 {
         envs = envs.row(col().max_w(280.0).px(8.0).py(8.0).child(note("Totals are partial while selected environments scan.".into())));
@@ -1621,7 +1694,7 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .variant("ghost")
                 .size("icon-sm")
                 .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
-                .disabled(refreshing(u) || (!limits && !can_read))
+                .disabled(refreshing(u) || (!limits && !readable))
                 .on_press(refresh)
                 .build(t),
         )
@@ -1658,8 +1731,9 @@ fn pick_window(s: &mut App, days: i64) {
 
 /// selectMetric
 fn pick_metric(s: &mut App, metric: &'static str) {
+    let now = s.now_ms;
     let u = ui(s);
-    u.metric = metric;
+    select_metric(u, metric, now);
     u.menu = None;
     save_preferences(s);
 }
@@ -2628,6 +2702,25 @@ mod tests {
     }
 
     #[test]
+    fn the_model_dialog_shows_only_while_its_row_is_on_screen_and_limits_start_the_overview_over() {
+        let bucket = |model: &str| json!({"provider": "codex", "apiProvider": "", "model": model, "day": "2026-11-01", "records": 1, "unpricedRecords": 0, "costUsd": 1.0, "totals": {"outputTokens": 10}});
+        let mut u = Ui { metric: "cost", summary: Some(json!({"buckets": [bucket("gpt-5")]})), model: Some("codex\0\0gpt-5".into()), ..Ui::default() };
+        assert_eq!(open_model(&u), Some("codex\0\0gpt-5"));
+        u.hidden = vec!["codex"];
+        assert_eq!(open_model(&u), None, "a hidden provider's row is gone, so its dialog is too");
+        u.hidden.clear();
+        u.summary = Some(json!({"buckets": [bucket("gpt-5-mini")]}));
+        assert_eq!(open_model(&u), None);
+        assert_eq!(u.model.as_deref(), Some("codex\0\0gpt-5"), "the choice stays, so the row's return reopens it");
+
+        u.by_period = true;
+        select_metric(&mut u, "tokens", 5);
+        assert!(u.by_period && u.model.is_some() && u.limits.now.is_none());
+        select_metric(&mut u, "limits", 5);
+        assert_eq!((u.metric, u.by_period, u.model.clone(), u.limits.now), ("limits", false, None, Some(5)), "limitsNow: the limits read the clock of the switch");
+    }
+
+    #[test]
     fn page_preferences_round_trip_and_fall_back_whole_on_any_unknown_value() {
         let mut u = Ui::default();
         apply_preferences(&mut u, &json!({"metric": "tokens", "windowDays": 7, "hiddenProviders": ["grok", "codex"]}));
@@ -2678,7 +2771,7 @@ mod tests {
     }
 
     fn env<'a>(key: &str, summary: Option<&'a Value>) -> EnvUsage<'a> {
-        EnvUsage { key: key.into(), label: key.to_uppercase(), connected: true, pending: false, error: None, summary, needs_cursor: false }
+        EnvUsage { key: key.into(), label: key.to_uppercase(), connected: true, can_read: true, pending: false, error: None, summary, needs_cursor: false }
     }
 
     fn answering(providers: &[&str]) -> Value {
@@ -2701,6 +2794,21 @@ mod tests {
         assert_eq!(progress(&EnvUsage { pending: true, ..env("a", Some(&two)) }, false), Phase::Partway(vec!["claude".into(), "codex".into()]));
         assert_eq!(status_label(&EnvUsage { pending: true, ..env("a", Some(&two)) }, false), "Updating 2 providers…");
         assert_eq!(status_label(&env("a", Some(&two)), false), "Ready");
+    }
+
+    #[test]
+    fn only_a_session_granting_diagnostics_read_is_scanned_and_only_an_attempted_connection_waits() {
+        let session = |permissions: &[&str]| -> Result<Value, Value> { Ok(json!({"authenticated": true, "permissions": permissions})) };
+        assert_eq!(usage_access("Connected", Some(&session(&["orchestration:read", "diagnostics:read"][..])), false), Ok(()));
+        assert_eq!(usage_access("Connected", Some(&session(&["orchestration:read"][..])), true), Err(Some("This connection does not have access to diagnostics and usage.")));
+        assert_eq!(usage_access("Connected", Some(&Err(json!("boom"))), false), Err(Some("Could not check this connection's access to diagnostics and usage.")));
+        assert_eq!(usage_access("Connected", None, false), Err(None), "a live session still being read is pending");
+        assert_eq!(usage_access("Connected", None, true), Ok(()), "a fixture has no session to read");
+        assert_eq!(usage_access("Connecting…", None, false), Err(None));
+        assert_eq!(usage_access("Reconnecting…", Some(&session(&["diagnostics:read"][..])), false), Err(None));
+        for blocked in ["Not connected", "Client not supported", "Connection failed"] {
+            assert_eq!(usage_access(blocked, None, false), Err(Some(NOT_CONNECTED)), "{blocked} is not waited on");
+        }
     }
 
     #[test]
