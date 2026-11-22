@@ -1442,7 +1442,7 @@ mod tests {
 
         let before = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
         let after = "a\nb\nc\nd\ne\nf\ng\nh\nbind\ni\nj\n";
-        assert_eq!(diff_lines(before, after), vec![(' ', "e"), (' ', "f"), (' ', "g"), (' ', "h"), ('+', "bind"), (' ', "i"), (' ', "j")], "three lines of context");
+        assert_eq!(diff_lines(before, after), vec![(' ', "f"), (' ', "g"), (' ', "h"), ('+', "bind"), (' ', "i"), (' ', "j")], "three lines of context");
         let two = diff_lines("x\n1\n2\n3\n4\n5\n6\n7\n8\ny\n", "1\n2\n3\n4\n5\n6\n7\n8\n");
         assert_eq!(two.iter().filter(|(m, _)| *m == '@').count(), 1, "far-apart changes are separate hunks");
         assert_eq!((two[0], *two.last().unwrap()), (('-', "x"), ('-', "y")));
