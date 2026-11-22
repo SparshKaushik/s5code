@@ -199,6 +199,12 @@ fn settled(projection: &Value, shell: Option<&Value>) -> bool {
     !active && shell.is_none_or(|r| s(r, "worktreePath").is_empty())
 }
 
+/// Work locally: cancel, and send the prompt again once [`poll`] sees the cancel settle.
+fn work_locally(app: &mut App, thread: &str) {
+    cancel(app, thread);
+    app.ui.chat.timeline.worktree.work_locally.insert(thread.to_owned());
+}
+
 fn cancel(app: &mut App, thread: &str) {
     if app.ui.chat.timeline.worktree.cancelling.contains_key(thread) {
         return;
@@ -387,10 +393,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .size("xs")
                 .icon(&icons::LAPTOP)
                 .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
-                .on_press(move |app: &mut App| {
-                    cancel(app, &local_thread);
-                    app.ui.chat.timeline.worktree.work_locally.insert(local_thread.clone());
-                })
+                .on_press(move |app: &mut App| work_locally(app, &local_thread))
                 .build(t),
         );
     }
@@ -466,6 +469,69 @@ mod tests {
         assert!(!settled(&p("preparing"), Some(&local)), "FAILED: waits for the cancelled run to fail");
         assert!(!settled(&p("failed"), Some(&worktree)), "FAILED: waits for the worktree to be cleared");
         assert!(settled(&p("failed"), Some(&local)));
+    }
+
+    /// The whole Work locally sequence against a recording connection: the cancel goes out, the
+    /// server says it cancelled, nothing is resent while the run is still preparing, and once the
+    /// run fails with its worktree cleared the prompt is dispatched to the thread again.
+    #[test]
+    fn work_locally_resends_through_the_connection_once_the_cancelled_run_settles() {
+        let mut app = App::new();
+        let thread = app
+            .state()
+            .thread_views
+            .iter()
+            .find(|(_, v)| s(&v.projection["thread"], "title") == "Replay showcase")
+            .map(|(id, _)| id.clone())
+            .expect("the showcase fixture thread");
+        let mut state = app.state().clone();
+        if let Some(shell) = state.threads.iter_mut().find(|r| s(r, "id") == thread) {
+            shell["worktreePath"] = json!("/home/dev/.t3/worktrees/app/billing-schema");
+        }
+        let p = &mut state.thread_views.get_mut(&thread).expect("its projection").projection;
+        let run = json!({"id": "wl-run", "ordinal": 999, "status": "preparing", "rootNodeId": "wl-root", "startedAt": "2026-12-01T00:00:00.000Z"});
+        let prompt = json!({"id": "wl-prompt", "type": "user_message", "runId": "wl-run", "nodeId": "wl-root", "ordinal": 1, "status": "completed",
+            "text": "add a billing schema", "attachments": [], "createdAt": "2026-12-01T00:00:00.000Z"});
+        for (key, value) in [("runs", run), ("turnItems", prompt)] {
+            match p[key].as_array_mut() {
+                Some(list) => list.push(value),
+                None => p[key] = json!([value]),
+            }
+        }
+        let (mut net, sent) = s5_net::Net::in_memory_sent("http://local.test");
+        *net.state_mut() = state;
+        app.src = crate::data::Source::Live(net);
+        app.navigate(Route::Thread(thread.clone()));
+
+        work_locally(&mut app, &thread);
+        let requests = sent.requests();
+        let (cancel, ..) = requests.iter().find(|(_, tag, _)| tag == "worktreeSetup.cancel").expect("FAILED: the cancel goes out");
+        assert_eq!(requests.iter().find(|(_, tag, _)| tag == "worktreeSetup.cancel").map(|r| &r.2["threadId"]), Some(&json!(thread)));
+        let Some(net) = app.src.net() else { panic!("live") };
+        net.put_reply(*cancel, Ok(json!({"cancelled": true})));
+
+        poll(&mut app);
+        assert!(app.ui.chat.timeline.worktree.resending.contains(&thread), "FAILED: the cancel is waiting to settle");
+        assert!(!sent.requests().iter().any(|(_, tag, _)| tag == "orchestration.dispatchCommand"), "FAILED: nothing is resent while the run is still preparing");
+
+        let Some(net) = app.src.net() else { panic!("live") };
+        let st = net.state_mut();
+        if let Some(shell) = st.threads.iter_mut().find(|r| s(r, "id") == thread) {
+            shell["worktreePath"] = Value::Null;
+        }
+        for run in st.thread_views.get_mut(&thread).and_then(|v| v.projection["runs"].as_array_mut()).into_iter().flatten() {
+            if run["id"] == "wl-run" {
+                run["status"] = json!("failed");
+            }
+        }
+        poll(&mut app);
+        assert!(app.ui.chat.timeline.worktree.resending.is_empty());
+        super::super::actions::poll(&mut app);
+        let dispatched: Vec<Value> = sent.requests().into_iter().filter(|(_, tag, _)| tag == "orchestration.dispatchCommand").map(|r| r.2).collect();
+        let resent = dispatched.iter().find(|c| c["type"] == "message.dispatch");
+        let resent = resent.unwrap_or_else(|| panic!("FAILED: the prompt is sent again; dispatched {dispatched:?}"));
+        assert_eq!(resent["threadId"], json!(thread));
+        assert_eq!(resent["text"], "add a billing schema");
     }
 
     #[test]

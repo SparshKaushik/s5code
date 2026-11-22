@@ -876,6 +876,61 @@ mod tests {
         assert!(draft.to_string().contains("fix the build"), "{draft}");
     }
 
+    /// Edit from here end to end against a recording connection: the confirmed rewind sends
+    /// `checkpoint.rollback` for the prompt's checkpoint, waits through the server's reply until the
+    /// projection rewinds, then puts the prompt back in the thread's draft; a recorded rollback
+    /// failure ends it with the server's message instead.
+    #[test]
+    fn edit_from_here_rolls_back_through_the_connection_and_returns_the_prompt() {
+        let projection = json!({
+            "thread": {"id": "t", "activeProviderThreadId": "pt"},
+            "providerThreads": [{"id": "pt", "providerInstanceId": "codex", "lastRunOrdinal": 2}],
+            "checkpoints": [{"id": "cp1", "appRunOrdinal": 1}],
+            "runs": [{"id": "r1", "ordinal": 1, "status": "completed"}, {"id": "r2", "ordinal": 2, "status": "completed"}],
+        });
+        let start = |restore_files: bool| {
+            let mut app = App::new();
+            let mut state = app.state().clone();
+            state.conn = s5_net::Conn::Open;
+            state.thread_views.insert("t".into(), s5_net::ThreadView { projection: projection.clone(), synchronized: true, ..Default::default() });
+            let (mut net, sent) = s5_net::Net::in_memory_sent("http://local.test");
+            *net.state_mut() = state;
+            app.src = crate::data::Source::Live(net);
+            let prompt = Rewind { thread: "t".into(), text: "try the other schema".into(), records: vec![], attachments: vec![], scope: "s1".into(), checkpoint: "cp1".into() };
+            app.ui.chat.timeline.actions.confirm.insert("t".into(), (prompt, None));
+            rewind(&mut app, "t", restore_files);
+            let requests = sent.requests();
+            let (id, _, command) = requests.into_iter().find(|(_, tag, _)| tag == "orchestration.dispatchCommand").expect("FAILED: the rollback goes out");
+            assert_eq!((command["type"].as_str(), command["scopeId"].as_str(), command["checkpointId"].as_str(), command["restoreFiles"].as_bool()), (Some("checkpoint.rollback"), Some("s1"), Some("cp1"), Some(restore_files)));
+            (app, id, command["commandId"].as_str().unwrap_or("").to_owned())
+        };
+        let edit = |app: &mut App, f: &dyn Fn(&mut Value)| {
+            if let Some(v) = app.src.net().and_then(|n| n.state_mut().thread_views.get_mut("t")) {
+                f(&mut v.projection);
+            }
+        };
+
+        let (mut app, id, _) = start(true);
+        app.src.net().expect("live").put_reply(id, Ok(json!({})));
+        poll(&mut app);
+        assert!(rewinding(&app, "t"), "FAILED: accepted, but the projection has not rewound yet");
+        edit(&mut app, &|p| {
+            p["providerThreads"][0]["lastRunOrdinal"] = json!(1);
+            p["runs"][1]["status"] = json!("rolled_back");
+        });
+        poll(&mut app);
+        assert!(!rewinding(&app, "t"));
+        let key = crate::chat::composer::draft_key(&app, &Route::Thread("t".into()));
+        let draft = crate::chat::composer::take_draft(&mut app, &key).expect("FAILED: the prompt is back in the draft");
+        assert!(draft.to_string().contains("try the other schema"), "{draft}");
+
+        let (mut app, _, command) = start(false);
+        edit(&mut app, &|p| p["thread"]["rollbackFailure"] = json!({"requestId": command, "message": "Checkpoint is gone."}));
+        poll(&mut app);
+        assert!(!rewinding(&app, "t"));
+        assert_eq!(app.ui.chat.timeline.actions.errors.get("t").map(String::as_str), Some("Checkpoint is gone."));
+    }
+
     #[test]
     fn a_fork_opens_once_its_thread_lands_or_reports_it_never_did() {
         let threads = [json!({"id": "source"}), json!({"id": "fork"})];

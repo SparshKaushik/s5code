@@ -123,10 +123,12 @@ impl Look {
             bg,
             fg,
             muted: c.muted_foreground,
-            number: mix(fg, bg, 0.5),
+            // `--diffs-fg-number`: 65% of the text over the surface.
+            number: mix(fg, bg, 0.65),
             hover: mix(bg, fg, 0.94),
-            sep_bg: mix(bg, fg, 0.97),
-            sep_fg: mix(fg, bg, 0.5),
+            // DIFF_SURFACE_THEME_UNSAFE_CSS `--diffs-bg-separator-override`.
+            sep_bg: mix(bg, fg, 0.95),
+            sep_fg: mix(fg, bg, 0.65),
             buffer: mix(bg, fg, 0.9),
             border: c.border,
             button_hover: c.accent,
@@ -547,7 +549,8 @@ pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
     if let Some(w) = view_w(st) {
         inner = inner.w(w).sticky_left(0.0);
     }
-    row().w_full().h(SEP_H).fill(l.sep_bg).role("separator").label(label).child(inner)
+    let (top, bottom) = super::state::sep_margins(h, st.files()[f].hunks.len());
+    col().w_full().pt(top).pb(bottom).child(row().w_full().h(SEP_H).fill(l.sep_bg).role("separator").label(label).child(inner))
 }
 
 /// A file with no lines to show.

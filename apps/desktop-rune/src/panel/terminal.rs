@@ -1044,7 +1044,7 @@ fn open_path(app: &mut App, target: String, thread: &str, id: &str) {
         let env = app.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_string()).unwrap_or_default();
         return note(app, thread, id, &format!("No available editor can open {target} in environment {env}."));
     };
-    if crate::env::ssh::open_in_editor(app, &editor, &target) {
+    if crate::env::ssh::open_in_editor(app, &editor, &target, |app, message| note(app, thread, id, message)) {
         return;
     }
     if !crate::chat::details::grants(app, "orchestration:operate") {

@@ -1431,6 +1431,22 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
 
 const TREE_FRACTION: f32 = 0.4;
 
+/// `--trees-fg-muted`: the chevron's ink.
+fn tree_muted() -> Color {
+    rune::color::hex("#84848a").unwrap_or(Color::WHITE)
+}
+
+/// Pierre's git lane: the letter, its `--trees-status-*` colour, and its title.
+fn git_status(status: FileStatus, dark: bool) -> (&'static str, Color, &'static str) {
+    let (letter, light, night, title) = match status {
+        FileStatus::Added | FileStatus::Copied => ("A", "#16a994", "#00cab1", "Git status: added"),
+        FileStatus::Deleted => ("D", "#ff2e3f", "#ff6762", "Git status: deleted"),
+        FileStatus::Renamed => ("R", "#d5a910", "#ffd452", "Git status: renamed"),
+        FileStatus::Modified => ("M", "#1ca1c7", "#08c0ef", "Git status: modified"),
+    };
+    (letter, rune::color::hex(if dark { night } else { light }).unwrap_or(tree_muted()), title)
+}
+
 /// `FileExplorerPane`'s bounds: 160 to 560 wide, leaving the diff at least 256.
 fn tree_width(w: f32, row: f32) -> f32 {
     let max = (row - 256.0).min(560.0).max(160.0);
@@ -1447,10 +1463,10 @@ fn tree_pane(app: &App, t: &T) -> El {
     let mut head = row()
         .h(40.0)
         .px(8.0)
-        .gap(8.0)
+        .gap(4.0)
         .center_y()
         .w_full()
-        .child(text("Files").font(theme::XS_MEDIUM).color(t.c.foreground))
+        .child(text("Files").font(theme::XS_MEDIUM).color(t.c.foreground).px(4.0))
         .child(el().grow(1.0))
         .child(text(paths.len().to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground));
     if !dirs.is_empty() {
@@ -1472,18 +1488,21 @@ fn tree_pane(app: &App, t: &T) -> El {
                 .build(t),
         );
     }
-    let mut list = col().key("panel-diff-tree-rows").w_full().padding(4.0).gap(1.0).role("tree").label("Changed files");
+    // Pierre's compact tree (density 0.8): rows inset 16 left and 10 right, 6.4 padding, 4.8 gaps,
+    // 16 icon and 12 git lanes, and 18.7 per level of indent guides.
+    let mut list = col().key("panel-diff-tree-rows").w_full().pl(16.0).pr(10.0).py(4.0).role("tree").label("Changed files");
+    let lane = |glyph: El, w: f32| row().size(w, 24.0).center().child(glyph);
     for (i, r) in rows.into_iter().enumerate() {
-        let pad = 8.0 + r.depth as f32 * 12.0;
-        let base = row().key(format!("t{i}")).h(24.0).pl(pad).pr(8.0).gap(6.0).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem");
+        let base = row().key(format!("t{i}")).h(24.0).pl(6.4 + r.depth as f32 * 18.7).pr(6.4).gap(4.8).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem");
         let line = if let Some(dir) = r.dir {
             let open = !ui.folded_dirs.contains(&dir);
             base.hover(t.c.foreground.alpha(0.07))
                 .label(r.label.clone())
                 .expanded(open)
-                .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground))
-                .child(icon(if open { &icons::FOLDER_OPEN } else { &icons::FOLDER }, 14.0).color(t.c.muted_foreground))
-                .child(text(r.label).font(theme::TEXT_XS).color(t.c.foreground).single_line().truncate().min_w(0.0).shrink())
+                .child(lane(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(tree_muted()), 16.0))
+                .child(text(r.label).font(theme::TEXT_XS).color(t.c.foreground).single_line().truncate().min_w(0.0).shrink().grow(1.0))
+                // Every folder in a diff holds a change: Pierre's half-strength descendant dot.
+                .child(lane(el().size(4.0, 4.0).radius(2.0).fill(git_status(FileStatus::Modified, t.dark).1.alpha_mul(0.5)), 12.0).help("Contains git status items"))
                 .on_press(move |s: &mut App| {
                     let folded = &mut s.ui.panel.diff.folded_dirs;
                     if !folded.remove(&dir) {
@@ -1493,19 +1512,18 @@ fn tree_pane(app: &App, t: &T) -> El {
         } else {
             let f = r.file.unwrap_or(0);
             let file = &st.files()[f];
-            let color = match file.status {
-                FileStatus::Added | FileStatus::Copied => t.c.diff_addition_foreground,
-                FileStatus::Deleted => t.c.diff_deletion_foreground,
-                FileStatus::Renamed => t.c.diff_modified_icon.alpha(1.0),
-                FileStatus::Modified => t.c.foreground,
-            };
             let selected = f == current;
-            base.pl(pad + 18.0)
-                .fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
+            let (letter, color, title) = git_status(file.status, t.dark);
+            let glyph = match crate::chat::timeline::language_icons::for_path(file.path()) {
+                Some((glyph, light, dark)) => icon(glyph, 16.0).color(rune::color::hex(if t.dark { dark } else { light }).unwrap_or(tree_muted())),
+                None => icon(&icons::FILE, 14.0).color(rune::color::hex(if t.dark { "#adadb1" } else { "#84848a" }).unwrap_or(tree_muted())),
+            };
+            base.fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(file.path().to_string())
-                .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground))
-                .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
+                .child(lane(glyph, 16.0))
+                .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink().grow(1.0))
+                .child(lane(text(letter).font(theme::weight(theme::TEXT_XS, 600.0)).color(color), 12.0).help(title))
                 .on_press_tx(move |s: &mut App, tx| {
                     let ui = &mut s.ui.panel.diff;
                     ui.touched = true;

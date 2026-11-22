@@ -1753,19 +1753,29 @@ pub fn editors(s: &App) -> Option<Vec<(String, String)>> {
     Some(ids.into_iter().map(|id| (id.to_owned(), editor_label(id).to_owned())).collect())
 }
 
-/// Opens `path` on the active SSH environment's host in `editor`; false off SSH.
-pub fn open_in_editor(s: &mut App, editor: &str, path: &str) -> bool {
+/// Opens `path` on the active SSH environment's host in `editor`; false off SSH. A launch
+/// failure goes to `failed`, so it lands where the open started (a terminal's own buffer).
+pub fn open_in_editor(s: &mut App, editor: &str, path: &str, failed: impl FnOnce(&mut App, &str)) -> bool {
     let OpenMode::Links(host, user) = open_mode(s, &s.ui.env.active) else { return false };
     let Some(url) = remote_open_url(editor, &host, user.as_deref(), path, false) else { return true };
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    match Command::new(opener).arg(&url).stdin(Stdio::null()).spawn() {
+    launch(s, if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &url, failed);
+    true
+}
+
+fn launch(s: &mut App, opener: &str, url: &str, failed: impl FnOnce(&mut App, &str)) {
+    match Command::new(opener).arg(url).stdin(Stdio::null()).spawn() {
         Ok(_) => {
             s.client_settings.values.insert(REMOTE_OPEN_HINT_SEEN.into(), serde_json::json!(true));
             s.client_settings.save();
         }
-        Err(e) => crate::shell::palette::toast(s, "Could not open the editor.", Some(&e.to_string())),
+        Err(e) => failed(s, &format!("Could not open the editor. {e}")),
     }
-    true
+}
+
+/// [`open_in_editor`]'s failure for opens with no terminal to write into.
+pub fn toast_open_error(s: &mut App, message: &str) {
+    let (title, detail) = message.split_once(". ").unwrap_or((message, ""));
+    crate::shell::palette::toast(s, &format!("{title}."), (!detail.is_empty()).then_some(detail));
 }
 
 /// `useRemoteOpenHint`: set after the first remote open goes through.
@@ -1851,6 +1861,16 @@ pub fn remote_open_url(editor: &str, host: &str, username: Option<&str>, path: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remote_editor_that_cannot_launch_reports_to_its_caller_and_leaves_the_hint_unseen() {
+        let mut app = App::new();
+        let mut reported = None;
+        launch(&mut app, "/nonexistent/s5-opener", "vscode://vscode-remote/ssh-remote+box/repo", |_, message| reported = Some(message.to_owned()));
+        let message = reported.expect("FAILED: the caller hears about the failed launch");
+        assert!(message.starts_with("Could not open the editor. "), "{message}");
+        assert!(app.client_settings.values.get(REMOTE_OPEN_HINT_SEEN).is_none(), "FAILED: a failed open is not a first remote open");
+    }
 
     fn target(alias: &str, hostname: &str, username: Option<&str>, port: Option<u16>) -> Target {
         Target { alias: alias.into(), hostname: hostname.into(), username: username.map(Into::into), port }

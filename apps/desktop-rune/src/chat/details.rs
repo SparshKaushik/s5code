@@ -1049,7 +1049,7 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
     }
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
-    if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
+    if crate::env::ssh::open_in_editor(s, &editor, &cwd, crate::env::ssh::toast_open_error) {
         return;
     }
     if let Some(net) = s.src.net() {
