@@ -1,6 +1,7 @@
 //! Web's `ThemeEditorPanel` as `ThemeEditorHost` mounts it: a floating panel over the app whose
-//! colors preview live. The session lives in the `form.themeEditor` value; web's inspect mode,
-//! resize handle and merge-by-name are not ported.
+//! colors preview live. The session lives in the `form.themeEditor` value. Inspect picks the
+//! app element under the pointer and maps its keyed region to a role (Rune can't tell which
+//! token painted a pixel, as web's CSS probes do); merge-by-name is not ported.
 use super::{builtins, color, custom_themes, modes, palette};
 use crate::kit::{self, Button};
 use crate::settings::vivid;
@@ -13,6 +14,9 @@ const SESSION: &str = "form.themeEditor";
 const FILTER: &str = "form.themeEditorFilter";
 const SIMPLE: [(&str, &str); 2] = [("canvas", "Background"), ("accent", "Accent")];
 const MARGIN: f32 = 8.0;
+const MIN_W: f32 = 280.0;
+const MIN_H: f32 = 220.0;
+const WIDTH: f32 = 416.0;
 static NULL: Value = Value::Null;
 
 type Family = (&'static str, &'static str, &'static [&'static str]);
@@ -279,15 +283,147 @@ fn save(s: &mut App) {
     close(s);
 }
 
-fn drag(s: &mut App, d: &rune::Drag) {
+fn pair(v: &Value) -> Option<[f32; 2]> {
+    Some([v[0].as_f64()? as f32, v[1].as_f64()? as f32])
+}
+
+/// `clampPanelPosition`: the header stays reachable inside the window.
+fn clamp_pos([x, y]: [f32; 2], width: f32, [vw, vh]: [f32; 2]) -> [f32; 2] {
+    [x.clamp(MARGIN, (vw - width - MARGIN).max(MARGIN)), y.clamp(MARGIN, (vh - 48.0).max(MARGIN))]
+}
+
+/// The resize handle's bounds: the minimum size, and the window's edge past the panel's corner.
+fn clamp_size([w, h]: [f32; 2], [x, y]: [f32; 2], [vw, vh]: [f32; 2]) -> [f32; 2] {
+    [w.clamp(MIN_W, (vw - MARGIN - x).max(MIN_W)), h.clamp(MIN_H, (vh - MARGIN - y).max(MIN_H))]
+}
+
+/// Where the panel sits: dragged once, it keeps its place inside the window.
+fn placed(s: &App) -> Option<[f32; 2]> {
+    let session = session(s);
+    let pos = pair(&session["pos"])?;
+    let width = pair(&session["size"]).map_or(WIDTH, |[w, _]| w);
+    Some(s.ui.desktop.window_size().map_or(pos, |window| clamp_pos(pos, width, window)))
+}
+
+/// A gesture starts from where the panel is now, pinned or placed.
+fn anchor(s: &mut App) {
+    let from = placed(s).map_or_else(|| json!([session(s)["rect"][0], session(s)["rect"][1]]), |p| json!(p));
     let session = session_mut(s);
+    session["pos"] = from.clone();
+    session["grab"] = from;
+}
+
+fn drag(s: &mut App, d: &rune::Drag) {
     if d.phase == Phase::Down {
-        let from = if session["pos"].is_array() { session["pos"].clone() } else { json!([session["rect"][0], session["rect"][1]]) };
-        session["grab"] = from;
+        anchor(s);
     }
-    if let (Some(x), Some(y)) = (session["grab"][0].as_f64(), session["grab"][1].as_f64()) {
-        session["pos"] = json!([(x as f32 + d.dx).max(MARGIN), (y as f32 + d.dy).max(MARGIN)]);
+    if let Some([x, y]) = pair(&session(s)["grab"]) {
+        let width = pair(&session(s)["size"]).map_or(WIDTH, |[w, _]| w);
+        let next = [x + d.dx, y + d.dy];
+        let next = s.ui.desktop.window_size().map_or([next[0].max(MARGIN), next[1].max(MARGIN)], |window| clamp_pos(next, width, window));
+        session_mut(s)["pos"] = json!(next);
     }
+}
+
+fn resize(s: &mut App, d: &rune::Drag) {
+    if d.phase == Phase::Down {
+        anchor(s);
+        let rect = &session(s)["rect"];
+        let start = json!([rect[2], rect[3]]);
+        session_mut(s)["grow"] = start;
+    }
+    let (Some([w, h]), Some(pos)) = (pair(&session(s)["grow"]), pair(&session(s)["pos"])) else { return };
+    let next = [w + d.dx, h + d.dy];
+    let next = s.ui.desktop.window_size().map_or([next[0].max(MIN_W), next[1].max(MIN_H)], |window| clamp_size(next, pos, window));
+    session_mut(s)["size"] = json!(next);
+}
+
+/// The role an inspected element shows, from the keyed regions on its path, innermost first.
+fn inspected_role(path: &str) -> &'static str {
+    for segment in path.rsplit('/') {
+        let role = match segment {
+            k if k.starts_with("terminal") => "terminalBackground",
+            k if k.starts_with("sb-row") => "sidebarRowSelected",
+            k if k == "sidebar" || k.starts_with("sb-") => "sidebar",
+            k if k.starts_with("composer") => "input",
+            k if k.starts_with("topbar") => "toolbar",
+            "code" | "file-editor" => "codeBackground",
+            k if k.starts_with("toast") => "surfaceOverlay",
+            "settings-modal" => "surface",
+            "main" | "shell" => "canvas",
+            _ => continue,
+        };
+        return role;
+    }
+    "canvas"
+}
+
+fn family_label(role: &str) -> &'static str {
+    GROUPS.iter().flat_map(|(_, families)| families.iter()).find(|(_, shown, _)| *shown == role).map_or("Background", |&(label, _, _)| label)
+}
+
+/// The family whose field shows `role`.
+fn family_role(role: &str) -> &'static str {
+    GROUPS.iter().flat_map(|(_, families)| families.iter()).find(|(_, _, roles)| roles.contains(&role)).map_or("canvas", |&(_, shown, _)| shown)
+}
+
+/// `selectThemeRole` with reveal: a role outside the simple pair opens advanced, unfiltered.
+fn select_role(s: &mut App, role: &str, tx: &mut rune::Tx) {
+    let shown = family_role(role);
+    let session = session_mut(s);
+    session["selected"] = json!(shown);
+    session["inspecting"] = json!(false);
+    if !SIMPLE.iter().any(|(r, _)| *r == shown) {
+        set_advanced(s, true);
+        s.ui.settings.edits.insert(FILTER.to_owned(), TextEdit::new(""));
+    }
+    tx.scroll_into_view(format!("theme-color-{shown}"));
+}
+
+fn inspect(s: &mut App, on: bool) {
+    let session = session_mut(s);
+    session["inspecting"] = json!(on);
+    if !on {
+        session["selected"] = Value::Null;
+    }
+}
+
+/// Settings' Escape: cancels inspecting, else closes an open editor.
+pub fn escape(s: &mut App) -> bool {
+    let open = s.ui.settings.theme_editor.is_some();
+    if open {
+        dismiss(s);
+    }
+    open
+}
+
+/// Escape cancels inspecting before it closes the editor.
+fn dismiss(s: &mut App) {
+    if session(s)["inspecting"] == true {
+        inspect(s, false);
+    } else {
+        close(s);
+    }
+}
+
+/// While inspecting, a press over the app picks its region instead of reaching it.
+fn inspector(s: &App) -> El {
+    let scope = if matches!(s.route, Route::Settings(_)) { "settings-modal" } else { "shell" };
+    el().key("theme-inspect")
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .cursor(rune::Cursor::Crosshair)
+        .on_pointer_move_local(|s: &mut App, e: rune::PointerEvent, _: &mut rune::Tx| session_mut(s)["pointer"] = json!([e.window_x, e.window_y]))
+        .on_drag(move |s: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| {
+            if d.phase != Phase::Down {
+                return;
+            }
+            let Some([x, y]) = pair(&session(s)["pointer"]) else { return };
+            tx.element_at_in(scope, x, y, |s: &mut App, picked: Option<rune::Picked>, tx: &mut rune::Tx| {
+                if let Some(picked) = picked {
+                    select_role(s, inspected_role(picked.path()), tx);
+                }
+            });
+        })
 }
 
 /// The session's colors for the appearance being edited, which `apply` paints over the app.
@@ -320,15 +456,18 @@ fn field(s: &App, t: &T, role: &'static str, label: &str) -> El {
         .build(t)
         .single_line()
         .w(128.0);
-    row()
+    let selected = session(s)["selected"].as_str() == Some(role);
+    let out = row()
         .key(format!("theme-color-{role}"))
         .w_full()
         .min_h(32.0)
         .gap(10.0)
         .center_y()
+        .radius(6.0)
         .child(el().size(20.0, 20.0).radius(6.0).border(1.0, t.c.border).fill(color(css).unwrap_or(rune::Color::TRANSPARENT)))
         .child(text(label.to_owned()).font(theme::TEXT_SM).color(t.c.foreground).grow(1.0).min_w(0.0).truncate())
-        .child(input)
+        .child(input);
+    if selected { out.outline(2.0, 2.0, t.c.ring) } else { out }
 }
 
 fn fields(s: &App, t: &T, advanced: bool) -> El {
@@ -421,6 +560,13 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
     let editing = editing_modes(s);
     let title = if editing.is_some() { "Edit theme" } else { "Create theme" };
     let minimized = state["minimized"] == true;
+    let inspecting = state["inspecting"] == true;
+    let mut heading = row().gap(8.0).min_w(0.0).center_y().child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground));
+    if !minimized {
+        let hint = if inspecting { "Select an element \u{b7} Esc to cancel" } else { "Select a color below" };
+        let hint = state["selected"].as_str().filter(|_| !inspecting).map_or_else(|| hint.to_owned(), |role| family_label(role).to_owned());
+        heading = heading.child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink());
+    }
     let header = row()
         .w_full()
         .h(44.0)
@@ -434,8 +580,19 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
                 .min_w(0.0)
                 .h_full()
                 .center_y()
+                .cursor(rune::Cursor::Grab)
                 .on_drag(|s: &mut App, d, _| drag(s, d))
-                .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground).truncate()),
+                .child(heading),
+        )
+        .child(
+            Button::new(if inspecting { "Cancel" } else { "Inspect" })
+                .icon(&icons::MOUSE_POINTER_2)
+                .size("xs")
+                .variant(if inspecting { "secondary" } else { "ghost" })
+                .on_press(move |s: &mut App| inspect(s, !inspecting))
+                .build(t)
+                .label(if inspecting { "Cancel inspecting app colors" } else { "Inspect app colors" })
+                .help(if inspecting { "Cancel and clear the selection" } else { "Pick a color from the app" }),
         )
         .child(
             Button::new(if minimized { "Expand the theme editor" } else { "Minimize the theme editor" })
@@ -446,10 +603,10 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
                 .build(t),
         )
         .child(Button::new("Close the theme editor").icon(&icons::X).size("icon-xs").variant("ghost").on_press(close).build(t));
+    let size = pair(&state["size"]);
     let mut panel = col()
         .key("theme-editor")
-        .w(416.0)
-        .max_h(672.0)
+        .w(size.map_or(WIDTH, |[w, _]| w))
         .radius(12.0)
         .clip_rounded(12.0)
         .border(1.0, t.c.border)
@@ -459,6 +616,10 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         .label(title)
         .on_layout(|s: &mut App, rect| session_mut(s)["rect"] = json!(rect))
         .child(header);
+    panel = match size {
+        Some([_, h]) if !minimized => panel.h(h),
+        _ => panel.max_h(s.ui.desktop.window_size().map_or(672.0, |[_, vh]| (vh - 2.0 * MARGIN).min(672.0))),
+    };
     if !minimized {
         let save_button = Button::new(if editing.is_some() { "Save changes" } else { "Create theme" }).size("sm").disabled(s.ui.settings.theme_name.text.trim().is_empty()).on_press(save);
         let save_button = if editing.is_some() { save_button } else { save_button.icon(&icons::PAINTBRUSH) };
@@ -475,29 +636,63 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
                     .justify_end()
                     .child(Button::new("Cancel").size("sm").variant("ghost").on_press(close).build(t))
                     .child(save_button.build(t)),
+            )
+            .child(
+                el().key("theme-editor-resize")
+                    .pin(None, None, Some(0.0), Some(0.0))
+                    .size(20.0, 20.0)
+                    .cursor(rune::Cursor::Move)
+                    .label("Resize the theme editor")
+                    .on_drag(|s: &mut App, d, _| resize(s, d)),
             );
     }
-    panel = match (state["pos"][0].as_f64(), state["pos"][1].as_f64()) {
-        (Some(x), Some(y)) => panel.absolute(x as f32, y as f32),
+    panel = match placed(s) {
+        Some([x, y]) => panel.absolute(x, y),
         _ => panel.pin(None, None, Some(16.0), Some(16.0)),
     };
-    panel = if matches!(s.route, Route::Settings(_)) {
-        panel.modal(false, close)
+    // Modal inside Settings traps focus, but inspecting needs the presses below it.
+    panel = if matches!(s.route, Route::Settings(_)) && !inspecting {
+        panel.modal(false, dismiss)
     } else {
         panel.on_key(|s: &mut App, e: &rune::KeyEvent, _: &mut rune::Tx| {
             let escape = e.key == rune::Key::Escape;
             if escape {
-                close(s);
+                dismiss(s);
             }
             escape
         })
     };
+    if inspecting {
+        layers.push(inspector(s));
+    }
     layers.push(panel);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panel_stays_inside_the_window_and_resizes_within_it() {
+        let window = [1200.0, 800.0];
+        assert_eq!(clamp_pos([-40.0, -5.0], WIDTH, window), [MARGIN, MARGIN]);
+        assert_eq!(clamp_pos([1100.0, 900.0], WIDTH, window), [1200.0 - WIDTH - MARGIN, 800.0 - 48.0]);
+        assert_eq!(clamp_pos([10.0, 10.0], WIDTH, [300.0, 40.0]), [MARGIN, MARGIN], "a window narrower than the panel pins it to the margin");
+        assert_eq!(clamp_size([100.0, 100.0], [20.0, 20.0], window), [MIN_W, MIN_H]);
+        assert_eq!(clamp_size([2000.0, 2000.0], [200.0, 100.0], window), [1200.0 - MARGIN - 200.0, 800.0 - MARGIN - 100.0]);
+    }
+
+    #[test]
+    fn inspecting_maps_the_innermost_region_to_its_family() {
+        let role = |path: &str| family_role(inspected_role(path));
+        assert_eq!(role("shell/sidebar/sb-scroll/sb-list/sb-row-t1/#0"), "sidebarRowSelected");
+        assert_eq!(role("shell/sidebar/#2"), "sidebar");
+        assert_eq!(role("shell/main/terminal-drawer/#1"), "terminalBackground");
+        assert_eq!(role("shell/main/topbar/topbar-title"), "canvas", "the toolbar is the background's family");
+        assert_eq!(role("shell/main/#3/composer-editor"), "input");
+        assert_eq!(role("#0/#1"), "canvas");
+        assert_eq!(family_label("terminalBackground"), "Terminal background");
+    }
 
     fn two_modes() -> Value {
         let mut theme = builtins().iter().find(|t| t["id"] == "grove").unwrap().clone();

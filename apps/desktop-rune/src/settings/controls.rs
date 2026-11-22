@@ -427,6 +427,15 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
     };
+    let hover_key = key.to_owned();
+    let row = row.on_hover_change(move |s: &mut App, on, _: &mut rune::Tx| {
+        let hovered = &mut s.ui.settings.hover_row;
+        if on {
+            *hovered = Some(hover_key.clone());
+        } else if hovered.as_deref() == Some(hover_key.as_str()) {
+            *hovered = None;
+        }
+    });
     super::pulsed(s, t, search_title, row)
 }
 

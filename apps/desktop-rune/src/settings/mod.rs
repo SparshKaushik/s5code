@@ -110,6 +110,8 @@ pub struct Ui {
     pub pulse: Option<(String, i64, bool)>,
     /// Open inheritance popover, by row key.
     pub inheritance: Option<String>,
+    /// The settings row under the pointer, which reveals its inheritance marker.
+    pub hover_row: Option<String>,
     pub edits: HashMap<String, TextEdit>,
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
@@ -1275,6 +1277,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.settings.open_select = Some("defaultRuntimeMode".into());
     }),
     ("settings-general", |s| scene(s, "general")),
+    ("settings-search", |s| {
+        scene(s, "general");
+        s.ui.settings.search = TextEdit::new("theme");
+    }),
     ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),
     ("settings-providers", |s| scene(s, "providers")),
@@ -1695,6 +1701,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         if s.ui.settings.open_select.take().is_some() || background::escape(s) {
             return true;
         }
+        if themes::open_vsx::escape(s) {
+            return true;
+        }
         if s.ui.settings.theme_import_open {
             s.ui.settings.theme_import_open = false;
             return true;
@@ -1714,7 +1723,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             return true;
         }
         if s.ui.settings.update_version.take().is_some()
-            || s.ui.settings.theme_editor.take().is_some()
+            || themes::editor_escape(s)
             || s.ui.settings.archive_menu.take().is_some()
         {
             return true;

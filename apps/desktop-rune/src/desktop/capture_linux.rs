@@ -43,14 +43,14 @@ pub enum Backend {
     Picker,
     Hyprland,
     Niri,
-    /// KWin's ScreenShot2. Its results carry no title, pid or frame, so no app text or effects.
+    /// KWin's ScreenShot2, with the KDE helper's KWin-script lookup naming the window.
     Kde,
 }
 
 impl Backend {
     /// Names the captured window's process, so its app text can be read.
     pub fn knows_window(self) -> bool {
-        matches!(self, Backend::GnomeExtension | Backend::Hyprland | Backend::Niri)
+        matches!(self, Backend::GnomeExtension | Backend::Hyprland | Backend::Niri | Backend::Kde)
     }
 }
 
@@ -419,6 +419,72 @@ pub fn kde_rgba(meta: &RawMeta, raw: &[u8]) -> Result<(u32, u32, Vec<u8>), Strin
     Ok((width, height, out))
 }
 
+/// The KDE helper's `capture_title`: a leading CLI spinner frame doesn't change the window.
+fn capture_title(title: &str) -> &str {
+    let title = title.trim();
+    let mut chars = title.chars();
+    if matches!(chars.next(), Some('\u{280b}' | '\u{2819}' | '\u{2839}' | '\u{2838}' | '\u{283c}' | '\u{2834}' | '\u{2826}' | '\u{2827}' | '\u{2807}' | '\u{280f}'))
+        && chars.clone().next().is_some_and(char::is_whitespace)
+    {
+        let label = chars.as_str().trim_start();
+        if !label.is_empty() {
+            return label;
+        }
+    }
+    title
+}
+
+/// What the KWin script read: the window's id for `CaptureWindow`, the window, and this app's
+/// own frame. Frames are output-local and kept only on a single output, as Hyprland's are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KwinLookup {
+    pub id: String,
+    pub window: Window,
+    pub own: Option<[f64; 4]>,
+    identity: (String, [f64; 4]),
+}
+
+/// The script's reply (`KWIN_LOOKUP`).
+pub fn parse_kwin(json: &str) -> Option<KwinLookup> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let w = &v["window"];
+    let rect = |r: &Value| Some([r["x"].as_f64()?, r["y"].as_f64()?, r["width"].as_f64()?, r["height"].as_f64()?]).filter(|r| r[2] > 0.0 && r[3] > 0.0);
+    let frame = rect(&w["bounds"])?;
+    let single = v["screens"].as_u64() == Some(1);
+    let local = |r: [f64; 4], output: &Value| rect(output).map(|o| [r[0] - o[0], r[1] - o[1], r[2], r[3]]);
+    let pid = w["processId"].as_u64().and_then(|p| u32::try_from(p).ok()).unwrap_or(0);
+    let window = Window {
+        title: w["title"].as_str().unwrap_or_default().to_owned(),
+        app: w["appName"].as_str().unwrap_or("Application").to_owned(),
+        pid,
+        bounds: single.then(|| local(frame, &w["output"])).flatten(),
+    };
+    let own = single.then(|| rect(&v["own"]["bounds"]).and_then(|r| local(r, &v["own"]["output"]))).flatten();
+    let identity = (format!("{}\u{0}{}\u{0}{}", w["appIdentifier"].as_str().unwrap_or_default(), window.app, capture_title(&window.title)), frame);
+    Some(KwinLookup { id: w["id"].as_str()?.to_owned(), window, own, identity })
+}
+
+impl KwinLookup {
+    /// `matches_after_capture`: still the same window, frame and app once the capture is done.
+    pub fn same_window(&self, after: &Self) -> bool {
+        self.id == after.id && self.window.pid == after.window.pid && self.identity == after.identity
+    }
+}
+
+/// The KDE helper's `window` script, also naming this app's window for the fly-in's origin.
+/// `__SELECT__` and `__PID__` are filled in per call.
+pub const KWIN_LOOKUP: &str = "function rect(r) { return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }; }
+function frame(w) { return { bounds: rect(w.frameGeometry), output: w.output ? rect(w.output.geometry) : null }; }
+const w = __SELECT__;
+const own = workspace.windowList().find(o => o.pid === __PID__ && o.normalWindow);
+reply({ window: !w ? null : Object.assign({ id: String(w.internalId), title: w.caption, appName: w.resourceClass || w.desktopFileName || 'Application', appIdentifier: w.desktopFileName || w.resourceClass || '', processId: w.pid }, frame(w)), own: own ? frame(own) : null, screens: workspace.screens ? workspace.screens.length : 0 });";
+
+/// The script for the active window (`None`) or the one with `id`.
+pub fn kwin_lookup_script(id: Option<&str>, pid: u32) -> String {
+    let select = id.map_or_else(|| "workspace.activeWindow".to_owned(), |id| format!("workspace.windowList().find(w => String(w.internalId) === {})", Value::from(id)));
+    KWIN_LOOKUP.replace("__SELECT__", &select).replace("__PID__", &pid.to_string())
+}
+
 /// The extension's window metadata. Its bounds are GNOME's, used only by the extension.
 pub fn parse_window(json: &str) -> Option<Window> {
     let v: Value = serde_json::from_str(json).ok()?;
@@ -703,10 +769,14 @@ pub fn capture(backend: Backend, path: &Path, feedback: Feedback) -> Result<Capt
         Backend::Kde => {
             ensure_kde_entry()?;
             match bus::kde_capture() {
-                Ok((meta, raw)) => {
+                Ok((meta, raw, lookup)) => {
                     let (width, height, rgba) = kde_rgba(&meta, &raw)?;
                     let image = image::RgbaImage::from_raw(width, height, rgba).ok_or("KDE Plasma returned an unreadable screenshot.")?;
                     save_image(image::DynamicImage::ImageRgba8(image), path)?;
+                    if let Some(lookup) = lookup {
+                        captured.own = (feedback.flash || feedback.animate).then_some(lookup.own).flatten();
+                        captured.window = Some(lookup.window);
+                    }
                     return Ok(captured);
                 }
                 // KDE may not have read the entry yet: this capture takes the picker, and the
@@ -774,7 +844,7 @@ pub struct Probe {
 
 #[cfg(target_os = "linux")]
 mod bus {
-    use super::{APP_ID, EXTENSION_UUID, KdeError, Probe, RawMeta, Shell};
+    use super::{APP_ID, EXTENSION_UUID, KdeError, KwinLookup, Probe, RawMeta, Shell};
     use futures_util::StreamExt;
     use std::collections::HashMap;
     use std::future::Future;
@@ -997,9 +1067,65 @@ mod bus {
         })
     }
 
-    /// The KDE helper's `capture`: `CaptureActiveWindow` with its options, writing raw pixels to
-    /// a socket drained on a thread, so KWin never blocks on a full buffer.
-    pub(super) fn kde_capture() -> Result<(RawMeta, Vec<u8>), KdeError> {
+    const KWIN: &str = "org.kde.KWin";
+    const REPLY_PATH: &str = "/com/s5code/KdeCapture";
+    const REPLY_INTERFACE: &str = "com.s5code.KdeCapture";
+
+    /// The KDE helper's `script`: loads a one-off KWin script whose `reply` calls back on this
+    /// connection, and unloads it however it ends. With no object server here, the call only
+    /// reaches the message stream, which takes it from KWin alone.
+    async fn kwin_script(conn: &Connection, body: &str) -> Option<String> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let owner: String = timed(call(conn, (DBUS, DBUS_PATH), DBUS, "GetNameOwner", &(KWIN,))).await.ok()?;
+        let me = conn.unique_name()?.to_string();
+        let name = format!("s5-capture-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let path = std::env::temp_dir().join(format!("{name}.js"));
+        let source = format!(
+            "function reply(value) {{ callDBus({}, '{REPLY_PATH}', '{REPLY_INTERFACE}', 'Reply', JSON.stringify(value)); }}\ntry {{ {body} }} catch (error) {{ reply({{error: String(error)}}); }}",
+            serde_json::Value::from(me)
+        );
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&path).ok()?.write_all(source.as_bytes()).ok()?;
+        }
+        let mut stream = zbus::MessageStream::from(conn);
+        let scripting = (KWIN, "/Scripting");
+        let result = async {
+            let id: i32 = timed(call(conn, scripting, "org.kde.kwin.Scripting", "loadScript", &(path.to_str()?, name.as_str()))).await.ok()?;
+            if id < 0 {
+                return None;
+            }
+            let object = format!("/Scripting/Script{id}");
+            timed(call::<_, ()>(conn, (KWIN, object.as_str()), "org.kde.kwin.Script", "run", &())).await.ok()?;
+            let reply = async {
+                while let Some(Ok(message)) = stream.next().await {
+                    let header = message.header();
+                    let from_kwin = header.sender().is_some_and(|s| s.as_str() == owner);
+                    let ours = header.member().is_some_and(|m| m.as_str() == "Reply") && header.interface().is_some_and(|i| i.as_str() == REPLY_INTERFACE);
+                    if matches!(message.message_type(), zbus::message::Type::MethodCall) && from_kwin && ours {
+                        return message.body().deserialize::<String>().ok().filter(|v| v.len() <= 64 * 1024);
+                    }
+                }
+                None
+            };
+            tokio::time::timeout(CALL_TIMEOUT, reply).await.ok().flatten()
+        }
+        .await;
+        let _ = timed(call::<_, bool>(conn, scripting, "org.kde.kwin.Scripting", "unloadScript", &(name.as_str(),))).await;
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    async fn kwin_window(conn: &Connection, id: Option<&str>) -> Option<KwinLookup> {
+        super::parse_kwin(&kwin_script(conn, &super::kwin_lookup_script(id, std::process::id())).await?)
+    }
+
+    /// The KDE helper's `capture`: the active window by its KWin id, writing raw pixels to a
+    /// socket drained on a thread, so KWin never blocks on a full buffer. Without scripting it
+    /// falls back to `CaptureActiveWindow` and names no window; a window that changed during
+    /// the capture is not named either, as the helper never guesses which app was captured.
+    pub(super) fn kde_capture() -> Result<(RawMeta, Vec<u8>, Option<KwinLookup>), KdeError> {
         use std::io::Read;
         use std::os::unix::net::UnixStream;
         let unprepared = |_: std::io::Error| KdeError::Failed("Could not prepare the snapshot.".into());
@@ -1020,17 +1146,25 @@ mod bus {
                 ("include-cursor", Variant::from(false)),
                 ("native-resolution", Variant::from(true)),
             ]);
+            let before = kwin_window(conn, None).await;
             let result = timed(async {
                 let proxy = Proxy::new(conn, KWIN_SCREENSHOT, KWIN_SCREENSHOT_PATH, KWIN_SCREENSHOT).await?;
-                proxy.call::<_, _, HashMap<String, OwnedVariant>>("CaptureActiveWindow", &(options, zbus::Fd::from(&writer))).await
+                match &before {
+                    Some(window) => proxy.call::<_, _, HashMap<String, OwnedVariant>>("CaptureWindow", &(window.id.as_str(), options, zbus::Fd::from(&writer))).await,
+                    None => proxy.call::<_, _, HashMap<String, OwnedVariant>>("CaptureActiveWindow", &(options, zbus::Fd::from(&writer))).await,
+                }
             })
             .await;
             // Only KWin's copy may keep the socket open, so the drain ends when KWin is done.
             drop(writer);
-            Ok::<_, String>(result)
+            let named = match (&result, before) {
+                (Ok(_), Some(before)) => kwin_window(conn, Some(&before.id)).await.filter(|after| before.same_window(after)).map(|_| before),
+                _ => None,
+            };
+            Ok::<_, String>(result.map(|r| (r, named)))
         });
         let outcome = match reply {
-            Ok(Ok(results)) => Ok(results),
+            Ok(Ok((results, named))) => Ok((results, named)),
             Ok(Err(zbus::Error::MethodError(name, ..))) if name.as_str() == KWIN_NOT_AUTHORIZED => Err(KdeError::Denied),
             Ok(Err(e)) => Err(KdeError::Failed(message(e))),
             Err(e) => Err(KdeError::Failed(e)),
@@ -1040,10 +1174,10 @@ mod bus {
             let _ = stop.shutdown(std::net::Shutdown::Read);
         }
         let raw = drain.join().map_err(|_| KdeError::Failed("Could not read the snapshot.".into()))?;
-        let results = outcome?;
+        let (results, named) = outcome?;
         let uint = |key: &str| number(&results, key).map(|v| v as u32);
         let meta = RawMeta { kind: text(&results, "type"), width: uint("width"), height: uint("height"), stride: uint("stride"), format: uint("format") };
-        Ok((meta, raw))
+        Ok((meta, raw, named))
     }
 
     const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
@@ -1144,7 +1278,7 @@ mod bus {
     pub(super) fn probe(_: bool, _: bool) -> Result<Probe, String> {
         Err(UNSUPPORTED.into())
     }
-    pub(super) fn kde_capture() -> Result<(super::RawMeta, Vec<u8>), super::KdeError> {
+    pub(super) fn kde_capture() -> Result<(super::RawMeta, Vec<u8>, Option<super::KwinLookup>), super::KdeError> {
         Err(super::KdeError::Failed(UNSUPPORTED.into()))
     }
     pub(super) fn set_enabled(_: bool) -> Result<(), String> {
@@ -1200,7 +1334,7 @@ mod tests {
         assert_eq!(backend_from(Some(2), Some(3), Some(8), false, None), Backend::Kde, "KWin comes before the portal");
         assert_eq!(backend_from(Some(1), Some(3), Some(8), false, None), Backend::ScreenshotPortal, "ScreenShot2 version 1 is too old");
         assert!(desktop_session(Some("KDE"), false, "kde") && !desktop_session(Some("KDE"), true, "kde"));
-        assert!(!Backend::Kde.knows_window(), "KWin names no window, so no app text");
+        assert!(Backend::Kde.knows_window(), "the KWin script names the window, so its text is read");
         assert!(gnome_session(Some("ubuntu:GNOME"), false));
         assert!(!gnome_session(Some("GNOME"), true), "sandboxed apps can't use the extension");
         assert!(!gnome_session(Some("KDE"), false));
@@ -1221,6 +1355,31 @@ mod tests {
         let moved = kde_desktop_entry("/usr/bin/rune");
         assert_eq!(kde_entry_stale(Some(&moved), &entry), Ok(true), "another Exec is rewritten");
         assert!(kde_entry_stale(Some("[Desktop Entry]\nName=Other\n"), &entry).is_err(), "never replaces someone else's entry");
+    }
+
+    #[test]
+    fn names_the_kwin_window_like_the_kde_helper() {
+        let reply = |screens: u32, title: &str, x: i32| {
+            json!({
+                "window": {"id": "{abc}", "title": title, "appName": "firefox", "appIdentifier": "org.mozilla.firefox", "processId": 42,
+                    "bounds": {"x": x, "y": 120, "width": 800, "height": 600}, "output": {"x": 1920, "y": 0, "width": 1920, "height": 1080}},
+                "own": {"bounds": {"x": 2000, "y": 50, "width": 1200, "height": 800}, "output": {"x": 1920, "y": 0, "width": 1920, "height": 1080}},
+                "screens": screens,
+            })
+            .to_string()
+        };
+        let one = parse_kwin(&reply(1, "Docs", 2020)).unwrap();
+        assert_eq!((one.id.as_str(), one.window.title.as_str(), one.window.app.as_str(), one.window.pid), ("{abc}", "Docs", "firefox", 42));
+        assert_eq!((one.window.bounds, one.own), (Some([100.0, 120.0, 800.0, 600.0]), Some([80.0, 50.0, 1200.0, 800.0])), "frames are output-local");
+        let two = parse_kwin(&reply(2, "Docs", 2020)).unwrap();
+        assert_eq!((two.window.bounds, two.own, two.window.pid), (None, None, 42), "several outputs name the window but play no effects");
+        assert!(one.same_window(&parse_kwin(&reply(1, "\u{280b} Docs", 2020)).unwrap()), "a CLI spinner frame is the same window");
+        assert!(!one.same_window(&parse_kwin(&reply(1, "Docs", 2100)).unwrap()), "a moved window isn't named");
+        assert!(!one.same_window(&parse_kwin(&reply(1, "Mail", 2020)).unwrap()));
+        assert_eq!(parse_kwin(r#"{"window":null,"own":null,"screens":1}"#), None);
+        let script = kwin_lookup_script(Some("{a'b}"), 7);
+        assert!(script.contains(r#"String(w.internalId) === "{a'b}""#) && script.contains("o.pid === 7"), "{script}");
+        assert!(kwin_lookup_script(None, 7).contains("const w = workspace.activeWindow;"));
     }
 
     #[test]
