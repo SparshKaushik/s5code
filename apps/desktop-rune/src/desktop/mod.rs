@@ -16,6 +16,7 @@ pub mod policy;
 #[cfg(unix)]
 pub mod telemetry;
 pub mod locale;
+pub mod permission_helper;
 pub mod recovery;
 #[cfg(unix)]
 pub mod shell_path;

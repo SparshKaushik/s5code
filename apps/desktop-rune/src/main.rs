@@ -181,6 +181,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= env::drain(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
+    changed |= settings::browser_profiles::poll(s, tx);
     changed |= settings::pulse_tick(s, tx);
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s, tx);
@@ -286,6 +287,7 @@ fn main() {
     let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
     panel::popout::register(&mut app);
     desktop::capture::register(&mut app);
+    desktop::permission_helper::register(&mut app);
     notify::set_window(app.handle());
     instance.serve(app.handle());
     #[cfg(unix)]
