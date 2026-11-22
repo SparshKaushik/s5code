@@ -469,6 +469,9 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     if let Some(page) = crate::chat::details::html_render::row_view(app, item, t) {
         return page;
     }
+    if let Some(frame) = crate::panel::mcp_app::row_view(app, item, t) {
+        return frame;
+    }
     if kind == "assistant_message" {
         // The same inset as a top-level assistant row.
         return col().w_full().px(4.0).child(markdown::view(app, s(item, "text"), &id, t));
