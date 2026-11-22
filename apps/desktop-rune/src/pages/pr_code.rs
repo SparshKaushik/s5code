@@ -883,6 +883,12 @@ pub fn answer_reveal(s: &mut App, tx: &mut Tx) -> bool {
     }
 }
 
+/// The diff view and its scroller, a direct child: `SCROLLER` is the key path Rune resolves
+/// through the nearest keyed ancestor, for layout reads and scroll requests alike.
+const VIEW_KEY: &str = "pr-code-view";
+const SCROLL_KEY: &str = "scroll";
+pub(super) const SCROLLER: &str = "pr-code-view/scroll";
+
 /// backgroundRefreshToken: a finished turn reads the diff's first page and the viewed ticks
 /// again, keeping the pages read so far while the first is unchanged.
 pub(super) fn turn_finished(s: &mut App) {
@@ -2041,7 +2047,7 @@ fn diff_view(s: &App, t: &T) -> El {
     look.comments = can_select(s);
     let look = Rc::new(look);
     let wrap = st.wraps();
-    if !wrap && let Some(r) = rune::memo::layout("pr-code-view/scroll") {
+    if !wrap && let Some(r) = rune::memo::layout(SCROLLER) {
         st.set_viewport(r);
     }
     let mut list = col().key("rows").w_full().growth(GrowthSpec::default()).selection_group(true).role("list").label("Diff");
@@ -2058,10 +2064,10 @@ fn diff_view(s: &App, t: &T) -> El {
             let changed = s.ui.pages.code.diff.set_visible_rows(rows);
             (near_end && load_more(s)) || changed
         });
-    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
+    let scroll = col().key(SCROLL_KEY).w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
     let footer = s.ui.pages.code.next.is_some().then(|| page_footer(s, t));
-    let mut root = col().key("pr-code-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
+    let mut root = col().key(VIEW_KEY).focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }
@@ -2905,6 +2911,11 @@ mod tests {
         s.ui.pages.code.reveal = Some("later.rs".into());
         assert!(!answer_reveal(&mut s, &mut tx), "no page is left to read it from");
         assert_eq!(s.ui.pages.code.reveal.as_deref(), Some("later.rs"), "kept until a page brings it");
+    }
+
+    #[test]
+    fn the_scroller_path_names_the_view_and_its_scroll_child() {
+        assert_eq!(SCROLLER, format!("{VIEW_KEY}/{SCROLL_KEY}"));
     }
 
     #[test]

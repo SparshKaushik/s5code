@@ -153,12 +153,17 @@ pub(super) fn condense_reporter(s: &App, tab: usize) -> impl Fn(rune::ScrollPos)
     }
 }
 
+/// The scroller each tab's header follows: the Code tab's diff view, else the shared area.
+pub(super) fn scroller(tab: usize) -> String {
+    if tab == 2 { super::pr_code::SCROLLER.to_string() } else { format!("pr-detail-scroll-{tab}") }
+}
+
 /// Restores the condensed tab's scroll offset before the next paint.
 pub fn anchor_header(s: &mut App, tx: &mut Tx) -> bool {
     let u = &s.ui.pages.detail;
     let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return false };
     if tab == u.tab && u.condense.on(tab) {
-        tx.scroll_to_y(if tab == 2 { "pr-code-view/scroll".to_string() } else { format!("pr-detail-scroll-{tab}") }, y);
+        tx.scroll_to_y(scroller(tab), y);
     }
     true
 }
@@ -1199,7 +1204,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         super::pr_guide::TAB if super::pr_guide::available(s) => super::pr_guide::view(s, t),
         _ => summary(s, t, d, overlays),
     };
-    let key = format!("pr-detail-scroll-{}", u.tab);
+    let key = scroller(u.tab);
     super::pr_edit::reaction_picker(s, t, overlays);
     let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(condense_reporter(s, u.tab)).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
     confirm_catcher(s, overlays);
@@ -3070,6 +3075,18 @@ mod tests {
         assert!(c.on(2) && !c.on(0), "each tab keeps its own");
         c.set(2, false);
         assert!(!c.on(2));
+
+        // The Code tab follows the diff view's own scroller, not the shared area.
+        assert_eq!(scroller(2), "pr-code-view/scroll");
+        assert_eq!(scroller(0), "pr-detail-scroll-0");
+        let mut s = App::new();
+        s.ui.pages.detail.tab = 2;
+        s.ui.pages.detail.condense.set(2, true);
+        *s.ui.pages.detail.condense.anchor.lock().unwrap() = Some((2, 40.0));
+        let mut tx = Tx::default();
+        assert!(anchor_header(&mut s, &mut tx), "the Code tab's condensing restores its offset");
+        assert!(s.ui.pages.detail.condense.anchor.lock().unwrap().is_none(), "once");
+        assert!(!anchor_header(&mut s, &mut tx));
     }
 
     #[test]
