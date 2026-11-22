@@ -186,14 +186,6 @@ fn shortcut_status(ui: &Ui, state: &State) -> Option<String> {
     }
 }
 
-fn modifier_symbol(modifier: &str) -> &'static str {
-    match modifier {
-        "meta" => "⌘",
-        "control" => "⌃",
-        "alt" => "⌥",
-        _ => "⇧",
-    }
-}
 
 /// `formatShortcutKeyLabel`.
 fn key_label(key: &str) -> String {
@@ -209,30 +201,47 @@ fn key_label(key: &str) -> String {
     }
 }
 
-/// `snapShotShortcutKeyLabels` on macOS: one keycap per key.
+const MAC: bool = cfg!(target_os = "macos");
+
 fn key_labels(shortcut: &Value) -> Vec<String> {
+    key_labels_for(shortcut, MAC)
+}
+
+/// `snapShotShortcutKeyLabels`: one keycap per key, names instead of glyphs off macOS.
+fn key_labels_for(shortcut: &Value, mac: bool) -> Vec<String> {
+    let cap = |modifier| super::controls::modifier_cap(modifier, mac).to_owned();
     if let Some(modifier) = capture::pair_modifier(shortcut) {
-        return vec![modifier_symbol(modifier).into(); 2];
+        return vec![cap(modifier); 2];
     }
     let flag = |k: &str| shortcut[k].as_bool().unwrap_or(false);
-    let mut labels: Vec<String> = [(flag("ctrlKey"), "⌃"), (flag("altKey"), "⌥"), (flag("shiftKey"), "⇧"), (flag("metaKey") || flag("modKey"), "⌘")]
+    let mod_key = flag("modKey");
+    let mut labels: Vec<String> = [(flag("ctrlKey") || (mod_key && !mac), "control"), (flag("altKey"), "alt"), (flag("shiftKey"), "shift"), (flag("metaKey") || (mod_key && mac), "meta")]
         .into_iter()
         .filter(|(on, _)| *on)
-        .map(|(_, l)| l.to_owned())
+        .map(|(_, modifier)| cap(modifier))
         .collect();
     labels.push(key_label(shortcut["key"].as_str().unwrap_or_default()));
     labels
 }
 
-/// `formatSnapShotShortcutLabel` on macOS.
 fn shortcut_label(shortcut: &Value) -> String {
-    capture::pair_modifier(shortcut).map_or_else(|| key_labels(shortcut).concat(), capture::pair_label)
+    shortcut_label_for(shortcut, MAC)
+}
+
+/// `formatSnapShotShortcutLabel`: "⌃⇧2" on macOS, "Ctrl+Shift+2" elsewhere.
+fn shortcut_label_for(shortcut: &Value, mac: bool) -> String {
+    match capture::pair_modifier(shortcut) {
+        Some(modifier) => capture::pair_label(modifier),
+        None if mac => key_labels_for(shortcut, mac).concat(),
+        None => key_labels_for(shortcut, mac).join("+"),
+    }
 }
 
 /// `sameSnapShotShortcut`.
 fn same(a: &Value, b: &Value) -> bool {
     match (capture::pair_modifier(a), capture::pair_modifier(b)) {
         (Some(x), Some(y)) => x == y,
+        // `shortcutConflictKey`: mod is ⌘ on macOS and Ctrl elsewhere.
         (None, None) => key_labels(a) == key_labels(b),
         _ => false,
     }
@@ -977,11 +986,16 @@ mod tests {
         let cmd_shift = Mods { cmd: true, shift: true, ..Mods::default() };
         let recorded = chord(&event(Key::Text("@".into()), cmd_shift), None).unwrap();
         assert_eq!(recorded, json!({"key": "2", "metaKey": false, "ctrlKey": false, "altKey": false, "shiftKey": true, "modKey": true}));
-        assert_eq!(shortcut_label(&recorded), "⇧⌘2");
-        assert_eq!(key_labels(&json!({"key": " ", "ctrlKey": true, "altKey": true})), ["⌃", "⌥", "Space"]);
-        assert_eq!(shortcut_label(&json!({"kind": "both-shift-keys"})), "Shift + Shift");
-        assert_eq!(key_labels(&json!({"kind": "modifier-pair", "modifier": "meta"})), ["⌘", "⌘"]);
-        assert!(same(&recorded, &json!({"key": "2", "metaKey": true, "shiftKey": true})), "mod and meta are one key on macOS");
+        assert_eq!(shortcut_label_for(&recorded, true), "⇧⌘2");
+        assert_eq!(shortcut_label_for(&recorded, false), "Ctrl+Shift+2", "Linux and Windows spell modifiers out");
+        assert_eq!(key_labels_for(&json!({"key": " ", "ctrlKey": true, "altKey": true}), true), ["⌃", "⌥", "Space"]);
+        assert_eq!(key_labels_for(&json!({"key": " ", "ctrlKey": true, "altKey": true}), false), ["Ctrl", "Alt", "Space"]);
+        assert_eq!(shortcut_label_for(&json!({"kind": "both-shift-keys"}), false), "Shift + Shift");
+        assert_eq!(key_labels_for(&json!({"kind": "modifier-pair", "modifier": "meta"}), true), ["⌘", "⌘"]);
+        assert_eq!(key_labels_for(&json!({"kind": "modifier-pair", "modifier": "control"}), false), ["Ctrl", "Ctrl"]);
+        let meta_shift_2 = json!({"key": "2", "metaKey": true, "shiftKey": true});
+        assert_eq!(key_labels_for(&recorded, true), key_labels_for(&meta_shift_2, true), "mod and meta are one key on macOS");
+        assert_ne!(key_labels_for(&recorded, false), key_labels_for(&meta_shift_2, false), "mod is Ctrl elsewhere");
         assert!(!same(&recorded, &json!({"kind": "both-shift-keys"})));
         assert_eq!(chord(&event(Key::Function(5), Mods { alt: true, ..Mods::default() }), None).unwrap()["key"], "f5");
     }

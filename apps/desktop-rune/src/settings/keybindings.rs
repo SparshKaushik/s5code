@@ -446,10 +446,10 @@ fn pill_parts(value: &str, mac: bool) -> Vec<String> {
     value
         .split('+')
         .map(|part| match part {
-            "mod" => (if mac { "⌘" } else { "Ctrl" }).to_owned(),
-            "shift" => "⇧".to_owned(),
-            "alt" => (if mac { "⌥" } else { "Alt" }).to_owned(),
-            "ctrl" => "⌃".to_owned(),
+            "mod" => super::controls::modifier_cap(if mac { "meta" } else { "control" }, mac).to_owned(),
+            "shift" => super::controls::modifier_cap("shift", mac).to_owned(),
+            "alt" => super::controls::modifier_cap("alt", mac).to_owned(),
+            "ctrl" => super::controls::modifier_cap("control", mac).to_owned(),
             p if p.chars().count() == 1 => p.to_uppercase(),
             p => p.to_owned(),
         })
@@ -1529,7 +1529,9 @@ mod tests {
         assert_ne!(conflict("mod+k", true), conflict("ctrl+k", true));
         assert_eq!(conflict("mod+k", false), conflict("ctrl+k", false));
         assert_eq!(pill_parts("mod+shift+f", true), ["⌘", "⇧", "F"]);
-        assert_eq!(pill_parts("alt+ctrl+arrowup", false), ["Alt", "⌃", "arrowup"]);
+        assert_eq!(pill_parts("alt+ctrl+arrowup", false), ["Alt", "Ctrl", "arrowup"]);
+        assert_eq!(pill_parts("mod+shift+2", false), ["Ctrl", "Shift", "2"], "Linux and Windows spell modifiers out");
+        assert_eq!(pill_parts("ctrl+alt+k", true), ["⌃", "⌥", "K"]);
         assert_eq!(pill_parts("mod+k", false), ["Ctrl", "K"]);
     }
 

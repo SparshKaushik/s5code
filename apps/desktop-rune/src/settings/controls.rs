@@ -626,6 +626,21 @@ fn authority(url: &str) -> Option<String> {
     Some(format!("{userinfo}@{}:{port}", host.to_ascii_lowercase()))
 }
 
+
+/// One keycap for a modifier: glyphs on macOS, names elsewhere ("Ctrl", "Shift", "Alt", "Super").
+pub(crate) fn modifier_cap(modifier: &str, mac: bool) -> &'static str {
+    match (modifier, mac) {
+        ("meta", true) => "⌘",
+        ("control", true) => "⌃",
+        ("alt", true) => "⌥",
+        (_, true) => "⇧",
+        ("meta", false) if cfg!(windows) => "⊞",
+        ("meta", false) => "Super",
+        ("control", false) => "Ctrl",
+        ("alt", false) => "Alt",
+        (_, false) => "Shift",
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

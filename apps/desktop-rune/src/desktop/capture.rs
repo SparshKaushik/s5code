@@ -656,10 +656,18 @@ pub fn pair_modifier(shortcut: &Value) -> Option<&'static str> {
 
 /// `snapShotModifierPairLabel` on macOS.
 pub fn pair_label(modifier: &str) -> String {
-    let label = match modifier {
-        "meta" => "Command",
-        "control" => "Control",
-        "alt" => "Option",
+    pair_label_for(modifier, cfg!(target_os = "macos"))
+}
+
+/// `snapShotModifierPairLabel`: Apple names on macOS, else Ctrl/Alt/Super.
+fn pair_label_for(modifier: &str, apple: bool) -> String {
+    let label = match (modifier, apple) {
+        ("meta", true) => "Command",
+        ("control", true) => "Control",
+        ("alt", true) => "Option",
+        ("meta", false) => "Super",
+        ("control", false) => "Ctrl",
+        ("alt", false) => "Alt",
         _ => "Shift",
     };
     format!("{label} + {label}")
@@ -1359,7 +1367,8 @@ mod tests {
         assert_eq!(plan(true, granted, false, &json!({"key": "k"})), Plan::Invalid, "a chord needs a modifier");
         assert_eq!(accelerator(&json!({"key": " ", "ctrlKey": true, "altKey": true})).as_deref(), Some("ctrl+alt+space"));
         assert!("shift+cmd+2".parse::<rune::Shortcut>().is_ok(), "Rune parses the accelerator");
-        assert_eq!(pair_label("meta"), "Command + Command");
+        assert_eq!(pair_label_for("meta", true), "Command + Command");
+        assert_eq!(pair_label_for("control", false), "Ctrl + Ctrl");
         assert_eq!(pair_shortcut("shift"), pair);
     }
 
