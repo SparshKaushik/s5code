@@ -85,6 +85,10 @@ const US_SHIFTED: [(char, char); 21] = [
     ('>', '.'),
     ('?', '/'),
 ];
+/// The unshifted US key a shifted character came from; bindings name that key with `shiftKey`.
+pub(crate) fn unshift(c: char) -> char {
+    US_SHIFTED.iter().find(|(shifted, _)| *shifted == c).map_or(c, |(_, plain)| *plain)
+}
 const UNKNOWN_HELP: &str = "T3 Code does not recognize this condition yet. It can still be saved, but it may not match unless the runtime provides it.";
 
 /// The page's editing state; each row's draft lives here, keyed by row id ("new" for the add row).

@@ -332,6 +332,72 @@ impl Thread {
     }
 }
 
+/// An environment's thread, keyed as the tag filter keys it.
+pub fn thread_key(env: &str, id: &str) -> String {
+    format!("{env}\u{1f}{id}")
+}
+
+/// `hiddenThreadTagsAtom`: the trimmed tags a server hides while `hideTaggedThreads` is on.
+pub fn hidden_tags(settings: &Value) -> Option<Vec<String>> {
+    if settings["hideTaggedThreads"] != true {
+        return None;
+    }
+    let tags: Vec<String> = settings["hiddenThreadTags"].as_array()?.iter().filter_map(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned).collect();
+    (!tags.is_empty()).then_some(tags)
+}
+
+/// `hiddenThreadKeys`: threads whose environment hides one of their tags. Subagents and side chats
+/// follow their parent, and while any environment hides tags one whose parent is not loaded stays
+/// hidden. `tags` holds only the environments that hide.
+pub fn hidden_threads(rows: &[(&str, &Value)], tags: &HashMap<String, Vec<String>>) -> HashSet<String> {
+    if tags.is_empty() {
+        return HashSet::new();
+    }
+    let by_key: HashMap<String, (&str, &Value)> = rows.iter().map(|(env, v)| (thread_key(env, v["id"].as_str().unwrap_or_default()), (*env, *v))).collect();
+    fn parent_key(env: &str, v: &Value) -> Option<String> {
+        let lineage = &v["lineage"];
+        let listed = lineage["relationshipToParent"] != "subagent" && lineage["sideChat"] != true;
+        match lineage["parentThreadId"].as_str() {
+            Some(parent) if !listed => Some(thread_key(env, parent)),
+            // Rune keys environments locally; a delegation is taken to come from the same one.
+            _ => v["delegatedFrom"]["threadId"].as_str().map(|parent| thread_key(env, parent)),
+        }
+    }
+    fn hidden(key: &str, by_key: &HashMap<String, (&str, &Value)>, tags: &HashMap<String, Vec<String>>, memo: &mut HashMap<String, bool>) -> bool {
+        if let Some(known) = memo.get(key) {
+            return *known;
+        }
+        let Some((env, v)) = by_key.get(key) else { return false };
+        let parent = parent_key(env, v);
+        let follows = parent.as_ref().is_some_and(|p| by_key.contains_key(p));
+        let out = match parent {
+            Some(_) if !follows => true,
+            Some(parent) => {
+                // Seed before following the parent so a malformed cycle ends visible.
+                memo.insert(key.to_owned(), false);
+                hidden(&parent, by_key, tags, memo)
+            }
+            None => tags.get(*env).is_some_and(|hide| v["tags"].as_array().into_iter().flatten().any(|t| t.as_str().is_some_and(|t| hide.iter().any(|h| h == t)))),
+        };
+        memo.insert(key.to_owned(), out);
+        out
+    }
+    let mut memo = HashMap::new();
+    by_key.keys().filter(|key| hidden(key, &by_key, tags, &mut memo)).cloned().collect()
+}
+
+/// `visibleLinkedThreads`: a loaded linked thread shows unless hidden; one the shell left out
+/// carries no lineage, so it stays out while any environment hides tags.
+pub fn visible_linked(rows: &[Value], env: &str, loaded: &HashSet<&str>, hidden: &HashSet<String>, hiding: bool) -> Vec<Value> {
+    rows.iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            if loaded.contains(id) { !hidden.contains(&thread_key(env, id)) } else { !hiding }
+        })
+        .cloned()
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Approval,
@@ -1281,6 +1347,32 @@ mod tests {
         select_click(&mut selected, &mut anchor, &ordered, "c", false, true);
         assert!(selected.contains("a") && selected.contains("d"), "a range adds to the selection");
         assert!(!select_click(&mut selected, &mut anchor, &ordered, "c", false, false), "a plain click opens");
+    }
+
+    #[test]
+    fn the_tag_filter_hides_tagged_threads_their_children_and_unloaded_linked_rows() {
+        assert_eq!(hidden_tags(&json!({"hideTaggedThreads": false, "hiddenThreadTags": ["x"]})), None);
+        assert_eq!(hidden_tags(&json!({"hideTaggedThreads": true, "hiddenThreadTags": [" private ", ""]})), Some(vec!["private".to_owned()]));
+        let secret = json!({"id": "a", "tags": ["private"]});
+        let open = json!({"id": "b", "tags": ["work"]});
+        let child = json!({"id": "c", "lineage": {"parentThreadId": "a", "relationshipToParent": "subagent"}});
+        let orphan = json!({"id": "d", "lineage": {"parentThreadId": "gone", "sideChat": true}});
+        let fork = json!({"id": "e", "lineage": {"parentThreadId": "a", "relationshipToParent": "fork"}});
+        let elsewhere = json!({"id": "f", "tags": ["private"]});
+        let rows = [("", &secret), ("", &open), ("", &child), ("", &orphan), ("", &fork), ("box", &elsewhere)];
+        let tags = HashMap::from([(String::new(), vec!["private".to_owned()])]);
+        let hidden = hidden_threads(&rows, &tags);
+        let mut keys: Vec<_> = hidden.iter().map(|k| k.split('\u{1f}').nth(1).unwrap()).collect();
+        keys.sort();
+        // The fork is listed and judged by its own tags; the other machine hides nothing.
+        assert_eq!(keys, ["a", "c", "d"]);
+        assert!(hidden_threads(&rows, &HashMap::new()).is_empty());
+
+        let linked = [json!({"id": "a"}), json!({"id": "b"}), json!({"id": "z"})];
+        let loaded = HashSet::from(["a", "b"]);
+        let ids = |rows: Vec<Value>| rows.iter().map(|r| r["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ids(visible_linked(&linked, "", &loaded, &hidden, true)), ["b"]);
+        assert_eq!(ids(visible_linked(&linked, "", &loaded, &HashSet::new(), false)), ["a", "b", "z"]);
     }
 
     #[test]

@@ -664,7 +664,7 @@ fn toggle_collapsed(s: &mut App, key: &str) {
     }
 }
 
-/// `signalProcess`: a SIGKILL first opens the confirmation (`overlays`); SIGINT goes at once.
+/// `signalProcess`: a SIGKILL asks first; SIGINT goes at once.
 fn begin_signal(s: &mut App, pid: i64, start_time_ms: i64, signal: &'static str) {
     if !super::permissions::can(s, ENVIRONMENT_MAINTAIN) {
         return;
@@ -677,7 +677,11 @@ fn begin_signal(s: &mut App, pid: i64, start_time_ms: i64, signal: &'static str)
     ui.signals.push(Signal { key: key.clone(), pid, start_time_ms, signal, request: None });
     if signal != "SIGKILL" {
         send_signal(s, &key);
+        return;
     }
+    // Web's destructive `dialogs.confirm`; a cancel clears the signal.
+    let question = format!("Send SIGKILL to process {pid}? This cannot be handled by the process.");
+    crate::shell::confirm::request_with(s, question, true, move |s: &mut App, _: &mut rune::Tx| send_signal(s, &key), cancel_confirm);
 }
 
 /// The server rejects a pid whose start time no longer matches, so a process that exited
@@ -1495,29 +1499,6 @@ fn attribution_section(ui: &Ui, t: &T) -> El {
         text("Logical bytes by operation").font(theme::TEXT_3XS).color(t.c.muted_foreground.alpha_mul(0.55)),
     ];
     section("Instrumented application I/O", &icons::DATABASE, actions, body, t)
-}
-
-/// The SIGKILL confirmation, as web's destructive `dialogs.confirm` splits its message.
-pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
-    let ui = &s.ui.settings.resource_telemetry;
-    if ui.env.as_deref() != Some(s.ui.env.active.as_str()) {
-        return;
-    }
-    let Some(sig) = ui.signals.iter().find(|sig| sig.signal == "SIGKILL" && sig.request.is_none()) else { return };
-    let key = sig.key.clone();
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(cancel_confirm).build(t);
-    let confirm = crate::kit::Button::new("Confirm")
-        .variant("destructive")
-        .on_press(move |s: &mut App| send_signal(s, &key))
-        .build(t);
-    crate::kit::Dialog::new("telemetry-sigkill", format!("Send SIGKILL to process {}?", sig.pid))
-        .alert()
-        .width(448.0)
-        .open(true)
-        .description("This cannot be handled by the process.")
-        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
-        .on_close(cancel_confirm)
-        .build(t, layers);
 }
 
 // --- Fixture --------------------------------------------------------------------------------
