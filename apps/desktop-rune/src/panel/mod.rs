@@ -1159,9 +1159,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([]));
     }),
-    ("panel-device-h264", |s| {
+    ("panel-device-webrtc", |s| {
         scene(s, Some(Surface::Device));
-        device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+        device::fixture(s, json!([{"hostId": "eas", "deviceId": "eas-16", "platform": "ios"}]));
     }),
     ("panel-device-stream", |s| {
         scene(s, Some(Surface::Device));
@@ -1176,6 +1176,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([]));
         s.ui.panel.add_menu = true;
+    }),
+    ("panel-device-android", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-tools", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::open_tools(s);
+    }),
+    ("device-float", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::float_fixture(s);
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1322,6 +1336,7 @@ pub(super) fn notice(t: &T, message: &str) -> El {
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
     let mut out = vec![];
     preview::pip(app, t, &mut out);
+    device::float(app, t, &mut out);
     if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
         out.extend(diff::overlays(app, t));
     }
