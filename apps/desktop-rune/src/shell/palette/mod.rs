@@ -1709,6 +1709,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             crate::shell::workspace::focus(s, forward);
         }
         Action::OpenProject(project) => {
+            let by_creation = crate::settings::threads_by_creation(s);
             let thread = s
                 .state()
                 .threads
@@ -1718,7 +1719,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                         && v["archivedAt"].is_null()
                         && v["lineage"]["parentThreadId"].is_null()
                 })
-                .max_by_key(|v| recent_use(v))
+                .max_by_key(|v| if by_creation { data::ts(v, "createdAt").unwrap_or(0) } else { recent_use(v) })
                 .map(|v| data::s(v, "id").to_owned());
             let route = thread.map(Route::Thread).unwrap_or(Route::Home {
                 project_id: Some(project),

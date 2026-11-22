@@ -78,50 +78,8 @@ fn todo(label: impl Into<String>) -> MenuItem {
     MenuItem::new(label).disabled(true)
 }
 
-/// "9:00 AM" for a wall-clock time, as `toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })`.
-fn clock(wall: i64) -> String {
-    let mins = wall.rem_euclid(86_400_000) / 60_000;
-    let (h, m) = (mins / 60, mins % 60);
-    format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
-}
-
-/// `resolveSnoozePresets` over `DEFAULT_SNOOZE_PRESETS`: soonest first, one per wake minute.
-pub fn snooze_presets(now: i64, zone: Zone) -> Vec<(String, i64)> {
-    const DAY: i64 = 86_400_000;
-    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    let wall_now = zone.wall(now);
-    let today = wall_now - wall_now.rem_euclid(DAY);
-    let at = |days: i64, h: i64| zone.instant(today + days * DAY + h * 3_600_000);
-    // getDay(): the epoch was a Thursday (4).
-    let weekday = (wall_now.div_euclid(DAY) + 4).rem_euclid(7);
-    let monday = (1 - weekday + 7).rem_euclid(7);
-    let monday = if monday == 0 { 7 } else { monday };
-    let clock = |at: i64| clock(zone.wall(at));
-    let when = |wake: i64, names_day: bool| {
-        let day = zone.wall(wake).div_euclid(DAY);
-        if names_day || day == wall_now.div_euclid(DAY) {
-            clock(wake)
-        } else {
-            format!("{} {}", DAYS[day.rem_euclid(7) as usize], clock(wake))
-        }
-    };
-    let mut out: Vec<(String, i64)> = vec![
-        (format!("In 1 hour ({})", when(now + 3_600_000, false)), now + 3_600_000),
-        (format!("In 3 hours ({})", when(now + 3 * 3_600_000, false)), now + 3 * 3_600_000),
-    ];
-    if at(0, 18) > now {
-        out.push((format!("This evening ({})", clock(at(0, 18))), at(0, 18)));
-    }
-    out.push((format!("Tomorrow ({})", clock(at(1, 9))), at(1, 9)));
-    let label = if monday == 1 { "Tomorrow" } else { "Next week" };
-    out.push((format!("{label} ({})", when(at(monday, 9), monday == 1)), at(monday, 9)));
-    out.sort_by_key(|(_, w)| w / 60_000);
-    out.dedup_by_key(|(_, w)| *w / 60_000);
-    out
-}
-
-fn snooze_entries(ids: &[String], now: i64) -> Vec<MenuEntry> {
-    let mut out: Vec<MenuEntry> = snooze_presets(now, Zone::Local)
+fn snooze_entries(s: &App, ids: &[String], now: i64) -> Vec<MenuEntry> {
+    let mut out: Vec<MenuEntry> = crate::settings::snooze_menu(s, now, Zone::Local)
         .into_iter()
         .map(|(label, until)| {
             let ids = ids.to_vec();
@@ -150,7 +108,7 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     let ids = selection(s, model);
     let threads: Vec<&Thread> = ids.iter().filter_map(|id| model.thread(id)).collect();
     if sub == Some(Sub::Snooze) {
-        return snooze_entries(&ids, model.now);
+        return snooze_entries(s, &ids, model.now);
     }
     let count = ids.len();
     let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
@@ -244,7 +202,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     };
     let shell = s.state().threads.iter().find(|t| t["id"] == th.id.as_str());
     match sub {
-        Some(Sub::Snooze) => return snooze_entries(std::slice::from_ref(&th.id), model.now),
+        Some(Sub::Snooze) => return snooze_entries(s, std::slice::from_ref(&th.id), model.now),
         Some(Sub::AutoSettle) => {
             let enabled = shell.is_none_or(|t| t["autoSettleDisabledAt"].is_null());
             return [("Enabled", true), ("Disabled", false)]

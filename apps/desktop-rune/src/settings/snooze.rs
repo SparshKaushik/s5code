@@ -171,12 +171,23 @@ pub fn sort(mut list: Vec<Value>, now: i64, zone: Zone) -> Vec<Value> {
     list
 }
 
-/// `resolveSnoozePresets`: the menu as it reads now, one entry per wake minute.
-fn menu(list: &[Value], now: i64) -> Vec<(String, String)> {
-    let mut entries: Vec<_> = list.iter().filter_map(|p| resolve(p, now, Zone::Local)).collect();
+/// `resolveSnoozePresets`: soonest first, one entry per wake minute.
+fn resolved(list: &[Value], now: i64, zone: Zone) -> Vec<(String, String, i64)> {
+    let mut entries: Vec<_> = list.iter().filter_map(|p| resolve(p, now, zone)).collect();
     entries.sort_by_key(|(_, _, w)| w / 60_000);
     let mut seen = HashSet::new();
-    entries.into_iter().filter(|(_, _, w)| seen.insert(w / 60_000)).map(|(l, w, _)| (l, w)).collect()
+    entries.retain(|(_, _, w)| seen.insert(w / 60_000));
+    entries
+}
+
+/// The menu as it reads now, for the editor's preview.
+fn menu(list: &[Value], now: i64) -> Vec<(String, String)> {
+    resolved(list, now, Zone::Local).into_iter().map(|(l, w, _)| (l, w)).collect()
+}
+
+/// The sidebar's snooze menu from the saved `snoozePresets`: `"label (when)"` and the wake.
+pub fn sidebar_menu(s: &App, now: i64, zone: Zone) -> Vec<(String, i64)> {
+    resolved(&saved(s), now, zone).into_iter().map(|(l, w, at)| (format!("{l} ({w})"), at)).collect()
 }
 
 fn unit_of(s: &App, index: usize, minutes: i64) -> (&'static str, i64, &'static str) {
@@ -458,5 +469,25 @@ mod tests {
         ];
         let sorted = sort(list, NOW, UTC);
         assert_eq!(sorted.iter().map(id).collect::<Vec<_>>(), ["after:60", "after:180", "at:today:08:00"]);
+    }
+
+    #[test]
+    fn the_sidebar_menu_reads_the_saved_presets() {
+        let mut s = App::new();
+        let defaults = sidebar_menu(&s, NOW, UTC);
+        assert_eq!(defaults.first().map(|e| e.0.as_str()), Some("In 1 hour (11:00 AM)"));
+        // 14:00 and "in 4 hours" wake the same minute; 08:00 today has passed.
+        s.ui.settings.optimistic_settings = Some(json!({"snoozePresets": [
+            {"kind":"at","day":"today","time":"08:00"},
+            {"kind":"after","minutes":240},
+            {"kind":"at","day":"today","time":"14:00"},
+            {"kind":"after","minutes":30}
+        ]}));
+        let menu = sidebar_menu(&s, NOW, UTC);
+        assert_eq!(
+            menu,
+            [("In 30 minutes (10:30 AM)".to_owned(), NOW + 30 * 60_000), ("In 4 hours (2:00 PM)".to_owned(), NOW + 240 * 60_000)],
+            "FAILED: the sidebar ignores the snooze options setting"
+        );
     }
 }

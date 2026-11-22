@@ -608,7 +608,15 @@ fn local_name(remote: &str) -> String {
 }
 
 fn draft_default(s: &App) -> DraftRun {
-    DraftRun { worktree: crate::settings::server_settings(s)["defaultThreadEnvMode"] == "worktree", ..DraftRun::default() }
+    let worktree = crate::settings::server_settings(s)["defaultThreadEnvMode"] == "worktree";
+    DraftRun { worktree, from_origin: starts_from_origin(s, worktree), ..DraftRun::default() }
+}
+
+/// `resolveNewDraftStartFromOrigin`: a new worktree starts from the remote base when the
+/// project's "New worktrees start from remote" setting is on.
+fn starts_from_origin(s: &App, worktree: bool) -> bool {
+    let project = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).unwrap_or_default();
+    worktree && crate::settings::project_value(s, &project, "newWorktreesStartFromOrigin") == true
 }
 
 /// Where the open draft runs; a thread's run context is fixed.
@@ -690,10 +698,12 @@ fn set_env_mode(s: &mut App, worktree: bool) {
     if worktree && draft_worktree(s).is_some() {
         s.ui.chat.home.workspace = None;
     }
+    let from_origin = starts_from_origin(s, worktree);
     let run = draft_run_mut(s);
     if run.worktree != worktree {
         run.worktree = worktree;
         run.base = None;
+        run.from_origin = from_origin;
     }
 }
 
@@ -1888,6 +1898,21 @@ mod tests {
         *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true, ..DraftRun::default() };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
+    }
+
+    #[test]
+    fn new_worktrees_start_from_origin_per_the_project_setting() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project.clone()) });
+        s.ui.settings.optimistic_settings = Some(json!({"newWorktreesStartFromOrigin": true}));
+        super::set_env_mode(&mut s, true);
+        assert!(draft_run(&s).unwrap().from_origin);
+        super::set_env_mode(&mut s, false);
+        assert!(!draft_run(&s).unwrap().from_origin, "FAILED: the checkout never starts from origin");
+        s.ui.settings.optimistic_settings = Some(json!({"newWorktreesStartFromOrigin": true, "projectSettingsOverrides": {project: {"newWorktreesStartFromOrigin": false}}}));
+        super::set_env_mode(&mut s, true);
+        assert!(!draft_run(&s).unwrap().from_origin, "FAILED: the project's override wins");
     }
 
     fn chord(c: char) -> rune::KeyEvent {

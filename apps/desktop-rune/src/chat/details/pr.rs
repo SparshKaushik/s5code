@@ -810,7 +810,7 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
             .child(icon(state_glyph(state), 16.0).color(color))
             .child(text_el)
             .on_press(move |s: &mut App| {
-                if !url.is_empty() {
+                if !url.is_empty() && !crate::panel::pull_requests::open_in_app(s, &url) {
                     crate::settings::auth::open_url(s, &url);
                 }
             })

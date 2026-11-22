@@ -540,9 +540,29 @@ const REASONING_IDS: [&str; 7] = ["reasoningEffort", "effort", "reasoning", "var
 /// The selected model's option descriptors.
 pub fn descriptors(s: &App) -> Vec<Value> {
     let Some((instance, slug)) = selection(s) else { return Vec::new() };
-    provider(s, &instance)
+    let all = provider(s, &instance)
         .and_then(|p| p["models"].as_array()?.iter().find(|m| data::s(m, "slug") == slug)?["capabilities"]["optionDescriptors"].as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if crate::settings::value(s, "planModeEnabled") == true { all } else { without_plan_agent(all) }
+}
+
+/// `withoutPlanAgentOption`: with plan mode off, an `agent` select loses its Plan option.
+fn without_plan_agent(descriptors: Vec<Value>) -> Vec<Value> {
+    descriptors
+        .into_iter()
+        .filter_map(|mut d| {
+            if d["type"] != "select" || d["id"] != "agent" {
+                return Some(d);
+            }
+            let options: Vec<Value> = d["options"].as_array()?.iter().filter(|o| o["id"] != "plan").cloned().collect();
+            if !options.iter().any(|o| o["id"] == d["currentValue"]) {
+                let fallback = options.iter().find(|o| o["isDefault"] == true).or(options.first()).map(|o| o["id"].clone())?;
+                d["currentValue"] = fallback;
+            }
+            d["options"] = Value::Array(options);
+            Some(d)
+        })
+        .collect()
 }
 
 /// isReasoningControl.
@@ -734,7 +754,7 @@ pub fn selection(s: &App) -> Option<(String, String)> {
         return Some(m);
     }
     providers(s).iter().find(|p| data::s(p, "status") == "ready").and_then(|p| {
-        let model = p["models"].as_array()?.first()?;
+        let model = *picker::listed(s, p).first()?;
         Some((data::s(p, "instanceId").to_string(), data::s(model, "slug").to_string()))
     })
 }
@@ -756,7 +776,11 @@ pub fn runtime_mode(s: &App) -> String {
     default_runtime_mode(s)
 }
 
+/// `resolveComposerInteractionMode`: Chat whenever plan mode is off or the provider has no toggle.
 pub fn interaction_mode(s: &App) -> String {
+    if !supports_plan(s) {
+        return "default".into();
+    }
     if let Some(m) = draft(s).and_then(|d| d.interaction_mode.clone()) {
         return m;
     }
@@ -1825,12 +1849,20 @@ fn code_key(s: &mut App, e: &KeyEvent) -> Option<bool> {
     if e.mods.cmd || e.mods.ctrl || !matches!(e.key, Key::Enter | Key::Tab) {
         return None;
     }
-    let rich = crate::settings::value(s, "composerRichTextEnabled") != false;
+    // The plain editor (`richText` off) has no code blocks to open or edit.
+    if !rich_text(s) {
+        return None;
+    }
     let d = draft_mut(s);
     if code_block::in_block(&d.edit) {
         return Some(if e.key == Key::Tab { code_block::indent(&mut d.edit, e.mods.shift) } else { code_block::close(&mut d.edit) || code_block::indented_newline(&mut d.edit) });
     }
-    (e.key == Key::Enter && rich && code_block::open(&mut d.edit, &mut d.code_langs)).then_some(true)
+    (e.key == Key::Enter && code_block::open(&mut d.edit, &mut d.code_langs)).then_some(true)
+}
+
+/// The Rich text composer setting.
+fn rich_text(s: &App) -> bool {
+    crate::settings::value(s, "composerRichTextEnabled") != false
 }
 
 /// Applies a list edit (`lists`) at the draft's caret; false when the caret is not in a list.
@@ -1942,8 +1974,10 @@ fn placeholder(s: &App) -> &'static str {
     }
 }
 
+/// The Labs "Plan mode" setting is on and the provider shows the toggle.
 fn supports_plan(s: &App) -> bool {
-    selection(s).and_then(|(i, _)| provider(s, &i).map(|p| p["showInteractionModeToggle"] == true)).unwrap_or(false)
+    crate::settings::value(s, "planModeEnabled") == true
+        && selection(s).and_then(|(i, _)| provider(s, &i).map(|p| p["showInteractionModeToggle"] == true)).unwrap_or(false)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
@@ -1996,7 +2030,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
                 menu::refresh(s);
             }))
     };
-    let code = code_block::header(s, t, d).filter(|_| question_editor(s).is_none() && !project_required(s));
+    let code = code_block::header(s, t, d).filter(|_| rich_text(s) && question_editor(s).is_none() && !project_required(s));
     let mut editor = col().w_full().px(16.0).pt(if code.is_some() { 4.0 } else { 16.0 }).child(auto_grow(field, 2, 8));
     if let Some(message) = length_error(s) {
         editor = editor.child(text(message).font(theme::TEXT_XS).color(t.c.destructive).wrap().w_full().pt(8.0).role("alert"));
@@ -3251,6 +3285,27 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_follows_the_labs_setting() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        let d = draft_mut(&mut s);
+        d.model = Some(("codex".into(), "gpt-5.5".into()));
+        d.interaction_mode = Some("plan".into());
+        s.client_settings.values.insert("planModeEnabled".into(), json!(false));
+        assert!(!supports_plan(&s));
+        assert_eq!(interaction_mode(&s), "default", "FAILED: plan mode off sends Chat");
+        s.client_settings.values.insert("planModeEnabled".into(), json!(true));
+        assert!(supports_plan(&s));
+        assert_eq!(interaction_mode(&s), "plan");
+        let agent = json!({"type": "select", "id": "agent", "currentValue": "plan", "options": [{"id": "build", "isDefault": true}, {"id": "plan"}]});
+        assert_eq!(
+            without_plan_agent(vec![agent, json!({"type": "boolean", "id": "fastMode"})]),
+            [json!({"type": "select", "id": "agent", "currentValue": "build", "options": [{"id": "build", "isDefault": true}]}), json!({"type": "boolean", "id": "fastMode"})]
+        );
+        assert!(without_plan_agent(vec![json!({"type": "select", "id": "agent", "options": [{"id": "plan"}]})]).is_empty());
+    }
+
+    #[test]
     fn runtime_modes_follow_the_provider_and_the_policy_ceiling() {
         let modes = |o: &[ModeOption]| o.iter().map(|o| o.mode).collect::<Vec<_>>();
         let all = mode_options(&[], &Value::Null);
@@ -3415,6 +3470,11 @@ mod tests {
         s.client_settings.values.insert("composerRichTextEnabled".into(), json!(false));
         set_text(&mut s, "```ts");
         assert_eq!(code_key(&mut s, &enter), None, "FAILED: a plain composer leaves fences as text");
+        s.client_settings.values.insert("composerRichTextEnabled".into(), json!(true));
+        set_text(&mut s, "```ts");
+        assert_eq!(code_key(&mut s, &enter), Some(true));
+        s.client_settings.values.insert("composerRichTextEnabled".into(), json!(false));
+        assert_eq!(code_key(&mut s, &KeyEvent::from(Key::Tab)), None, "FAILED: a plain composer has no block keys");
     }
 
     #[test]

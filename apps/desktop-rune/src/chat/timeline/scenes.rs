@@ -1214,6 +1214,7 @@ fn side_composer_question(app: &mut App) {
 /// A side chat in plan mode with a proposed plan: "Plan ready" and Implement on its composer.
 fn side_composer_plan(app: &mut App) {
     side_pane(app);
+    app.client_settings.values.insert("planModeEnabled".into(), true.into());
     if let crate::data::Source::Fixture(state) = &mut app.src {
         if let Some(side) = state.threads.iter_mut().find(|r| crate::data::s(r, "id") == "scene-side") {
             side["interactionMode"] = "plan".into();

@@ -1013,6 +1013,7 @@ mod tests {
 
     fn slash_labels(model: &str) -> Vec<String> {
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let d = draft_mut(&mut s);
         d.model = Some((model.into(), "m".into()));
         d.edit = rune::TextEdit::new("/");
