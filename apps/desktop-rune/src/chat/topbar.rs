@@ -122,7 +122,7 @@ fn commit_rename(s: &mut App) {
     }
     let next = edit.text.trim().to_string();
     if next.is_empty() {
-        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        crate::shell::palette::toast_warning(s, "Thread title cannot be empty", None, vec![], false);
         return;
     }
     if next == title(s) {

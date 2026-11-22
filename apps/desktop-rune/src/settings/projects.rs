@@ -3,7 +3,7 @@ use crate::{
     App,
     theme::{self, AlphaMul, T},
 };
-use rune::{El, col, el, row, text};
+use rune::{El, col, row, text};
 use serde_json::{Value, json};
 
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {

@@ -1050,7 +1050,7 @@ pub fn commit_rename(s: &mut App) {
     let Some((id, edit)) = s.ui.shell.sidebar.rename.take() else { return };
     let next = edit.text.trim().to_string();
     if next.is_empty() {
-        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        crate::shell::palette::toast_warning(s, "Thread title cannot be empty", None, vec![], false);
         return;
     }
     let current = Model::build(s).thread(&id).map(|t| t.title.clone()).unwrap_or_default();

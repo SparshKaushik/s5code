@@ -2248,7 +2248,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         entry = entry.hover(t.c.accent).on_press_tx(move |s: &mut App, tx| execute(s, action.clone(), tx));
     }
     if let Some((value, th)) = &thread {
-        entry = entry.children(thread_row::trailing(s, t, value, th, &ui.query));
+        entry = entry.children(thread_row::trailing(s, t, value, th, &ui.query.text));
     }
     if let Some(timestamp) = &v.timestamp {
         entry = entry.child(text(timestamp).font(theme::TEXT_XS).color(muted));
