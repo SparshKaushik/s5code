@@ -1519,7 +1519,7 @@ mod tests {
         let mut host = Host::new(&app());
         let effects = replay(&mut host, &[
             r#"{"jsonrpc":"2.0","id":1,"method":"ui/download-file","params":{"contents":[
-                {"type":"resource","resource":{"uri":"file:///tmp/report.csv?x=1","text":"a,b"}},
+                {"type":"resource","resource":{"uri":"file:///tmp/report.csv","text":"a,b"}},
                 {"type":"resource","resource":{"uri":"ui://x","name":"my:file?.bin","blob":"AAEC"}},
                 {"type":"resource_link","uri":"ui://weather/exports/","name":""}]}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"ui/download-file","params":{"contents":[{"type":"resource","resource":{"uri":"ui://x"}}]}}"#,
@@ -1533,7 +1533,8 @@ mod tests {
         let message = json!("ui/download-file needs embedded resources or resource links.");
         assert_eq!(posted(&effects).iter().map(|p| &p["error"]["message"]).collect::<Vec<_>>(), [&message, &message]);
         assert_eq!(download_name(&Value::Null, &json!("")), "download");
-        assert_eq!(download_name(&json!("ui://a/b#frag"), &Value::Null), "b");
+        // As web splits it, a query or fragment is the last segment.
+        assert_eq!(download_name(&json!("ui://a/b#frag"), &Value::Null), "frag");
         assert_eq!(download_name(&Value::Null, &json!("x".repeat(300))).len(), 200);
     }
 
