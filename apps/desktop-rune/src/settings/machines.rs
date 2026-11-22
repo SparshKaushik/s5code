@@ -20,6 +20,8 @@ pub struct Ui {
     grants: Option<Vec<Grant>>,
     /// Update all: the requests in flight, and desktop apps waiting on the confirmation.
     updating: Vec<(u64, Target)>,
+    /// Desktop apps that prepared their update, waiting on `server.commitDesktopUpdate` to relaunch.
+    committing: Vec<(u64, Target, Value)>,
     pub(super) confirm: Option<Vec<Target>>,
     /// A saved row's own Update, waiting on its desktop app confirmation.
     pub(super) confirm_row: Option<Target>,
@@ -706,7 +708,8 @@ pub(super) fn row_update(s: &App, key: &str) -> bool {
 }
 
 pub(super) fn row_updating(s: &App, key: &str) -> bool {
-    s.ui.settings.connections.machines.updating.iter().any(|(_, t)| t.key == key)
+    let machines = &s.ui.settings.connections.machines;
+    machines.updating.iter().any(|(_, t)| t.key == key) || machines.committing.iter().any(|(_, t, _)| t.key == key)
 }
 
 pub(super) fn row_failure<'a>(s: &'a App, key: &str) -> Option<&'a str> {
@@ -746,8 +749,7 @@ pub(super) fn poll(s: &mut App) -> bool {
     let mut changed = collect_resources(s);
     let updating = std::mem::take(&mut s.ui.settings.connections.machines.updating);
     for (id, target) in updating {
-        let reply = env::net_of(s, &target.key).and_then(|net| net.take_reply(id)).or_else(|| s.src.net().and_then(|net| net.take_reply(id)));
-        let Some(reply) = reply else {
+        let Some(reply) = take_reply(s, &target.key, id) else {
             s.ui.settings.connections.machines.updating.push((id, target));
             continue;
         };
@@ -759,25 +761,54 @@ pub(super) fn poll(s: &mut App) -> bool {
             }
             reply => reply,
         };
+        // A desktop app only prepares its update; the commit relaunches it.
+        if let Ok(result) = &reply
+            && let Some(token) = result["desktopUpdateToken"].as_str().filter(|t| result["method"] == "desktop-app" && !t.is_empty())
+            && let Some(commit) = env::net_of(s, &target.key).map(|net| net.request("server.commitDesktopUpdate", json!({"requestId": token})))
+        {
+            s.ui.settings.connections.machines.committing.push((commit, target, result.clone()));
+            continue;
+        }
+        finish(s, &target, reply);
+    }
+    let committing = std::mem::take(&mut s.ui.settings.connections.machines.committing);
+    for (id, target, result) in committing {
+        let Some(reply) = take_reply(s, &target.key, id) else {
+            s.ui.settings.connections.machines.committing.push((id, target, result));
+            continue;
+        };
+        changed = true;
         match reply {
-            Ok(result) => {
-                let version = result["targetVersion"].as_str().unwrap_or(&target.target_version).to_owned();
-                let description = if target.self_update == "desktop-managed" {
-                    format!("Desktop app relaunched on {version}.")
-                } else {
-                    format!("Reconnected on t3@{version}.")
-                };
-                toast(s, &format!("{} updated", target.label), Some(&description));
-                env::server_updated(s, &target.key);
-            }
-            Err(error) => {
-                let message = error["message"].as_str().unwrap_or("Server update failed.").to_owned();
-                toast_error(s, &format!("{} update failed", target.label), Some(&message));
-                s.ui.settings.connections.machines.failed.insert(target.key.clone(), message);
-            }
+            // The app relaunches as it commits, so a dropped socket is success.
+            Err(cause) if !crate::chat::server_update::transport_lost(&cause) => finish(s, &target, Err(cause)),
+            _ => finish(s, &target, Ok(result)),
         }
     }
     changed
+}
+
+fn take_reply(s: &mut App, key: &str, id: u64) -> Option<s5_net::Reply> {
+    env::net_of(s, key).and_then(|net| net.take_reply(id)).or_else(|| s.src.net().and_then(|net| net.take_reply(id)))
+}
+
+fn finish(s: &mut App, target: &Target, reply: s5_net::Reply) {
+    match reply {
+        Ok(result) => {
+            let version = result["targetVersion"].as_str().unwrap_or(&target.target_version).to_owned();
+            let description = if target.self_update == "desktop-managed" {
+                format!("Desktop app relaunched on {version}.")
+            } else {
+                format!("Reconnected on t3@{version}.")
+            };
+            toast(s, &format!("{} updated", target.label), Some(&description));
+            env::server_updated(s, &target.key);
+        }
+        Err(error) => {
+            let message = error["message"].as_str().unwrap_or("Server update failed.").to_owned();
+            toast_error(s, &format!("{} update failed", target.label), Some(&message));
+            s.ui.settings.connections.machines.failed.insert(target.key.clone(), message);
+        }
+    }
 }
 
 /// The Environments header's Update all, while a saved server is behind this client.
@@ -965,5 +996,20 @@ mod tests {
         assert_eq!(env::short_status(&s, "box"), "Client not supported");
         update_row(&mut s, "box");
         assert!(row_updating(&s, "box"), "FAILED: the update goes out though the outdated server's session can't be read");
+
+        // A desktop app only prepares its update; the commit relaunches it, dropping the socket.
+        // SAFETY: the same file every_environment_is_listed_and_commands_follow_the_owner uses.
+        unsafe { std::env::set_var("S5_ENVIRONMENTS", std::env::temp_dir().join(format!("s5-env-{}.json", std::process::id()))) };
+        let (id, target) = &mut s.ui.settings.connections.machines.updating[0];
+        target.self_update = "desktop-managed".into();
+        let id = *id;
+        let prepared = json!({"targetVersion": "0.1.7", "method": "desktop-app", "desktopUpdateToken": "tok"});
+        env::net_of(&mut s, "box").unwrap().put_reply(id, Ok(prepared));
+        poll(&mut s);
+        let commit = s.ui.settings.connections.machines.committing.first().map(|(id, ..)| *id).expect("FAILED: a prepared desktop update is never committed");
+        assert!(row_updating(&s, "box") && env::outdated(&s, "box").is_some(), "FAILED: the update finished before its commit");
+        env::net_of(&mut s, "box").unwrap().put_reply(commit, Err(json!({"_tag": "TransportError", "message": "closed"})));
+        poll(&mut s);
+        assert!(!row_updating(&s, "box") && env::outdated(&s, "box").is_none(), "FAILED: the relaunch's dropped socket is not the update's success");
     }
 }

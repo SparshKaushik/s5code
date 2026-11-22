@@ -26,8 +26,16 @@ pub fn project_merge_method<'a>(settings: &'a Value, project_id: &str) -> Option
 
 /// What a pull request's own pick falls back to: the project's default, then the last one used.
 pub fn merge_defaults<'a>(s: &'a App, project_id: &str) -> (Option<&'a str>, Option<&'a str>) {
-    let project = project_merge_method(crate::settings::server_settings(s), project_id);
+    let project = project_merge_method(crate::settings::server_settings(s), project_id).or_else(|| legacy_merge_method(s, project_id));
     (project, s.client_settings.values.get(LAST_MERGE_METHOD).and_then(Value::as_str))
+}
+
+/// The client's older `pullRequestMergeMethodOverrides`, keyed by logical project, for when no
+/// project or environment default is set (usePullRequestDefaultMergeMethodResolver).
+fn legacy_merge_method<'a>(s: &'a App, project_id: &str) -> Option<&'a str> {
+    let overrides = s.client_settings.values.get("pullRequestMergeMethodOverrides")?.as_object().filter(|o| !o.is_empty())?;
+    let project = s.state().projects.iter().find(|p| field(p, "id") == project_id)?;
+    overrides.get(&crate::shell::sidebar::folders::Grouping::read(s).key(project))?.as_str()
 }
 
 /// pullRequestActionNeedsHostRefresh: approving workflows changes checks the host has cached.
@@ -237,6 +245,19 @@ fn has_word(hay: &str, phrase: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_legacy_folder_merge_method_applies_only_without_a_project_default() {
+        let mut s = App::new();
+        let project = s.state().projects[0].clone();
+        let id = field(&project, "id").to_owned();
+        let key = crate::shell::sidebar::folders::Grouping::read(&s).key(&project);
+        s.ui.settings.optimistic_settings = Some(json!({}));
+        s.client_settings.values.insert("pullRequestMergeMethodOverrides".into(), json!({ key: "rebase" }));
+        assert_eq!(merge_defaults(&s, &id).0, Some("rebase"), "FAILED: the folder's older override is ignored");
+        s.ui.settings.optimistic_settings = Some(json!({"pullRequestMergeMethod": "squash"}));
+        assert_eq!(merge_defaults(&s, &id).0, Some("squash"), "FAILED: the environment default wins");
+    }
 
     const ALL: [&str; 11] = ["merge", "ready", "draft", "close", "reopen", "update-branch", "enable-auto-merge", "disable-auto-merge", "revert", "delete-branch", "approve-workflows"];
 

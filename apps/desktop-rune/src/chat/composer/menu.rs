@@ -42,7 +42,22 @@ pub struct Mention {
     entries: Vec<(String, bool)>,
     prs: Prs,
     snapshot: Snapshot,
+    links: Links,
 }
+
+/// useLinkedEnvironments: the composer's environment's `peerLinks.list`, asked for as an `@`
+/// query starts and kept briefly, so its agents' linked machines' threads can be mentioned.
+#[derive(Default)]
+struct Links {
+    /// The environment the list belongs to, and when it was asked for.
+    env: Option<String>,
+    asked_at: i64,
+    request: Option<u64>,
+    /// Each link that has not expired: its environment id and the label it was linked under.
+    links: Vec<(String, String)>,
+}
+
+const LINKS_TTL_MS: i64 = 30_000;
 
 /// useProviderWorkspaceSnapshotRefresh: one `server.refreshProviders` scan per environment,
 /// provider and cwd (`key`), again once the TTL passes, retried after a cooldown up to three
@@ -253,31 +268,88 @@ fn context_item(record: Value, description: &str) -> Item {
     Item { id: super::chips::pill_id(&record), label, description: description.to_owned(), folder: None, pr: None, context: Some(record) }
 }
 
-/// matchComposerThreadItems: this environment's listed threads other than the open one, best
-/// title match first. A bare `@` lists none.
+/// offersLinkedEnvironments: this server links machines, and Settings has it on.
+fn offers_links(s: &App) -> bool {
+    s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["peerLinks"] == true)
+        && crate::settings::server_settings(s)["linkedEnvironmentsEnabled"] == true
+}
+
+/// linkedEnvironmentNames: the machines the composer's environment links to, by environment id,
+/// named as this window knows them, else as they were linked.
+fn linked_environments(s: &App) -> Vec<(String, String)> {
+    let links = &s.ui.chat.composer.mention.links;
+    if !offers_links(s) || links.env.as_deref() != Some(s.ui.env.active.as_str()) {
+        return Vec::new();
+    }
+    let local = crate::env::local_id(s);
+    links
+        .links
+        .iter()
+        .map(|(id, label)| {
+            let key = if local.as_deref() == Some(id.as_str()) { crate::env::LOCAL } else { id.as_str() };
+            let known = crate::env::label(s, key);
+            (id.clone(), if known.is_empty() { label.clone() } else { known })
+        })
+        .collect()
+}
+
+/// Asks for the composer's environment's links, unless a recent answer for it is in hand.
+fn request_links(s: &mut App) {
+    if !offers_links(s) {
+        return;
+    }
+    let (env, now) = (s.ui.env.active.clone(), data::now_ms());
+    let links = &s.ui.chat.composer.mention.links;
+    if links.env.as_ref() == Some(&env) && (links.request.is_some() || now - links.asked_at < LINKS_TTL_MS) {
+        return;
+    }
+    let Some(net) = s.src.net() else { return };
+    let request = net.request("peerLinks.list", json!({}));
+    let links = &mut s.ui.chat.composer.mention.links;
+    if links.env.as_ref() != Some(&env) {
+        links.links.clear();
+    }
+    (links.env, links.asked_at, links.request) = (Some(env), now, Some(request));
+}
+
+/// matchComposerThreadItems: listed threads other than the open one, on this environment or a
+/// machine it links to ("Thread on {machine}"), best title match first. A bare `@` lists none.
 fn thread_items(s: &App, query: &str) -> Vec<Item> {
     if query.trim().is_empty() {
         return Vec::new();
     }
     let open = ctx(s).thread.map(|t| data::s(t, "id"));
-    let candidates: Vec<&Value> = s
+    let own = own_environment(s);
+    let local = crate::env::local_id(s);
+    let linked = linked_environments(s);
+    // Each thread with its environment id, and its machine's name when that is a linked one.
+    let candidates: Vec<(&Value, &str, Option<&str>)> = s
         .state()
         .threads
         .iter()
         .filter(|t| {
-            t.get(crate::env::TAG).is_none()
-                && Some(data::s(t, "id")) != open
+            Some(data::s(t, "id")) != open
                 && t["archivedAt"].is_null()
                 && t["lineage"]["relationshipToParent"] != "subagent"
                 && t["lineage"]["sideChat"] != true
         })
+        .filter_map(|t| match t.get(crate::env::TAG).and_then(Value::as_str) {
+            None => Some((t, own.as_str(), None)),
+            Some(key) => {
+                let id = if key == crate::env::LOCAL { local.as_deref()? } else { key };
+                linked.iter().find(|(l, _)| l == id).map(|(l, name)| (t, l.as_str(), Some(name.as_str())))
+            }
+        })
         .collect();
     let recency = |t: &Value| data::ts(t, "latestUserMessageAt").or_else(|| data::ts(t, "updatedAt")).unwrap_or(0);
-    let titles: Vec<(&str, i64)> = candidates.iter().map(|t| (data::s(t, "title"), recency(*t))).collect();
-    let environment = own_environment(s);
+    let titles: Vec<(&str, i64)> = candidates.iter().map(|&(t, ..)| (data::s(t, "title"), recency(t))).collect();
     super::search::rank_titles(&titles, query, THREAD_RESULTS)
         .into_iter()
-        .map(|i| context_item(super::chips::thread(&environment, data::s(candidates[i], "id"), titles[i].0), "Thread"))
+        .map(|i| {
+            let (thread, environment, machine) = candidates[i];
+            let description = machine.map_or_else(|| "Thread".to_owned(), |m| format!("Thread on {m}"));
+            context_item(super::chips::thread(environment, data::s(thread, "id"), titles[i].0), &description)
+        })
         .collect()
 }
 
@@ -285,8 +357,7 @@ fn thread_items(s: &App, query: &str) -> Vec<Item> {
 /// this server links machines (offersLinkedEnvironments).
 fn environment_items(s: &App, query: &str) -> Vec<Item> {
     let query = query.trim().to_lowercase();
-    let peer_links = s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["peerLinks"] == true);
-    if query.is_empty() || !peer_links || crate::settings::server_settings(s)["linkedEnvironmentsEnabled"] != true {
+    if query.is_empty() || !offers_links(s) {
         return Vec::new();
     }
     let own = own_environment(s);
@@ -539,6 +610,9 @@ pub fn refresh(s: &mut App) {
         }
         return;
     }
+    if m.kind == Kind::Path && !m.query().trim().is_empty() {
+        request_links(s);
+    }
     if m.kind != Kind::Path || s.ui.chat.composer.mention.query.as_deref() == Some(m.query()) {
         return;
     }
@@ -572,8 +646,16 @@ pub fn poll(mention: &mut Mention, net: &mut s5_net::Net) -> bool {
             Err(_) => prs.failed = true,
         }
     }
-    let Some(request) = mention.request else { return got_prs };
-    let Some(reply) = net.take_reply(request) else { return false };
+    let links = &mut mention.links;
+    let links_reply = links.request.and_then(|r| net.take_reply(r));
+    let got = got_prs || links_reply.is_some();
+    if let Some(reply) = links_reply {
+        links.request = None;
+        let list = reply.ok().and_then(|v| v["links"].as_array().cloned()).unwrap_or_default();
+        links.links = list.iter().filter(|l| data::s(l, "status") != "expired").map(|l| (data::s(l, "environmentId").to_owned(), data::s(l, "label").to_owned())).collect();
+    }
+    let Some(request) = mention.request else { return got };
+    let Some(reply) = net.take_reply(request) else { return got };
     mention.request = None;
     mention.loading = false;
     mention.entries = reply
@@ -702,7 +784,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
             r = r.fill(t.c.accent);
         }
         if let Some(folder) = item.folder {
-            r = r.child(icon(if folder { &icons::FOLDER } else { &icons::FILE }, 16.0).color(t.c.secondary_label));
+            r = r.child(if folder { icon(&icons::FOLDER, 16.0).color(t.c.secondary_label) } else { crate::panel::diff::file_icon(&item.id, 16.0, t.dark) });
         }
         if let Some(record) = &item.context
             && let Some((_, glyph)) = super::chips::look(data::s(record, "kind"), Some(record))
@@ -865,6 +947,52 @@ mod tests {
     }
 
     #[test]
+    fn at_mentions_list_threads_on_linked_machines_by_machine() {
+        let mut s = App::new();
+        if let data::Source::Fixture(state) = &mut s.src {
+            let config = state.config.get_or_insert_with(|| json!({}));
+            config["environment"]["capabilities"]["peerLinks"] = json!(true);
+            config["settings"]["linkedEnvironmentsEnabled"] = json!(true);
+        }
+        s.ui.env.saved.push(crate::env::Saved { id: "env-box".into(), label: "Build box".into(), base: "https://box".into(), bearer: String::new() });
+        for (key, id, title) in [("env-box", "box-thread", "Zebra rollout on the box"), ("env-lab", "lab-thread", "Zebra notes in the lab"), ("env-other", "other-thread", "Zebra elsewhere")] {
+            let mut theirs = data::empty_state();
+            theirs.threads.push(json!({"id": id, "title": title, "projectId": format!("{key}-project")}));
+            crate::env::park(&mut s, key, data::Source::Fixture(theirs));
+        }
+        crate::env::drain(&mut s);
+        let d = draft_mut(&mut s);
+        d.edit = rune::TextEdit::new("@zebra");
+        d.edit.set_caret(6);
+        let listed = |s: &App| {
+            let m = open_menu(s).unwrap();
+            items(s, &m).into_iter().map(|i| (i.label, i.description)).collect::<Vec<_>>()
+        };
+        assert!(listed(&s).is_empty(), "FAILED: another machine's threads need a link to it");
+
+        // `peerLinks.list` answers: an expired link counts for nothing.
+        let mut net = s5_net::Net::in_memory("http://local.test");
+        let request = net.reserve_id();
+        net.put_reply(request, Ok(json!({"links": [
+            {"environmentId": "env-box", "label": "box", "status": "reachable"},
+            {"environmentId": "env-lab", "label": "Lab", "status": "unreachable"},
+            {"environmentId": "env-other", "label": "Other", "status": "expired"},
+        ]})));
+        let links = &mut s.ui.chat.composer.mention.links;
+        (links.env, links.request) = (Some(s.ui.env.active.clone()), Some(request));
+        assert!(poll(&mut s.ui.chat.composer.mention, &mut net));
+        let mut found = listed(&s);
+        found.sort();
+        assert_eq!(found, [("Zebra notes in the lab".to_owned(), "Thread on Lab".to_owned()), ("Zebra rollout on the box".to_owned(), "Thread on Build box".to_owned())], "a known machine goes by its own name");
+
+        let m = open_menu(&s).unwrap();
+        let index = items(&s, &m).iter().position(|i| i.label == "Zebra rollout on the box").unwrap();
+        choose(&mut s, &m, index, &mut Tx::default());
+        let record = draft(&s).unwrap().contexts[0].clone();
+        assert_eq!((data::s(&record, "kind"), data::s(&record, "environmentId"), data::s(&record, "threadId")), ("thread", "env-box", "box-thread"));
+    }
+
+    #[test]
     fn a_picked_skill_is_a_chip_that_sends_as_its_token() {
         for (text, index) in [("$contr", 0), ("/skill:contr", usize::MAX)] {
             let mut s = App::new();
@@ -885,6 +1013,7 @@ mod tests {
 
     fn slash_labels(model: &str) -> Vec<String> {
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let d = draft_mut(&mut s);
         d.model = Some((model.into(), "m".into()));
         d.edit = rune::TextEdit::new("/");
@@ -902,6 +1031,7 @@ mod tests {
         let list = vec![it("model", "Switch response model"), it("review", "Review the side diff")];
         assert_eq!(labels(ranked_slash(list, 1, "side")), ["/review"]);
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let d = draft_mut(&mut s);
         d.model = Some(("codex".into(), "m".into()));
         d.edit = rune::TextEdit::new("fix it /");
@@ -941,6 +1071,7 @@ mod tests {
     #[test]
     fn side_chat_commands_follow_the_built_ins_on_a_thread_whose_server_has_side_chats() {
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let id = s.state().threads.iter().find(|t| t["lineage"]["relationshipToParent"] != "subagent" && t["lineage"]["sideChat"] != true && t["delegatedFrom"].is_null()).map(|t| data::s(t, "id").to_owned()).unwrap();
         if let data::Source::Fixture(state) = &mut s.src {
             state.config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["sideChats"] = json!(true);

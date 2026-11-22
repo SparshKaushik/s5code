@@ -12,7 +12,7 @@ pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
-mod connection_diagnosis;
+pub(crate) mod connection_diagnosis;
 mod checkout_grouping;
 pub(crate) mod connections;
 mod controls;
@@ -51,6 +51,7 @@ pub(crate) mod tasks;
 pub(crate) mod themes;
 mod vivid;
 pub use themes::apply as apply_theme;
+pub use snooze::sidebar_menu as snooze_menu;
 
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Appearance, Route, icons};
@@ -250,6 +251,19 @@ fn complete_object(parent: &str, stored: Value) -> Value {
         _ => {}
     }
     object
+}
+
+/// A project-scoped server setting as `resolveProjectSettings` reads it: the project's override,
+/// else the environment's value, else the built-in default.
+pub fn project_value(s: &App, project: &str, key: &str) -> Value {
+    let settings = server_settings(s);
+    settings["projectSettingsOverrides"][project].get(key).or_else(|| settings.get(key)).unwrap_or(&scope::defaults()[key]).clone()
+}
+
+/// `sidebarThreadSortOrder` (no settings row; older web builds wrote it): "created_at" picks a
+/// project's latest thread by creation instead of recent activity.
+pub fn threads_by_creation(s: &App) -> bool {
+    value(s, "sidebarThreadSortOrder") == "created_at"
 }
 
 pub fn value(s: &App, key: &str) -> Value {
@@ -1365,6 +1379,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-connections-route-remove", |s| {
         scene(s, "connections");
         connections::scene(s, "route-remove");
+    }),
+    ("settings-connections-outdated", |s| {
+        scene(s, "connections");
+        connections::scene(s, "outdated");
     }),
     ("settings-connections-machines", |s| {
         scene(s, "connections");

@@ -451,7 +451,7 @@ fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
         .center_y()
         .child(input(s, t, key, 176.0, &placeholder, false))
         .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)));
-    let hint = matches!(key, "fontFamilySans" | "fontFamilyCode").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
+    let hint = matches!(key, "fontFamilySans" | "fontFamilyCode" | "fontFamilyComposer").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
     match hint {
         Some(hint) => col().gap(4.0).items_end().child(control).child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         None => control,

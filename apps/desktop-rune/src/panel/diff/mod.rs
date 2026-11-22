@@ -1451,6 +1451,14 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
 
 const TREE_FRACTION: f32 = 0.4;
 
+/// Web `PierreEntryIcon` for a file, on every surface that names one: its type's layered icon
+/// in web's colours.
+pub(crate) fn file_icon(path: &str, size: f32, dark: bool) -> El {
+    file_icons::for_path(path).iter().fold(el().size(size, size), |mark, &(glyph, light, night)| {
+        mark.child(icon(glyph, size).color(rune::color::hex(if dark { night } else { light }).unwrap_or(tree_muted())).absolute(0.0, 0.0))
+    })
+}
+
 /// `--trees-fg-muted`: the chevron's ink.
 fn tree_muted() -> Color {
     rune::color::hex("#84848a").unwrap_or(Color::WHITE)
@@ -1534,9 +1542,7 @@ fn tree_pane(app: &App, t: &T) -> El {
             let file = &st.files()[f];
             let selected = f == current;
             let (letter, color, title) = git_status(file.status, t.dark);
-            let glyph = file_icons::for_path(file.path()).iter().fold(el().size(16.0, 16.0), |mark, &(glyph, light, dark)| {
-                mark.child(icon(glyph, 16.0).color(rune::color::hex(if t.dark { dark } else { light }).unwrap_or(tree_muted())).absolute(0.0, 0.0))
-            });
+            let glyph = file_icon(file.path(), 16.0, t.dark);
             base.fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(file.path().to_string())

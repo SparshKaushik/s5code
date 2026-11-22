@@ -140,6 +140,9 @@ pub fn apply(s: &App, t: T) -> T {
     };
     t.code = super::fonts::code_size(&s.client_settings.values);
     t.px = 1.0 / super::fonts::interface_scale(&s.client_settings.values);
+    t.prompt = super::fonts::prompt_style(&s.client_settings.values);
+    t.chat_w = crate::chat::details::max_width(super::value(s, "chatWidth").as_str());
+    t.math = super::value(s, "mathRenderingEnabled") == true;
     super::diff_scheme::apply(super::value(s, "diffColorScheme").as_str().unwrap_or(""), &mut t);
     let contrast = percent("appearanceContrast", 100.0);
     if contrast != 100.0 {

@@ -87,6 +87,27 @@ fn rail_providers(s: &App) -> Vec<&Value> {
     providers(s).iter().filter(|p| p["enabled"] == true && data::s(p, "status") != "disabled").collect()
 }
 
+/// `applyInstanceModelPreferences`: a provider's models without its hidden ones (custom models
+/// always show), in its saved `modelOrder`, then catalog order.
+pub(super) fn listed<'a>(s: &App, p: &'a Value) -> Vec<&'a Value> {
+    let prefs = &crate::settings::server_settings(s)["providerModelPreferences"][data::s(p, "instanceId")];
+    ordered(p["models"].as_array().map(Vec::as_slice).unwrap_or_default(), prefs)
+}
+
+fn ordered<'a>(models: &'a [Value], prefs: &Value) -> Vec<&'a Value> {
+    let mut out: Vec<&Value> = models.iter().filter(|m| m["isCustom"] == true || !hidden(prefs, data::s(m, "slug"))).collect();
+    out.sort_by_key(|m| rank(&prefs["modelOrder"], data::s(m, "slug")).unwrap_or(usize::MAX));
+    out
+}
+
+fn rank(list: &Value, slug: &str) -> Option<usize> {
+    list.as_array()?.iter().position(|x| x.as_str() == Some(slug))
+}
+
+fn hidden(prefs: &Value, slug: &str) -> bool {
+    rank(&prefs["hiddenModels"], slug).is_some()
+}
+
 /// The saved favorites (`{provider, model}`): the environment's, else the client's older copy.
 pub(super) fn favorites(s: &App) -> Vec<(String, String)> {
     let server = &crate::settings::server_settings(s)["favorites"];
@@ -133,7 +154,7 @@ fn rail_rows(s: &App, r: &str) -> Vec<Row> {
         let mut out = Vec::new();
         for p in rail_providers(s) {
             let instance = data::s(p, "instanceId");
-            for m in p["models"].as_array().into_iter().flatten() {
+            for m in listed(s, p) {
                 if is_favorite(&favorites, instance, data::s(m, "slug")) {
                     out.push(row_of(instance, m));
                 }
@@ -142,12 +163,14 @@ fn rail_rows(s: &App, r: &str) -> Vec<Row> {
         return out;
     }
     let Some(p) = provider(s, r) else { return Vec::new() };
-    let mut out: Vec<Row> = p["models"].as_array().into_iter().flatten().map(|m| row_of(r, m)).collect();
-    // appendUnavailableDynamicModelSelection: a dynamic catalog keeps the thread's model listed.
+    let mut out: Vec<Row> = listed(s, p).into_iter().map(|m| row_of(r, m)).collect();
+    // appendUnavailableDynamicModelSelection: a dynamic catalog keeps the thread's model listed
+    // once it leaves the catalog, unless the user hid it.
     if let Some((instance, slug)) = selection(s)
         && instance == r
         && matches!(data::s(p, "driver"), "opencode" | "antigravity")
-        && !out.iter().any(|x| x.slug == slug)
+        && !p["models"].as_array().into_iter().flatten().any(|m| data::s(m, "slug") == slug)
+        && !hidden(&crate::settings::server_settings(s)["providerModelPreferences"][r], &slug)
     {
         out.push(Row { instance, name: slug.clone(), slug, sub_provider: String::new(), new: false, unavailable: true });
     }
@@ -159,7 +182,7 @@ fn search_rows(s: &App, query: &str) -> Vec<Row> {
     let models: Vec<(&Value, &Value)> = rail_providers(s)
         .into_iter()
         .filter(|p| data::s(p, "status") == "ready")
-        .flat_map(|p| p["models"].as_array().into_iter().flatten().map(move |m| (p, m)))
+        .flat_map(|p| listed(s, p).into_iter().map(move |m| (p, m)))
         .collect();
     let searchable: Vec<Searchable> = models
         .iter()
@@ -795,6 +818,18 @@ mod tests {
         e.mods.ctrl = !cfg!(target_os = "macos");
         e.mods.shift = true;
         e
+    }
+
+    #[test]
+    fn model_preferences_hide_and_order_the_providers_models() {
+        let models = [json!({"slug": "a"}), json!({"slug": "b"}), json!({"slug": "c"}), json!({"slug": "d", "isCustom": true})];
+        let slugs = |prefs: serde_json::Value| super::ordered(&models, &prefs).into_iter().map(|m| data::s(m, "slug").to_owned()).collect::<Vec<_>>();
+        assert_eq!(slugs(serde_json::Value::Null), ["a", "b", "c", "d"]);
+        assert_eq!(
+            slugs(json!({"hiddenModels": ["b", "d"], "modelOrder": ["c", "d"]})),
+            ["c", "d", "a"],
+            "FAILED: hidden models leave the picker (custom ones stay) and the saved order leads"
+        );
     }
 
     #[test]
