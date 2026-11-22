@@ -466,7 +466,9 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
         menu.child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN).label("Usage").on_press(|s: &mut App| super::go(s, Route::Usage)))
     };
     let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(undo_notice(s, t));
-    if model.updates > 0 {
+    if let Some(pill) = crate::desktop::updates::pill(s, t, model.updates > 0) {
+        bar = bar.child(pill);
+    } else if model.updates > 0 {
         bar = bar.child(
             el().key("sb-update")
                 .size(32.0, 32.0)

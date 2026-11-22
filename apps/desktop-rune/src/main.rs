@@ -244,7 +244,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::updates::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 
@@ -258,6 +258,11 @@ pub fn scene_clock(s: &mut App) {
 fn main() {
     if std::env::args().any(|a| a == "--check-server") {
         std::process::exit(host::check());
+    }
+    if let [_, flag, manifest, archive] = std::env::args().collect::<Vec<_>>().as_slice()
+        && flag == "--check-update-archive"
+    {
+        std::process::exit(desktop::updates::check_archive(manifest.as_ref(), archive.as_ref()));
     }
     // A second launch focuses the running window and exits.
     let Some(instance) = desktop::single::claim() else { return };
