@@ -506,7 +506,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                         Err(video::Failure::Decoder(_)) if fallback => read_stream(&mjpeg, &pixels, &shared, &stop, &wake).err().map(str::to_owned),
                         Err(video::Failure::Decoder(e)) => Some(e),
                         Err(video::Failure::WebRtc) => Some(WEBRTC.to_owned()),
-                        Err(video::Failure::Stream(_)) => Some(STREAM_FAILED.to_owned()),
+                        Err(video::Failure::Stream) => Some(STREAM_FAILED.to_owned()),
                     };
                     if let Some(failed) = failed
                         && !stop.load(Ordering::Relaxed)

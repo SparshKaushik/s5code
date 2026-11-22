@@ -22,7 +22,8 @@ pub enum Failure {
     Decoder(String),
     /// serve-sim is locked to WebRTC (409), which this app can't receive.
     WebRtc,
-    Stream(String),
+    /// The stream failed or ended; the panel offers Reconnect.
+    Stream,
 }
 
 pub fn paint(pixels: &Pixels, shared: &Mutex<Shared>, wake: &dyn Fn(), width: u32, height: u32, rgba: Vec<u8>) {
@@ -55,7 +56,7 @@ pub fn read_avcc(url: &str, pixels: &Pixels, shared: &Mutex<Shared>, stop: &Atom
         let response = match agent.get(url).call() {
             Ok(response) => response,
             Err(ureq::Error::Status(409, _)) => return Err(Failure::WebRtc),
-            Err(e) => return Err(Failure::Stream(e.to_string())),
+            Err(_) => return Err(Failure::Stream),
         };
         let mut reader = response.into_reader();
         let (mut avcc, mut feed, mut length_size) = (Avcc::default(), Feed::default(), 4);
@@ -65,11 +66,11 @@ pub fn read_avcc(url: &str, pixels: &Pixels, shared: &Mutex<Shared>, stop: &Atom
                 return Ok(());
             }
             let n = match reader.read(&mut chunk) {
-                Ok(0) => return Err(Failure::Stream("The device stream ended.".into())),
+                Ok(0) => return Err(Failure::Stream),
                 Ok(n) => n,
                 // Stalled: a new request starts a fresh capture with a keyframe.
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => break,
-                Err(e) => return Err(Failure::Stream(e.to_string())),
+                Err(_) => return Err(Failure::Stream),
             };
             for chunk in avcc.push(&chunk[..n]) {
                 match chunk {
@@ -92,7 +93,7 @@ pub fn read_avcc(url: &str, pixels: &Pixels, shared: &Mutex<Shared>, stop: &Atom
                 }
             }
             if avcc.pending() > 64 << 20 {
-                return Err(Failure::Stream("The device stream sent an oversized frame.".into()));
+                return Err(Failure::Stream);
             }
         }
     }
