@@ -1987,6 +1987,24 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
     tab
 }
 
+/// The live check's overflowing strip: four browser tabs, the last active.
+pub fn scene_tabs(app: &mut App) -> Vec<TabId> {
+    let ui = &mut app.ui.panel.browser;
+    let titles = [("http://localhost:8000/popup.html", "localhost:8000"), ("https://example.com/", "Example Domain"), ("https://example.org/", "Example Domain"), ("https://example.net/", "Example Domain")];
+    titles
+        .into_iter()
+        .map(|(url, title)| {
+            ui.next += 1;
+            let tab = ui.next;
+            let mut fresh = Tab::new(Pixels::new());
+            fresh.bar.replace_text(url);
+            ui.tabs.insert(tab, fresh);
+            ui.browser.shared.lock().unwrap().tabs.insert(tab, Status { url: url.into(), title: title.into(), painted: true, ..Default::default() });
+            tab
+        })
+        .collect()
+}
+
 /// A two-page PDF for the `browser-pdf-chrome` scene, its text in Helvetica.
 fn scene_pdf_bytes() -> Vec<u8> {
     let page = |lines: &[&str]| {
@@ -2032,10 +2050,9 @@ const SCENE_PERMISSIONS: &str = r#"<!doctype html><title>Permissions</title><sty
 })();
 </script>"#;
 
-/// Scenes with Chrome (`S5_CHROME`): a real tab loads `path` from a server here (a PDF at an
-/// address without `.pdf`, a page behind a sign-in, a permissions probe) and waits for `title`,
-/// since a headless run's clock does not wait on Chrome.
-pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
+/// The scenes' page server: a PDF at an address without `.pdf`, a page behind a sign-in, a
+/// popup opener and its popup, and a permissions probe.
+fn scene_server() -> Option<u16> {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
@@ -2047,6 +2064,8 @@ pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
             let path = request.split(' ').nth(1).unwrap_or("/");
             let (status, headers, body) = match path {
                 "/reports/q3" => ("200 OK", "Content-Type: application/pdf\r\n", scene_pdf_bytes()),
+                "/opener" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>Popup opener</title><button style=\"position:fixed;inset:0;font:24px system-ui\" onclick=\"window.open('/popped', 'p', 'width=500,height=400')\">Open a 500x400 popup</button>".to_vec()),
+                "/popped" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>The popup</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#dbeafe;font:28px system-ui\"><p>The popup painted</p>".to_vec()),
                 "/staging" => ("401 Unauthorized", "Content-Type: text/html\r\nWWW-Authenticate: Basic realm=\"Staging\"\r\n", b"<!doctype html><title>401 Unauthorized</title><body style=\"font:16px system-ui,sans-serif;margin:24px\"><h1>401 Unauthorized</h1><p>The staging server's own page, shown once the sign-in is cancelled.</p>".to_vec()),
                 _ => ("200 OK", "Content-Type: text/html\r\n", SCENE_PERMISSIONS.as_bytes().to_vec()),
             };
@@ -2054,6 +2073,25 @@ pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
             let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
         }
     });
+    Some(port)
+}
+
+/// The shown tab's status once `done` holds, or after a minute.
+fn scene_wait(app: &App, tab: TabId, done: impl Fn(&Status) -> bool) -> Status {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let status = app.ui.panel.browser.browser.shared.lock().unwrap().tabs.get(&tab).cloned().unwrap_or_default();
+        if done(&status) || std::time::Instant::now() > deadline {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Scenes with Chrome (`S5_CHROME`): a real tab loads `path` from `scene_server` and waits for
+/// `title`, since a headless run's clock does not wait on Chrome.
+pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
+    let port = scene_server()?;
     super::html_frame::scene_waker(app);
     let ui = &mut app.ui.panel.browser;
     ui.area = (539., 731.);
@@ -2063,18 +2101,38 @@ pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
     let ui = &mut app.ui.panel.browser;
     ui.browser.send(Cmd::Show(Some(tab)));
     ui.browser.send(Cmd::Navigate(tab, format!("http://127.0.0.1:{port}{path}")));
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        let status = ui.browser.shared.lock().unwrap().tabs.get(&tab).cloned().unwrap_or_default();
-        if (status.title == title && status.painted && !status.loading) || std::time::Instant::now() > deadline {
-            break status;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    let status = scene_wait(app, tab, |s| s.title == title && s.painted && !s.loading);
     // pdf.js draws after the load; its frames follow.
     std::thread::sleep(Duration::from_secs(3));
     eprintln!("scene: tab at {} titled {:?}, painted {}, failure {:?}", status.url, status.title, status.painted, status.failure.map(|f| f.description));
     Some(tab)
+}
+
+/// The live check's popup: a click opens `window.open(url, name, "width=500,height=400")`, which
+/// the panel adopts as a tab that must paint without a tab switch.
+pub fn scene_popup(app: &mut App) -> Option<TabId> {
+    let opener = scene_page(app, "/opener", "Popup opener")?;
+    for kind in ["mousePressed", "mouseReleased"] {
+        app.ui.panel.browser.browser.send(Cmd::Mouse { kind, x: 200., y: 200., clicks: 1 });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let popup = loop {
+        poll(app, &mut Tx::default());
+        if let Some(tab) = app.ui.panel.browser.tabs.keys().copied().find(|t| *t != opener) {
+            break tab;
+        }
+        if std::time::Instant::now() > deadline {
+            eprintln!("scene: no popup opened");
+            return Some(opener);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    poll(app, &mut Tx::default());
+    let status = scene_wait(app, popup, |s| s.title == "The popup" && s.painted && !s.loading);
+    std::thread::sleep(Duration::from_secs(2));
+    poll(app, &mut Tx::default());
+    eprintln!("scene: popup tab at {} titled {:?}, painted {}", status.url, status.title, status.painted);
+    Some(popup)
 }
 
 /// The profile a tab shows pages in: a server tab's as its server reports it.

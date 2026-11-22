@@ -786,37 +786,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
     let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
-    let mut w = Worker {
-        ws,
-        host: host.clone(),
-        next: 0,
-        pending: HashMap::new(),
-        tabs: HashMap::new(),
-        sessions: HashMap::new(),
-        shown: None,
-        viewport: (0., 0., 1.),
-        scale,
-        pressed: false,
-        hovering: false,
-        hover_next: None,
-        recording: None,
-        tracking: None,
-        track_busy: false,
-        downloads: HashMap::new(),
-        agent_downloads: HashMap::new(),
-        crashes: HashMap::new(),
-        native_pdf,
-        snaps: HashMap::new(),
-        snap_next: 0,
-        lives: HashMap::new(),
-        opening: Vec::new(),
-        popups: HashSet::new(),
-        button: "left",
-        modifiers: 0,
-        modified: None,
-        shared,
-        waker,
-    };
+    let mut w = Worker::new(ws, host.clone(), scale, native_pdf, shared, waker);
     w.send(None, "Target.setDiscoverTargets", json!({ "discover": true }), None);
     let dir = downloads_staging();
     let _ = std::fs::create_dir_all(&dir);
@@ -858,6 +828,40 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
 }
 
 impl Worker {
+    fn new(ws: WebSocket<TcpStream>, host: String, scale: f32, native_pdf: Option<bool>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Worker {
+        Worker {
+            ws,
+            host,
+            next: 0,
+            pending: HashMap::new(),
+            tabs: HashMap::new(),
+            sessions: HashMap::new(),
+            shown: None,
+            viewport: (0., 0., 1.),
+            scale,
+            pressed: false,
+            hovering: false,
+            hover_next: None,
+            recording: None,
+            tracking: None,
+            track_busy: false,
+            downloads: HashMap::new(),
+            agent_downloads: HashMap::new(),
+            crashes: HashMap::new(),
+            native_pdf,
+            snaps: HashMap::new(),
+            snap_next: 0,
+            lives: HashMap::new(),
+            opening: Vec::new(),
+            popups: HashSet::new(),
+            button: "left",
+            modifiers: 0,
+            modified: None,
+            shared,
+            waker,
+        }
+    }
+
     fn send(&mut self, session: Option<&str>, method: &str, params: Value, reply: Option<Reply>) {
         self.next += 1;
         let mut msg = json!({ "id": self.next, "method": method, "params": params });
@@ -1570,6 +1574,12 @@ impl Worker {
                 self.history(tab);
                 if method == "Page.loadEventFired" {
                     self.call(tab, "Runtime.evaluate", json!({ "expression": FAVICON_JS, "returnByValue": true }), Some(Reply::Favicon(tab)));
+                    // Chrome 158's screencast can miss a new document until it restarts (a popup
+                    // attached before its page, a PDF's viewer), so a shown page that loads
+                    // restarts it, as switching tabs does, and paints its frame at once.
+                    if self.shown == Some(tab) {
+                        self.screencast(tab);
+                    }
                 }
             }
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
@@ -2759,6 +2769,48 @@ mod tests {
         for url in ["about:blank", "javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "view-source:https://a.b", "chrome://settings", "", "not a url", "1http://x"] {
             assert_eq!(window_open_action(url, &tab), Opened::Deny, "{url}");
         }
+    }
+
+    /// A worker on a fake DevTools socket: what it sends comes back once it drops.
+    fn fake_chrome(test: impl FnOnce(&mut Worker)) -> Vec<Value> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let chrome = std::thread::spawn(move || {
+            let mut ws = tungstenite::accept(listener.accept().unwrap().0).unwrap();
+            let mut sent = Vec::new();
+            while let Ok(Message::Text(text)) = ws.read() {
+                sent.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            sent
+        });
+        let url = format!("ws://{addr}/devtools/browser/x");
+        let (ws, _) = tungstenite::client(url.as_str(), TcpStream::connect(addr).unwrap()).unwrap();
+        let mut worker = Worker::new(ws, addr.to_string(), 1., Some(false), Arc::default(), Arc::new(|| {}));
+        test(&mut worker);
+        drop(worker);
+        chrome.join().unwrap()
+    }
+
+    #[test]
+    fn a_shown_page_that_loads_restarts_its_screencast() {
+        let sent = fake_chrome(|w| {
+            w.viewport = (539., 731., 1.);
+            for (tab, session) in [(1, "shown"), (2, "hidden")] {
+                w.tabs.insert(tab, Tab { pixels: Some(Pixels::new()), zoom: 1., session: Some(session.into()), target: Some(format!("t{tab}")), ..Default::default() });
+                w.sessions.insert(session.into(), tab);
+            }
+            w.shown = Some(1);
+            // An adopted popup, or a PDF's viewer, finishing its load in each tab.
+            for session in ["shown", "hidden"] {
+                w.message(json!({ "method": "Page.loadEventFired", "sessionId": session, "params": {} }));
+            }
+        });
+        let calls = |session: &str| sent.iter().filter(|m| m["sessionId"] == session).map(|m| m["method"].as_str().unwrap_or_default().to_owned()).collect::<Vec<_>>();
+        let shown = calls("shown");
+        let at = shown.iter().position(|m| m == "Page.startScreencast").expect("the shown page's screencast restarts");
+        assert_eq!(shown[at - 1], "Page.stopScreencast");
+        assert_eq!(shown[at + 1], "Page.captureScreenshot");
+        assert!(!calls("hidden").iter().any(|m| m.contains("Screencast") || m == "Page.captureScreenshot"));
     }
 
     #[test]
