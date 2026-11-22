@@ -953,7 +953,10 @@ fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .child(el().grow(1.0))
         .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
         .child(crate::kit::Button::new("Switch branch").disabled(!grants(s, "source-control:write")).on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
+    // ChatOverlayHosts: `Switch to <code className="font-medium">{branch}</code>?`.
+    let code = rune::Span::new("Switch to ".len(), "Switch to ".len() + branch.len()).mono().weight(500.0);
     crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
+        .title_spans(vec![code])
         .open(true)
         .alert()
         .description("You have uncommitted changes. They'll carry over to the other branch, or block the switch if they conflict.")
@@ -1644,6 +1647,34 @@ pub fn scene_editor_menu(s: &mut App) {
         config["availableEditors"] = json!(["cursor", "vscode", "zed", "file-manager"]);
     }
     s.ui.chat.details.menu = Some(Menu::Editor);
+}
+
+/// Scene: the branch picker over a page of refs, its second row highlighted.
+pub fn scene_branch_menu(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    let project = cwd(s).unwrap_or_default();
+    let r = |name: &str, remote: bool, current: bool, default: bool, worktree: Option<String>| Ref { name: name.into(), remote, current, default, worktree };
+    let refs = vec![
+        r("feat/greeting", false, true, false, None),
+        r("main", false, false, true, None),
+        r("fix/terminal-first-key", false, false, false, Some(format!("{project}-worktrees/terminal"))),
+        r("chore/bump-deps", false, false, false, None),
+        r("origin/main", true, false, false, None),
+        r("origin/release/1.4", true, false, false, None),
+    ];
+    let ui = &mut s.ui.chat.details;
+    ui.refs_total = refs.len() as u64;
+    ui.refs = Some(refs);
+    ui.branch_query = TextEdit::new("");
+    ui.branch_query.focused = true;
+    ui.branch_active = 1;
+    ui.menu = Some(Menu::Branch);
+}
+
+/// Scene: the confirm before restoring the thread's branch over uncommitted changes.
+pub fn scene_branch_restore(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    s.ui.chat.details.restore_confirm = Some(("feat/greeting".into(), None));
 }
 
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,

@@ -1293,6 +1293,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("delete-worktree-too", crate::chat::details::cleanup::scene),
     ("script-editor-locked", crate::chat::details::scripts::scene_locked),
     ("details-editor-menu", crate::chat::details::scene_editor_menu),
+    ("details-branch-menu", crate::chat::details::scene_branch_menu),
+    ("details-branch-restore", crate::chat::details::scene_branch_restore),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);
