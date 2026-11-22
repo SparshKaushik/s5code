@@ -14,7 +14,7 @@ use crate::{App, Route, icons, kit};
 
 /// branding.ts's `APP_DISPLAY_NAME` as the desktop app injects it: `S5 Code (Beta)`, or
 /// `(Nightly)` on a nightly or preview build. The sidebar's "T3 Code" wordmark differs on web too.
-fn app_display_name() -> String {
+pub(crate) fn app_display_name() -> String {
     let stage = if crate::settings::about::release_channel(env!("CARGO_PKG_VERSION")) != "stable" { "Nightly" } else { "Beta" };
     format!("S5 Code ({stage})")
 }

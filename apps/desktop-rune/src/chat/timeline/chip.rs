@@ -73,7 +73,10 @@ pub fn pressed(app: &mut App, item: &str, link: &str, records: &[Value], tx: &mu
     let Some(record) = records.iter().find(|r| s(r, "contextId") == id) else { return };
     match kind {
         "review-comment" if record["pullRequest"].is_object() => {
-            let _ = tx.open_url(s(&record["pullRequest"], "url"));
+            let url = s(&record["pullRequest"], "url").to_owned();
+            if !crate::panel::pull_requests::open_in_app(app, &url) {
+                let _ = tx.open_url(&url);
+            }
         }
         "thread" if !s(record, "threadId").is_empty() => app.navigate(Route::Thread(s(record, "threadId").to_owned())),
         "terminal" | "element" | "preview-annotation" | "review-comment" => {

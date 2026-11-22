@@ -1045,10 +1045,12 @@ mod tests {
     #[test]
     fn work_locally_puts_the_prompt_back_without_rolling_back() {
         let mut app = App::new();
-        let message = json!({"type": "user_message", "text": "fix the build", "attachments": []});
+        let record = json!({"kind": "file", "contextId": "c1", "label": "notes.md"});
+        let message = json!({"type": "user_message", "text": "fix the build", "attachments": [], "context": {"version": 1, "records": [record.clone()]}});
         resend(&mut app, "t", &message);
         let pending = app.ui.chat.timeline.actions.rewinds.remove("t").expect("FAILED: the resend is pending");
         assert!(matches!(pending.step, Step::Ready), "FAILED: no rollback goes out");
+        assert_eq!(pending.rewind.records, vec![record], "FAILED: its context goes out again");
         land(&mut app, pending);
         let key = crate::chat::composer::draft_key(&app, &Route::Thread("t".into()));
         let draft = crate::chat::composer::take_draft(&mut app, &key).expect("FAILED: the prompt is in the thread's draft");

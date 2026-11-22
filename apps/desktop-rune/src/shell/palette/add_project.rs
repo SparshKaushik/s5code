@@ -853,9 +853,10 @@ fn add(s: &mut App, raw: &str) {
     }
 }
 fn latest_thread(s: &App, project: &str) -> Option<String> {
+    let key = if crate::settings::threads_by_creation(s) { "createdAt" } else { "updatedAt" };
     s.state().threads.iter()
         .filter(|v| v["projectId"] == project && v["archivedAt"].is_null())
-        .max_by_key(|v| data::ts(v, "updatedAt").unwrap_or(0))
+        .max_by_key(|v| data::ts(v, key).unwrap_or(0))
         .map(|v| data::s(v, "id").to_owned())
 }
 fn lookup(s: &mut App) {
@@ -1090,6 +1091,20 @@ pub fn brand(provider: usize, size: f32, muted: rune::Color) -> Option<rune::El>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_readded_project_opens_its_latest_thread_by_the_sort_order() {
+        let mut s = App::new();
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.threads = vec![
+                json!({"id": "old", "projectId": "p", "archivedAt": null, "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-03-01T00:00:00.000Z"}),
+                json!({"id": "new", "projectId": "p", "archivedAt": null, "createdAt": "2026-02-01T00:00:00.000Z", "updatedAt": "2026-02-02T00:00:00.000Z"}),
+            ];
+        }
+        assert_eq!(latest_thread(&s, "p").as_deref(), Some("old"));
+        s.client_settings.values.insert("sidebarThreadSortOrder".into(), json!("created_at"));
+        assert_eq!(latest_thread(&s, "p").as_deref(), Some("new"), "FAILED: created_at picks the newest thread");
+    }
+
     #[test]
     fn add_project_asks_which_environment_and_the_flow_stays_on_it() {
         let ready = |root: &str| {

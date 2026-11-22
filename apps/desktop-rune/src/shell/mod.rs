@@ -64,7 +64,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     chat::details::on_key(s, e) || palette::on_key(s, e, tx) || theme_editor_key(s, e) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
-/// `themeEditor.toggle` on any route; the editor is a dialog, so Escape closes it through Rune.
+/// `themeEditor.toggle` on any route. Escape closes the editor from its own key handler while it has focus.
 fn theme_editor_key(s: &mut App, e: &KeyEvent) -> bool {
     if !panel::shortcut(s, e, "themeEditor.toggle") {
         return false;

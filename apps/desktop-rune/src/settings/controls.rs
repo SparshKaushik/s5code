@@ -427,6 +427,15 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
     };
+    let hover_key = key.to_owned();
+    let row = row.on_hover_change(move |s: &mut App, on, _: &mut rune::Tx| {
+        let hovered = &mut s.ui.settings.hover_row;
+        if on {
+            *hovered = Some(hover_key.clone());
+        } else if hovered.as_deref() == Some(hover_key.as_str()) {
+            *hovered = None;
+        }
+    });
     super::pulsed(s, t, search_title, row)
 }
 
@@ -442,7 +451,7 @@ fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
         .center_y()
         .child(input(s, t, key, 176.0, &placeholder, false))
         .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)));
-    let hint = matches!(key, "fontFamilySans" | "fontFamilyCode").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
+    let hint = matches!(key, "fontFamilySans" | "fontFamilyCode" | "fontFamilyComposer").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
     match hint {
         Some(hint) => col().gap(4.0).items_end().child(control).child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         None => control,

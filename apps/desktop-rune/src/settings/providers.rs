@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 mod acp_sessions;
 mod custom_models;
 pub(super) mod policy;
+mod codex;
 mod setup;
 mod updates;
 mod usage;
@@ -64,6 +65,7 @@ pub struct Ui {
     /// The custom model whose editor is open, and its draft.
     editing: Option<custom_models::Draft>,
     setup: setup::Ui,
+    codex: codex::Ui,
     sessions: acp_sessions::Ui,
     /// Requests whose replies this page handles itself; kept when another instance is selected.
     pending: Pending,
@@ -1987,8 +1989,11 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
     let managed_codex = r.driver == "codex" && instance["config"]["setupMode"] == "managed";
     let mut setup: Vec<El> = if r.driver == "antigravity" {
         setup::antigravity(s, t, &r.id, &instance, live, resolve_enabled(&instance), read_only)
-    } else if managed_codex && live.is_none_or(|p| p["setup"]["canAuthenticate"] != true) {
-        vec![plain_row(t, "ChatGPT account", "Preparing sign-in.")]
+    } else if managed_codex {
+        match live.filter(|p| p["setup"]["canAuthenticate"] == true) {
+            Some(p) => codex::view(s, t, &r.id, p, resolve_enabled(&instance), read_only),
+            None => vec![plain_row(t, "ChatGPT account", "Preparing sign-in.")],
+        }
     } else if let Some(p) = live.filter(|p| {
         !read_only && (p["setup"]["canAuthenticate"] == true || (p["driver"] == "acpRegistry" && p["installed"] == true))
     }) {
@@ -2039,6 +2044,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
             }
             rows
         };
+        let rows = if managed_codex { codex::runtime(s, t, &r.id, live) } else { rows };
         sections.push(flat_section(heading("Runtime", t), None, rows.into_iter().map(lock).collect(), t));
     }
     let environment = match locks.as_ref().filter(|l| l.whole_environment) {
@@ -2369,11 +2375,11 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
 
 /// Escape closes this page's open dialog, if any.
 pub fn escape(s: &mut App) -> bool {
-    s.ui.settings.providers_ui.confirm.take().is_some() || usage::escape(s)
+    s.ui.settings.providers_ui.confirm.take().is_some() || codex::escape(s) || custom_models::escape(s) || usage::escape(s)
 }
 
 pub fn poll(s: &mut App) -> bool {
-    usage::poll(s) | updates::poll(s) | poll_pending(s) | setup::poll(s) | acp_sessions::poll(s)
+    usage::poll(s) | updates::poll(s) | poll_pending(s) | setup::poll(s) | codex::poll(s) | acp_sessions::poll(s)
 }
 
 /// Subscriptions the selected instance's setup rows read.
@@ -2402,6 +2408,7 @@ pub fn scene_usage(s: &mut App, open: &str) {
 /// The remove and reset confirmations (`confirmProviderInstanceRemoval`).
 pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
     usage::overlays(s, t, layers);
+    codex::picker(s, t, layers);
     project_popover(s, t, layers);
     let Some((id, reset)) = s.ui.settings.providers_ui.confirm.clone() else { return };
     let driver = driver_of(s, &id);

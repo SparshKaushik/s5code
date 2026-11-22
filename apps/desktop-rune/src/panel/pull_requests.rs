@@ -241,7 +241,38 @@ fn entry(link: &Value, project: &str) -> Value {
     e
 }
 
+/// `useOpenChangeRequestLink`: while "Open pull requests in T3 Code" is on, a change request of a
+/// project's own repository opens in the pull requests view. False leaves the link to the browser.
+pub(crate) fn open_in_app(app: &mut App, url: &str) -> bool {
+    if crate::settings::value(app, "pullRequestLinksOpenInApp") == false {
+        return false;
+    }
+    let Some(entry) = in_app_entry(&app.state().projects, url) else { return false };
+    crate::pages::pr_tabs::restore(app, entry);
+    true
+}
+
+/// The pull requests view's entry for `url`: `findProjectForChangeRequest` over `projects`.
+fn in_app_entry(projects: &[Value], url: &str) -> Option<Value> {
+    let link = crate::shell::palette::actions::parse_url(url)?;
+    let key = format!("{}/{}", link.host, link.repository).to_lowercase();
+    let project = projects.iter().find(|p| {
+        let identity = &p["repositoryIdentity"];
+        identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str()).is_some_and(|k| k.to_lowercase() == key)
+    })?;
+    let mut entry = json!({"projectId": project["id"], "host": link.host, "repository": link.repository, "number": link.number, "url": url, "provider": provider(url)});
+    if let Some(env) = project.get(crate::env::TAG) {
+        entry[crate::env::TAG] = env.clone();
+    }
+    Some(entry)
+}
+
+/// `useOpenPrLink`: in the app unless Cmd or Ctrl asks for the browser.
 fn open_link(s: &mut App, tx: &mut Tx, url: &str) {
+    let mods = tx.mods();
+    if !(mods.cmd || mods.ctrl) && open_in_app(s, url) {
+        return;
+    }
     if tx.open_url(url).is_err() {
         crate::shell::palette::toast_error(s, "Unable to open link", None);
     }
@@ -506,6 +537,27 @@ pub(crate) fn fixture_links() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pull_request_link_opens_in_the_app_only_for_a_projects_repository() {
+        let projects = [json!({"id": "p1", "repositoryIdentity": {"canonicalKey": "github.com/acme/app"}, "_environment": "box"})];
+        let entry = super::in_app_entry(&projects, "https://github.com/Acme/App/pull/12").unwrap();
+        assert_eq!((entry["projectId"].as_str(), entry["number"].as_u64(), entry["provider"].as_str()), (Some("p1"), Some(12), Some("github")));
+        assert_eq!(entry["_environment"], "box");
+        assert!(super::in_app_entry(&projects, "https://github.com/acme/other/pull/12").is_none());
+        assert!(super::in_app_entry(&projects, "https://github.com/acme/app/issues/12").is_none());
+
+        let mut app = App::new();
+        let url = "https://github.com/acme/app/pull/12";
+        if let crate::data::Source::Fixture(state) = &mut app.src {
+            state.projects = projects.to_vec();
+        }
+        app.client_settings.values.insert("pullRequestLinksOpenInApp".into(), json!(false));
+        assert!(!super::open_in_app(&mut app, url), "FAILED: off leaves the link to the browser");
+        app.client_settings.values.insert("pullRequestLinksOpenInApp".into(), json!(true));
+        assert!(super::open_in_app(&mut app, url));
+        assert_eq!(app.route, Route::PullRequests);
+    }
 
     #[test]
     fn links_list_as_stacks_and_base_branch_chains_newest_first() {

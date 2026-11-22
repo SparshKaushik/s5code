@@ -68,7 +68,7 @@ fn thread_id(href: &str) -> Option<String> {
     (segment(env) && segment(id)).then(|| percent_decode(id))
 }
 
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -186,6 +186,10 @@ pub fn open(app: &mut App, url: &str, tx: &mut Tx) {
         // Web's `resolveLinkTarget`: Settings may send links to the preview; Cmd or Ctrl still opens the system browser.
         Target::Web => {
             let mods = tx.mods();
+            // ChatMarkdown's change request links open in the app unless Cmd or Ctrl asks for the browser.
+            if !(mods.cmd || mods.ctrl) && crate::panel::pull_requests::open_in_app(app, url) {
+                return;
+            }
             crate::panel::terminal::open_web(app, tx, url, mods.cmd || mods.ctrl);
         }
     }
