@@ -20,6 +20,9 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
     let current = value(s, key);
     let on = if key == "sidebarProjectGroupingMode" {
         current.as_str() != Some("separate")
+    } else if key == "boringSidebarEnabled" {
+        // The sidebar treats the legacy flag as the boring sidebar too.
+        current == true || value(s, "legacySidebarEnabled") == true
     } else {
         current.as_bool().unwrap_or(false)
     };
@@ -35,7 +38,7 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
                 json!(!on)
             };
             update(s, key, v);
-            if key == "boringSidebarEnabled" && !on {
+            if key == "boringSidebarEnabled" {
                 update(s, "legacySidebarEnabled", json!(false));
             }
         })
@@ -93,7 +96,8 @@ fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
     options
         .iter()
         .find(|(v, _)| *v == current)
-        .map(|(_, l)| l.clone())
+        // `CHAT_WIDTH_LABELS` and `EFFORT_DISPLAY_LABELS`: the closed select drops the menu's note.
+        .map(|(_, l)| if matches!(key, "chatWidth" | "effortDisplay") { l.trim_end_matches(" (default)").to_owned() } else { l.clone() })
         .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned())
 }
 
@@ -203,11 +207,25 @@ fn follow_up_description(send_shortcut: Option<&str>, modifier: &str) -> String 
     format!("Queue follow-ups while the agent runs or steer the current run. {flip}")
 }
 
+/// The project-scope wording web's project rows switch to.
+fn project_description(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "defaultRuntimeMode" => "Permissions for new threads in this project.",
+        "defaultAutoPull" => "Keeps this project's default branch current when the checkout has no local changes or commits.",
+        "pullRequestMergeMethod" => "Pull requests in this project start with this method.",
+        "enableAgentBrowserAccess" => "Allow agents in this project to use the shared browser. Applies when the agent session next starts.",
+        _ => return None,
+    })
+}
+
 /// Web `SettingsRow`'s reason a row's control is inert: an administrator's lock, then a
 /// connection that may not write settings, then a project scope over an environment-wide key.
 fn row_lock(s: &App, key: &str) -> Option<String> {
     let client = s.client_settings.values.contains_key(key) || key == "appearance";
-    if client || key.starts_with("project::") {
+    if key.starts_with("project::") {
+        return (!super::permissions::can(s, "orchestration:operate")).then(|| super::projects::CANNOT_CHANGE.to_owned());
+    }
+    if client {
         return None;
     }
     let environment_wide = s.ui.settings.project.is_some() && !super::scope::project_key(key);
@@ -222,6 +240,11 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         if key == "followUpBehavior" {
             let modifier = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
             return Some(follow_up_description(value(s, "sendShortcut").as_str(), modifier));
+        }
+        if s.ui.settings.project.is_some()
+            && let Some(text) = project_description(key)
+        {
+            return Some(text.to_owned());
         }
         let text = match (key, value(s, key).as_str()) {
             ("responseStreamingMode", Some("turn")) => "Text appears once the agent finishes its turn.",
@@ -259,7 +282,24 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let lock = row_lock(s, key);
     // Web's project-scoped Workspace row has no reset either.
     let project_workspace = key == "defaultThreadEnvMode" && s.ui.settings.project.is_some();
-    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced" | "sourceControlWriterModelSelection" | "reviewGuideModelSelection")
+    // Nor do Labs, Legacy and Notifications rows.
+    let no_reset = matches!(
+        key,
+        "sidebarAutoSettleAfterDays"
+            | "typographyAdvanced"
+            | "sourceControlWriterModelSelection"
+            | "reviewGuideModelSelection"
+            | "notificationMode"
+            | "inAppNotificationsEnabled"
+            | "boringSidebarEnabled"
+            | "boringSidebarMultilineRows"
+            | "guestSharingEnabled"
+            | "linkedEnvironmentsEnabled"
+            | "simlockDeviceHostsEnabled"
+            | "planModeEnabled"
+            | "contextWindowMeterEnabled"
+    );
+    if !no_reset
         && !project_workspace && customized && lock.is_none() {
         let owned = key.to_owned();
         let size_key = size_key.clone();
@@ -591,6 +631,9 @@ fn status(s: &App, key: &str) -> Option<&'static str> {
         "browserCustomSearchUrl" if !valid_search_template(value(s, key).as_str().unwrap_or("")) => {
             Some("Enter an http or https URL containing %s. Searches use DuckDuckGo until then.")
         }
+        "branchNamingMode" if value(s, key) == "semantic" => {
+            Some("The model chooses a prefix that describes the work, such as feat/add-search, fix/login-timeout, or refactor/auth.")
+        }
         _ => None,
     }
 }
@@ -631,6 +674,21 @@ fn authority(url: &str) -> Option<String> {
     Some(format!("{userinfo}@{}:{port}", host.to_ascii_lowercase()))
 }
 
+
+/// One keycap for a modifier: glyphs on macOS, names elsewhere ("Ctrl", "Shift", "Alt", "Super").
+pub(crate) fn modifier_cap(modifier: &str, mac: bool) -> &'static str {
+    match (modifier, mac) {
+        ("meta", true) => "⌘",
+        ("control", true) => "⌃",
+        ("alt", true) => "⌥",
+        (_, true) => "⇧",
+        ("meta", false) if cfg!(windows) => "⊞",
+        ("meta", false) => "Super",
+        ("control", false) => "Ctrl",
+        ("alt", false) => "Alt",
+        (_, false) => "Shift",
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -160,9 +160,21 @@ fn changed(s: &App) -> Vec<usize> {
     (0..3).filter(|&i| ui.inputs[i].text.trim() != saved(s, SIGNALS[i].0)).collect()
 }
 
+/// The input's `pattern`: an endpoint is HTTP(S) or empty, which turns export off.
+const INVALID_ENDPOINT: &str = "Enter an HTTP or HTTPS endpoint, or leave empty to disable export.";
+
+fn endpoints_valid(s: &App) -> bool {
+    s.ui.settings.telemetry.inputs.iter().all(|input| endpoint_valid(&input.text))
+}
+
+fn endpoint_valid(text: &str) -> bool {
+    let text = text.trim();
+    text.is_empty() || is_http(text)
+}
+
 fn save(s: &mut App) {
     let changed = changed(s);
-    if changed.is_empty() || s.ui.settings.telemetry.saving.is_some() {
+    if changed.is_empty() || s.ui.settings.telemetry.saving.is_some() || !endpoints_valid(s) {
         return;
     }
     let patch: serde_json::Map<String, Value> =
@@ -274,12 +286,14 @@ pub(crate) fn view(s: &App, t: &T) -> El {
         form = form.child(block);
     }
     let dirty = !changed(s).is_empty();
+    let valid = endpoints_valid(s);
+    let message = if valid { ui.message.clone().unwrap_or_default() } else { INVALID_ENDPOINT.to_owned() };
     form = form.child(
         row()
             .w_full()
             .gap(12.0)
             .center_y()
-            .child(text(ui.message.clone().unwrap_or_default()).role("status").font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.0))
+            .child(text(message).role("status").font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.0))
             .child(
                 kit::Button::new("Discard")
                     .variant("outline")
@@ -291,7 +305,7 @@ pub(crate) fn view(s: &App, t: &T) -> El {
             .child(
                 kit::Button::new(if saving { "Saving…" } else { "Save" })
                     .size("xs")
-                    .disabled(!dirty || saving || !can_edit)
+                    .disabled(!dirty || !valid || saving || !can_edit)
                     .on_press(save)
                     .build(t),
             ),
@@ -322,5 +336,6 @@ mod tests {
         );
         assert_eq!(running_override(Some(&running), 2), None, "a saved setting is no override");
         assert!(is_http("HTTPS://x") && !is_http("http://") && !is_http("ftp://x"));
+        assert!(endpoint_valid("  ") && endpoint_valid("http://localhost:4318/v1/traces") && !endpoint_valid("localhost:4318"), "empty turns export off");
     }
 }
