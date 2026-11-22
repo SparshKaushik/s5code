@@ -127,7 +127,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(timeline::actions::overlays(s, t))
         .children(timeline::plan::overlays(s, t))
         .children(timeline::chip::overlay(s, t))
-        .children(timeline::attachments::lightbox(s));
+        .children(timeline::attachments::lightbox(s))
+        .children(topbar::overlays(s, t));
     main.child(topbar::view(s, cx, t))
         .child(side::beside(s, cx, t, stack))
         .children(crate::panel::drawer::view(s, cx, t))

@@ -21,7 +21,16 @@ pub struct Ui {
     pub terminal_open: bool,
     /// The thread footer's requests in flight (ThreadNow).
     pub now: crate::chat::timeline::now::State,
+    /// A title click's menu, held through the double-click rename interval: thread and when.
+    menu_due: Option<(String, i64)>,
+    /// "Stop sharing" in flight.
+    stopping_share: Option<u64>,
+    /// A draft header's right-click menu ("Project settings"), at this point.
+    draft_menu: Option<(f32, f32)>,
 }
+
+/// `TITLE_MENU_OPEN_DELAY_MS`: a title click waits out a double-click before its menu opens.
+const TITLE_MENU_DELAY_MS: i64 = 500;
 
 /// A project's monogram and colour (projectIdentity.ts).
 pub fn project_identity(name: &str) -> (String, usize) {
@@ -156,6 +165,21 @@ pub fn poll(s: &mut App) -> bool {
         commit_rename(s);
         changed = true;
     }
+    if let Some((thread, due)) = s.ui.chat.topbar.menu_due.clone()
+        && crate::data::now_ms() >= due
+    {
+        s.ui.chat.topbar.menu_due = None;
+        if matches!(&route, Route::Thread(open) if *open == thread) {
+            open_menu(s, None);
+        }
+        changed = true;
+    }
+    if let Some(id) = s.ui.chat.topbar.stopping_share
+        && s.src.net().and_then(|net| net.take_reply(id)).is_some()
+    {
+        s.ui.chat.topbar.stopping_share = None;
+        changed = true;
+    }
     if let Some(id) = s.ui.chat.topbar.rename_request
         && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
     {
@@ -181,6 +205,72 @@ fn parent(s: &App) -> Option<(String, String)> {
     Some((id.to_string(), title.to_string()))
 }
 
+/// `GuestShareIndicator`: who the open thread is shared with, and "Stop sharing".
+fn guest_share(s: &App, t: &T, thread: &serde_json::Value) -> Option<El> {
+    let status = share_status(&thread["guestShare"], s.now_ms)?;
+    let id = data::s(thread, "id").to_string();
+    let stopping = s.ui.chat.topbar.stopping_share.is_some();
+    let stop = crate::kit::Button::new("Stop sharing").size("xs").variant("ghost-muted").disabled(stopping).build(t).key("topbar-stop-share");
+    let stop = if stopping { stop } else { stop.on_press(move |s: &mut App| stop_share(s, &id)) };
+    Some(
+        row()
+            .key("topbar-guest-share")
+            .gap(4.0)
+            .center_y()
+            .child(rune::icon(&icons::USER, 14.0).color(t.c.muted_foreground))
+            .child(text(status).font(theme::TEXT_XS).color(t.c.muted_foreground))
+            .child(stop),
+    )
+}
+
+/// `GuestShareStatus`, to the minute. The share stays on the thread after it expires, until the
+/// owner clears it.
+fn share_status(share: &serde_json::Value, now: i64) -> Option<String> {
+    share.as_object()?;
+    let expires = data::iso_ms(data::s(share, "expiresAt")).unwrap_or(0);
+    Some(if expires.div_euclid(60_000) <= now.div_euclid(60_000) {
+        "Guest link expired".into()
+    } else {
+        share["guestName"].as_str().map_or_else(|| "Guest link active".into(), |name| format!("{name} is a guest"))
+    })
+}
+
+fn stop_share(s: &mut App, id: &str) {
+    let command = json!({"type": "thread.guest-share.close", "commandId": s5_net::uuid(), "threadId": id});
+    s.ui.chat.topbar.stopping_share = crate::env::net_for(s, id).map(|net| net.dispatch(command));
+}
+
+/// Whether the breadcrumbs overflow `room` at their natural widths, so the parent title folds to
+/// "..." (ChatHeader's `collapseParentTitle`).
+fn parent_overflows(project: &str, parent: &str, title: &str, room: f32) -> bool {
+    let width = |label: &str, font| rune::text::measure(label, &[], font, None).0;
+    let slash = width("/", theme::TEXT_SM) + 24.0;
+    let project = if project.is_empty() { 0.0 } else { (20.0 + width(project, CRUMB)).min(160.0) + slash };
+    let parent = width(parent, CRUMB).min(160.0) + slash;
+    project + parent + width(title, CRUMB) + 18.0 > room + 0.5
+}
+
+/// The draft header's right-click menu: "Project settings".
+pub fn overlays(s: &App, t: &T) -> Vec<El> {
+    let mut layers = vec![];
+    let Some((x, y)) = s.ui.chat.topbar.draft_menu else { return layers };
+    let Some(project) = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return layers };
+    let close = |s: &mut App| s.ui.chat.topbar.draft_menu = None;
+    crate::kit::Menu::new("topbar-draft-menu")
+        .native(true)
+        .width(198.0)
+        .open(true)
+        .on_close(close)
+        .at(x, y)
+        .item(crate::kit::MenuItem::new("Project settings").icon(&icons::SETTINGS).on_select(move |s: &mut App| {
+            close(s);
+            s.ui.settings.project = Some(project.clone());
+            crate::shell::sidebar::go(s, Route::Settings("projects".into()));
+        }))
+        .overlay(&crate::kit::theme(t), &mut layers);
+    layers
+}
+
 /// A header toggle's tooltip: `{label} ({shortcut})`.
 fn with_shortcut(s: &App, label: &str, command: &str) -> String {
     match crate::shell::palette::shortcut_label(s, command) {
@@ -195,7 +285,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let project = composer::ctx(s).project;
     let scratch = project.is_some_and(|p| crate::shell::palette::actions::is_scratch_project(s, p));
     let project = if scratch { "No project".to_string() } else { project.map(|p| data::s(p, "title").to_string()).unwrap_or_default() };
-    let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
+    let mut crumbs = row().key("topbar-crumbs").gap(12.0).center_y().shrink().min_w(0.0);
     if !project.is_empty() {
         let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { composer::ctx(s).project.map_or_else(|| monogram(t, &project, 14.0), |p| crate::shell::sidebar::favicon::view(s, t, p, 14.0)) };
         crumbs = crumbs
@@ -219,6 +309,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
     if let Some((id, parent)) = parent(s) {
+        let room = cx.layout_with("topbar-crumbs", |r| r[2]).unwrap_or(f32::MAX);
+        let folded = parent_overflows(&project, &parent, &title(s), room);
+        let label = if folded { "...".to_string() } else { parent.clone() };
         crumbs = crumbs
             .child(
                 row()
@@ -234,7 +327,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .label(format!("Open parent thread: {parent}"))
                     .help(parent.clone())
                     .on_press(move |s: &mut App| crate::shell::sidebar::open_thread(s, &id))
-                    .child(text(parent).font(CRUMB).color(t.c.muted_foreground).group_color(t.c.foreground).truncate().shrink()),
+                    .child(text(label).font(CRUMB).color(t.c.muted_foreground).group_color(t.c.foreground).truncate().shrink()),
             )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
@@ -278,9 +371,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .label(format!("Thread actions for {}", title(s)))
             .help(title(s))
             .child(text(title(s)).font(CRUMB).color(t.c.foreground).truncate().shrink())
-            .child(rune::icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).group_opacity(0.0, 1.0))
-            .on_press(|s: &mut App| open_menu(s, None))
+            // The chevron opens the menu at once; the title waits out a double-click.
+            .child(
+                rune::icon(&icons::CHEVRON_DOWN, 14.0)
+                    .key("topbar-title-chevron")
+                    .color(t.c.muted_foreground)
+                    .group_opacity(0.0, 1.0)
+                    .on_press(|s: &mut App| {
+                        s.ui.chat.topbar.menu_due = None;
+                        open_menu(s, None);
+                    }),
+            )
+            .on_press_tx(|s: &mut App, tx: &mut rune::Tx| {
+                if let Route::Thread(id) = s.frame_route().clone() {
+                    s.ui.chat.topbar.menu_due = Some((id, crate::data::now_ms() + TITLE_MENU_DELAY_MS));
+                    tx.wake_after(std::time::Duration::from_millis(TITLE_MENU_DELAY_MS as u64));
+                }
+            })
             .on_double_press(|s: &mut App| {
+                s.ui.chat.topbar.menu_due = None;
                 s.ui.shell.sidebar.menu = None;
                 start_rename(s);
             })
@@ -296,6 +405,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if editing {
         crumbs = crumbs.grow(1.0);
     }
+    // `handleHeaderContextMenu` on a draft: "Project settings".
+    if thread.is_none() && composer::ctx(s).project.is_some() && !scratch {
+        crumbs = crumbs.on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.chat.topbar.draft_menu = Some((at.x, at.y)));
+    }
+    let share = thread.filter(|_| !editing).and_then(|th| guest_share(s, t, th));
 
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let fits = crate::chat::details::lane(w, h, false).card;
@@ -340,6 +454,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .center_y()
         .window_drag()
         .child(crumbs)
+        .children(share)
         .children((!editing).then(spacer))
         .child(toggles)
 }
@@ -351,8 +466,18 @@ fn toggle(t: &T, i: &'static rune::Icon, label: &str, on: bool) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_rename, poll, start_rename};
+    use super::{commit_rename, poll, share_status, start_rename};
     use crate::{App, Route, data};
+
+    #[test]
+    fn the_guest_share_reads_expired_from_its_minute_on() {
+        let at = data::iso_ms("2026-11-22T10:05:30Z").unwrap();
+        let share = |name: serde_json::Value| serde_json::json!({"expiresAt": "2026-11-22T10:06:00Z", "guestName": name});
+        assert_eq!(share_status(&share(serde_json::Value::Null), at).as_deref(), Some("Guest link active"));
+        assert_eq!(share_status(&share("Ada".into()), at).as_deref(), Some("Ada is a guest"));
+        assert_eq!(share_status(&share("Ada".into()), at + 30_000).as_deref(), Some("Guest link expired"));
+        assert_eq!(share_status(&serde_json::Value::Null, at), None);
+    }
 
     fn title_of(s: &App, id: &str) -> String {
         s.state().threads.iter().find(|t| data::s(t, "id") == id).map(|t| data::s(t, "title").to_string()).unwrap_or_default()
