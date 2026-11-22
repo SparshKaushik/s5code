@@ -6,7 +6,7 @@
 //! helper Electron ships separately, so it takes the portal path here. App text comes from
 //! AT-SPI, as Electron's accessibility module reads it on Linux.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Electron's Linux desktop entry name: the GNOME extension only answers its `.SnapShot` name.
@@ -803,7 +803,7 @@ mod bus {
 
     async fn call<B, R>(conn: &Connection, (dest, path): (&str, &str), interface: &str, method: &str, body: &B) -> zbus::Result<R>
     where
-        B: serde::Serialize + zbus::zvariant::DynamicType,
+        B: zbus::export::serde::Serialize + zbus::zvariant::DynamicType,
         R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
     {
         let reply = conn.call_method(Some(dest), path, Some(interface), method, body).await?;
@@ -935,6 +935,7 @@ pub fn scene_setup(backend: Backend, extension: Option<ExtensionStatus>) -> Setu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn picks_the_backend_like_electron() {
