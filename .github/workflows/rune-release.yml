@@ -7,11 +7,6 @@ name: Rune release
 # become the repository's "Latest" release, which stays Electron's.
 
 on:
-  # TEMPORARY: verifies the build-and-check path from this branch (never publishes); removed
-  # before merge, since a dispatch-only workflow can't run until it is on the default branch.
-  push:
-    branches: [feat/rune-p3-desktop]
-    paths: [.github/workflows/rune-release.yml]
   workflow_dispatch:
     inputs:
       version:
