@@ -517,15 +517,15 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     } else {
       const encoding =
         bytes[0] === 0xff && bytes[1] === 0xfe
-          ? "UTF-16LE"
+          ? "utf-16le"
           : bytes[0] === 0xfe && bytes[1] === 0xff
-            ? "UTF-16BE"
-            : "UTF-8";
+            ? "utf-16be"
+            : "utf-8";
       const decoded = yield* Effect.try({
         try: () => new TextDecoder(encoding, { fatal: true }).decode(bytes),
         catch: () =>
           EffectAcpErrors.AcpRequestError.invalidParams(
-            `Attachment '${attachment.name}' is not a ${encoding} text file.`,
+            `Attachment '${attachment.name}' is not a ${encoding.toUpperCase()} text file.`,
           ),
       });
       if (decoded.includes("\0")) {

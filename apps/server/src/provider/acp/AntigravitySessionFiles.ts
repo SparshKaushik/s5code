@@ -71,9 +71,12 @@ async function readDatabaseWorkspacePaths(
 
   let database: import("node:sqlite").DatabaseSync | undefined;
   try {
-    database = new DatabaseSync(databasePath, { readOnly: true });
-    database.exec("PRAGMA busy_timeout = 100");
-    const rows = database
+    const opened: import("node:sqlite").DatabaseSync = new DatabaseSync(databasePath, {
+      readOnly: true,
+    });
+    database = opened;
+    opened.exec("PRAGMA busy_timeout = 100");
+    const rows = opened
       .prepare("SELECT data FROM trajectory_metadata_blob WHERE length(data) <= ? LIMIT 2")
       .all(MAX_METADATA_BLOB_BYTES);
     if (rows.length !== 1) return undefined;

@@ -212,11 +212,15 @@ const openOwnershipLock = (stateDir: string) =>
 export const isServerOwnershipHeld = (statePath: string): boolean => {
   let db: import("node:sqlite").DatabaseSync | undefined;
   try {
-    db = new DatabaseSync(ownershipLockPath(NodePath.dirname(statePath)), {
-      readOnly: true,
-      timeout: 0,
-    });
-    db.prepare("SELECT 1 FROM sqlite_schema").get();
+    const opened: import("node:sqlite").DatabaseSync = new DatabaseSync(
+      ownershipLockPath(NodePath.dirname(statePath)),
+      {
+        readOnly: true,
+        timeout: 0,
+      },
+    );
+    db = opened;
+    opened.prepare("SELECT 1 FROM sqlite_schema").get();
     return false;
   } catch (cause) {
     return isSqliteBusy(cause);

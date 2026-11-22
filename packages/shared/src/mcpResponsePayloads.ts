@@ -15,9 +15,9 @@ function sseEventData(rawEvent: string): string {
     .join("\n");
 }
 
-async function* sseDataLines(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): AsyncGenerator<string> {
+type BodyReader = Pick<ReadableStreamDefaultReader<Uint8Array>, "read">;
+
+async function* sseDataLines(reader: BodyReader): AsyncGenerator<string> {
   const decoder = new TextDecoder();
   let eventParts: string[] = [];
   let unscanned = "";
@@ -40,7 +40,7 @@ async function* sseDataLines(
   }
 }
 
-async function readText(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+async function readText(reader: BodyReader): Promise<string> {
   const decoder = new TextDecoder();
   let text = "";
   while (true) {
