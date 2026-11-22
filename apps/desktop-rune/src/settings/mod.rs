@@ -594,7 +594,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && (diagnostics::tick(s) | resource_telemetry::tick(s));
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s) | snapshots::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
