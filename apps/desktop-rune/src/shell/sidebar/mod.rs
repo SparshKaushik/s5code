@@ -178,6 +178,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene_home(s);
         s.client_settings.values.insert("environmentIdentificationMode".into(), json!("dev-artwork"));
     }),
+    ("sidebar-stage-nightly-grove", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("nightly-artwork"));
+        s.client_settings.values.insert("themeDark".into(), json!("grove"));
+    }),
+    ("sidebar-stage-dev-ocean", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("dev-artwork"));
+        s.client_settings.values.insert("themeDark".into(), json!("ocean"));
+    }),
+    // A file drag held over the second row.
+    ("sidebar-file-drop", |s| {
+        scene_home(s);
+        s.ui.shell.sidebar.drop_over = s.state().threads.get(1).map(|t| crate::data::s(t, "id").to_owned());
+    }),
     // Search with message matches: a title hit with its excerpt, and a thread found only by one.
     ("sidebar-search-excerpts", |s| {
         scene_home(s);
