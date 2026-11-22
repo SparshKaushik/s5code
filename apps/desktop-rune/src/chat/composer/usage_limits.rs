@@ -539,7 +539,8 @@ fn reset_credits(s: &App, t: &T, account: &Account, now: i64) -> Option<El> {
 /// ResetCreditDialog for the panel's Use reset.
 pub(super) fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some((key, input)) = s.ui.chat.composer.usage.confirm.clone() else { return };
-    crate::pages::usage_limits::reset_credit_dialog(t, layers, !can_redeem(s), |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
+    let allowed = crate::pages::usage_limits::can_redeem(s, &s.ui.env.active);
+    crate::pages::usage_limits::reset_credit_dialog(t, layers, allowed, |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
 }
 
 /// useResetCredit's `canManageProviders`, on the environment the composer reads.
@@ -550,10 +551,10 @@ fn can_redeem(s: &App) -> bool {
 /// useResetCredit's redeem, on the environment the composer reads.
 fn redeem(s: &mut App, key: &str, input: &Value) {
     s.ui.chat.composer.usage.confirm = None;
-    if !can_redeem(s) {
+    let environment = s.ui.env.active.clone();
+    if !crate::pages::usage_limits::can_redeem(s, &environment) {
         return;
     }
-    let environment = s.ui.env.active.clone();
     let Some(net) = s.src.net() else { return };
     let id = net.request("provider.consumeResetCredit", input.clone());
     let usage = &mut s.ui.chat.composer.usage;

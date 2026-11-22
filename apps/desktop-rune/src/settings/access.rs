@@ -62,8 +62,9 @@ pub struct State {
     creating: Option<u64>,
     create_error: Option<String>,
     revoking: Option<u64>,
-    /// The client session a Revoke was pressed on, while its request is pending.
+    /// The client session or pairing link a Revoke was pressed on, while its request is pending.
     revoking_client: Option<String>,
+    revoking_link: Option<String>,
     /// Credentials for links this window created; the server never returns them again.
     credentials: HashMap<String, String>,
     newest: Option<String>,
@@ -89,6 +90,8 @@ pub(super) fn poll(s: &mut App) -> bool {
                 if let (Some(id), Some(credential)) = (created["id"].as_str(), created["credential"].as_str()) {
                     state.credentials.insert(id.to_owned(), credential.to_owned());
                     state.newest = Some(id.to_owned());
+                    // Web `defaultShareOpen`: the link just made opens ready to share.
+                    state.share = Some(id.to_owned());
                 }
                 state.create = false;
                 state.label.clear();
@@ -537,8 +540,10 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
     let state = &s.ui.settings.connections.access;
     let id = link["id"].as_str().unwrap_or_default().to_owned();
     let credential = state.credentials.get(&id).cloned();
-    let scopes = link["permissions"].as_array().or(link["scopes"].as_array()).map_or(0, Vec::len);
+    let scopes: Vec<&str> = link["permissions"].as_array().or(link["scopes"].as_array()).into_iter().flatten().filter_map(Value::as_str).collect();
+    let at = |key: &str| crate::data::ts(link, key).map(|ms| super::tasks::draft::medium_short(crate::data::Zone::Local.wall(ms)));
     let expires = crate::data::ts(link, "expiresAt").map(|e| expires_in(e, s.now_ms)).unwrap_or_default();
+    let revoking = state.revoking_link.as_deref() == Some(id.as_str()) && s.ui.settings.pending.values().any(|path| path == REVOKE_LINK);
     let options = crate::desktop::exposure::share_endpoints(s);
     let default = crate::desktop::exposure::pairing_endpoint(s);
     let shareable = credential.as_ref().and_then(|code| {
@@ -554,7 +559,7 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
                 .min_h(20.0)
                 .gap(6.0)
                 .center_y()
-                .child(dot(t.c.warning))
+                .child(dot(t.c.warning).help(format!("Link created at {}", at("createdAt").unwrap_or_default())))
                 .child(
                     text(link["label"].as_str().unwrap_or("Pairing link").to_owned())
                         .font(theme::SM_MEDIUM)
@@ -562,9 +567,15 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
                 ),
         )
         .child(
-            text(format!("{expires} · {scopes} {}", if scopes == 1 { "scope" } else { "scopes" }))
-                .font(theme::TEXT_XS)
-                .color(t.c.muted_foreground),
+            // `formatExpiresInLabel` with the absolute time on hover, then `AccessScopeSummary`.
+            row()
+                .child(text(expires).font(theme::TEXT_XS).color(t.c.muted_foreground).help(at("expiresAt").unwrap_or_default()))
+                .child(
+                    text(format!(" · {} {}", scopes.len(), if scopes.len() == 1 { "scope" } else { "scopes" }))
+                        .font(theme::TEXT_XS)
+                        .color(t.c.muted_foreground)
+                        .help(std::iter::once("Granted scopes").chain(scopes.iter().copied()).collect::<Vec<_>>().join("\n")),
+                ),
         );
     let hint = match (&credential, &shareable) {
         (None, _) => Some("Create a new link to share from this client."),
@@ -605,11 +616,14 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
     }
     let revoke = id.clone();
     actions = actions.child(
-        kit::Button::new("Revoke")
+        kit::Button::new(if revoking { "Revoking…" } else { "Revoke" })
             .variant("destructive-outline")
             .size("xs")
-            .disabled(!super::permissions::can(s, "access:write"))
-            .on_press(move |s: &mut App| http(s, "POST", "/api/auth/pairing-links/revoke", json!({"id": revoke})))
+            .disabled(revoking || !super::permissions::can(s, "access:write"))
+            .on_press(move |s: &mut App| {
+                s.ui.settings.connections.access.revoking_link = Some(revoke.clone());
+                http(s, "POST", REVOKE_LINK, json!({"id": revoke}));
+            })
             .build(t),
     );
     let line = row().w_full().gap(12.0).center_y().child(copy).child(actions);
@@ -685,6 +699,12 @@ fn share_panel(t: &T, options: &[crate::desktop::exposure::Endpoint], selected: 
     let mut body = row().w_full().pt(12.0).gap(16.0).items_start().child(left);
     if selected.is_none_or(|e| e.qr_shareable()) {
         body = body.child(el().padding(12.0).radius(12.0).fill(rune::Color::WHITE).child(super::qr::view(url, 168.0)));
+    } else {
+        body = body.child(
+            col().w(192.0).h(192.0).padding(16.0).center().radius(12.0).border(1.0, t.c.border.alpha_mul(0.5)).child(
+                text(NO_QR).font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)).wrap(),
+            ),
+        );
     }
     col().w_full().mt(12.0).child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5))).child(body)
 }
@@ -784,7 +804,9 @@ fn elapsed_label(ms: i64) -> String {
     }
 }
 
-const REVOKE_CLIENT: &str = "/api/auth/clients/revoke";
+pub(super) const REVOKE_CLIENT: &str = "/api/auth/clients/revoke";
+pub(super) const REVOKE_LINK: &str = "/api/auth/pairing-links/revoke";
+const NO_QR: &str = "No QR for this endpoint. Another device scanning a loopback link would dial itself; copy the URL for use on this machine instead.";
 
 fn revoke_others(s: &mut App) {
     if s.ui.settings.connections.access.revoking.is_some() {

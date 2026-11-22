@@ -1,6 +1,6 @@
 //! A new worktree's setup progress (WorktreeSetupCard, useWorktreeSetup; client-runtime
 //! worktreeSetup.ts): its stages streamed from `subscribeWorktreeSetup`, Cancel while it runs,
-//! Work locally, and Retry on the error a failed workspace preparation leaves in the timeline.
+//! and Retry on the error a failed workspace preparation leaves in the timeline.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,17 +30,10 @@ pub struct State {
     cancelling: HashMap<String, u64>,
     /// Run id -> `prepared-run.retry` in flight.
     retrying: HashMap<String, u64>,
-    /// Thread id -> where its Work locally stands.
-    working_locally: HashMap<String, WorkLocally>,
-}
-
-/// ChatView's onWorktreeSetupWorkLocally: cancel the setup, wait for the cancellation to settle,
-/// then send the thread's message again in the project checkout.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum WorkLocally {
-    Cancelling(u64),
-    Settling,
-    Sending(u64),
+    /// Threads whose cancel was Work locally: their prompt goes out again once it lands.
+    work_locally: HashSet<String>,
+    /// Cancelled for Work locally, until the run settles and the worktree is cleared.
+    resending: HashSet<String>,
 }
 
 fn stage_label(id: &str) -> &'static str {
@@ -76,30 +69,6 @@ fn visible(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
         "done" => !turn_started || stage_failed(snapshot),
         _ => true,
     }
-}
-
-/// Web offers Work locally on a running setup's unpromoted draft: here, a thread whose first
-/// message still waits on its worktree.
-fn offers_work_locally(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
-    s(snapshot, "phase") == "running" && !turn_started && !follow_up_sent
-}
-
-/// The thread's first message again, as the composer sends it, once the setup is cancelled.
-fn resend(projection: &Value, thread: &str) -> Option<Value> {
-    let message = array(projection, "turnItems").iter().find(|i| s(i, "type") == "user_message")?;
-    let attachments = if message["attachments"].is_array() { message["attachments"].clone() } else { json!([]) };
-    if s(message, "text").is_empty() && attachments.as_array().is_none_or(Vec::is_empty) {
-        return None;
-    }
-    let mut command = json!({
-        "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
-        "threadId": thread, "messageId": s5_net::uuid(), "text": s(message, "text"), "attachments": attachments,
-        "dispatchMode": {"type": "start_immediately"}, "deliveryIntent": "auto",
-    });
-    if message["context"].is_object() {
-        command["context"] = message["context"].clone();
-    }
-    Some(command)
 }
 
 /// The setup script's server terminal, once its stage has started.
@@ -168,11 +137,17 @@ pub fn poll(app: &mut App) -> bool {
         ui.watched = Some(id);
     }
     let mut failures = Vec::new();
-    ui.cancelling.retain(|_, request| {
+    let (work_locally, resending) = (&mut ui.work_locally, &mut ui.resending);
+    ui.cancelling.retain(|thread, request| {
         let Some(reply) = net.take_reply(*request) else { return true };
         changed = true;
-        if let Err(error) = reply {
-            failures.push(("Could not cancel worktree setup", error));
+        let resend = work_locally.remove(thread);
+        match reply {
+            Ok(v) if resend && v["cancelled"] == true => {
+                resending.insert(thread.clone());
+            }
+            Ok(_) => {}
+            Err(error) => failures.push(("Could not cancel worktree setup", error)),
         }
         false
     });
@@ -184,66 +159,44 @@ pub fn poll(app: &mut App) -> bool {
         }
         false
     });
-    let mut send_failures = Vec::new();
-    ui.working_locally.retain(|thread, step| {
-        let (WorkLocally::Cancelling(request) | WorkLocally::Sending(request)) = *step else { return true };
-        let Some(reply) = net.take_reply(request) else { return true };
-        changed = true;
-        match (*step, reply) {
-            // Like web, a setup that was not cancelled, or a failed cancel, leaves things be.
-            (WorkLocally::Cancelling(_), Ok(v)) if v["cancelled"] == true => {
-                *step = WorkLocally::Settling;
-                true
-            }
-            (WorkLocally::Sending(_), Err(error)) => {
-                send_failures.push((thread.clone(), error));
-                false
-            }
-            _ => false,
-        }
-    });
     for (title, error) in failures {
         let description = crate::shell::palette::error_message(&error, "An error occurred.");
         crate::shell::palette::toast_error(app, title, Some(&description));
     }
-    for (thread, error) in send_failures {
-        let message = crate::shell::palette::error_message(&error, "Failed to send message.");
-        super::error_banner::set_local(app, &thread, Some(&message));
-    }
-    changed | resend_settled(app)
-}
-
-/// Resends each Work locally whose cancelled setup has settled: the run no longer preparing and
-/// its worktree removed. A worktree that could not be removed keeps the thread where it was.
-fn resend_settled(app: &mut App) -> bool {
-    let settled: Vec<(String, Option<Value>)> = app
+    let st = app.state();
+    let ready: Vec<(String, Value)> = app
         .ui
         .chat
         .timeline
         .worktree
-        .working_locally
+        .resending
         .iter()
-        .filter(|(_, step)| **step == WorkLocally::Settling)
-        .filter_map(|(thread, _)| {
-            let shell = app.state().threads.iter().find(|r| s(r, "id") == thread.as_str());
-            if shell.is_some_and(|r| s(r, "activityRunStatus") == "preparing" || s(r, "status") == "preparing") {
+        .filter_map(|thread| {
+            let projection = &st.thread_views.get(thread)?.projection;
+            let shell = st.threads.iter().find(|r| s(r, "id") == thread.as_str());
+            if !settled(projection, shell) {
                 return None;
             }
-            let local = shell.is_some_and(|r| s(r, "worktreePath").is_empty());
-            let command = local.then(|| app.state().thread_views.get(thread).and_then(|v| resend(&v.projection, thread))).flatten();
-            Some((thread.clone(), command))
+            Some((thread.clone(), prompt(projection)?.clone()))
         })
         .collect();
-    let changed = !settled.is_empty();
-    for (thread, command) in settled {
-        let sent = command.and_then(|command| app.src.net().map(|net| net.dispatch(command)));
-        let working = &mut app.ui.chat.timeline.worktree.working_locally;
-        match sent {
-            Some(request) => working.insert(thread, WorkLocally::Sending(request)),
-            None => working.remove(&thread),
-        };
+    for (thread, message) in ready {
+        app.ui.chat.timeline.worktree.resending.remove(&thread);
+        super::actions::resend(app, &thread, &message);
+        changed = true;
     }
     changed
+}
+
+/// The prompt a cancelled setup held back: the thread's latest message.
+fn prompt(projection: &Value) -> Option<&Value> {
+    array(projection, "turnItems").iter().rev().find(|i| s(i, "type") == "user_message")
+}
+
+/// The cancelled run has failed and the thread's worktree is gone, so a send starts locally.
+fn settled(projection: &Value, shell: Option<&Value>) -> bool {
+    let active = array(projection, "runs").iter().any(|r| matches!(s(r, "status"), "preparing" | "queued" | "starting" | "running" | "waiting"));
+    !active && shell.is_none_or(|r| s(r, "worktreePath").is_empty())
 }
 
 fn cancel(app: &mut App, thread: &str) {
@@ -253,15 +206,6 @@ fn cancel(app: &mut App, thread: &str) {
     let Some(net) = app.src.net() else { return };
     let request = net.request("worktreeSetup.cancel", json!({"threadId": thread}));
     app.ui.chat.timeline.worktree.cancelling.insert(thread.to_owned(), request);
-}
-
-fn work_locally(app: &mut App, thread: &str) {
-    if app.ui.chat.timeline.worktree.working_locally.contains_key(thread) {
-        return;
-    }
-    let Some(net) = app.src.net() else { return };
-    let request = net.request("worktreeSetup.cancel", json!({"threadId": thread}));
-    app.ui.chat.timeline.worktree.working_locally.insert(thread.to_owned(), WorkLocally::Cancelling(request));
 }
 
 fn retry(app: &mut App, thread: &str, run: &str) {
@@ -425,18 +369,6 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .build(t),
         );
     }
-    if offers_work_locally(snapshot, turn_started, follow_up) {
-        let local_thread = thread.to_owned();
-        actions = actions.child(
-            Button::new("Work locally")
-                .variant("ghost-muted")
-                .size("xs")
-                .icon(&icons::LAPTOP)
-                .disabled(app.ui.chat.timeline.worktree.working_locally.contains_key(thread))
-                .on_press(move |app: &mut App| work_locally(app, &local_thread))
-                .build(t),
-        );
-    }
     if running {
         let cancel_thread = thread.to_owned();
         actions = actions.child(
@@ -446,6 +378,19 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .icon(&icons::X)
                 .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
                 .on_press(move |app: &mut App| cancel(app, &cancel_thread))
+                .build(t),
+        );
+        let local_thread = thread.to_owned();
+        actions = actions.child(
+            Button::new("Work locally")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::LAPTOP)
+                .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
+                .on_press(move |app: &mut App| {
+                    cancel(app, &local_thread);
+                    app.ui.chat.timeline.worktree.work_locally.insert(local_thread.clone());
+                })
                 .build(t),
         );
     }
@@ -512,23 +457,15 @@ mod tests {
     }
 
     #[test]
-    fn work_locally_resends_the_first_message_while_its_worktree_is_set_up() {
-        let running = snapshot("running", json!([{"id": "fetch", "status": "running"}]));
-        assert!(offers_work_locally(&running, false, false));
-        assert!(!offers_work_locally(&running, true, false), "the turn started: the server owns the send");
-        assert!(!offers_work_locally(&running, false, true));
-        assert!(!offers_work_locally(&snapshot("failed", json!([])), false, false));
-        let p = json!({"turnItems": [
-            {"type": "user_message", "text": "Fix the build", "attachments": [{"type": "image", "id": "a1"}], "context": {"version": 1, "records": []}},
-            {"type": "error", "status": "failed"},
-            {"type": "user_message", "text": "later", "attachments": []},
-        ]});
-        let command = resend(&p, "t").unwrap();
-        assert_eq!((command["type"].as_str(), command["threadId"].as_str(), command["text"].as_str()), (Some("message.dispatch"), Some("t"), Some("Fix the build")));
-        assert_eq!(command["attachments"], json!([{"type": "image", "id": "a1"}]));
-        assert_eq!(command["context"], json!({"version": 1, "records": []}));
-        assert_eq!(command["dispatchMode"], json!({"type": "start_immediately"}));
-        assert_eq!(resend(&json!({"turnItems": [{"type": "user_message", "text": ""}]}), "t"), None, "nothing to send");
+    fn work_locally_resends_the_latest_prompt_once_the_cancel_settles() {
+        let item = |kind: &str, text: &str| json!({"type": kind, "text": text});
+        let p = |run: &str| json!({"runs": [{"status": run}], "turnItems": [item("user_message", "first"), item("assistant_message", "a"), item("user_message", "build it")]});
+        assert_eq!(prompt(&p("failed")).map(|m| s(m, "text")), Some("build it"));
+        let worktree = json!({"worktreePath": "/wt"});
+        let local = json!({"worktreePath": null});
+        assert!(!settled(&p("preparing"), Some(&local)), "FAILED: waits for the cancelled run to fail");
+        assert!(!settled(&p("failed"), Some(&worktree)), "FAILED: waits for the worktree to be cleared");
+        assert!(settled(&p("failed"), Some(&local)));
     }
 
     #[test]

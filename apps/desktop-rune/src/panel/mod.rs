@@ -2,7 +2,7 @@
 pub(crate) mod agent;
 pub(crate) mod stream;
 pub mod browser;
-mod closed;
+pub(crate) mod closed;
 mod device;
 pub(crate) mod diff;
 pub mod drawer;
@@ -74,7 +74,7 @@ pub struct Ui {
     /// The tab strip's right-click menu: its tab and window point.
     tab_menu: Option<(Surface, (f32, f32))>,
     thread: String,
-    closed: closed::Store,
+    pub(crate) closed: closed::Store,
     /// Each thread's surfaces, as web's right panel state is per thread; browser tabs stay
     /// alive while their thread is in the background.
     stash: std::collections::HashMap<String, Stash>,
@@ -338,14 +338,16 @@ fn close(app: &mut App, surface: Surface) {
     }
     remove_surface(app, surface);
 }
-/// `view.reopenClosed`: the newest closed view still worth reopening, on its thread.
-fn reopen_closed(app: &mut App) -> bool {
+/// `view.reopenClosed`: the newest closed view still worth reopening, on its thread or the pull
+/// requests page, from either.
+fn reopen_closed(app: &mut App, tx: &mut Tx) -> bool {
     let mut store = std::mem::take(&mut app.ui.panel.closed);
     let current = context(app).map(|(id, _)| id);
-    let exists = |thread: &str| app.state().threads.iter().any(|v| v["id"] == thread);
+    let exists = |thread: &str| thread == closed::PAGE || app.state().threads.iter().any(|v| v["id"] == thread);
     let next = store.next(exists, |c| match &c.view {
         // A deleted side chat drops too; an open one is open whatever the panel shows.
         closed::View::SideChat(side) => !exists(side.as_str()) || (current.as_deref() == Some(c.thread.as_str()) && crate::chat::side::open_beside(app) == Some(side.as_str())),
+        closed::View::PullRequest(entry) => crate::pages::pr_tabs::showing(app, entry),
         view => {
             app.ui.shell.panel_open
                 && current.as_deref() == Some(c.thread.as_str())
@@ -353,12 +355,20 @@ fn reopen_closed(app: &mut App) -> bool {
                     closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
                     closed::View::PullRequests => app.ui.panel.surfaces.contains(&Surface::PullRequests),
                     closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
-                    closed::View::Browser(_) | closed::View::SideChat(_) => false,
+                    closed::View::Browser(_) | closed::View::SideChat(_) | closed::View::PullRequest(_) => false,
                 }
         }
     });
     app.ui.panel.closed = store;
-    let Some(c) = next else { return false };
+    let c = match next {
+        None => return false,
+        Some(closed::Closed { view: closed::View::PullRequest(entry), .. }) => {
+            let tab = crate::pages::pr_tabs::restore(app, entry);
+            tx.scroll_into_view_in(crate::pages::pr_tabs::STRIP, tab);
+            return true;
+        }
+        Some(c) => c,
+    };
     let parent = c.thread.clone();
     if current.as_deref() != Some(c.thread.as_str()) {
         app.navigate(Route::Thread(c.thread.clone()));
@@ -376,6 +386,7 @@ fn reopen_closed(app: &mut App) -> bool {
         closed::View::Files(path) => open_file(app, path),
         closed::View::Browser(url) => open_preview(app, &url),
         closed::View::SideChat(side) => crate::chat::side::reopen(app, &parent, &side),
+        closed::View::PullRequest(_) => {}
     }
     true
 }
@@ -715,7 +726,7 @@ fn when_context(app: &App, name: &str) -> bool {
 }
 pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if !app.ui.panel.closed.is_empty() && !tx.key_repeat() && shortcut(app, e, "view.reopenClosed") {
-        return reopen_closed(app);
+        return reopen_closed(app, tx);
     }
     if shortcut(app, e, "rightPanel.toggle") {
         app.ui.shell.panel_open = !app.ui.shell.panel_open;
@@ -972,7 +983,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 .role("tab")
                 .label(title.clone())
                 .focusable(true)
-                .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                // Web closes a tab on a middle click.
+                .pointer_buttons([rune::PointerButton::Middle])
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| match tx.button() {
+                    rune::PointerButton::Middle => close(s, surface),
+                    _ => s.ui.panel.active = Some(surface),
+                })
                 .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
                 .children(speaker)
@@ -1005,7 +1021,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
         Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
-        Some(Surface::Device) => device::view(app, t),
+        Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Surface::Terminal) => col()
             .grow(1.)
             .min_h(0.)
@@ -1078,6 +1094,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-host-setup", |s| browser_scene(s, "host-setup")),
     ("browser-more-menu", |s| browser_scene(s, "more")),
     ("browser-file-chooser", |s| browser_scene(s, "chooser")),
+    ("browser-clipboard-prompt", |s| browser_scene(s, "clipboard-prompt")),
+    ("browser-external-prompt", |s| browser_scene(s, "external-prompt")),
+    ("browser-file-not-shown", |s| browser_scene(s, "file-not-shown")),
+    ("browser-server-unreachable", |s| browser_scene(s, "server-unreachable")),
     ("panel-launcher-profiles", |s| {
         scene(s, None);
         s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
@@ -1120,6 +1140,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "data/models.csv", "provider,model,context,notes\nClaude,Opus 5.5,1000000,\"Default for \"\"hard\"\" turns\"\nClaude,Haiku 5.5,200000,Cheap replays\nCodex,Luna,400000,\nCursor,Auto,128000,\"Multi\nline\"\n", true);
     }),
+    ("panel-file-mermaid", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "docs/turn.mmd", "flowchart LR\n  Client -->|command| Orchestrator\n  Orchestrator -->|events| Sink[(Event sink)]\n  Sink --> Projections\n  Sink --> Worker[Effect worker]\n  Worker -->|result command| Orchestrator\n", true);
+    }),
     ("panel-file-no-preview", |s| {
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "docs/spec.pdf", "", false);
@@ -1131,6 +1155,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-device-h264", |s| {
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-stream", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+    }),
+    ("panel-device-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::open_menu(s);
+    }),
+    ("panel-add-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([]));
+        s.ui.panel.add_menu = true;
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1221,6 +1259,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-fanout-uncertain", crate::chat::composer::fanout::scene_uncertain),
     ("composer-allow-retry", crate::chat::composer::fanout::scene_allow_retry),
     ("delete-worktree-too", crate::chat::details::cleanup::scene),
+    ("script-editor-locked", crate::chat::details::scripts::scene_locked),
+    ("details-editor-menu", crate::chat::details::scene_editor_menu),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);
@@ -1416,6 +1456,29 @@ mod sheet_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_launchers_profile_chevron_opens_its_menu_without_a_default_tab() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(480., 640.).child(picker(s, &crate::theme::theme(true)))
+        }
+        let mut rt = rune::Runtime::new(App::new(), view, (480., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let chevron = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("panel-launcher-profiles")).expect("the Browser row's chevron").rect;
+        let click = |rt: &mut rune::Runtime<App>, (x, y): (f32, f32)| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.);
+        };
+        let y = chevron[1] + chevron[3] / 2.;
+        click(&mut rt, (chevron[0] + chevron[2] / 2., y));
+        assert!(rt.state.ui.panel.launcher_profiles, "the chevron opens the profile menu");
+        assert!(rt.state.ui.panel.surfaces.is_empty(), "and opens no tab");
+        // The rest of the row still opens a tab in the default profile.
+        click(&mut rt, (chevron[0] - 120., y));
+        assert!(matches!(rt.state.ui.panel.surfaces[..], [Surface::Browser(_)]), "the row opens one tab");
+    }
+
     #[test]
     fn each_thread_gets_its_own_panel_back() {
         let mut app = App::new();

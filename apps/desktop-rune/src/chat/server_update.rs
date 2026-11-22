@@ -102,7 +102,7 @@ pub fn start(app: &mut App, target: &str) {
 }
 
 /// The transport dropped mid-request, as a restarting server does (isLegacyUpdateHandoffLoss).
-fn transport_lost(cause: &Value) -> bool {
+pub(crate) fn transport_lost(cause: &Value) -> bool {
     s(cause, "_tag") == "TransportError"
 }
 

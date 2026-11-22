@@ -272,6 +272,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-citations-with-chips", citations_with_chips),
     ("composer-citation-comment", crate::chat::composer::chips::comment_scene),
     ("timeline-media-actions", media_actions),
+    ("timeline-run-in-terminal", run_in_terminal),
     ("timeline-video-fallback", video_fallback),
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
@@ -382,6 +383,12 @@ fn citations_with_chips(app: &mut App) {
     push_visible(app, vec![serde_json::json!({"id": "scene-citation-chips", "type": "user_message", "text": text,
         "createdAt": "2026-01-01T00:00:00Z", "attachments": [], "context": {"records": [terminal]}})]);
     app.ui.chat.timeline.md_links.citation = Some((super::chip::bubble_key("scene-citation-chips"), quote));
+}
+/// A finished reply whose one-line shell fence offers Run in terminal; the multi-line one does not.
+fn run_in_terminal(app: &mut App) {
+    showcase(app);
+    let text = "Run the suite:\n\n```bash\nvp test run src/billing\n```\n\nThen rebuild:\n\n```bash\nvp i\nvp run build\n```\n";
+    push_visible(app, vec![serde_json::json!({"id": "scene-run", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 /// A reply with a workspace screenshot, its media actions menu open.
 fn media_actions(app: &mut App) {

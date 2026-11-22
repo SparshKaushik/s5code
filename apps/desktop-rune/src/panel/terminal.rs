@@ -247,6 +247,8 @@ pub struct Ui {
     pub menu: Option<Menu>,
     /// Requests whose failure is written into their terminal, as web's `writeSystemMessage`.
     pending: Vec<(u64, String, String)>,
+    /// `terminal.resize` replies, dropped unread: web reports no resize failure.
+    resizes: Vec<u64>,
     /// `terminal.close` requests, to type `exit` when one fails.
     closing: Vec<(u64, String, String)>,
     /// The palette last drawn with, for colour queries answered outside the view.
@@ -257,8 +259,11 @@ pub struct Ui {
     /// Whether each absolute path a link names exists (`filesystem.getMetadata`); `None` while asked.
     paths: HashMap<String, Option<bool>>,
     path_requests: Vec<(u64, String)>,
-    /// A path link pressed before its check came back: opens if it exists.
-    open_when_known: Option<(String, String)>,
+    /// A path link pressed before its check came back: opens if it exists, from the terminal
+    /// (thread, id) it was pressed in.
+    open_when_known: Option<(String, String, (String, String))>,
+    /// `shell.openInEditor` requests for path links, and the terminal a failure is written to.
+    opening: Vec<(u64, String, String)>,
     /// Every terminal the server runs (`subscribeTerminalMetadata`'s summaries).
     known: Vec<Value>,
     /// Closed here and not yet gone from `known`, so the drawer doesn't bring them back.
@@ -287,6 +292,8 @@ pub struct Launch<'a> {
     pub cwd: &'a str,
     pub worktree: Option<&'a str>,
     pub root: Option<&'a str>,
+    /// The PTY's first size, before the view measures it (`cols`, `rows`).
+    pub size: Option<(u16, u16)>,
 }
 
 /// Attaches (opening when missing) the session for a terminal id, once.
@@ -325,6 +332,10 @@ pub fn run(app: &mut App, thread: &str, id: &str, at: &Launch, data: String) {
 /// The project's scripts read `T3CODE_PROJECT_ROOT` and `T3CODE_WORKTREE_PATH` (`projectScriptRuntimeEnv`).
 fn attach_payload(thread: &str, id: &str, at: &Launch) -> Value {
     let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":at.cwd});
+    if let Some((cols, rows)) = at.size {
+        payload["cols"] = json!(cols);
+        payload["rows"] = json!(rows);
+    }
     if let Some(path) = at.worktree {
         payload["worktreePath"] = json!(path);
     }
@@ -456,7 +467,7 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
         && let Some(net) = app.src.net()
     {
         let request = net.request("terminal.resize", json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}));
-        app.ui.panel.terminal.pending.push((request, thread.to_string(), id.to_string()));
+        app.ui.panel.terminal.resizes.push(request);
     }
 }
 
@@ -497,6 +508,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             tx.wake_after(p.due - now);
         }
     }
+    if let Some(net) = app.src.net() {
+        app.ui.panel.terminal.resizes.retain(|request| net.take_reply(*request).is_none());
+    }
     let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
     for (request, thread, id) in pending {
         match app.src.net().and_then(|net| net.take_reply(request)) {
@@ -518,7 +532,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     && let Some(session) = app.ui.panel.terminal.get_mut(&thread, &id)
                 {
                     let message = data::s(&error, "message");
-                    system_line(session, if message.is_empty() { "Terminal request failed" } else { message });
+                    system_line(session, if message.is_empty() { "Terminal write failed" } else { message });
                     changed = true;
                 }
             }
@@ -611,14 +625,32 @@ fn poll_links(app: &mut App) -> bool {
         let ui = &mut app.ui.panel.terminal;
         ui.paths.insert(path.clone(), Some(exists));
         changed = true;
-        if ui.open_when_known.as_ref().is_some_and(|(p, _)| *p == path)
-            && let Some((_, target)) = ui.open_when_known.take()
+        if ui.open_when_known.as_ref().is_some_and(|(p, ..)| *p == path)
+            && let Some((_, target, (thread, id))) = ui.open_when_known.take()
             && exists
         {
-            open_path(app, target);
+            open_path(app, target, &thread, &id);
         }
     }
+    for (request, thread, id) in std::mem::take(&mut app.ui.panel.terminal.opening) {
+        let Some(reply) = app.src.net().and_then(|net| net.take_reply(request)) else {
+            app.ui.panel.terminal.opening.push((request, thread, id));
+            continue;
+        };
+        if let Err(error) = reply {
+            let message = data::s(&error, "message");
+            note(app, &thread, &id, if message.is_empty() { "Unable to open path" } else { message });
+        }
+        changed = true;
+    }
     changed
+}
+
+/// `writeSystemMessage`: a `[terminal]` line in the terminal's own buffer, not sent to the PTY.
+fn note(app: &mut App, thread: &str, id: &str, message: &str) {
+    if let Some(session) = app.ui.panel.terminal.get_mut(thread, id) {
+        system_line(session, message);
+    }
 }
 
 fn fallback_exit(app: &mut App, thread: &str, id: &str) {
@@ -975,18 +1007,24 @@ fn link_exists(app: &mut App, link: &Link) -> Option<bool> {
 /// Opens a clicked link: URLs in the preview when links open in the app (Cmd or Ctrl still
 /// picks the system browser), paths at their line in the preferred editor (`handleLinkActivate`,
 /// `openTerminalLinkInPreview`, `openInPreferredEditor`).
-fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool) {
+fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool, thread: &str, id: &str) {
     if link.kind == links::Kind::Url {
-        return open_web(app, tx, &link.text, force_browser);
+        if in_preview(&app.client_settings.values, &link.text, force_browser) && super::context(app).is_some() {
+            super::open_preview(app, &link.text);
+        } else if let Err(e) = tx.open_url(&link.text) {
+            let message = e.to_string();
+            note(app, thread, id, if message.is_empty() { "Unable to open link" } else { &message });
+        }
+        return;
     }
     let Some((_, cwd)) = super::context(app) else {
         return;
     };
     let (absolute, target) = link_target(&link.text, &cwd);
     match link_exists(app, link) {
-        Some(true) => open_path(app, target),
+        Some(true) => open_path(app, target, thread, id),
         Some(false) => {}
-        None => app.ui.panel.terminal.open_when_known = Some((absolute, target)),
+        None => app.ui.panel.terminal.open_when_known = Some((absolute, target, (thread.to_string(), id.to_string()))),
     }
 }
 
@@ -999,17 +1037,22 @@ pub(crate) fn open_web(app: &mut App, tx: &mut Tx, url: &str, force_browser: boo
     }
 }
 
-fn open_path(app: &mut App, target: String) {
-    let config = app.state().config.as_ref();
-    let editor = config
-        .and_then(|c| c["availableEditors"].as_array())
-        .and_then(|v| v.first())
-        .map(|e| e.as_str().map_or_else(|| data::s(e, "id").to_string(), str::to_string));
-    let Some(editor) = editor else {
-        return crate::shell::palette::toast_error(app, "Editor opening is unavailable.", None);
+/// `useOpenInPreferredEditor`: the editor the details card would open, over SSH when it does.
+/// A failure is written into the terminal the link was pressed in, as web's drawer does.
+fn open_path(app: &mut App, target: String, thread: &str, id: &str) {
+    let Some(editor) = crate::chat::details::preferred_editor(app).map(|e| e.0) else {
+        let env = app.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_string()).unwrap_or_default();
+        return note(app, thread, id, &format!("No available editor can open {target} in environment {env}."));
     };
+    if crate::env::ssh::open_in_editor(app, &editor, &target) {
+        return;
+    }
+    if !crate::chat::details::grants(app, "orchestration:operate") {
+        return note(app, thread, id, "This connection cannot open an editor on this environment.");
+    }
     if let Some(net) = app.src.net() {
-        net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
+        let request = net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
+        app.ui.panel.terminal.opening.push((request, thread.to_string(), id.to_string()));
     }
 }
 
@@ -1349,7 +1392,7 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
         send(s, thread, id, data);
     }
     if let Some((link, force_browser)) = open {
-        open_link(s, tx, &link, force_browser);
+        open_link(s, tx, &link, force_browser, thread, id);
     }
 }
 
@@ -1615,14 +1658,35 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_cannot_open_says_why_in_its_terminal() {
+        let mut app = App::new();
+        app.ui.panel.terminal.sessions.push(Session::new("t", "term-1"));
+        // The buffer wraps at its width; read it back as one line.
+        let text = |app: &App| app.ui.panel.terminal.get("t", "term-1").unwrap().vt.text().replace('\n', "");
+        open_path(&mut app, "/repo/src/main.rs".into(), "t", "term-1");
+        assert!(text(&app).contains("[terminal] No available editor can open /repo/src/main.rs in environment"), "FAILED: {}", text(&app));
+        if let crate::data::Source::Fixture(state) = &mut app.src
+            && let Some(config) = state.config.as_mut()
+        {
+            config["availableEditors"] = json!(["vscode"]);
+        }
+        crate::chat::details::set_session(&mut app, Some(Ok(json!({"authenticated": true, "scopes": ["terminal:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
+        open_path(&mut app, "/repo/src/main.rs".into(), "t", "term-1");
+        assert!(text(&app).ends_with("[terminal] This connection cannot open an editor on this environment."), "FAILED: {}", text(&app));
+    }
+
+    #[test]
     fn attach_opens_a_closed_id_again_with_the_project_env() {
-        let payload = attach_payload("t", "term-2", &Launch { cwd: "/wt", worktree: Some("/wt"), root: Some("/repo") });
+        let payload = attach_payload("t", "term-2", &Launch { cwd: "/wt", worktree: Some("/wt"), root: Some("/repo"), size: None });
         assert!(payload.get("resume").is_none(), "{payload}");
         assert_eq!(payload["worktreePath"], "/wt");
         assert_eq!(payload["env"], json!({"T3CODE_PROJECT_ROOT": "/repo", "T3CODE_WORKTREE_PATH": "/wt"}));
-        let local = attach_payload("t", "term-2", &Launch { cwd: "/repo", worktree: None, root: Some("/repo") });
+        let local = attach_payload("t", "term-2", &Launch { cwd: "/repo", worktree: None, root: Some("/repo"), size: None });
         assert!(local.get("worktreePath").is_none());
         assert_eq!(local["env"], json!({"T3CODE_PROJECT_ROOT": "/repo"}));
+        assert!(local.get("cols").is_none(), "an ordinary terminal starts at the server's size");
+        let script = attach_payload("t", "term-3", &Launch { cwd: "/repo", worktree: None, root: None, size: Some((120, 30)) });
+        assert_eq!((script["cols"].as_u64(), script["rows"].as_u64()), (Some(120), Some(30)), "FAILED: a new script terminal opens at 120x30");
     }
 
     #[test]

@@ -395,7 +395,7 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
                 s.ui.env.ssh.targets.retain(|(k, _)| *k != id);
                 s.ui.env.ssh.targets.push((id.clone(), target.clone()));
             }
-            super::paired(s, Ok(env));
+            super::paired(s, Ok((env, None)));
             let landed = if route.is_some() { s.ui.env.route_added.is_some() } else { s.ui.env.saved.iter().any(|e| e.id == id) };
             if !landed && route.is_some() {
                 s.ui.env.ssh.targets.retain(|(k, _)| *k != id);
@@ -1744,7 +1744,7 @@ fn editor_label(id: &str) -> &'static str {
 /// SSH, as web's OpenInPicker in remote mode. None when the active environment is not SSH.
 pub fn editors(s: &App) -> Option<Vec<(String, String)>> {
     static PROBED: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    remote_host(s, &s.ui.env.active)?;
+    let OpenMode::Links(..) = open_mode(s, &s.ui.env.active) else { return None };
     // Rendering asks every frame, so probe once, after the login shell's PATH is known.
     let ids = match crate::desktop::shell_path::get() {
         Some(path) => PROBED.get_or_init(|| probe_remote_editors(path)).clone(),
@@ -1755,13 +1755,46 @@ pub fn editors(s: &App) -> Option<Vec<(String, String)>> {
 
 /// Opens `path` on the active SSH environment's host in `editor`; false off SSH.
 pub fn open_in_editor(s: &mut App, editor: &str, path: &str) -> bool {
-    let Some((host, user)) = remote_host(s, &s.ui.env.active) else { return false };
+    let OpenMode::Links(host, user) = open_mode(s, &s.ui.env.active) else { return false };
     let Some(url) = remote_open_url(editor, &host, user.as_deref(), path, false) else { return true };
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    if let Err(e) = Command::new(opener).arg(&url).stdin(Stdio::null()).spawn() {
-        crate::shell::palette::toast(s, "Could not open the editor.", Some(&e.to_string()));
+    match Command::new(opener).arg(&url).stdin(Stdio::null()).spawn() {
+        Ok(_) => {
+            s.client_settings.values.insert(REMOTE_OPEN_HINT_SEEN.into(), serde_json::json!(true));
+            s.client_settings.save();
+        }
+        Err(e) => crate::shell::palette::toast(s, "Could not open the editor.", Some(&e.to_string())),
     }
     true
+}
+
+/// `useRemoteOpenHint`: set after the first remote open goes through.
+pub const REMOTE_OPEN_HINT_SEEN: &str = "remoteOpenHintSeen";
+
+/// `RemoteOpenState`: where an environment's Open in editor runs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenMode {
+    /// The server launches the editor on its own machine.
+    Local,
+    /// This machine's editor opens the host over SSH.
+    Links(String, Option<String>),
+    /// A remote server with no SSH route, whose editors would open out of sight.
+    Unavailable,
+}
+
+/// `resolveRemoteOpenState`: an SSH target, then this machine, then the server's advertised target.
+pub fn open_mode(s: &App, id: &str) -> OpenMode {
+    if let Some((host, user)) = remote_host(s, id) {
+        return OpenMode::Links(host, user);
+    }
+    if crate::settings::machines::loopback(s, id) {
+        return OpenMode::Local;
+    }
+    let config = crate::env::source(s, id).and_then(|src| src.state().config.as_ref());
+    match config.map(|c| &c["remoteOpenTargets"][0]).and_then(|t| t["host"].as_str().map(|h| (h, t["username"].as_str()))) {
+        Some((host, user)) if !host.trim().is_empty() => OpenMode::Links(host.trim().to_owned(), user.map(str::to_owned)),
+        _ => OpenMode::Unavailable,
+    }
 }
 
 /// `encodeURIComponent`.
@@ -1959,6 +1992,25 @@ mod tests {
             Some("jetbrains://gateway/ssh/environment?h=box&launchIde=true&ideHint=IU&projectHint=%2Fsrv%2Fapp&u=me")
         );
         assert_eq!(remote_open_url("trae", "box", None, "/a", false), None);
+    }
+
+    #[test]
+    fn open_mode_matches_remote_opens_resolution() {
+        let mut s = crate::App::new();
+        let saved = |id: &str, base: &str| crate::env::Saved { id: id.into(), label: id.into(), base: base.into(), bearer: String::new() };
+        s.ui.env.saved.push(saved("box", "https://box.example.com"));
+        s.ui.env.saved.push(saved("tunnel", "http://127.0.0.1:4100"));
+        s.ui.env.saved.push(saved("devbox", "http://127.0.0.1:4200"));
+        s.ui.env.saved.push(saved("advertised", "https://far.example.com"));
+        s.ui.env.ssh.targets.push(("devbox".into(), target("me@devbox", "devbox", None, None)));
+        let mut far = crate::data::empty_state();
+        far.config = Some(serde_json::json!({"remoteOpenTargets": [{"kind": "ssh-alias", "host": "far", "username": "ops"}]}));
+        crate::env::park(&mut s, "advertised", crate::data::Source::Fixture(far));
+        assert_eq!(open_mode(&s, crate::env::LOCAL), OpenMode::Local);
+        assert_eq!(open_mode(&s, "tunnel"), OpenMode::Local, "a loopback route is this machine");
+        assert_eq!(open_mode(&s, "devbox"), OpenMode::Links("devbox".into(), Some("me".into())), "an SSH target wins over its forwarded loopback port");
+        assert_eq!(open_mode(&s, "advertised"), OpenMode::Links("far".into(), Some("ops".into())));
+        assert_eq!(open_mode(&s, "box"), OpenMode::Unavailable, "FAILED: a remote server without a route must not open editors on itself");
     }
 
     #[test]

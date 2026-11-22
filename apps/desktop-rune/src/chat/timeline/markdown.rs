@@ -192,11 +192,17 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
 
 /// Parsing and highlighting a message is the costliest part of a timeline build, and the view
 /// rebuilds at least once a second (relative times), so each message builds once per version.
-pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
-    memoized(app, source, id, t, ink(t))
+/// A Mermaid source drawn as chat draws a ```` ```mermaid ```` fence, or `None` outside the
+/// diagrams Rune supports.
+pub(crate) fn diagram(source: &str, t: &T) -> Option<El> {
+    rune_kit::mermaid::render(source, &style(t, t.c.foreground))
 }
 
-fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
+pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
+    memoized(app, source, id, t, ink(t), false)
+}
+
+fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color, run: bool) -> El {
     let ui = &app.ui.chat.timeline;
     let fence = format!("{id}-fence-");
     let mut unwrapped: Vec<&String> = ui.wrapped.iter().filter(|k| k.starts_with(&fence)).collect();
@@ -210,26 +216,40 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source));
-    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink))
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source), run);
+    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink, run))
 }
 
-/// A reply: [`view`] with find-in-thread matches painted (rows with marks build fresh while the
-/// bar is open), its text a quote source for the Cite toolbar.
-pub fn view_marked(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
+/// A reply, with find-in-thread matches painted (rows with marks build fresh while the bar is
+/// open), its text a quote source for the Cite toolbar; once finished, its shell code blocks can
+/// run in the thread's terminal.
+pub fn reply(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, run: bool) -> El {
     let body = match marks {
-        None => view(app, source, id, t),
-        Some(_) => build(app, source, id, t, marks, ink(t)),
+        None => memoized(app, source, id, t, ink(t), run),
+        Some(_) => build(app, source, id, t, marks, ink(t), run),
     };
     super::citation::source(id, body)
+}
+
+/// MarkdownCodeBlock `canRun`: a closed shell fence holding one visible command line. Control
+/// and format characters (bidi overrides, zero-width) could make the shown command differ from
+/// what the terminal receives.
+fn runnable(language: &str, code: &str, closed: bool) -> bool {
+    let format = |c: char| matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}');
+    let command = code.trim();
+    closed
+        && matches!(language, "sh" | "bash" | "zsh" | "fish" | "shell" | "powershell" | "pwsh")
+        && !command.is_empty()
+        && !command.ends_with('\\')
+        && !code.chars().any(|c| c.is_control() || format(c))
 }
 
 /// A user message in its bubble's ink, each newline a line break (ChatMarkdown `lineBreaks`).
 pub fn user(app: &App, text: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
     let source = user_source(text);
     match marks {
-        None => memoized(app, &source, id, t, t.c.message_foreground),
-        Some(_) => build(app, &source, id, t, marks, t.c.message_foreground),
+        None => memoized(app, &source, id, t, t.c.message_foreground, false),
+        Some(_) => build(app, &source, id, t, marks, t.c.message_foreground, false),
     }
 }
 
@@ -256,8 +276,8 @@ pub fn user_source(text: &str) -> String {
     out
 }
 
-fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
-    let out = render(&Cx { app, id, t, marks, ink }, source, "");
+fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: rune::Color, run: bool) -> El {
+    let out = render(&Cx { app, id, t, marks, ink, run }, source, "");
     if source.is_empty() {
         return out.child(icon(&icons::ELLIPSIS, 16.0).color(t.c.muted_foreground));
     }
@@ -271,6 +291,8 @@ struct Cx<'a> {
     t: &'a T,
     marks: Option<&'a Marks>,
     ink: rune::Color,
+    /// A finished reply: its shell fences can run in the terminal.
+    run: bool,
 }
 
 /// `source` as its blocks. `scope` tells a nested run's keys apart; the top level's is empty, so
@@ -282,9 +304,9 @@ fn render(cx: &Cx, source: &str, scope: &str) -> El {
     for part in parts(source) {
         let block = match part {
             Part::Prose { start, text } => prose(app, &text, &format!("{id}-{scope}{start}"), t, cx.marks, cx.ink),
-            Part::Fence { language, code } => {
+            Part::Fence { language, code, closed } => {
                 fences += 1;
-                fence(cx, &language, &code, format!("{id}-fence-{scope}{}", fences - 1))
+                fence(cx, &language, &code, closed, format!("{id}-fence-{scope}{}", fences - 1))
             }
             Part::Alert { kind, body } => {
                 nested += 1;
@@ -306,7 +328,7 @@ fn render(cx: &Cx, source: &str, scope: &str) -> El {
     out
 }
 
-fn fence(cx: &Cx, language: &str, code: &str, key: String) -> El {
+fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
     let (app, t) = (cx.app, cx.t);
     // `wrapped` holds the blocks toggled away from the wordWrap setting.
     let wrap = (crate::settings::value(app, "wordWrap").as_bool() != Some(false)) != app.ui.chat.timeline.wrapped.contains(&key);
@@ -341,6 +363,20 @@ fn fence(cx: &Cx, language: &str, code: &str, key: String) -> El {
                     }
                 }),
         )
+        .children((cx.run && runnable(language, code, closed)).then(|| {
+            let command = code.trim().to_owned();
+            row()
+                .size(24.0, 24.0)
+                .center()
+                .child(icon(&icons::PLAY, 12.0).color(t.c.muted_foreground))
+                .radius(6.0)
+                .hover(t.c.muted)
+                .focusable(true)
+                .role("button")
+                .label("Run in terminal")
+                .help("Run in terminal")
+                .on_press(move |app: &mut App| crate::chat::details::scripts::run_command(app, &command))
+        }))
         .child(copy_button(app, code, t, "Copy code"));
     let fenced = format!("```{language}\n{code}\n```");
     let code_view = Markdown::new(fenced.clone())
@@ -519,7 +555,7 @@ fn use_template(app: &mut App, template: &Template) {
 enum Part {
     /// Plain Markdown from line `start`, its Codex inline directives already rendered.
     Prose { start: usize, text: String },
-    Fence { language: String, code: String },
+    Fence { language: String, code: String, closed: bool },
     Alert { kind: Alert, body: String },
     Details { summary: String, open: bool, body: String },
     Template(Template),
@@ -618,8 +654,9 @@ fn parts(source: &str) -> Vec<Part> {
             while i < lines.len() && !lines[i].trim_start().starts_with(marker) {
                 i += 1;
             }
+            let closed = i < lines.len();
             let code = lines[code_start..i].concat().trim_end_matches('\n').to_owned();
-            out.push(Part::Fence { language, code });
+            out.push(Part::Fence { language, code, closed });
             i = (i + 1).min(lines.len());
         } else if let Some(kind) = alert_marker(line) {
             flush(&mut out, start, i);
@@ -1012,8 +1049,21 @@ pub fn for_copy(text: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Alert, Part, Template, citation_markdown, directives, for_copy, parts, user_source};
+    use super::{Alert, Part, Template, citation_markdown, directives, for_copy, parts, runnable, user_source};
     use crate::chat::timeline::md_links::{Target, classify};
+
+    #[test]
+    fn only_a_closed_one_line_shell_fence_runs() {
+        assert!(runnable("bash", "npm test", true));
+        assert!(runnable("pwsh", "  Get-ChildItem  ", true));
+        assert!(!runnable("bash", "npm test", false), "FAILED: a fence still streaming");
+        assert!(!runnable("python", "print(1)", true));
+        assert!(!runnable("sh", "   ", true));
+        assert!(!runnable("sh", "make \\", true), "FAILED: a continuation waits for more input");
+        assert!(!runnable("sh", "cd a\nmake", true), "FAILED: a newline is a control character");
+        assert!(!runnable("sh", "rm -rf \u{202e}fdsa", true), "FAILED: a bidi override hides the real command");
+        assert!(!runnable("sh", "ls\u{200b}", true));
+    }
 
     const FILE_CITATION: &str = ":codex-file-citation{path=\"outputs/report.xlsx\" purpose=\"output\"}";
     const FOLLOW_UP: &str = ":codex-followup[Prepare print version]{prompt=\"Prepare the document for printing.\"}";
@@ -1052,8 +1102,8 @@ mod tests {
 
     #[test]
     fn fences_split_out_closed_or_still_streaming() {
-        assert_eq!(parts("```bash\nnpm test\n```")[0], Part::Fence { language: "bash".into(), code: "npm test".into() });
-        assert_eq!(parts("```sh\nls")[0], Part::Fence { language: "sh".into(), code: "ls".into() });
+        assert_eq!(parts("```bash\nnpm test\n```")[0], Part::Fence { language: "bash".into(), code: "npm test".into(), closed: true });
+        assert_eq!(parts("```sh\nls")[0], Part::Fence { language: "sh".into(), code: "ls".into(), closed: false });
     }
 
     #[test]

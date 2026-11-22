@@ -1395,10 +1395,12 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
                     .variant("outline")
                     .disabled(busy || !allowed)
                     .on_press(move |s: &mut App| {
-                        ui(s).segment = None;
-                        if can_redeem(s, &target.0) {
-                            ui(s).confirm = Some((key.clone(), target.clone()));
+                        if !can_redeem(s, &target.0) {
+                            return;
                         }
+                        let u = ui(s);
+                        u.segment = None;
+                        u.confirm = Some((key.clone(), target.clone()));
                     })
                     .build(t),
             );
@@ -1409,21 +1411,16 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
 
 fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
     let Some((key, target)) = s.ui.pages.usage.limits.confirm.clone() else { return };
-    let disabled = !can_redeem(s, &target.0);
-    reset_credit_dialog(t, overlays, disabled, |s: &mut App| ui(s).confirm = None, move |s: &mut App| redeem(s, &key, &target));
-}
-
-/// useResetCredit's `canManageProviders`: the environment holding the credit grants `providers:manage`.
-pub(crate) fn can_redeem(s: &App, environment: &str) -> bool {
-    crate::settings::permissions::can_on(s, environment, "providers:manage")
+    let allowed = can_redeem(s, &target.0);
+    reset_credit_dialog(t, overlays, allowed, |s: &mut App| ui(s).confirm = None, move |s: &mut App| redeem(s, &key, &target));
 }
 
 /// ResetCreditDialog: redemption spends a credit, so it asks first. The composer's
 /// `/usage-limits` panel asks with it too.
-pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, disabled: bool, cancel: impl Fn(&mut App) + Clone + 'static, confirm: impl Fn(&mut App) + 'static) {
+pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, allowed: bool, cancel: impl Fn(&mut App) + Clone + 'static, confirm: impl Fn(&mut App) + 'static) {
     let close = cancel.clone();
     let cancel = kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t);
-    let confirm = kit::Button::new("Use credit").disabled(disabled).on_press(confirm).build(t);
+    let confirm = kit::Button::new("Use credit").disabled(!allowed).on_press(confirm).build(t);
     kit::Dialog::new("usage-reset-credit", "Use a reset credit?")
         .alert()
         .width(448.0)
@@ -1432,6 +1429,11 @@ pub(crate) fn reset_credit_dialog(t: &T, overlays: &mut Vec<El>, disabled: bool,
         .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
         .on_close(close)
         .build(t, overlays);
+}
+
+/// Web `useResetCredit`'s `providers:manage` gate on the environment holding the credit.
+pub(crate) fn can_redeem(s: &App, environment: &str) -> bool {
+    crate::settings::permissions::can_on(s, environment, "providers:manage")
 }
 
 /// Spends the credit on the environment that reported it.
@@ -1499,6 +1501,23 @@ mod tests {
         poll(&mut s);
         assert_eq!(s.ui.pages.usage.limits.redeeming, None);
         assert!(s.ui.pages.usage.limits.status.contains_key("codex"));
+    }
+
+    #[test]
+    fn a_reset_credit_spends_only_where_the_session_manages_providers() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        crate::env::park(&mut s, "lab", crate::data::Source::Live(s5_net::Net::offline()));
+        assert!(can_redeem(&s, crate::env::LOCAL), "fixtures grant everything");
+        assert!(!can_redeem(&s, "lab"), "denied until the session answers");
+        crate::settings::permissions::set_session(&mut s, "lab", json!({"authenticated": true, "permissions": ["orchestration:operate"]}));
+        assert!(!can_redeem(&s, "lab"));
+        redeem(&mut s, "codex", &("lab".to_string(), json!({"instanceId": "codex"})));
+        assert_eq!(s.ui.pages.usage.limits.redeeming, None);
+        crate::settings::permissions::set_session(&mut s, "lab", json!({"authenticated": true, "scopes": ["orchestration:operate"]}));
+        assert!(can_redeem(&s, "lab"), "legacy operate implies providers:manage");
+        crate::settings::permissions::set_session(&mut s, crate::env::LOCAL, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert!(!can_redeem(&s, crate::env::LOCAL), "each environment answers for its own credits");
     }
 
     const NOW: &str = "2026-11-06T10:30:00.000Z";

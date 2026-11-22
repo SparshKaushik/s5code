@@ -107,6 +107,14 @@ fn next_id() -> u64 {
 }
 impl Net {
     pub fn connect(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn(base_url, token, true, wake)
+    }
+    /// A connection that subscribes to nothing and only carries requests, for a server whose
+    /// orchestration protocol is older than this client's but whose self-update RPCs still answer.
+    pub fn connect_requests_only(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn(base_url, token, false, wake)
+    }
+    fn spawn(base_url: &str, token: &str, subscribe_shell: bool, wake: impl Fn() + Send + Sync + 'static) -> Net {
         let (tx, commands) = mpsc::channel();
         let (incoming, rx) = mpsc::channel();
         let incoming_tx = incoming.clone();
@@ -115,7 +123,7 @@ impl Net {
         let base = base_url.to_owned();
         let worker_token = token.to_owned();
         std::thread::spawn(move || {
-            transport::run(base, worker_token, commands, incoming, move || {
+            transport::run(base, worker_token, subscribe_shell, commands, incoming, move || {
                 worker_wake()
             })
         });
@@ -563,6 +571,22 @@ pub fn api_post(base: &str, bearer: &str, path: &str, query: &str, content_type:
         .send_bytes(body)
         .map(|_| ())
         .map_err(api_error)
+}
+/// The body of an empty POST to one of the server's `/api` routes as this client, at most `limit` bytes.
+pub fn api_post_read(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .post(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .call()
+        .map_err(api_error)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
