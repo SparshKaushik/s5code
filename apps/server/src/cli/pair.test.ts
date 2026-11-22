@@ -805,7 +805,9 @@ describe("auth session revoke", () => {
 
         const requests: Array<{ readonly path: string; readonly body: unknown }> = [];
         const requestStarted = Promise.withResolvers<void>();
-        const fetch: typeof globalThis.fetch | undefined =
+        const fetch:
+          | ((...args: Parameters<typeof globalThis.fetch>) => Promise<Response>)
+          | undefined =
           server === "answers" || server === "fails"
             ? async (input, init) => {
                 requests.push({
@@ -835,7 +837,12 @@ describe("auth session revoke", () => {
         const running = yield* (
           fetch === undefined
             ? revoke
-            : revoke.pipe(Effect.provideService(FetchHttpClient.Fetch, fetch))
+            : revoke.pipe(
+                Effect.provideService(
+                  FetchHttpClient.Fetch,
+                  Object.assign(fetch, { preconnect: () => {} }),
+                ),
+              )
         ).pipe(Effect.exit, Effect.forkChild);
         if (server === "hangs") {
           yield* Effect.promise(() => requestStarted.promise);

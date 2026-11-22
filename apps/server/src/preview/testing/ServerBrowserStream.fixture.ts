@@ -65,7 +65,11 @@ for (const slow of [false, true]) {
           ),
           Layer.provide(auth),
           Layer.provide(
-            Layer.mock(SessionStore.SessionStore, { awaitInvalidation: () => Effect.never }),
+            Layer.mock(SessionStore.SessionStore, {
+              cookieName: "test",
+              legacyCookieName: undefined,
+              awaitInvalidation: () => Effect.never,
+            }),
           ),
         ),
       );

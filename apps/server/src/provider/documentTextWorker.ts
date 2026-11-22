@@ -371,7 +371,7 @@ async function archive(path: string): Promise<Map<string, string>> {
                 : (data[0] === 0xfe && data[1] === 0xff) || (data[0] === 0 && data[1] === 0x3c)
                   ? "utf-16be"
                   : "utf-8";
-            files.set(entry.fileName, new TextDecoder(encoding).decode(data));
+            files.set(entry.fileName, new NodeUtil.TextDecoder(encoding).decode(data));
             zip.readEntry();
           });
         });
@@ -462,7 +462,7 @@ function* rtf(source: string): Generator<string, void> {
     uc: 1,
     font: 0,
     fontTable: false,
-    decoder: new TextDecoder("windows-1252"),
+    decoder: new NodeUtil.TextDecoder("windows-1252"),
   };
   const stack: Array<typeof state> = [];
   // A font's \fcharset, not the document code page, encodes the bytes written in that font.
@@ -545,7 +545,7 @@ function* rtf(source: string): Generator<string, void> {
           if (state.fontTable) fonts.delete(value);
         } else if (control === "fcharset" && state.fontTable) {
           const codePage = FONT_CODE_PAGES.get(value);
-          if (codePage) fonts.set(state.font, new TextDecoder(codePage));
+          if (codePage) fonts.set(state.font, new NodeUtil.TextDecoder(codePage));
         }
         if (control === "deleted") state.deleted = value !== 0;
         else if (control === "plain") {
@@ -553,14 +553,12 @@ function* rtf(source: string): Generator<string, void> {
           state.font = defaultFont;
         }
         if (control === "mac" || (control === "ansicpg" && value === 10000))
-          state.decoder = new TextDecoder("macintosh");
+          state.decoder = new NodeUtil.TextDecoder("macintosh");
         else if (control === "ansicpg") {
           // Per-byte decoding only supports single-byte Windows code pages.
           if (value !== 874 && (value < 1250 || value > 1258))
             throw new Error("Unsupported RTF code page");
-          // S5's Bun types list encodings without the windows-125x code pages.
-          const encoding = `windows-${value}` as ConstructorParameters<typeof TextDecoder>[0];
-          state.decoder = new TextDecoder(encoding, { fatal: true });
+          state.decoder = new NodeUtil.TextDecoder(`windows-${value}`, { fatal: true });
         } else if (control === "uc") {
           if (!Number.isSafeInteger(value) || value < 0)
             throw new Error("Invalid RTF fallback count");
