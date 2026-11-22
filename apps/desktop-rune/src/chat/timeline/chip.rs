@@ -14,6 +14,8 @@ use crate::{App, Route};
 
 /// The quote model and card, for the composer's quote chips (AssistantCitationChip `composer`).
 pub use super::citation::{Citation, MAX_COMMENT, card as citation_card, href as citation_href, label as citation_label, parse_href as parse_citation, with_comment};
+/// The Cite toolbar over a selection in a reply (AssistantSelectionToolbar).
+pub use super::citation::toolbar as quote_toolbar;
 
 /// The bubble's chip links, keyed `kind/id` for [`pressed`], with their tooltips.
 pub fn links(shown: &[chips::Shown], records: &[Value]) -> Vec<Link> {

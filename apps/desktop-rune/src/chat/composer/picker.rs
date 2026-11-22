@@ -4,7 +4,7 @@
 use rune::{Align, Cursor, Cx, El, Key, KeyEvent, Side, TextEdit, Tx, col, el, icon, row, spacer, text, text_input};
 use serde_json::{Value, json};
 
-use super::provider_icons::STAR_FILLED;
+use super::provider_icons::{OPENAI, STAR_FILLED};
 use super::search::{self, Searchable};
 use super::{ModeOption, act, act_tx, draft_mut, provider, provider_icon, providers, selection, set_runtime_mode};
 use crate::data;
@@ -477,7 +477,9 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .child(el().absolute(0.0, 0.0).w(1.0).h_full().fill(line))
         .child(header)
         .child(el().w_full().h(1.0).fill(line))
-        .child(col().w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(models));
+        .child(col().w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(models))
+        // Inside the fixed height, so switching to or from a ChatGPT plan never resizes it.
+        .children(gathered.is_none().then(|| chatgpt_sharing(s, t)).flatten());
 
     // Effort: the selected model's reasoning levels (or its reasoning switch, On and Off) under
     // the header that names them, then its other options (ComposerEffortColumn).
@@ -641,6 +643,56 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
     layers
 }
 
+/// CHATGPT_USAGE_URL.
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/#settings/Usage";
+
+/// usesChatGptSharing: signed in to a ChatGPT plan shared through a workspace.
+fn uses_chatgpt_sharing(provider: &Value) -> bool {
+    data::s(&provider["auth"], "status") == "authenticated" && provider["auth"]["subscriptionSharing"] == true
+}
+
+/// ChatGptSharingControl: the selected provider bills a shared ChatGPT plan; ChatGptUsageButton.
+fn chatgpt_sharing(s: &App, t: &T) -> Option<El> {
+    let (instance, _) = selection(s)?;
+    provider(s, &instance).filter(|p| uses_chatgpt_sharing(p))?;
+    let muted = t.c.muted_foreground;
+    let manage = crate::kit::Button::new("Manage usage")
+        .variant("ghost-muted")
+        .size("xs")
+        .build(t)
+        .child(icon(&icons::EXTERNAL_LINK, 14.0).color(muted))
+        .on_press_tx(|_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(CHATGPT_USAGE_URL);
+        });
+    Some(
+        row()
+            .key("picker-chatgpt-sharing")
+            .w_full()
+            .px(12.0)
+            .py(8.0)
+            .gap(16.0)
+            .center_y()
+            .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border))
+            .child(row().gap(8.0).center_y().child(icon(&OPENAI, 14.0).color(muted)).child(text("Using ChatGPT plan").font(theme::TEXT_XS).color(muted)))
+            .child(spacer())
+            .child(manage),
+    )
+}
+
+/// `composer-picker-chatgpt-sharing`: the picker on a Codex model billed to a shared ChatGPT plan.
+pub(super) fn chatgpt_sharing_scene(s: &mut App) {
+    super::on_replay_showcase(s);
+    super::patch_config(s, |c| {
+        for p in c["providers"].as_array_mut().into_iter().flatten().filter(|p| p["instanceId"] == "codex") {
+            p["status"] = json!("ready");
+            p["auth"] = json!({"status": "authenticated", "type": "chatgpt", "subscriptionSharing": true});
+            p["models"] = json!([{"slug": "gpt-5.5", "name": "GPT-5.5"}, {"slug": "gpt-5.5-mini", "name": "GPT-5.5 Mini"}]);
+        }
+    });
+    draft_mut(s).model = Some(("codex".into(), "gpt-5.5".into()));
+    toggle(s);
+}
+
 /// SpeedControl: Codex service tiers, or Standard and Fast for a fast-mode switch.
 fn speed_control(s: &App, t: &T) -> Option<El> {
     let d = super::speed_descriptor(s)?;
@@ -779,5 +831,12 @@ mod tests {
         assert_eq!(super::rail(&s), *ready.last().unwrap(), "FAILED: previous wraps to the last provider");
         assert!(super::on_key(&mut s, &up, &mut rune::Tx::default()), "FAILED: the focused search box takes the chord too");
         assert!(s.ui.chat.composer.picker.open, "FAILED: the picker stays open");
+    }
+
+    #[test]
+    fn only_a_signed_in_shared_plan_shows_the_chatgpt_footer() {
+        assert!(super::uses_chatgpt_sharing(&json!({"auth": {"status": "authenticated", "subscriptionSharing": true}})));
+        assert!(!super::uses_chatgpt_sharing(&json!({"auth": {"status": "authenticated"}})));
+        assert!(!super::uses_chatgpt_sharing(&json!({"auth": {"status": "unauthenticated", "subscriptionSharing": true}})));
     }
 }

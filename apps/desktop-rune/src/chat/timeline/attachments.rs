@@ -21,6 +21,9 @@ pub struct Assets {
     pub(super) failed: std::collections::HashSet<String>,
     /// The image the lightbox shows: an attachment id or a Markdown media key.
     pub open: Option<String>,
+    /// The pictures Previous and Next step through: those sent with the open one, or those in its
+    /// Markdown paragraph.
+    pub gallery: Vec<String>,
     /// The open image at lightbox size, and whether a view has drawn it yet.
     zoom: Option<(String, Loaded, bool)>,
     /// The thread whose pictures are decoded; another thread's are dropped.
@@ -35,6 +38,7 @@ impl Assets {
         self.ready.clear();
         self.failed.clear();
         self.open = None;
+        self.gallery.clear();
         self.zoom = None;
         self.media.forget();
     }
@@ -180,60 +184,123 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
         }
         frame
     } else {
-        row()
-            .w(256.0)
-            .gap(12.0)
-            .padding(8.0)
-            .radius(16.0)
-            .fill(t.c.message_surface)
-            .child(
-                icon(&icons::FILE, 20.0)
-                    .padding(8.0)
-                    .radius(8.0)
-                    .fill(t.c.background),
-            )
-            .child({
-                let (label, size) = file_label(attachment);
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_foreground).truncate())
-                    .child(text(size).font(theme::TEXT_XS).color(t.c.muted_foreground))
-            })
-            .child(icon(&icons::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
+        return file_card(attachment, asset.map(|a| a.url.clone()), t);
     };
-    if let Some(loaded) = asset {
-        let url = loaded.url.clone();
-        let image = s(attachment, "mimeType").starts_with("image/");
+    if asset.is_some() {
         let id = id.to_owned();
-        let shown = if image { name.to_owned() } else { file_label(attachment).0 };
         content = content
             .focusable(true)
             .role("button")
             .cursor(rune::Cursor::Pointer)
-            .label(format!("{} {shown}", if image { "Preview" } else { "Open" }))
-            .on_press_tx(move |app: &mut App, tx| {
-                if image {
-                    app.ui.chat.timeline.assets.open = Some(id.clone());
-                } else {
-                    let _ = tx.open_url(&url);
-                }
+            .label(format!("Preview {name}"))
+            .on_press(move |app: &mut App| {
+                let gallery = siblings(app, &id);
+                let assets = &mut app.ui.chat.timeline.assets;
+                assets.open = Some(id.clone());
+                assets.gallery = gallery;
             });
     }
     content
 }
 
-fn close(app: &mut App) {
-    app.ui.chat.timeline.assets.open = None;
+/// UserFileCard: the file's name and size, pressed to preview it in the panel, and Download
+/// once its URL is signed.
+fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
+    let (label, size) = file_label(attachment);
+    let identity = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(12.0)
+        .center_y()
+        .radius(12.0)
+        .child(icon(&icons::FILE, 20.0).padding(8.0).radius(8.0).fill(t.c.background))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(text(label.clone()).font(theme::SM_MEDIUM).color(t.c.message_foreground).truncate())
+                .child(text(size).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+        );
+    let download_label = format!("Download {label}");
+    let download = row()
+        .size(24.0, 24.0)
+        .center()
+        .radius(6.0)
+        .role("button")
+        .label(download_label.clone())
+        .help(download_label)
+        .child(icon(&icons::DOWNLOAD, 12.0).color(t.c.muted_foreground));
+    let (identity, download) = match url {
+        Some(url) => {
+            let (preview, name) = (url.clone(), s(attachment, "name").to_owned());
+            (
+                identity
+                    .focusable(true)
+                    .role("button")
+                    .cursor(rune::Cursor::Pointer)
+                    .label(format!("Preview {label}"))
+                    .on_press(move |app: &mut App| crate::panel::open_preview(app, &preview)),
+                download
+                    .focusable(true)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(t.c.muted)
+                    .on_press_tx(move |app: &mut App, tx| media::save_attachment(app, url.clone(), name.clone(), tx)),
+            )
+        }
+        None => (identity, download.disabled(true).opacity(0.64)),
+    };
+    row().w(256.0).gap(4.0).py(8.0).pl(8.0).pr(4.0).center_y().radius(16.0).fill(t.c.message_surface).child(identity).child(download)
 }
 
-/// Escape closes the lightbox.
-pub fn on_key(app: &mut App, e: &rune::KeyEvent) -> bool {
-    if e.key == rune::Key::Escape && app.ui.chat.timeline.assets.open.is_some() {
-        close(app);
-        return true;
+/// The pictures sent with the message holding attachment `id`, in order.
+fn siblings(app: &App, id: &str) -> Vec<String> {
+    let crate::Route::Thread(thread) = app.frame_route() else { return Vec::new() };
+    let Some(view) = app.state().thread_views.get(thread) else { return Vec::new() };
+    super::rows::derive(&view.projection, app.now_ms)
+        .into_iter()
+        .find_map(|row| {
+            let super::rows::Row::User(message) = row else { return None };
+            let list = super::rows::array(message, "attachments");
+            list.iter()
+                .any(|a| s(a, "id") == id)
+                .then(|| list.iter().filter(|a| s(a, "mimeType").starts_with("image/")).map(|a| s(a, "id").to_owned()).collect())
+        })
+        .unwrap_or_default()
+}
+
+fn close(app: &mut App) {
+    app.ui.chat.timeline.assets.open = None;
+    app.ui.chat.timeline.assets.gallery.clear();
+}
+
+/// The open picture's place in its gallery and the gallery's size, when it has others.
+fn place(assets: &Assets) -> Option<(usize, usize)> {
+    let open = assets.open.as_ref()?;
+    let index = assets.gallery.iter().position(|k| k == open)?;
+    (assets.gallery.len() > 1).then_some((index, assets.gallery.len()))
+}
+
+/// Previous (-1) or Next (1), wrapping around (ExpandedImageDialog's navigateImage).
+fn step(app: &mut App, by: isize) {
+    let assets = &mut app.ui.chat.timeline.assets;
+    if let Some((index, count)) = place(assets) {
+        let next = (index as isize + by).rem_euclid(count as isize) as usize;
+        assets.open = Some(assets.gallery[next].clone());
     }
-    false
+}
+
+/// Escape closes the lightbox; ← and → step through its gallery.
+pub fn on_key(app: &mut App, e: &rune::KeyEvent) -> bool {
+    if app.ui.chat.timeline.assets.open.is_none() {
+        return false;
+    }
+    match e.key {
+        rune::Key::Escape => close(app),
+        rune::Key::Left if place(&app.ui.chat.timeline.assets).is_some() => step(app, -1),
+        rune::Key::Right if place(&app.ui.chat.timeline.assets).is_some() => step(app, 1),
+        _ => return false,
+    }
+    true
 }
 
 /// The open image over the chat (ExpandedImageDialog): click outside, X or Escape closes it, and
@@ -245,7 +312,12 @@ pub fn lightbox(app: &App) -> Option<El> {
     let url = loaded.url.clone();
     let zoom = app.ui.chat.timeline.assets.zoom.as_ref().filter(|(k, z, _)| k == id && z.pixels.size().0 > 0);
     let pixels = zoom.map_or(&loaded.pixels, |(_, z, _)| &z.pixels);
-    let picture = el().w_full().h_full().pixels_fit(pixels, rune::SurfaceFit::Fit);
+    let picture = el().w_full().grow(1.0).min_h(0.0).pixels_fit(pixels, rune::SurfaceFit::Fit);
+    let place = place(&app.ui.chat.timeline.assets);
+    let caption = match place {
+        Some((index, count)) => format!("{} ({}/{count})", loaded.name, index + 1),
+        None => loaded.name.clone(),
+    };
     let mut menu = Vec::new();
     // The lightbox is dark in both themes, and so is its menu.
     media::menu(app, &crate::kit::theme(&theme::theme(true)), &mut menu);
@@ -275,7 +347,24 @@ pub fn lightbox(app: &App) -> Option<El> {
                     .role("dialog")
                     .label("Image preview")
                     .modal(true, close)
-                    .child(media::with_actions(picture, id, &source, false))
+                    .child(
+                        row()
+                            .w_full()
+                            .h_full()
+                            .gap(12.0)
+                            .center_y()
+                            .children(place.map(|_| button("image-lightbox-previous", &icons::CHEVRON_LEFT, "Previous media").on_press(|app: &mut App| step(app, -1))))
+                            .child(
+                                col()
+                                    .grow(1.0)
+                                    .min_w(0.0)
+                                    .h_full()
+                                    .gap(8.0)
+                                    .child(media::with_actions(picture, id, &source, false))
+                                    .child(row().w_full().justify_center().child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate())),
+                            )
+                            .children(place.map(|_| button("image-lightbox-next", &icons::CHEVRON_RIGHT, "Next media").on_press(|app: &mut App| step(app, 1)))),
+                    )
                     .child(
                 row()
                     .pin(None, Some(0.0), Some(0.0), None)

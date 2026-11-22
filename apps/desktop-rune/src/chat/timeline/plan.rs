@@ -154,7 +154,7 @@ pub fn card(app: &App, item: &Value, t: &T) -> El {
 /// The open thread's actionable plan, when the composer should offer to implement it
 /// (shouldShowPlanFollowUpPrompt over findLatestProposedPlan): `(plan id, markdown)`.
 pub fn follow_up(app: &App) -> Option<(String, String)> {
-    let Route::Thread(id) = app.frame_route() else { return None };
+    let Route::Thread(id) = crate::chat::composer::route(app) else { return None };
     if crate::chat::composer::interaction_mode(app) != "plan"
         || crate::chat::composer::running(app)
         || super::question::active(app).is_some()
@@ -162,7 +162,7 @@ pub fn follow_up(app: &App) -> Option<(String, String)> {
     {
         return None;
     }
-    let view = app.state().thread_views.get(id)?;
+    let view = app.state().thread_views.get(&id)?;
     let p = &view.projection;
     let plans: Vec<&Value> = array(p, "plans").iter().filter(|plan| s(plan, "kind") == "proposed_plan").collect();
     let latest_run = array(p, "runs").iter().max_by_key(|r| r["ordinal"].as_i64().unwrap_or(0)).map(|r| s(r, "id"));
@@ -219,13 +219,15 @@ pub fn action(app: &App, t: &T, typed: bool) -> Option<El> {
         .cursor(Cursor::Pointer)
         .label(label)
         .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_action_foreground))
-        .on_press(crate::chat::composer::submit);
+        .on_press(crate::chat::composer::act(app, crate::chat::composer::submit));
     if typed {
         return Some(main.radius(radius::FULL));
     }
-    // ComposerPrimaryActions: a split button whose chevron offers a fresh thread.
+    // ComposerPrimaryActions: a split button whose chevron offers a fresh thread. A side chat's
+    // menu remembers its composer (`implement:<side>`).
+    let menu = crate::chat::composer::drawing(app).map_or_else(|| "implement".to_owned(), |side| format!("implement:{side}"));
     let more = row()
-        .key("plan-implement-more")
+        .key(crate::chat::composer::keyed(app, "plan-implement-more"))
         .size(28.0, 28.0)
         .center()
         .corners([0.0, radius::FULL, radius::FULL, 0.0])
@@ -234,7 +236,7 @@ pub fn action(app: &App, t: &T, typed: bool) -> Option<El> {
         .cursor(Cursor::Pointer)
         .label("Implementation actions")
         .child(icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.message_action_foreground))
-        .on_press(|app: &mut App| app.ui.chat.timeline.plan.menu = Some("implement".into()));
+        .on_press(move |app: &mut App| app.ui.chat.timeline.plan.menu = Some(menu.clone()));
     Some(row().gap(1.0).child(main.corners([radius::FULL, 0.0, 0.0, radius::FULL])).child(more))
 }
 
@@ -256,7 +258,7 @@ fn filename(markdown: &str) -> String {
 /// useProposedPlanSend's new-thread path: create a sibling thread on the same branch and
 /// worktree, then send it the plan with a link back to its source.
 fn implement_in_new_thread(app: &mut App) {
-    let (Some((plan_id, markdown)), Route::Thread(source)) = (follow_up(app), app.frame_route().clone()) else { return };
+    let (Some((plan_id, markdown)), Route::Thread(source)) = (follow_up(app), crate::chat::composer::route(app)) else { return };
     let composer = crate::chat::composer::ctx(app);
     let (Some(thread), Some(project)) = (composer.thread, composer.project) else { return };
     let id = format!("thread:project:{}:{}", s(project, "id"), s5_net::uuid());
@@ -348,16 +350,19 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     let state = &app.ui.chat.timeline.plan;
     let close = |app: &mut App| app.ui.chat.timeline.plan.menu = None;
     match state.menu.as_deref() {
-        Some("implement") => Menu::new("plan-implement-menu")
-            .anchor("plan-implement-more")
-            .placement(Placement::TopEnd)
-            .open(true)
-            .on_close(close)
-            .item(MenuItem::new("Implement in a new thread").on_select(|app: &mut App| {
-                app.ui.chat.timeline.plan.menu = None;
-                implement_in_new_thread(app);
-            }))
-            .overlay(&crate::kit::theme(t), &mut layers),
+        Some(menu) if menu == "implement" || menu.starts_with("implement:") => {
+            let side = menu.strip_prefix("implement:").map(str::to_owned);
+            Menu::new("plan-implement-menu")
+                .anchor(if side.is_some() { "side-plan-implement-more" } else { "plan-implement-more" })
+                .placement(Placement::TopEnd)
+                .open(true)
+                .on_close(close)
+                .item(MenuItem::new("Implement in a new thread").on_select(move |app: &mut App| {
+                    app.ui.chat.timeline.plan.menu = None;
+                    crate::chat::composer::acting(app, side.clone(), implement_in_new_thread);
+                }))
+                .overlay(&crate::kit::theme(t), &mut layers)
+        }
         Some(menu) if menu.starts_with("card:") => {
             let id = &menu["card:".len()..];
             let markdown = app
