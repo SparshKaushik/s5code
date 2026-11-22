@@ -181,6 +181,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= env::drain(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
+    changed |= settings::pulse_tick(s, tx);
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s, tx);
     changed |= chat::composer::poll(s);

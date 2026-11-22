@@ -24,7 +24,6 @@ pub struct Ui {
     /// A title click's menu, held through the double-click rename interval: thread and when.
     menu_due: Option<(String, i64)>,
     /// "Stop sharing" in flight.
-    stopping_share: Option<u64>,
     /// A draft header's right-click menu ("Project settings"), at this point.
     draft_menu: Option<(f32, f32)>,
 }
@@ -174,12 +173,6 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
-    if let Some(id) = s.ui.chat.topbar.stopping_share
-        && s.src.net().and_then(|net| net.take_reply(id)).is_some()
-    {
-        s.ui.chat.topbar.stopping_share = None;
-        changed = true;
-    }
     if let Some(id) = s.ui.chat.topbar.rename_request
         && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
     {
@@ -203,41 +196,6 @@ fn parent(s: &App) -> Option<(String, String)> {
     }
     let title = s.state().threads.iter().find(|t| data::s(t, "id") == id).map(|t| data::s(t, "title")).filter(|t| !t.is_empty()).unwrap_or("Parent thread");
     Some((id.to_string(), title.to_string()))
-}
-
-/// `GuestShareIndicator`: who the open thread is shared with, and "Stop sharing".
-fn guest_share(s: &App, t: &T, thread: &serde_json::Value) -> Option<El> {
-    let status = share_status(&thread["guestShare"], s.now_ms)?;
-    let id = data::s(thread, "id").to_string();
-    let stopping = s.ui.chat.topbar.stopping_share.is_some();
-    let stop = crate::kit::Button::new("Stop sharing").size("xs").variant("ghost-muted").disabled(stopping).build(t).key("topbar-stop-share");
-    let stop = if stopping { stop } else { stop.on_press(move |s: &mut App| stop_share(s, &id)) };
-    Some(
-        row()
-            .key("topbar-guest-share")
-            .gap(4.0)
-            .center_y()
-            .child(rune::icon(&icons::USER, 14.0).color(t.c.muted_foreground))
-            .child(text(status).font(theme::TEXT_XS).color(t.c.muted_foreground))
-            .child(stop),
-    )
-}
-
-/// `GuestShareStatus`, to the minute. The share stays on the thread after it expires, until the
-/// owner clears it.
-fn share_status(share: &serde_json::Value, now: i64) -> Option<String> {
-    share.as_object()?;
-    let expires = data::iso_ms(data::s(share, "expiresAt")).unwrap_or(0);
-    Some(if expires.div_euclid(60_000) <= now.div_euclid(60_000) {
-        "Guest link expired".into()
-    } else {
-        share["guestName"].as_str().map_or_else(|| "Guest link active".into(), |name| format!("{name} is a guest"))
-    })
-}
-
-fn stop_share(s: &mut App, id: &str) {
-    let command = json!({"type": "thread.guest-share.close", "commandId": s5_net::uuid(), "threadId": id});
-    s.ui.chat.topbar.stopping_share = crate::env::net_for(s, id).map(|net| net.dispatch(command));
 }
 
 /// Whether the breadcrumbs overflow `room` at their natural widths, so the parent title folds to
@@ -409,7 +367,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if thread.is_none() && composer::ctx(s).project.is_some() && !scratch {
         crumbs = crumbs.on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.chat.topbar.draft_menu = Some((at.x, at.y)));
     }
-    let share = thread.filter(|_| !editing).and_then(|th| guest_share(s, t, th));
+    let share = if editing { None } else { crate::chat::guest::indicator(s, t) };
 
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let fits = crate::chat::details::lane(w, h, false).card;
@@ -454,8 +412,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .center_y()
         .window_drag()
         .child(crumbs)
-        .children(share)
+        // The breadcrumb grows (`flex-1`), so the share sits at the end, before the toggles.
         .children((!editing).then(spacer))
+        .children(share)
         .child(toggles)
 }
 
@@ -466,18 +425,8 @@ fn toggle(t: &T, i: &'static rune::Icon, label: &str, on: bool) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_rename, poll, share_status, start_rename};
+    use super::{commit_rename, poll, start_rename};
     use crate::{App, Route, data};
-
-    #[test]
-    fn the_guest_share_reads_expired_from_its_minute_on() {
-        let at = data::iso_ms("2026-11-22T10:05:30Z").unwrap();
-        let share = |name: serde_json::Value| serde_json::json!({"expiresAt": "2026-11-22T10:06:00Z", "guestName": name});
-        assert_eq!(share_status(&share(serde_json::Value::Null), at).as_deref(), Some("Guest link active"));
-        assert_eq!(share_status(&share("Ada".into()), at).as_deref(), Some("Ada is a guest"));
-        assert_eq!(share_status(&share("Ada".into()), at + 30_000).as_deref(), Some("Guest link expired"));
-        assert_eq!(share_status(&serde_json::Value::Null, at), None);
-    }
 
     fn title_of(s: &App, id: &str) -> String {
         s.state().threads.iter().find(|t| data::s(t, "id") == id).map(|t| data::s(t, "title").to_string()).unwrap_or_default()

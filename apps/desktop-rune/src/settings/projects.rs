@@ -18,6 +18,10 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let Some(project) = selected else {
         return chooser(s, t);
     };
+    // Web derives `isScratch` from the server's scratch root; the shell rows don't carry it.
+    let mut project = project.clone();
+    project["isScratch"] = json!(crate::shell::palette::actions::is_scratch_project(s, &project));
+    let project = &project;
     let id = crate::data::s(project, "id").to_owned();
     let title = crate::data::s(project, "title").to_owned();
     let root = crate::data::s(project, "workspaceRoot").to_owned();
@@ -34,14 +38,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         overview.push(text(CANNOT_CHANGE).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w_full().px(16.0).py(10.0));
     }
     overview.extend([
-        c::setting_row(
-            s,
-            cx,
-            t,
-            &json!({"key": key("title"), "title": "Name", "kind": "input", "width": 256, "placeholder": "Project name",
-                "description": "The shared name for this project group in the sidebar and thread lists."}),
-        ),
-        super::permissions::gate("project-icon", super::project_icon::settings_row(t, project), lock()),
+        name_row(s, t, project, &key("title"), lock()),
+        super::permissions::gate("project-icon", super::project_icon::settings_row(s, t, project), lock()),
     ]);
     if organize {
         overview.push(c::setting_row(
@@ -127,6 +125,43 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(c::section("Danger", vec![danger], t))
 }
 
+/// `SCRATCH_PROJECT_TITLE`: what a scratch project's name resets to.
+const SCRATCH_TITLE: &str = "No project";
+
+/// Web's Name row: the shared name, and Reset back to "No project" on a renamed scratch project.
+fn name_row(s: &App, t: &T, project: &Value, key: &str, lock: Option<String>) -> El {
+    let mut heading = row().gap(6.0).center_y().child(text("Name").key(super::title_key("Name")).font(theme::SM_MEDIUM).color(t.c.foreground));
+    if project["isScratch"] == true && crate::data::s(project, "title") != SCRATCH_TITLE {
+        let id = crate::data::s(project, "id").to_owned();
+        heading = heading.child(
+            crate::kit::Button::new("Reset project name")
+                .variant("ghost-muted")
+                .size("icon-micro")
+                .icon(&crate::icons::UNDO_2)
+                .disabled(lock.is_some())
+                .on_press(move |s: &mut App| {
+                    s.ui.settings.edits.remove(&format!("project::{id}::title"));
+                    update(s, &id, "title", json!(SCRATCH_TITLE));
+                })
+                .build(t),
+        );
+    }
+    let copy = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .child(heading)
+        .child(
+            text("The shared name for this project group in the sidebar and thread lists.")
+                .font(theme::TEXT_XS.lh(18.0))
+                .color(t.c.muted_foreground)
+                .wrap(),
+        );
+    let input = super::permissions::gate(key, c::input(s, t, key, 256.0, "Project name", false), lock);
+    let line = row().key(format!("row-{key}")).w_full().px(16.0).py(12.0).gap(32.0).center_y().child(copy).child(input);
+    super::pulsed(s, t, "Name", line)
+}
+
 /// Web `ProjectDefaultsSettings` with category "project": the picked project's own model and
 /// workspace for new threads, read from and written to its `projectSettingsOverrides` entry.
 /// The fallback model is environment-wide, so it stays on Threads.
@@ -202,10 +237,22 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
     use crate::chat::details::scripts;
     let id = crate::data::s(project, "id").to_owned();
     let add = id.clone();
-    let mut rows = vec![super::about::about_row(
-        t,
-        "Actions",
-        "Commands that run in this project's checkout or its worktree, with optional shortcuts.",
+    let imports = scripts::project_imports(s, project);
+    let mut controls = row().gap(6.0).center_y();
+    if imports.as_ref().is_some_and(|list| !list.is_empty()) {
+        let (open, toggle) = (scripts::imports_open(s, &id), id.clone());
+        controls = controls.child(
+            row().key(scripts::IMPORT_ANCHOR).child(
+                crate::kit::Button::new("Import scripts")
+                    .variant("ghost")
+                    .size("xs")
+                    .on_press(move |s: &mut App| scripts::toggle_imports(s, &toggle))
+                    .build(t)
+                    .expanded(open),
+            ),
+        );
+    }
+    controls = controls.child(
         crate::kit::Button::new("Add action")
             .variant("outline")
             .size("xs")
@@ -213,6 +260,12 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
             .on_press(move |s: &mut App| scripts::open_for_project(s, &add, None))
             .build(t)
             .key("project-add-action"),
+    );
+    let mut rows = vec![super::about::about_row(
+        t,
+        "Actions",
+        "Commands that run in this project's checkout or its worktree, with optional shortcuts.",
+        controls,
     )];
     let scripts = scripts::resolve(super::server_settings(s), project);
     if scripts.is_empty() {
@@ -284,6 +337,22 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                         ),
                 )
                 .child(control),
+        );
+    }
+    if imports.is_none() {
+        rows.push(
+            col()
+                .w_full()
+                .px(16.0)
+                .py(12.0)
+                .gap(4.0)
+                .child(text("t3.json is invalid").font(theme::SM_MEDIUM).color(t.c.warning))
+                .child(
+                    text("A t3.json exists in this checkout but fails to parse, so every action and icon it declares is ignored. Check the JSON syntax and icon values.")
+                        .font(theme::TEXT_XS.lh(18.0))
+                        .color(t.c.warning)
+                        .wrap(),
+                ),
         );
     }
     c::section("Actions", rows, t)
@@ -403,16 +472,33 @@ fn archived_rows(fetched: &[Value], live: &[Value], active: &[Value]) -> Vec<Val
 
 /// Web `ArchivedThreadsPanel`'s groups: each project with archived threads, in project order,
 /// its threads newest-archived first (then by id, as web's `localeCompare` tiebreak).
-fn archive_groups(projects: &[Value], threads: &[Value]) -> Vec<(Value, Vec<Value>)> {
+/// Each project's archived threads, newest first. With `logical`, projects it keys alike (one
+/// repository checked out on several machines) share a group titled by all of them, as web merges
+/// the scope's logical project groups once archives span environments.
+fn archive_groups(projects: &[Value], threads: &[Value], logical: Option<&dyn Fn(&Value) -> String>) -> Vec<(Value, Vec<Value>)> {
     let key = |t: &Value| t["archivedAt"].as_str().or(t["createdAt"].as_str()).unwrap_or("").to_owned();
     let mut seen = std::collections::HashSet::new();
-    projects
-        .iter()
-        .filter(|p| seen.insert((crate::data::s(p, ENV).to_owned(), crate::data::s(p, "id").to_owned())))
-        .filter_map(|project| {
-            let mut rows: Vec<Value> = threads.iter().filter(|t| t["projectId"] == project["id"] && t[ENV] == project[ENV]).cloned().collect();
+    let projects: Vec<&Value> = projects.iter().filter(|p| seen.insert((crate::data::s(p, ENV).to_owned(), crate::data::s(p, "id").to_owned()))).collect();
+    let group_of = |p: &Value| logical.map_or_else(|| format!("{}:{}", crate::data::s(p, ENV), crate::data::s(p, "id")), |f| f(p));
+    let mut groups: Vec<(String, Value, Vec<Value>)> = vec![];
+    for project in &projects {
+        let rows = threads.iter().filter(|t| t["projectId"] == project["id"] && t[ENV] == project[ENV]).cloned();
+        let group = group_of(project);
+        match groups.iter_mut().find(|(g, ..)| *g == group) {
+            Some((.., all)) => all.extend(rows),
+            None => groups.push((group, (*project).clone(), rows.collect())),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(.., rows)| !rows.is_empty())
+        .map(|(group, mut project, mut rows)| {
             rows.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| crate::data::s(b, "id").cmp(crate::data::s(a, "id"))));
-            (!rows.is_empty()).then(|| (project.clone(), rows))
+            let members: Vec<&Value> = projects.iter().copied().filter(|p| group_of(p) == group).collect();
+            if members.len() > 1 {
+                project["title"] = json!(crate::shell::sidebar::folders::label(&members));
+            }
+            (project, rows)
         })
         .collect()
 }
@@ -430,9 +516,21 @@ pub fn archived(s: &App, t: &T) -> El {
         .filter(|p| s.ui.settings.project.as_ref().is_none_or(|id| p["id"] == *id))
         .collect();
     let threads = archived_rows(&fetched, &live(&s.state().archived), &s.state().threads);
-    let groups = archive_groups(&projects, &threads);
-    // `hasMultipleEnvironments`: rows then name their environment.
-    let several = groups.iter().flat_map(|(_, rows)| rows).map(|row| crate::data::s(row, ENV)).collect::<std::collections::HashSet<_>>().len() > 1;
+    // `hasMultipleEnvironments`: rows then name their environment, and group by logical project.
+    let several = threads
+        .iter()
+        .filter(|t| projects.iter().any(|p| p["id"] == t["projectId"] && p[ENV] == t[ENV]))
+        .map(|row| crate::data::s(row, ENV))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        > 1;
+    let grouping = crate::shell::sidebar::folders::Grouping::read(s);
+    let logical = |p: &Value| {
+        let mut p = p.clone();
+        p[crate::env::TAG] = p[ENV].clone();
+        grouping.key(&p)
+    };
+    let groups = archive_groups(&projects, &threads, several.then_some(&logical as &dyn Fn(&Value) -> String));
     if groups.is_empty() {
         let loading = s.ui.settings.pending.values().any(|m| m.starts_with(ARCHIVED_SNAPSHOT));
         let error = snapshots.iter().find_map(|(_, r)| r[super::LOAD_ERROR].as_str());
@@ -591,7 +689,40 @@ pub(super) fn scene_archive(s: &mut App, menu: bool) {
             s.ui.settings.archive_menu = Some((crate::data::s(first, "id").to_owned(), crate::data::s(first, "title").to_owned(), 720.0, 220.0));
         }
     }
-    let projects = s.state().projects.clone();
+    // Every project names its repository, so checkouts on the other machines merge with it.
+    let projects: Vec<Value> = s
+        .state()
+        .projects
+        .iter()
+        .map(|p| {
+            let mut p = p.clone();
+            if p["repositoryIdentity"].is_null() {
+                let name = crate::data::s(&p, "title").to_owned();
+                p["repositoryIdentity"] = json!({"canonicalKey": format!("github.com/acme/{name}"), "name": name});
+            }
+            p
+        })
+        .collect();
+    // Two more machines with checkouts of the first two projects.
+    for (env, label, take) in [("box", "Build box", 2), ("lab", "Lab mini", 1)] {
+        s.ui.env.saved.push(crate::env::Saved { id: env.into(), label: label.into(), base: format!("https://{env}.invalid"), bearer: String::new() });
+        let copies: Vec<Value> = projects.iter().take(take).map(|p| {
+            let mut p = p.clone();
+            p["id"] = json!(format!("{env}-{}", crate::data::s(&p, "id")));
+            p
+        }).collect();
+        let rows: Vec<Value> = threads
+            .iter()
+            .filter(|t| copies.iter().any(|p| crate::data::s(p, "id") == format!("{env}-{}", crate::data::s(t, "projectId"))))
+            .map(|t| {
+                let mut t = t.clone();
+                t["id"] = json!(format!("{env}-{}", crate::data::s(&t, "id")));
+                t["projectId"] = json!(format!("{env}-{}", crate::data::s(&t, "projectId")));
+                t
+            })
+            .collect();
+        s.ui.settings.results.insert(archive_key(env), json!({"projects": copies, "threads": rows}));
+    }
     s.ui.settings.results.insert(archive_key(crate::env::LOCAL), json!({"projects": projects, "threads": threads}));
 }
 
@@ -619,9 +750,26 @@ mod tests {
             json!({"id": "a", "projectId": "p", "_env": "local", "archivedAt": "2026-11-02T00:00:00Z"}),
             json!({"id": "b", "projectId": "p", "_env": "box", "archivedAt": "2026-11-03T00:00:00Z"}),
         ];
-        let groups = archive_groups(&projects, &threads);
+        let groups = archive_groups(&projects, &threads, None);
         assert_eq!(groups.len(), 2, "the same project id on two machines stays two groups");
         assert_eq!(groups[1].1[0]["id"], "b");
+        // Across environments the scope's logical groups merge checkouts of one repository.
+        let repo = |id: &str, env: &str, title: &str| json!({"id": id, "title": title, "_env": env, "repositoryIdentity": {"canonicalKey": "github.com/acme/api", "name": "api"}});
+        let projects = [repo("p", "", "api"), repo("q", "box", "api (box)"), json!({"id": "r", "title": "docs", "_env": "box"})];
+        let threads = [
+            json!({"id": "a", "projectId": "p", "_env": "", "archivedAt": "2026-11-02T00:00:00Z"}),
+            json!({"id": "b", "projectId": "q", "_env": "box", "archivedAt": "2026-11-03T00:00:00Z"}),
+            json!({"id": "c", "projectId": "r", "_env": "box", "archivedAt": "2026-11-04T00:00:00Z"}),
+        ];
+        let grouping = crate::shell::sidebar::folders::Grouping::read(&App::new());
+        let logical = |p: &serde_json::Value| {
+            let mut p = p.clone();
+            p[crate::env::TAG] = p["_env"].clone();
+            grouping.key(&p)
+        };
+        let groups = archive_groups(&projects, &threads, Some(&logical));
+        let shape: Vec<(&str, Vec<&str>)> = groups.iter().map(|(p, rows)| (p["title"].as_str().unwrap(), rows.iter().map(|r| r["id"].as_str().unwrap()).collect())).collect();
+        assert_eq!(shape, [("api", vec!["b", "a"]), ("docs", vec!["c"])], "one group per repository, titled for all its checkouts");
         let mut s = App::new();
         archive_fetched(&mut s, &archive_key("box"), &json!({"threads": [{"id": "b"}]}));
         assert_eq!(crate::env::owner(&s, "b"), "box");
@@ -655,7 +803,7 @@ mod tests {
             json!({"id":"4","projectId":"a","archivedAt":"2026-11-03T00:00:00Z","createdAt":"2026-10-01T00:00:00Z"}),
             json!({"id":"5","projectId":"gone","archivedAt":"2026-11-09T00:00:00Z"}),
         ];
-        let groups = archive_groups(&projects, &threads);
+        let groups = archive_groups(&projects, &threads, None);
         let shape: Vec<(&str, Vec<&str>)> = groups
             .iter()
             .map(|(p, rows)| (p["id"].as_str().unwrap(), rows.iter().map(|r| r["id"].as_str().unwrap()).collect()))

@@ -61,7 +61,7 @@ fn resolve_command(thread: &str, guest_message: &str, send: bool, command_id: &s
 
 fn close(app: &mut App, thread: &str) {
     let command = close_command(thread, &s5_net::uuid());
-    let Some(net) = app.src.net() else { return };
+    let Some(net) = crate::env::net_for(app, thread) else { return };
     let request = net.dispatch(command);
     app.ui.chat.guest.closing.insert(thread.to_owned(), request);
 }
@@ -80,11 +80,18 @@ pub fn poll(app: &mut App) -> bool {
     if ui.resolving.is_empty() && ui.closing.is_empty() {
         return false;
     }
-    let Some(net) = app.src.net() else { return false };
-    let ui = &mut app.ui.chat.guest;
     let before = ui.resolving.len() + ui.closing.len();
-    ui.resolving.retain(|_, request| net.take_reply(*request).is_none());
-    ui.closing.retain(|_, request| net.take_reply(*request).is_none());
+    // A close went to the thread's own environment.
+    let closing: Vec<(String, u64)> = ui.closing.iter().map(|(thread, request)| (thread.clone(), *request)).collect();
+    for (thread, request) in closing {
+        if crate::env::net_for(app, &thread).is_none_or(|net| net.take_reply(request).is_some()) {
+            app.ui.chat.guest.closing.remove(&thread);
+        }
+    }
+    if let Some(net) = app.src.net() {
+        app.ui.chat.guest.resolving.retain(|_, request| net.take_reply(*request).is_none());
+    }
+    let ui = &app.ui.chat.guest;
     ui.resolving.len() + ui.closing.len() != before
 }
 

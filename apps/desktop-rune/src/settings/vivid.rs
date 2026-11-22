@@ -325,6 +325,112 @@ pub(crate) fn colors(defaults: &Value, dark_appearance: bool, canvas_css: &str, 
     out
 }
 
+fn hex_of(c: Rgb) -> String {
+    let ch = |v: f64| v.round().clamp(0.0, 255.0) as u8;
+    format!("#{:02x}{:02x}{:02x}", ch(c.r), ch(c.g), ch(c.b))
+}
+
+/// `themeColorToHex` for an opaque color.
+pub(crate) fn hex(css: &str) -> Option<String> {
+    parse(css).map(|c| hex_of(to_rgb(c, true)))
+}
+
+/// `readableThemeColorOn`: only the lightness moves until `color` reaches `min` contrast on `surface`.
+pub(crate) fn readable_on(color: &str, surface: &str, min: f64) -> String {
+    let (Some(c), Some(bg)) = (parse(color), parse(surface)) else { return color.to_owned() };
+    let bg = to_rgb(bg, true);
+    if contrast(to_rgb(c, true), bg) >= min {
+        return color.to_owned();
+    }
+    hex_of(to_rgb(solve(c, &[bg], min, luminance(bg) < 0.179), true))
+}
+
+/// `updateThemeColorFamily`: an advanced edit of a family's color and the roles it derives.
+/// Translucent picks are taken as opaque.
+pub(crate) fn update_family(dark_appearance: bool, colors: &Value, role: &str, value: &str) -> Value {
+    let mut out = colors.clone();
+    let Some(picked) = parse(value) else {
+        out[role] = Value::String(value.to_owned());
+        return out;
+    };
+    let normalized = format(picked);
+    let fallback = if dark_appearance { Rgb { r: 24.0, g: 15.0, b: 27.0 } } else { Rgb { r: 250.0, g: 245.0, b: 250.0 } };
+    let canvas = rgb_of(colors["canvas"].as_str().unwrap_or(""), fallback);
+    let selected = to_rgb(picked, true);
+    let accent = rgb_of(colors["accent"].as_str().unwrap_or(""), Rgb { r: 168.0, g: 67.0, b: 112.0 });
+    let canvas_dark = luminance(canvas) < 0.179;
+    let fg_on = |bg: Rgb| rgb_css(readable_foreground(bg));
+    let tone_on = |bg: Rgb| lch_css(solve(picked, &[bg], 4.6, luminance(bg) < 0.179));
+    let status = || {
+        let surface = mix(canvas, selected, if canvas_dark { 0.16 } else { 0.08 });
+        (tone_on(surface), rgb_css(surface))
+    };
+    let n = || normalized.clone();
+    let set: Vec<(&str, String)> = match role {
+        "canvas" => vec![("canvas", n()), ("chrome", n()), ("toolbar", n())],
+        "text" => vec![("text", n()), ("toolbarForeground", n()), ("toolbarControlForeground", n())],
+        "mutedForeground" => ["textMuted", "mutedForeground", "placeholder", "secondaryLabel", "iconMuted", "sidebarMutedForeground"]
+            .into_iter()
+            .map(|r| (r, n()))
+            .collect(),
+        "border" => vec![("border", n()), ("toolbarBorder", n()), ("sidebarBorder", n())],
+        "secondary" => vec![("secondary", n()), ("secondaryForeground", fg_on(selected)), ("muted", n()), ("toolbarControl", n())],
+        "accentSurface" => vec![("accentSurface", n()), ("accentSurfaceForeground", fg_on(selected)), ("toolbarControlHover", n())],
+        "accent" => {
+            let update = mix(canvas, selected, if canvas_dark { 0.32 } else { 0.16 });
+            vec![
+                ("accent", n()),
+                ("accentForeground", fg_on(selected)),
+                ("focus", n()),
+                ("update", n()),
+                ("updateForeground", tone_on(update)),
+                ("updateSurface", rgb_css(update)),
+                ("terminalCursor", n()),
+            ]
+        }
+        "messageAction" => {
+            let fg = readable_foreground(selected);
+            let toward = if fg == LIGHT_FOREGROUND || fg == WHITE { BLACK } else { WHITE };
+            vec![("messageAction", n()), ("messageActionForeground", rgb_css(fg)), ("messageActionHover", rgb_css(mix(selected, toward, 0.12)))]
+        }
+        "messageSurface" => vec![("messageSurface", n()), ("messageForeground", fg_on(selected))],
+        "searchMatchBackground" => vec![("searchMatchBackground", rgb_css(selected)), ("searchMatchForeground", fg_on(selected))],
+        "searchMatchActiveBackground" => {
+            vec![("searchMatchActiveBackground", rgb_css(selected)), ("searchMatchActiveForeground", fg_on(selected))]
+        }
+        "codeBackground" => vec![("codeBackground", n()), ("codeForeground", fg_on(selected))],
+        "sidebar" => vec![("sidebar", n()), ("sidebarForeground", fg_on(selected))],
+        "sidebarRowSelected" => {
+            let sidebar = rgb_of(colors["sidebar"].as_str().unwrap_or(""), canvas);
+            vec![
+                ("sidebarRowHover", rgb_css(mix(sidebar, selected, 0.5))),
+                ("sidebarRowActive", rgb_css(mix(sidebar, selected, 0.8))),
+                ("sidebarRowSelected", n()),
+            ]
+        }
+        "terminalBackground" => {
+            let fg = readable_foreground(selected);
+            let dark = luminance(selected) < 0.179;
+            vec![
+                ("terminalBackground", n()),
+                ("terminalForeground", rgb_css(fg)),
+                ("terminalSelection", rgb_css(mix(selected, accent, if dark { 0.35 } else { 0.18 }))),
+                ("terminalScrollbar", rgb_css(mix(selected, fg, if dark { 0.42 } else { 0.22 }))),
+                ("terminalScrollbarHover", rgb_css(mix(selected, fg, if dark { 0.55 } else { 0.32 }))),
+            ]
+        }
+        "error" | "warning" => {
+            let (fg, surface) = status();
+            vec![(role, n()), (if role == "error" { "errorForeground" } else { "warningForeground" }, fg), (if role == "error" { "errorSurface" } else { "warningSurface" }, surface)]
+        }
+        _ => vec![(role, n())],
+    };
+    for (key, css) in set {
+        out[key] = Value::String(css);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +465,22 @@ mod tests {
             assert_eq!(luminance(rgb(&out["text"])) > luminance(surface), dark);
             assert_eq!(out["fontKeep"], "x");
         }
+    }
+
+    #[test]
+    fn a_family_edit_moves_its_roles_and_keeps_them_readable() {
+        let before = colors(&serde_json::json!({}), true, "#101418", "#3b82f6");
+        let after = update_family(true, &before, "accent", "#fde047");
+        for role in ["accent", "focus", "terminalCursor"] {
+            assert_eq!(after[role], after["accent"], "FAILED: {role}");
+        }
+        assert!(contrast(rgb(&after["accentForeground"]), rgb(&after["accent"])) >= 4.5);
+        assert_eq!((&after["canvas"], &after["error"]), (&before["canvas"], &before["error"]), "other families stay");
+        let status = update_family(true, &before, "error", "#ef4444");
+        assert!(contrast(rgb(&status["errorForeground"]), rgb(&status["errorSurface"])) >= 4.5);
+        assert_eq!(update_family(true, &before, "canvas", "nope")["canvas"], "nope", "unparseable picks are kept as typed");
+        assert_eq!(hex("#3B82F6").as_deref(), Some("#3b82f6"));
+        assert_eq!(readable_on("#ffffff", "#000000", 4.5), "#ffffff", "already readable colors are left alone");
+        assert!(contrast(rgb(&serde_json::json!(readable_on("#222222", "#000000", 4.5))), BLACK) >= 4.4, "hex rounding aside, it reaches the minimum");
     }
 }

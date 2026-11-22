@@ -885,19 +885,23 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
             };
             let (close_id, select_id) = (id.clone(), id.clone());
             let close_label = if active { with_shortcut(app, &format!("Close {label}"), "terminal.close") } else { format!("Close {label}") };
-            // PanelTabCloseButton: a 16 box whose terminal glyph turns into an X while the row is hovered.
+            let operable = crate::chat::details::grants(app, "terminal:operate");
             let mut close = row()
                 .size(16., 16.)
                 .center()
-                .radius(2.)
                 .role("button")
                 .label(close_label.clone())
                 .help(close_label)
                 .focusable(true)
-                .child(icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg).group_opacity(1., 0.))
-                .child(icon(&icons::X, 12.).size(12., 12.).color(t.c.foreground).group_opacity(0., 1.).pin(Some(2.), Some(2.), None, None));
-            if crate::chat::details::grants(app, "terminal:operate") {
-                close = close.hover(t.c.muted).on_press(move |s: &mut App| request_close(s, owner, &close_id));
+                .children(close_layers(operable).into_iter().map(|layer| match layer {
+                    CloseLayer::Backdrop => el().size(16., 16.).pin(Some(0.), Some(0.), None, None).radius(2.).hover(t.c.muted),
+                    CloseLayer::Glyph { glyph, rest, hovered } => {
+                        let color = if std::ptr::eq(glyph, &icons::X) { t.c.foreground } else { fg };
+                        icon(glyph, 12.).size(12., 12.).color(color).group_opacity(rest, hovered).pin(Some(2.), Some(2.), None, None)
+                    }
+                }));
+            if operable {
+                close = close.on_press(move |s: &mut App| request_close(s, owner, &close_id));
             }
             let mut entry = row()
                 .w_full()
@@ -953,6 +957,25 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 })
                 .child(list),
         )
+}
+
+/// A layer of web's PanelTabCloseButton, bottom first: a 16 box whose terminal glyph turns into an
+/// X while the row is hovered. Rune hands a group-opacity glyph to its nearest ancestor with a hover
+/// fill, so the button's own fill is a sibling backdrop and the glyphs follow the row's hover group.
+enum CloseLayer {
+    Backdrop,
+    Glyph { glyph: &'static rune::Icon, rest: f32, hovered: f32 },
+}
+
+fn close_layers(operable: bool) -> Vec<CloseLayer> {
+    let backdrop = operable.then_some(CloseLayer::Backdrop);
+    backdrop
+        .into_iter()
+        .chain([
+            CloseLayer::Glyph { glyph: &icons::SQUARE_TERMINAL, rest: 1., hovered: 0. },
+            CloseLayer::Glyph { glyph: &icons::X, rest: 0., hovered: 1. },
+        ])
+        .collect()
 }
 
 /// The drawer or panel body for one owner's terminals.
@@ -1137,6 +1160,29 @@ pub fn fixture(app: &mut App, owner: Owner, groups: &[(&[(&str, &str)], bool)], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hovered_tab_row_swaps_its_terminal_glyph_for_the_close_x() {
+        let shown = |layers: &[CloseLayer], row_hovered: bool| -> Vec<&'static str> {
+            layers
+                .iter()
+                .filter_map(|l| match l {
+                    CloseLayer::Glyph { glyph, rest, hovered } => {
+                        let opacity = if row_hovered { *hovered } else { *rest };
+                        (opacity > 0.).then_some(glyph.name)
+                    }
+                    CloseLayer::Backdrop => None,
+                })
+                .collect()
+        };
+        for operable in [true, false] {
+            let layers = close_layers(operable);
+            assert_eq!(shown(&layers, false), [icons::SQUARE_TERMINAL.name]);
+            assert_eq!(shown(&layers, true), [icons::X.name], "the row's hover reaches the glyphs");
+            let backdrops: Vec<usize> = layers.iter().enumerate().filter(|(_, l)| matches!(l, CloseLayer::Backdrop)).map(|(i, _)| i).collect();
+            assert_eq!(backdrops, if operable { vec![0] } else { vec![] }, "only a closable tab gets the fill, under the glyphs and not around them");
+        }
+    }
 
     #[test]
     fn a_script_reuses_the_idle_active_drawer_terminal_else_the_first_idle_one() {

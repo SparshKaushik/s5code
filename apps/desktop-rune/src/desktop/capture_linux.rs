@@ -1,19 +1,30 @@
 //! SnapShots on Linux, taken the way Electron takes them (apps/desktop/src/snapShot:
 //! `LinuxSnapShot.ts`, `GnomeCaptureSetup.ts`, `NiriSnapShot.ts`, `linuxCaptureSession.ts`).
 //! Wayland only, as Electron's `captureMode`. Hyprland (through `hyprctl` and `grim` instead of
-//! Electron's helper) and Niri (its IPC socket) come first, then the Screenshot portal's
-//! active-window target, the bundled GNOME extension, else the portal's own picker. KDE needs a
-//! helper Electron ships separately, so it takes the portal path here. App text comes from
-//! AT-SPI, as Electron's accessibility module reads it on Linux.
+//! Electron's helper) and Niri (its IPC socket) come first, then KWin's ScreenShot2 on KDE Plasma
+//! (called from this binary instead of Electron's `t3-kde-snap-shot` helper, `KdeSnapShot.ts`),
+//! the Screenshot portal's active-window target, the bundled GNOME extension, else the portal's
+//! own picker. App text comes from AT-SPI, as Electron's accessibility module reads it on Linux.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Electron's Linux desktop entry name: the GNOME extension only answers its `.SnapShot` name.
 pub const APP_ID: &str = "com.t3tools.T3Code";
 pub const EXTENSION_UUID: &str = "snap-shot@t3.codes";
 const MAX_PNG_BYTES: usize = 32 * 1024 * 1024;
+/// The KDE helper's cap on KWin's raw pixels.
+const MAX_RAW_BYTES: usize = 128 * 1024 * 1024;
 const MAX_CAPTURE: (f64, f64) = (2_560.0, 1_600.0);
+/// KWin authorizes ScreenShot2 callers by an entry whose Exec is their executable. Electron's
+/// helper owns `com.t3tools.T3Code.KdeCapture.desktop`, so this one sits beside it.
+const KDE_ENTRY: &str = "com.t3tools.T3Code.RuneCapture.desktop";
+const KDE_MARKER: &str = "X-T3Code-Rune-Capture=true";
+const KDE_PENDING: &str = "KDE Plasma is still registering T3 Code for active-window snapshots, so this one used the window picker.";
+const KDE_DENIED: &str = "KDE Plasma hasn't allowed T3 Code to capture windows. Sign out and back in, then try again.";
+/// This run wrote the entry, so a refusal may only mean KDE hasn't read it yet.
+static KDE_REGISTERED: AtomicBool = AtomicBool::new(false);
 pub const MODIFIER_PAIR_UNAVAILABLE: &str = "Modifier-pair shortcuts aren't available in this Wayland session. Choose another shortcut or use Take snapshot from the command palette.";
 
 /// The extension Electron bundles, installed as `installGnomeCaptureBundle` does.
@@ -32,6 +43,8 @@ pub enum Backend {
     Picker,
     Hyprland,
     Niri,
+    /// KWin's ScreenShot2. Its results carry no title, pid or frame, so no app text or effects.
+    Kde,
 }
 
 impl Backend {
@@ -66,6 +79,8 @@ pub struct Captured {
     pub own: Option<[f64; 4]>,
     /// The compositor already flashed and flew the picture.
     pub effects_done: bool,
+    /// Why this capture went another way than the backend's, for a toast.
+    pub notice: Option<String>,
 }
 
 /// `DesktopCaptureExtensionState.status`.
@@ -132,10 +147,18 @@ fn niri_socket() -> Option<PathBuf> {
     env("NIRI_SOCKET").map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// `LinuxCaptureConnection.backend` without the KDE helper: the active-window portal target
-/// (version 3, target bit 8), else the extension on GNOME (API version 1 or 2), else the picker.
-pub fn backend_from(portal_version: Option<u32>, targets: Option<u32>, gnome: bool, extension_api: Option<u32>) -> Backend {
-    if portal_version.is_some_and(|v| v >= 3) && targets.is_some_and(|t| t & 8 != 0) {
+/// `isKdeCaptureSession`.
+fn kde_session() -> bool {
+    desktop_session(env("XDG_CURRENT_DESKTOP").as_deref(), sandboxed(), "kde")
+}
+
+/// `LinuxCaptureConnection.backend`: KWin's ScreenShot2 (version 2, probed on KDE only), else the
+/// active-window portal target (version 3, target bit 8), else the extension on GNOME (API
+/// version 1 or 2), else the picker.
+pub fn backend_from(kwin: Option<u32>, portal_version: Option<u32>, targets: Option<u32>, gnome: bool, extension_api: Option<u32>) -> Backend {
+    if kwin.is_some_and(|v| v >= 2) {
+        Backend::Kde
+    } else if portal_version.is_some_and(|v| v >= 3) && targets.is_some_and(|t| t & 8 != 0) {
         Backend::ScreenshotPortal
     } else if gnome && matches!(extension_api, Some(1 | 2)) {
         Backend::GnomeExtension
@@ -240,11 +263,160 @@ fn store_png(bytes: &[u8], path: &Path) -> Result<(), String> {
         return Err("Invalid or oversized window screenshot.".into());
     }
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).map_err(|_| "The window screenshot is empty.".to_owned())?;
-    match fitted(image.width(), image.height()) {
-        Some((w, h)) => image.resize_exact(w, h, image::imageops::FilterType::Lanczos3).save_with_format(path, image::ImageFormat::Png),
-        None => return std::fs::write(path, bytes).map_err(|_| "Could not save the snapshot.".to_owned()),
+    if fitted(image.width(), image.height()).is_none() {
+        return std::fs::write(path, bytes).map_err(|_| "Could not save the snapshot.".to_owned());
     }
-    .map_err(|_| "Could not save the snapshot.".to_owned())
+    save_image(image, path)
+}
+
+/// Encodes a decoded capture into `path` as PNG, scaled as Electron stores it.
+fn save_image(image: image::DynamicImage, path: &Path) -> Result<(), String> {
+    let image = match fitted(image.width(), image.height()) {
+        Some((w, h)) => image.resize_exact(w, h, image::imageops::FilterType::Lanczos3),
+        None => image,
+    };
+    image.save_with_format(path, image::ImageFormat::Png).map_err(|_| "Could not save the snapshot.".to_owned())
+}
+
+/// `escapeDesktopEntryExecArgument`: Exec values are unescaped as strings, then unquoted, so
+/// escape in reverse order.
+pub fn desktop_exec_argument(value: &str) -> String {
+    let quoted = value.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$").replace('"', "\\\"").replace('%', "%%");
+    format!("\"{quoted}\"").replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+}
+
+/// `kdeCaptureDesktopEntry` naming this executable, which is what KWin authorizes.
+pub fn kde_desktop_entry(executable: &str) -> String {
+    [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=T3 Code SnapShots",
+        "NoDisplay=true",
+        &format!("Exec={}", desktop_exec_argument(executable)),
+        // KService reads this custom property as a KConfig list, not an XDG ';' list.
+        "X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2",
+        KDE_MARKER,
+        "",
+    ]
+    .join("\n")
+}
+
+/// Whether our entry needs writing: missing or different (another Exec, an older format). A file
+/// at our name without our marker belongs to someone else and is never replaced.
+pub fn kde_entry_stale(existing: Option<&str>, expected: &str) -> Result<bool, String> {
+    match existing {
+        None => Ok(true),
+        Some(entry) if entry == expected => Ok(false),
+        Some(entry) if entry.lines().any(|line| line == KDE_MARKER) => Ok(true),
+        Some(_) => Err("Another desktop entry uses T3 Code's capture name. Rename it, then try again.".into()),
+    }
+}
+
+/// Registers this executable with KWin when the entry is missing or names another one.
+fn ensure_kde_entry() -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("Could not register T3 Code with KDE Plasma: {e}");
+    let executable = std::env::current_exe().map_err(failed)?;
+    let dir = data_home().ok_or("Could not find your data folder.")?.join("applications");
+    let path = dir.join(KDE_ENTRY);
+    let expected = kde_desktop_entry(&executable.to_string_lossy());
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
+        return Err("T3 Code's KDE desktop entry must be a regular file. Remove the conflicting link, then try again.".into());
+    }
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(entry) => Some(entry),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(failed(e)),
+    };
+    if !kde_entry_stale(existing.as_deref(), &expected)? {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).map_err(failed)?;
+    // Not `.desktop` while staged, so KService never reads a partial entry.
+    let staged = dir.join(format!(".{KDE_ENTRY}.{}.tmp", std::process::id()));
+    let written = std::fs::write(&staged, &expected).and_then(|()| std::fs::rename(&staged, &path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(failed(e));
+    }
+    KDE_REGISTERED.store(true, Ordering::Relaxed);
+    // KWin checks callers against KService's cache, so rebuild it now, then again in the session
+    // manager's environment: the cache's name hashes XDG_DATA_DIRS, which an AppImage changes.
+    if let Some(tool) = ["kbuildsycoca6", "kbuildsycoca5"].into_iter().find(|tool| run_quiet(tool, &["--noincremental"]).is_some()) {
+        let _ = run_quiet("systemd-run", &["--user", "--quiet", "--wait", "--collect", "--pipe", "--service-type=exec", tool, "--noincremental"]);
+    }
+    Ok(())
+}
+
+/// Runs a tool without output, stopped after 20 s as Electron's `execFile` is; None when it
+/// couldn't start, else whether it succeeded.
+fn run_quiet(program: &str, args: &[&str]) -> Option<bool> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(false);
+            }
+        }
+    }
+}
+
+/// KWin's `CaptureActiveWindow` results: how the raw QImage pixels it wrote are laid out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RawMeta {
+    pub kind: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub stride: Option<u32>,
+    pub format: Option<u32>,
+}
+
+/// Why KWin's capture failed; `Denied` is its permission check.
+#[derive(Debug)]
+pub enum KdeError {
+    Denied,
+    Failed(String),
+}
+
+/// The KDE helper's `rgba`: Qt's RGB32, ARGB32 or RGBA8888 (premultiplied or not) rows as
+/// straight RGBA, with the width and height. Unknown types and formats are refused.
+pub fn kde_rgba(meta: &RawMeta, raw: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let invalid = || "KDE Plasma returned an unreadable screenshot.".to_owned();
+    let (Some("raw"), Some(width), Some(height), Some(format)) = (meta.kind.as_deref(), meta.width, meta.height, meta.format) else { return Err(invalid()) };
+    let (w, h) = (width as usize, height as usize);
+    let row = w.checked_mul(4).ok_or_else(invalid)?;
+    let stride = meta.stride.map_or(row, |s| s as usize);
+    let bytes = stride.checked_mul(h).ok_or_else(invalid)?;
+    if w == 0 || h == 0 || stride < row || bytes > MAX_RAW_BYTES || ![4, 5, 6, 17, 18].contains(&format) {
+        return Err(invalid());
+    }
+    if raw.len() < bytes {
+        return Err("KDE Plasma returned an incomplete screenshot.".into());
+    }
+    let mut out = Vec::with_capacity(row * h);
+    for y in 0..h {
+        for pixel in raw[y * stride..y * stride + row].chunks_exact(4) {
+            let (r, g, b, a) = if format >= 17 {
+                (pixel[0], pixel[1], pixel[2], pixel[3])
+            } else {
+                let argb = u32::from_ne_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8, if format == 4 { 255 } else { (argb >> 24) as u8 })
+            };
+            let straight = |v: u8| if a == 0 { 0 } else { ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8 };
+            if format == 6 || format == 18 {
+                out.extend_from_slice(&[straight(r), straight(g), straight(b), a]);
+            } else {
+                out.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+    }
+    Ok((width, height, out))
 }
 
 /// The extension's window metadata. Its bounds are GNOME's, used only by the extension.
@@ -504,12 +676,12 @@ pub fn detect() -> Result<Setup, String> {
         return Ok(Setup { backend: Backend::Niri, extension: None });
     }
     let gnome = gnome_session(env("XDG_CURRENT_DESKTOP").as_deref(), sandboxed());
-    let found = bus::probe(gnome)?;
+    let found = bus::probe(gnome, kde_session())?;
     let extension = gnome.then(|| match &found.shell {
         Ok(shell) => extension_status(shell, installed_version(), &bundled()),
         Err(message) => (ExtensionStatus::Error, message.clone()),
     });
-    Ok(Setup { backend: backend_from(found.portal_version, found.targets, gnome, found.extension_api), extension })
+    Ok(Setup { backend: backend_from(found.kwin, found.portal_version, found.targets, gnome, found.extension_api), extension })
 }
 
 /// Runs a setup action, checked against the current state as `GnomeCaptureSetup.perform` does.
@@ -526,8 +698,27 @@ pub fn act(action: Action) -> Result<(), String> {
 
 /// Captures with `backend` into `path`.
 pub fn capture(backend: Backend, path: &Path, feedback: Feedback) -> Result<Captured, String> {
-    let mut captured = Captured { window: None, own: None, effects_done: false };
+    let mut captured = Captured { window: None, own: None, effects_done: false, notice: None };
     let png = match backend {
+        Backend::Kde => {
+            ensure_kde_entry()?;
+            match bus::kde_capture() {
+                Ok((meta, raw)) => {
+                    let (width, height, rgba) = kde_rgba(&meta, &raw)?;
+                    let image = image::RgbaImage::from_raw(width, height, rgba).ok_or("KDE Plasma returned an unreadable screenshot.")?;
+                    save_image(image::DynamicImage::ImageRgba8(image), path)?;
+                    return Ok(captured);
+                }
+                // KDE may not have read the entry yet: this capture takes the picker, and the
+                // next one asks KWin again rather than registering again.
+                Err(KdeError::Denied) if KDE_REGISTERED.load(Ordering::Relaxed) => {
+                    captured.notice = Some(KDE_PENDING.into());
+                    bus::screenshot(true)?
+                }
+                Err(KdeError::Denied) => return Err(KDE_DENIED.into()),
+                Err(KdeError::Failed(message)) => return Err(message),
+            }
+        }
         Backend::ScreenshotPortal => bus::screenshot(false)?,
         Backend::Picker => bus::screenshot(true)?,
         Backend::GnomeExtension => {
@@ -572,6 +763,8 @@ pub fn play(path: &Path) {
 
 /// What the probe read off the session bus.
 pub struct Probe {
+    /// ScreenShot2's version, probed on KDE sessions only.
+    kwin: Option<u32>,
     portal_version: Option<u32>,
     targets: Option<u32>,
     extension_api: Option<u32>,
@@ -581,7 +774,7 @@ pub struct Probe {
 
 #[cfg(target_os = "linux")]
 mod bus {
-    use super::{APP_ID, EXTENSION_UUID, Probe, Shell};
+    use super::{APP_ID, EXTENSION_UUID, KdeError, Probe, RawMeta, Shell};
     use futures_util::StreamExt;
     use std::collections::HashMap;
     use std::future::Future;
@@ -598,6 +791,10 @@ mod bus {
     const EXTENSIONS: &str = "org.gnome.Shell.Extensions";
     const DBUS: &str = "org.freedesktop.DBus";
     const DBUS_PATH: &str = "/org/freedesktop/DBus";
+    /// KWin registers this name as well as `org.kde.KWin`; Electron and its helper call it.
+    const KWIN_SCREENSHOT: &str = "org.kde.KWin.ScreenShot2";
+    const KWIN_SCREENSHOT_PATH: &str = "/org/kde/KWin/ScreenShot2";
+    const KWIN_NOT_AUTHORIZED: &str = "org.kde.KWin.ScreenShot2.Error.NoAuthorized";
     const CALL_TIMEOUT: Duration = Duration::from_secs(5);
     /// The portal may show a dialog; Electron waits two minutes for it.
     const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -654,14 +851,18 @@ mod bus {
         }
     }
 
-    pub(super) fn probe(gnome: bool) -> Result<Probe, String> {
+    pub(super) fn probe(gnome: bool, kde: bool) -> Result<Probe, String> {
         block(|conn| async move {
             let conn = &conn;
+            let mut found = Probe { kwin: None, portal_version: None, targets: None, extension_api: None, shell: Err(String::new()) };
+            // Any failure here leaves KDE on the portal rather than failing detection.
+            if kde && let Ok(props) = all(conn, KWIN_SCREENSHOT, KWIN_SCREENSHOT_PATH, KWIN_SCREENSHOT).await {
+                found.kwin = number(&props, "Version").map(|v| v as u32);
+            }
             // Unsandboxed apps name themselves to the portal so its permissions stick.
             if let Ok(registry) = Proxy::new(conn, PORTAL, PORTAL_PATH, "org.freedesktop.host.portal.Registry").await {
                 let _ = timed(registry.call::<_, _, ()>("Register", &(APP_ID, HashMap::<&str, Variant>::new()))).await;
             }
-            let mut found = Probe { portal_version: None, targets: None, extension_api: None, shell: Err(String::new()) };
             match all(conn, PORTAL, PORTAL_PATH, SCREENSHOT).await {
                 Ok(props) => {
                     found.portal_version = number(&props, "version").map(|v| v as u32);
@@ -796,6 +997,55 @@ mod bus {
         })
     }
 
+    /// The KDE helper's `capture`: `CaptureActiveWindow` with its options, writing raw pixels to
+    /// a socket drained on a thread, so KWin never blocks on a full buffer.
+    pub(super) fn kde_capture() -> Result<(RawMeta, Vec<u8>), KdeError> {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        let unprepared = |_: std::io::Error| KdeError::Failed("Could not prepare the snapshot.".into());
+        let (reader, writer) = UnixStream::pair().map_err(unprepared)?;
+        reader.set_read_timeout(Some(CALL_TIMEOUT)).map_err(unprepared)?;
+        let stop = reader.try_clone().map_err(unprepared)?;
+        let drain = std::thread::spawn(move || {
+            let mut raw = Vec::new();
+            // A timeout keeps what arrived; `kde_rgba` checks it against the reply's size.
+            let _ = reader.take(super::MAX_RAW_BYTES as u64).read_to_end(&mut raw);
+            raw
+        });
+        let reply = block(|conn| async move {
+            let conn = &conn;
+            let options = HashMap::from([
+                ("include-decoration", Variant::from(true)),
+                ("include-shadow", Variant::from(false)),
+                ("include-cursor", Variant::from(false)),
+                ("native-resolution", Variant::from(true)),
+            ]);
+            let result = timed(async {
+                let proxy = Proxy::new(conn, KWIN_SCREENSHOT, KWIN_SCREENSHOT_PATH, KWIN_SCREENSHOT).await?;
+                proxy.call::<_, _, HashMap<String, OwnedVariant>>("CaptureActiveWindow", &(options, zbus::Fd::from(&writer))).await
+            })
+            .await;
+            // Only KWin's copy may keep the socket open, so the drain ends when KWin is done.
+            drop(writer);
+            Ok::<_, String>(result)
+        });
+        let outcome = match reply {
+            Ok(Ok(results)) => Ok(results),
+            Ok(Err(zbus::Error::MethodError(name, ..))) if name.as_str() == KWIN_NOT_AUTHORIZED => Err(KdeError::Denied),
+            Ok(Err(e)) => Err(KdeError::Failed(message(e))),
+            Err(e) => Err(KdeError::Failed(e)),
+        };
+        if outcome.is_err() {
+            // Nothing will arrive; wake the drain rather than wait out its timeout.
+            let _ = stop.shutdown(std::net::Shutdown::Read);
+        }
+        let raw = drain.join().map_err(|_| KdeError::Failed("Could not read the snapshot.".into()))?;
+        let results = outcome?;
+        let uint = |key: &str| number(&results, key).map(|v| v as u32);
+        let meta = RawMeta { kind: text(&results, "type"), width: uint("width"), height: uint("height"), stride: uint("stride"), format: uint("format") };
+        Ok((meta, raw))
+    }
+
     const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
     const ATSPI_TEXT: &str = "org.a11y.atspi.Text";
     /// `STATE_ACTIVE` in the first word of `GetState`.
@@ -891,8 +1141,11 @@ mod bus {
 mod bus {
     use super::Probe;
     const UNSUPPORTED: &str = "Snapshots on Linux need a Wayland session.";
-    pub(super) fn probe(_: bool) -> Result<Probe, String> {
+    pub(super) fn probe(_: bool, _: bool) -> Result<Probe, String> {
         Err(UNSUPPORTED.into())
+    }
+    pub(super) fn kde_capture() -> Result<(super::RawMeta, Vec<u8>), super::KdeError> {
+        Err(super::KdeError::Failed(UNSUPPORTED.into()))
     }
     pub(super) fn set_enabled(_: bool) -> Result<(), String> {
         Err(UNSUPPORTED.into())
@@ -939,15 +1192,52 @@ mod tests {
 
     #[test]
     fn picks_the_backend_like_electron() {
-        assert_eq!(backend_from(Some(3), Some(8 | 1), false, None), Backend::ScreenshotPortal);
-        assert_eq!(backend_from(Some(2), Some(8), true, Some(2)), Backend::GnomeExtension, "an older portal has no active-window target");
-        assert_eq!(backend_from(Some(3), Some(1), true, Some(1)), Backend::GnomeExtension);
-        assert_eq!(backend_from(Some(3), Some(1), true, Some(3)), Backend::Picker, "an unknown extension API");
-        assert_eq!(backend_from(None, None, false, Some(2)), Backend::Picker, "the extension only counts on GNOME");
+        assert_eq!(backend_from(None, Some(3), Some(8 | 1), false, None), Backend::ScreenshotPortal);
+        assert_eq!(backend_from(None, Some(2), Some(8), true, Some(2)), Backend::GnomeExtension, "an older portal has no active-window target");
+        assert_eq!(backend_from(None, Some(3), Some(1), true, Some(1)), Backend::GnomeExtension);
+        assert_eq!(backend_from(None, Some(3), Some(1), true, Some(3)), Backend::Picker, "an unknown extension API");
+        assert_eq!(backend_from(None, None, None, false, Some(2)), Backend::Picker, "the extension only counts on GNOME");
+        assert_eq!(backend_from(Some(2), Some(3), Some(8), false, None), Backend::Kde, "KWin comes before the portal");
+        assert_eq!(backend_from(Some(1), Some(3), Some(8), false, None), Backend::ScreenshotPortal, "ScreenShot2 version 1 is too old");
+        assert!(desktop_session(Some("KDE"), false, "kde") && !desktop_session(Some("KDE"), true, "kde"));
+        assert!(!Backend::Kde.knows_window(), "KWin names no window, so no app text");
         assert!(gnome_session(Some("ubuntu:GNOME"), false));
         assert!(!gnome_session(Some("GNOME"), true), "sandboxed apps can't use the extension");
         assert!(!gnome_session(Some("KDE"), false));
         assert!(!gnome_session(None, false));
+    }
+
+    #[test]
+    fn registers_with_kwin_like_the_kde_helper() {
+        let entry = kde_desktop_entry("/opt/T3 Code/rune");
+        let lines: Vec<&str> = entry.lines().collect();
+        assert!(lines.contains(&"Exec=\"/opt/T3 Code/rune\""), "{entry}");
+        assert!(lines.contains(&"X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2"), "a KConfig list, no trailing ';'");
+        assert!(lines.contains(&"NoDisplay=true") && entry.ends_with('\n'));
+        assert_eq!(desktop_exec_argument("/x/a\"b"), r#""/x/a\\"b""#, "quoted, then string-escaped");
+        assert_eq!(desktop_exec_argument("/x/50%$"), r#""/x/50%%\\$""#, "field codes and shell characters");
+        assert_eq!(kde_entry_stale(None, &entry), Ok(true));
+        assert_eq!(kde_entry_stale(Some(&entry), &entry), Ok(false));
+        let moved = kde_desktop_entry("/usr/bin/rune");
+        assert_eq!(kde_entry_stale(Some(&moved), &entry), Ok(true), "another Exec is rewritten");
+        assert!(kde_entry_stale(Some("[Desktop Entry]\nName=Other\n"), &entry).is_err(), "never replaces someone else's entry");
+    }
+
+    #[test]
+    fn decodes_kwin_raw_images_like_the_kde_helper() {
+        let meta = |width, height, stride, format| RawMeta { kind: Some("raw".into()), width: Some(width), height: Some(height), stride, format: Some(format) };
+        let raw = [0xff11_2233_u32.to_ne_bytes(), [0; 4]].concat();
+        assert_eq!(kde_rgba(&meta(1, 1, Some(8), 5), &raw), Ok((1, 1, vec![0x11, 0x22, 0x33, 255])), "native ARGB32, row padding skipped");
+        assert_eq!(kde_rgba(&meta(1, 1, None, 4), &0x0011_2233_u32.to_ne_bytes()).unwrap().2, [0x11, 0x22, 0x33, 255], "RGB32 is opaque, stride defaults to the row");
+        assert_eq!(kde_rgba(&meta(1, 1, Some(4), 18), &[64, 32, 16, 128]).unwrap().2, [128, 64, 32, 128], "premultiplied RGBA is unpremultiplied");
+        assert_eq!(kde_rgba(&meta(1, 1, Some(4), 18), &[0, 0, 0, 0]).unwrap().2, [0, 0, 0, 0]);
+        assert_eq!(kde_rgba(&meta(1, 1, Some(4), 17), &[1, 2, 3, 4]).unwrap().2, [1, 2, 3, 4]);
+        for (width, height, stride, format) in [(0, 1, 4, 5), (2, 1, 4, 5), (1, 1, 4, 99), (u32::MAX, 1, 4, 5)] {
+            assert!(kde_rgba(&meta(width, height, Some(stride), format), &[0; 4]).is_err(), "{width}x{height} stride {stride} format {format}");
+        }
+        assert_eq!(kde_rgba(&meta(1, 2, Some(4), 5), &[0; 4]), Err("KDE Plasma returned an incomplete screenshot.".into()));
+        assert!(kde_rgba(&RawMeta { kind: Some("png".into()), ..meta(1, 1, None, 5) }, &[0; 4]).is_err(), "only raw pixels");
+        assert!(kde_rgba(&RawMeta { format: None, ..meta(1, 1, None, 5) }, &[0; 4]).is_err());
     }
 
     #[test]

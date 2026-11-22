@@ -697,7 +697,11 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
             r = r.child(excerpt(t, found, ui.search.text.trim()));
         }
         r = if on { r.fill(t.sb.sidebar_row_active) } else { r.hover(t.sb.sidebar_row_hover) };
-        list = list.child(r);
+        let file_over = ui.drop_over.as_deref() == Some(th.id.as_str());
+        if file_over && !on {
+            r = r.fill(t.sb.sidebar_row_hover);
+        }
+        list = list.child(super::drop_ring(super::drop_target(r, &th.id), t, file_over));
     }
     // A column, so the list keeps its content height: a row would stretch it to the viewport,
     // leaving nothing to scroll.
