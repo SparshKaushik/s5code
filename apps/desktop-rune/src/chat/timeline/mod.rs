@@ -6,7 +6,7 @@ pub mod error_banner;
 pub mod find;
 pub(crate) mod markdown;
 
-pub(crate) mod language_icons;
+mod language_icons;
 pub mod plan;
 pub mod question;
 pub mod queue;

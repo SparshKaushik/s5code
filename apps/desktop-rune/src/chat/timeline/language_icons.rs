@@ -51,28 +51,6 @@ static TYPESCRIPT: Icon = Icon {
     view: 16.0,
     body: "\n  <path fill=\"currentColor\" d=\"M8 1C2.24 1 1 2.24 1 8s1.24 7 7 7 7-1.24 7-7-1.24-7-7-7\" class=\"bg\" opacity=\".2\"/>\n  <path fill=\"currentColor\" d=\"M8.1 9.64h.95c.04.62.28.76 1.28.76s1.2-.14 1.2-.85c0-.66-.2-.85-1.2-1.07-1.79-.38-2.18-.7-2.18-1.86C8.15 5.3 8.54 5 10.31 5c1.67 0 2.04.26 2.07 1.42h-.95c-.02-.43-.23-.53-1.1-.53-1 0-1.22.14-1.22.74 0 .52.22.7 1.24.92 1.76.38 2.15.73 2.15 2 0 1.44-.4 1.75-2.24 1.75-1.8 0-2.18-.3-2.15-1.66m-3 1.57V5.99H3.5v-.9h4.21v.9H6.1v5.22z\"/>\n",
 };
-/// The glyph a Pierre file tree shows for `path`, with its `--trees-file-icon-color-*` (light,
-/// dark); None for the default file icon.
-pub fn for_path(path: &str) -> Option<(&'static Icon, &'static str, &'static str)> {
-    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    if name == "tsconfig.json" {
-        return Some((&TYPESCRIPT, "#1a85d4", "#69b1ff"));
-    }
-    Some(match name.rsplit_once('.').map_or("", |(_, ext)| ext) {
-        "ts" | "mts" | "cts" => (&TYPESCRIPT, "#1a85d4", "#69b1ff"),
-        "tsx" | "jsx" => (&REACT, "#1ca1c7", "#68cdf2"),
-        "js" | "mjs" | "cjs" => (&JAVASCRIPT, "#d5a910", "#ffd452"),
-        "json" | "jsonc" => (&JSON, "#d47628", "#ffa359"),
-        "sh" | "bash" | "zsh" => (&BASH, "#199f43", "#5ecc71"),
-        "py" => (&PYTHON, "#1a85d4", "#69b1ff"),
-        "rs" => (&RUST, "#d47628", "#ffa359"),
-        "css" => (&CSS, "#693acf", "#9d6afb"),
-        "html" | "htm" => (&HTML, "#d47628", "#ffa359"),
-        "md" | "mdx" | "markdown" => (&MARKDOWN, "#199f43", "#5ecc71"),
-        _ => return None,
-    })
-}
-
 pub fn language(value: &str, t: &T) -> El {
     let entry = match value {
         "ts" | "typescript" => Some((&TYPESCRIPT, if t.dark { "#69b1ff" } else { "#1a85d4" })),

@@ -2,10 +2,13 @@
 
     tools/ci-build.sh                       # push this branch, wait for CI, download bundle.tgz
     modal run tools/modal_render.py --bundle BUNDLE.tgz --scenes home,thread-showcase \
-        [--themes dark,light] [--args "--chrome"] [--files a.json,b.json] [--out shots/]
+        [--themes dark,light] [--args "--chrome"] [--files a.json,b.json] [--out shots/] \
+        [--variants "drawer-hover|terminal-drawer-split|--script /work/files/hover.json --at 0.4"]
 
 Writes OUT/<scene>[-light].png and .tree.json, the same names tools/snap.sh produces. Extra
 `--files` are uploaded to /work/files/<basename>, so `--args "--script /work/files/x.json"` works.
+`--variants` adds `;`-separated `stem|scene|args` jobs, each in every theme, for one scene's
+extra states (a script's hover) beside the plain scenes in the same batch.
 """
 
 import io
@@ -51,8 +54,8 @@ def render(bundle: bytes, jobs: list, files: dict) -> dict:
         S5_FIXTURES="/work/fixtures",
     )
     out, logs = {}, []
-    for scene, theme, extra in jobs:
-        stem = scene + ("-light" if theme == "light" else "")
+    for name, scene, theme, extra in jobs:
+        stem = name + ("-light" if theme == "light" else "")
         cmd = ["/work/target/release/s5code-rune", "--snap", f"/tmp/{stem}.png", "--tree", f"/tmp/{stem}.tree.json",
                "--scene", scene, "--size", "1440x900", "--scale", "1", "--theme", theme, *extra]
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd="/work")
@@ -67,9 +70,12 @@ def render(bundle: bytes, jobs: list, files: dict) -> dict:
 
 
 @app.local_entrypoint()
-def main(bundle: str, scenes: str, themes: str = "dark", args: str = "", files: str = "", out: str = "shots"):
+def main(bundle: str, scenes: str, themes: str = "dark", args: str = "", files: str = "", out: str = "shots", variants: str = ""):
     extra = args.split() if args else []
-    jobs = [(s, t, extra) for s in scenes.split(",") if s for t in themes.split(",")]
+    jobs = [(s, s, t, extra) for s in scenes.split(",") if s for t in themes.split(",")]
+    for v in filter(None, variants.split(";")):
+        stem, scene, more = v.split("|", 2)
+        jobs += [(stem, scene, t, extra + more.split()) for t in themes.split(",")]
     uploads = {os.path.basename(p): open(p, "rb").read() for p in files.split(",") if p}
     result = render.remote(open(bundle, "rb").read(), jobs, uploads)
     os.makedirs(out, exist_ok=True)

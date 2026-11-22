@@ -33,7 +33,8 @@ pub struct LineRange {
 
 pub const LINE_H: f32 = 20.0;
 pub const HEADER_H: f32 = 32.0;
-pub const SEP_H: f32 = 24.0;
+/// `[data-separator=line-info]`'s height.
+pub const SEP_H: f32 = 32.0;
 /// Pierre's `--diffs-gap-block` around a line-info separator.
 const SEP_GAP: f32 = 8.0;
 
