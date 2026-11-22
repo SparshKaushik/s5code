@@ -1,8 +1,10 @@
 //! SnapShots on Linux, taken the way Electron takes them (apps/desktop/src/snapShot:
-//! `LinuxSnapShot.ts`, `GnomeCaptureSetup.ts`, `linuxCaptureSession.ts`). Wayland only, as
-//! Electron's `captureMode`. The Screenshot portal's active-window target comes first, then the
-//! bundled GNOME extension, else the portal's own picker. Hyprland, KDE and Niri need helpers
-//! Electron ships separately, so they take the portal path here.
+//! `LinuxSnapShot.ts`, `GnomeCaptureSetup.ts`, `NiriSnapShot.ts`, `linuxCaptureSession.ts`).
+//! Wayland only, as Electron's `captureMode`. Hyprland (through `hyprctl` and `grim` instead of
+//! Electron's helper) and Niri (its IPC socket) come first, then the Screenshot portal's
+//! active-window target, the bundled GNOME extension, else the portal's own picker. KDE needs a
+//! helper Electron ships separately, so it takes the portal path here. App text comes from
+//! AT-SPI, as Electron's accessibility module reads it on Linux.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -28,6 +30,42 @@ pub enum Backend {
     ScreenshotPortal,
     GnomeExtension,
     Picker,
+    Hyprland,
+    Niri,
+}
+
+impl Backend {
+    /// Names the captured window's process, so its app text can be read.
+    pub fn knows_window(self) -> bool {
+        matches!(self, Backend::GnomeExtension | Backend::Hyprland | Backend::Niri)
+    }
+}
+
+/// The captured window, as the compositor described it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Window {
+    pub title: String,
+    pub app: String,
+    pub pid: u32,
+    /// Output-local points, where the compositor gives a comparable origin (Hyprland).
+    pub bounds: Option<[f64; 4]>,
+}
+
+/// The effects a capture asks for. GNOME's extension plays them inside the compositor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Feedback {
+    pub flash: bool,
+    pub animate: bool,
+    /// The composer's frame as fractions of our window: where the extension's flight lands.
+    pub relative: Option<[f64; 4]>,
+}
+
+pub struct Captured {
+    pub window: Option<Window>,
+    /// Our window's frame in the same output-local points as `window.bounds`.
+    pub own: Option<[f64; 4]>,
+    /// The compositor already flashed and flew the picture.
+    pub effects_done: bool,
 }
 
 /// `DesktopCaptureExtensionState.status`.
@@ -74,6 +112,24 @@ pub fn gnome_session(desktop: Option<&str>, sandboxed: bool) -> bool {
 
 fn sandboxed() -> bool {
     env("FLATPAK_ID").is_some() || env("SNAP").is_some()
+}
+
+/// `isDesktopSession`.
+fn desktop_session(desktop: Option<&str>, sandboxed: bool, name: &str) -> bool {
+    !sandboxed && desktop.is_some_and(|d| d.split(':').any(|n| n.eq_ignore_ascii_case(name)))
+}
+
+/// `isHyprlandCaptureSession`.
+pub fn hyprland_session() -> bool {
+    wayland() && desktop_session(env("XDG_CURRENT_DESKTOP").as_deref(), sandboxed(), "hyprland")
+}
+
+/// `niriSocketPath`.
+fn niri_socket() -> Option<PathBuf> {
+    if !desktop_session(env("XDG_CURRENT_DESKTOP").as_deref(), sandboxed(), "niri") {
+        return None;
+    }
+    env("NIRI_SOCKET").map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
 /// `LinuxCaptureConnection.backend` without the KDE helper: the active-window portal target
@@ -191,11 +247,199 @@ fn store_png(bytes: &[u8], path: &Path) -> Result<(), String> {
     .map_err(|_| "Could not save the snapshot.".to_owned())
 }
 
-/// The extension's window metadata: its title and app name, for the attachment's source.
-pub fn parse_window(json: &str) -> Option<(String, String)> {
+/// The extension's window metadata. Its bounds are GNOME's, used only by the extension.
+pub fn parse_window(json: &str) -> Option<Window> {
     let v: Value = serde_json::from_str(json).ok()?;
-    Some((v["title"].as_str()?.to_owned(), v["appName"].as_str()?.to_owned()))
+    let pid = v["processId"].as_u64().and_then(|p| u32::try_from(p).ok()).unwrap_or(0);
+    Some(Window { title: v["title"].as_str()?.to_owned(), app: v["appName"].as_str()?.to_owned(), pid, bounds: None })
 }
+
+/// Hyprland's `activewindow`/`clients` entry: its frame in layout points, less the monitor's origin.
+pub fn hyprland_window(v: &Value, origin: Option<(f64, f64)>) -> Option<Window> {
+    let pair = |key: &str| Some((v[key][0].as_f64()?, v[key][1].as_f64()?));
+    let ((x, y), (w, h)) = (pair("at")?, pair("size")?);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let pid = v["pid"].as_i64().and_then(|p| u32::try_from(p).ok()).unwrap_or(0);
+    let bounds = origin.map(|(ox, oy)| [x - ox, y - oy, w, h]);
+    Some(Window { title: v["title"].as_str().unwrap_or_default().to_owned(), app: v["class"].as_str().unwrap_or_default().to_owned(), pid, bounds })
+}
+
+/// `grim -g`'s geometry for a Hyprland window, in layout points.
+pub fn grim_geometry(v: &Value) -> Option<String> {
+    let n = |key: &str, i: usize| v[key][i].as_f64().map(|f| f.round() as i64);
+    Some(format!("{},{} {}x{}", n("at", 0)?, n("at", 1)?, n("size", 0)?, n("size", 1)?))
+}
+
+/// Niri's `Version` reply: 25.11 brought caller-chosen screenshot paths and completion events.
+pub fn niri_supported(version: &str) -> bool {
+    let version = version.strip_prefix("niri ").unwrap_or(version);
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next().and_then(|p| p.parse::<u32>().ok());
+    let minor = parts.next().and_then(|p| p.parse::<u32>().ok());
+    matches!((major, minor), (Some(m), Some(n)) if m > 25 || (m == 25 && n >= 11))
+}
+
+/// A Niri window, when it is still the one that was focused when the capture started.
+pub fn niri_window(before: &Value, after: Option<&Value>) -> Option<Window> {
+    let after = after?;
+    let same = ["pid", "title", "app_id"].iter().all(|k| before[k] == after[k]) && before["layout"]["window_size"] == after["layout"]["window_size"];
+    same.then(|| Window {
+        title: before["title"].as_str().unwrap_or_default().to_owned(),
+        app: before["app_id"].as_str().unwrap_or("Application").to_owned(),
+        pid: before["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).unwrap_or(0),
+        // Niri reports a logical size, not a comparable screen origin.
+        bounds: None,
+    })
+}
+
+/// The overlay's display space on Hyprland: one monitor, so output-local points are unambiguous.
+fn hyprland_origin() -> Option<(f64, f64)> {
+    let monitors = hyprland::query("monitors").ok()?;
+    match monitors.as_array().map(Vec::as_slice) {
+        Some([only]) => Some((only["x"].as_f64()?, only["y"].as_f64()?)),
+        _ => None,
+    }
+}
+
+mod hyprland {
+    use serde_json::Value;
+    use std::process::{Command, Stdio};
+
+    fn missing(tool: &str) -> String {
+        format!("Install {tool} to capture windows on Hyprland.")
+    }
+
+    pub fn query(what: &str) -> Result<Value, String> {
+        let out = Command::new("hyprctl").args(["-j", what]).stdin(Stdio::null()).output().map_err(|_| missing("hyprctl"))?;
+        if !out.status.success() {
+            return Err("Hyprland did not respond. Check that hyprctl works in this session.".into());
+        }
+        serde_json::from_slice(&out.stdout).map_err(|_| "Hyprland returned an unreadable reply.".to_owned())
+    }
+
+    pub fn check() -> Result<(), String> {
+        query("version")?;
+        Command::new("grim").arg("-h").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|_| missing("grim"))?;
+        Ok(())
+    }
+
+    /// The focused window's PNG from `grim`, and the window.
+    pub fn capture() -> Result<(Vec<u8>, Value), String> {
+        let active = query("activewindow")?;
+        let geometry = super::grim_geometry(&active).ok_or("Hyprland has no focused window to capture.")?;
+        let out = Command::new("grim").args(["-g", &geometry, "-t", "png", "-"]).stdin(Stdio::null()).output().map_err(|_| missing("grim"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(if detail.is_empty() { "grim could not capture the window.".into() } else { detail });
+        }
+        Ok((out.stdout, active))
+    }
+
+    /// Our own window, for where a flight lands.
+    pub fn own() -> Option<Value> {
+        let pid = i64::from(std::process::id());
+        query("clients").ok()?.as_array()?.iter().find(|c| c["pid"].as_i64() == Some(pid) && c["mapped"] != false).cloned()
+    }
+}
+
+mod niri {
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    const MAX_MESSAGE_BYTES: u64 = 4 * 1024 * 1024;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct Socket(BufReader<UnixStream>);
+
+    impl Socket {
+        fn open(path: &Path) -> Result<Self, String> {
+            let stream = UnixStream::connect(path).map_err(|_| "Could not reach Niri. Check that NIRI_SOCKET is set.".to_owned())?;
+            stream.set_read_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
+            stream.set_write_timeout(Some(TIMEOUT)).map_err(|e| e.to_string())?;
+            Ok(Self(BufReader::new(stream)))
+        }
+
+        fn send(&mut self, message: &Value) -> Result<(), String> {
+            let line = format!("{message}\n");
+            self.0.get_mut().write_all(line.as_bytes()).map_err(|_| "Niri closed the connection.".to_owned())
+        }
+
+        /// One reply or event; bounded so an unterminated message can't grow without limit.
+        fn next(&mut self) -> Result<Value, String> {
+            let mut line = Vec::new();
+            let read = self.0.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\n', &mut line).map_err(|_| "Niri did not respond.".to_owned())?;
+            if read == 0 {
+                return Err("Niri closed the connection.".into());
+            }
+            if line.len() as u64 > MAX_MESSAGE_BYTES {
+                return Err("Niri returned an oversized message.".into());
+            }
+            serde_json::from_slice(&line).map_err(|_| "Niri returned an unreadable message.".to_owned())
+        }
+    }
+
+    fn request(path: &Path, message: Value) -> Result<Value, String> {
+        let mut socket = Socket::open(path)?;
+        socket.send(&message)?;
+        let mut reply = socket.next()?;
+        match (reply.get_mut("Ok").map(Value::take), reply["Err"].as_str()) {
+            (Some(ok), _) => Ok(ok),
+            (None, Some(err)) => Err(format!("Niri: {err}")),
+            _ => Err("Niri returned an unreadable reply.".into()),
+        }
+    }
+
+    pub fn check(path: &Path) -> Result<(), String> {
+        let version = request(path, json!("Version"))?;
+        if super::niri_supported(version["Version"].as_str().unwrap_or_default()) { Ok(()) } else { Err("SnapShots require Niri 25.11 or newer.".into()) }
+    }
+
+    /// `captureNiriWindow`: subscribe, screenshot the focused window to our path, wait for it.
+    pub fn capture(path: &Path) -> Result<(Vec<u8>, Option<super::Window>), String> {
+        let mut events = Socket::open(path)?;
+        events.send(&json!("EventStream"))?;
+        // An initial state event proves the subscription; the EventStream reply alone doesn't.
+        let deadline = Instant::now() + TIMEOUT;
+        while events.next()?.get("WindowsChanged").is_none() {
+            if Instant::now() > deadline {
+                return Err("Niri did not respond.".into());
+            }
+        }
+        let focused = request(path, json!("FocusedWindow"))?["FocusedWindow"].take();
+        let id = focused["id"].as_u64().ok_or("Niri has no focused window to capture.")?;
+        let dir = std::env::temp_dir().join(format!("t3-niri-capture-{}-{}", std::process::id(), s5_net::uuid()));
+        std::fs::create_dir(&dir).map_err(|_| "Could not prepare the snapshot.".to_owned())?;
+        let image = dir.join("capture.png");
+        let result = (|| {
+            let target = image.to_string_lossy().into_owned();
+            request(path, json!({"Action": {"ScreenshotWindow": {"id": id, "write_to_disk": true, "show_pointer": false, "path": target}}}))?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                let event = events.next()?;
+                if event["ScreenshotCaptured"]["path"].as_str() == Some(target.as_str()) {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    return Err("Niri did not finish the snapshot.".to_owned());
+                }
+            }
+            let png = std::fs::read(&image).map_err(|_| "Incomplete screenshot file.".to_owned())?;
+            let windows = request(path, json!("Windows"))?;
+            let after = windows["Windows"].as_array().and_then(|all| all.iter().find(|w| w["id"].as_u64() == Some(id)));
+            // A changed or closed window still gives the image, never text from its replacement.
+            Ok((png, super::niri_window(&focused, after)))
+        })();
+        // The directory is ours; the compositor's own screenshot folder is never touched.
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+}
+
 
 fn data_home() -> Option<PathBuf> {
     env("XDG_DATA_HOME").map(PathBuf::from).or_else(|| env("HOME").map(|h| Path::new(&h).join(".local/share")))
@@ -251,6 +495,14 @@ fn install() -> Result<(), String> {
 
 /// Finds the backend and, on GNOME, the extension's setup state.
 pub fn detect() -> Result<Setup, String> {
+    if hyprland_session() {
+        hyprland::check()?;
+        return Ok(Setup { backend: Backend::Hyprland, extension: None });
+    }
+    if let Some(socket) = niri_socket() {
+        niri::check(&socket)?;
+        return Ok(Setup { backend: Backend::Niri, extension: None });
+    }
     let gnome = gnome_session(env("XDG_CURRENT_DESKTOP").as_deref(), sandboxed());
     let found = bus::probe(gnome)?;
     let extension = gnome.then(|| match &found.shell {
@@ -272,19 +524,39 @@ pub fn act(action: Action) -> Result<(), String> {
     }
 }
 
-/// Captures with `backend` into `path`, returning its `SnapShotSource`.
-pub fn capture(backend: Backend, path: &Path) -> Result<Value, String> {
-    let (png, window) = match backend {
-        Backend::ScreenshotPortal => (bus::screenshot(false)?, None),
-        Backend::Picker => (bus::screenshot(true)?, None),
+/// Captures with `backend` into `path`.
+pub fn capture(backend: Backend, path: &Path, feedback: Feedback) -> Result<Captured, String> {
+    let mut captured = Captured { window: None, own: None, effects_done: false };
+    let png = match backend {
+        Backend::ScreenshotPortal => bus::screenshot(false)?,
+        Backend::Picker => bus::screenshot(true)?,
         Backend::GnomeExtension => {
-            let (png, window) = bus::extension_capture()?;
-            (png, parse_window(&window))
+            let (png, window, effects) = bus::extension_capture(feedback)?;
+            captured.window = parse_window(&window);
+            captured.effects_done = effects;
+            png
+        }
+        Backend::Hyprland => {
+            let (png, active) = hyprland::capture()?;
+            let origin = (feedback.flash || feedback.animate).then(hyprland_origin).flatten();
+            captured.window = hyprland_window(&active, origin);
+            captured.own = origin.and_then(|o| hyprland_window(&hyprland::own()?, Some(o))?.bounds);
+            png
+        }
+        Backend::Niri => {
+            let socket = niri_socket().ok_or("Niri is not available in this session.")?;
+            let (png, window) = niri::capture(&socket)?;
+            captured.window = window;
+            png
         }
     };
     store_png(&png, path)?;
-    let (title, app) = window.unwrap_or_default();
-    Ok(crate::desktop::capture::snap_shot_source(&app, &title, None))
+    Ok(captured)
+}
+
+/// The captured window's text through AT-SPI, as Electron reads it on Linux.
+pub fn app_text(window: &Window) -> Option<String> {
+    (window.pid > 0).then(|| bus::app_text(window.pid, &window.title)).flatten()
 }
 
 /// Plays a capture sound through PipeWire, else PulseAudio.
@@ -487,7 +759,9 @@ mod bus {
     }
 
     /// `captureExtension`: own the caller name the extension trusts, then ask for the window.
-    pub(super) fn extension_capture() -> Result<(Vec<u8>, String), String> {
+    /// With effects on, the extension flashes and, once we name our window, flies the picture
+    /// to `relative` on the same connection; closing it clears the landed picture.
+    pub(super) fn extension_capture(feedback: super::Feedback) -> Result<(Vec<u8>, String, bool), String> {
         block(|conn| async move {
             let conn = &conn;
             let name = format!("{APP_ID}.SnapShot");
@@ -501,13 +775,115 @@ mod bus {
             if owned != 1 {
                 return Err("Another T3 Code instance is capturing a window. Try again.".into());
             }
-            timed(async {
-                let proxy = Proxy::new(conn, EXTENSION, EXTENSION_PATH, EXTENSION).await?;
-                proxy.call::<_, _, (Vec<u8>, String)>("Capture", &()).await
-            })
-            .await
-            .map_err(message)
+            let proxy = Proxy::new(conn, EXTENSION, EXTENSION_PATH, EXTENSION).await.map_err(message)?;
+            if feedback.flash || feedback.animate {
+                match timed(proxy.call::<_, _, (Vec<u8>, String, bool)>("CaptureWithFeedback", &(feedback.flash, feedback.animate))).await {
+                    Ok((png, window, started)) => {
+                        if let Some([x, y, w, h]) = feedback.relative.filter(|_| started) {
+                            // Our only window is found by pid; the title only breaks ties.
+                            let _ = timed(proxy.call::<_, _, ()>("Activate", &("",))).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(3), proxy.call::<_, _, ()>("Animate", &(x, y, w, h))).await;
+                        }
+                        return Ok((png, window, true));
+                    }
+                    // Version 1 of the extension has no feedback.
+                    Err(e) if missing(&e) => {}
+                    Err(e) => return Err(message(e)),
+                }
+            }
+            let (png, window) = timed(proxy.call::<_, _, (Vec<u8>, String)>("Capture", &())).await.map_err(message)?;
+            Ok((png, window, false))
         })
+    }
+
+    const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
+    const ATSPI_TEXT: &str = "org.a11y.atspi.Text";
+    /// `STATE_ACTIVE` in the first word of `GetState`.
+    const STATE_ACTIVE: u32 = 1 << 1;
+
+    async fn call<B, R>(conn: &Connection, (dest, path): (&str, &str), interface: &str, method: &str, body: &B) -> zbus::Result<R>
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+        R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
+    {
+        let reply = conn.call_method(Some(dest), path, Some(interface), method, body).await?;
+        reply.body().deserialize::<R>()
+    }
+
+    async fn property(conn: &Connection, node: (&str, &str), name: &str) -> Option<String> {
+        let v: OwnedVariant = call(conn, node, "org.freedesktop.DBus.Properties", "Get", &(ATSPI_ACCESSIBLE, name)).await.ok()?;
+        <&str>::try_from(&v).ok().map(str::to_owned)
+    }
+
+    async fn children(conn: &Connection, node: (&str, &str)) -> Vec<(String, OwnedObjectPath)> {
+        call(conn, node, ATSPI_ACCESSIBLE, "GetChildren", &()).await.unwrap_or_default()
+    }
+
+    /// `SnapShotAccessibility`'s flat text over AT-SPI: the app with the window's pid, its window
+    /// by title (else the active one), then name, description and text, depth first.
+    pub(super) fn app_text(pid: u32, title: &str) -> Option<String> {
+        use crate::desktop::capture::{ACCESSIBILITY_MAX_NODES, ACCESSIBLE_TEXT_MAX_CHARS, TEXT_TIMEOUT, accessible_text};
+        let title = title.to_owned();
+        block(|session| async move {
+            let address: String = call(&session, ("org.a11y.Bus", "/org/a11y/bus"), "org.a11y.Bus", "GetAddress", &()).await.map_err(message)?;
+            let a11y = zbus::connection::Builder::address(address.as_str()).map_err(message)?.build().await.map_err(message)?;
+            let mut values = Vec::new();
+            let walk = async {
+                let root = children(&a11y, ("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")).await;
+                let mut app = None;
+                for (name, path) in root {
+                    let owner: zbus::Result<u32> = call(&a11y, (DBUS, DBUS_PATH), DBUS, "GetConnectionUnixProcessID", &(name.as_str(),)).await;
+                    if owner.ok() == Some(pid) {
+                        app = Some((name, path));
+                        break;
+                    }
+                }
+                let (bus, app_path) = app?;
+                let windows = children(&a11y, (bus.as_str(), app_path.as_str())).await;
+                let mut chosen = None;
+                for (_, path) in &windows {
+                    let node = (bus.as_str(), path.as_str());
+                    if !title.is_empty() && property(&a11y, node, "Name").await.as_deref() == Some(title.as_str()) {
+                        chosen = Some(path.clone());
+                        break;
+                    }
+                    let state: Vec<u32> = call(&a11y, node, ATSPI_ACCESSIBLE, "GetState", &()).await.unwrap_or_default();
+                    if chosen.is_none() && state.first().is_some_and(|s| s & STATE_ACTIVE != 0) {
+                        chosen = Some(path.clone());
+                    }
+                }
+                let mut stack = vec![chosen.or_else(|| windows.first().map(|(_, p)| p.clone()))?];
+                let mut visited: u32 = 0;
+                while let Some(path) = stack.pop() {
+                    visited += 1;
+                    if visited > ACCESSIBILITY_MAX_NODES {
+                        break;
+                    }
+                    let node = (bus.as_str(), path.as_str());
+                    for name in ["Name", "Description"] {
+                        if let Some(value) = property(&a11y, node, name).await {
+                            values.push(value);
+                        }
+                    }
+                    let interfaces: Vec<String> = call(&a11y, node, ATSPI_ACCESSIBLE, "GetInterfaces", &()).await.unwrap_or_default();
+                    if interfaces.iter().any(|i| i == ATSPI_TEXT)
+                        && let Ok(text) = call::<_, String>(&a11y, node, ATSPI_TEXT, "GetText", &(0i32, -1i32)).await
+                    {
+                        values.push(text);
+                    }
+                    let mut kids = children(&a11y, node).await;
+                    kids.reverse();
+                    stack.extend(kids.into_iter().map(|(_, p)| p));
+                }
+                Some(())
+            };
+            // Whatever was read before the deadline still counts, as Electron keeps partial text.
+            let _ = tokio::time::timeout(TEXT_TIMEOUT, walk).await;
+            let _ = a11y.close().await;
+            Ok(accessible_text(&values, ACCESSIBLE_TEXT_MAX_CHARS))
+        })
+        .ok()
+        .filter(|text| !text.is_empty())
     }
 }
 
@@ -524,8 +900,11 @@ mod bus {
     pub(super) fn screenshot(_: bool) -> Result<Vec<u8>, String> {
         Err(UNSUPPORTED.into())
     }
-    pub(super) fn extension_capture() -> Result<(Vec<u8>, String), String> {
+    pub(super) fn extension_capture(_: super::Feedback) -> Result<(Vec<u8>, String, bool), String> {
         Err(UNSUPPORTED.into())
+    }
+    pub(super) fn app_text(_: u32, _: &str) -> Option<String> {
+        None
     }
 }
 
@@ -607,7 +986,26 @@ mod tests {
         assert_eq!(uri_path("file:///tmp/%00x"), None);
         assert_eq!(fitted(5120, 2880), Some((2560, 1440)));
         assert_eq!(fitted(1200, 800), None);
-        assert_eq!(parse_window(r#"{"title":"Docs","appName":"Firefox","appIdentifier":"firefox","processId":7,"bounds":{"x":0,"y":0,"width":10,"height":10}}"#), Some(("Docs".into(), "Firefox".into())));
+        let docs = Window { title: "Docs".into(), app: "Firefox".into(), pid: 7, bounds: None };
+        assert_eq!(parse_window(r#"{"title":"Docs","appName":"Firefox","appIdentifier":"firefox","processId":7,"bounds":{"x":0,"y":0,"width":10,"height":10}}"#), Some(docs));
         assert_eq!(parse_window("{}"), None);
+    }
+
+    #[test]
+    fn reads_hyprland_and_niri_windows() {
+        let active = json!({"at": [1930, 40], "size": [1200, 800], "pid": 42, "title": "Docs", "class": "firefox"});
+        assert_eq!(grim_geometry(&active).as_deref(), Some("1930,40 1200x800"));
+        let window = hyprland_window(&active, Some((1920.0, 0.0))).unwrap();
+        assert_eq!((window.pid, window.app.as_str(), window.bounds), (42, "firefox", Some([10.0, 40.0, 1200.0, 800.0])), "output-local for the overlay");
+        assert_eq!(hyprland_window(&active, None).unwrap().bounds, None, "no effects without one monitor");
+        assert_eq!(hyprland_window(&json!({}), None), None, "hyprctl's empty reply when nothing is focused");
+        assert_eq!(grim_geometry(&json!({})), None);
+        assert!(niri_supported("niri 25.11 (abc)") && niri_supported("26.02") && !niri_supported("25.08") && !niri_supported("unknown"));
+        let before = json!({"id": 3, "pid": 9, "title": "Term", "app_id": "foot", "layout": {"window_size": [800, 600]}});
+        assert_eq!(niri_window(&before, Some(&before)).map(|w| (w.pid, w.app)), Some((9, "foot".into())));
+        let retitled = json!({"id": 3, "pid": 9, "title": "Other", "app_id": "foot", "layout": {"window_size": [800, 600]}});
+        assert_eq!(niri_window(&before, Some(&retitled)), None, "never attach text from a replacement");
+        assert_eq!(niri_window(&before, None), None);
+        assert!(Backend::Niri.knows_window() && !Backend::ScreenshotPortal.knows_window());
     }
 }
