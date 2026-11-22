@@ -1112,7 +1112,7 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
 
 /// Queues files in the open route's draft; the route's banner says why one was refused. A folder
 /// becomes an @ mention instead, relative to the workspace it sits in.
-fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
+pub(crate) fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
     if editing_run(s).is_some() {
         return;
     }

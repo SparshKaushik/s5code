@@ -1458,6 +1458,19 @@ pub(crate) fn jump_labels(s: &App, model: &Model) -> HashMap<String, String> {
         .collect()
 }
 
+/// `handleThreadFileDrop`: files dropped on a row open its thread with them attached; folders
+/// are left out, as web's row drop ignores them.
+pub fn drop_files(s: &mut App, id: &str, files: &[std::path::PathBuf]) {
+    let files: Vec<String> = files.iter().filter(|p| !p.is_dir()).map(|p| p.display().to_string()).collect();
+    if files.is_empty() {
+        return;
+    }
+    open_thread(s, id);
+    if matches!(&s.route, Route::Thread(open) if open == id) {
+        crate::chat::composer::add_files(s, files);
+    }
+}
+
 /// `selectThreadSearchResult`: opens the thread, and find on its message match as the palette does.
 pub(crate) fn open_result(s: &mut App, id: &str) {
     let ui = &s.ui.shell.sidebar;
@@ -1694,6 +1707,20 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn files_dropped_on_a_row_open_its_thread_and_folders_alone_do_nothing() {
+        let mut s = App::new();
+        s.route = Route::Home { project_id: None };
+        let id = crate::data::s(&s.state().threads[0], "id").to_string();
+        drop_files(&mut s, &id, &[std::env::temp_dir()]);
+        assert!(matches!(s.route, Route::Home { .. }), "a folder alone is ignored");
+        let file = std::env::temp_dir().join("s5code-rune-drop-test.txt");
+        std::fs::write(&file, "x").unwrap();
+        drop_files(&mut s, &id, &[file.clone()]);
+        assert!(matches!(&s.route, Route::Thread(open) if *open == id));
+        let _ = std::fs::remove_file(file);
     }
 
     #[test]

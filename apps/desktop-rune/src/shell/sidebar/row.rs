@@ -159,8 +159,9 @@ fn place(li: El, rc: &RowCtx) -> El {
 /// The press/drag/menu wiring every row shares: a click opens (Cmd toggles, Shift extends the
 /// selection), a drag past `DRAG_DISTANCE` moves it, a secondary press opens the menu.
 fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>) -> El {
-    let (id, hid, mid) = (th.id.clone(), th.id.clone(), th.id.clone());
+    let (id, hid, mid, fid) = (th.id.clone(), th.id.clone(), th.id.clone(), th.id.clone());
     e.key(format!("sb-row-{}", th.id))
+        .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| super::drop_files(s, &fid, files))
         .cursor(Cursor::Pointer)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.sb.ring)
