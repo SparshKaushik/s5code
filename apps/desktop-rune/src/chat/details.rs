@@ -1737,7 +1737,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, DraftRun, Item, Pending, Ref, Shown, access, branch_denied, branch_items, draft_run, grants, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
+    use super::{Access, DraftRun, Item, Pending, Ref, Shown, access, branch_denied, branch_items, draft_run, grants, git, lane, lane_max, local_name, max_width, shown, switching, take_draft_workspace, toggle};
     use serde_json::{Value, json};
     use crate::{App, Route, data};
 
