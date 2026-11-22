@@ -169,6 +169,129 @@ pub fn intake(attachments: &mut Vec<String>, paths: impl IntoIterator<Item = Str
     error
 }
 
+/// PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES.
+pub const PASTED_TEXT_THRESHOLD: usize = 32 * 1024;
+
+/// pastedTextDisposition: a paste of 32 KiB or more, or one that would push the prompt over its
+/// limit, becomes a text file, unless pasted as text (Mod+Shift+V). UTF-8 bytes are never fewer
+/// than web's UTF-16 length, so the byte count covers both of web's checks.
+pub fn folds_paste(text: &str, as_text: bool, exceeds_limit: bool) -> bool {
+    !as_text && !text.is_empty() && (exceeds_limit || text.len() >= PASTED_TEXT_THRESHOLD)
+}
+
+/// nextPastedTextFileName: `pasted-text.txt`, then `pasted-text-2.txt`, ... unused among `names`.
+pub fn pasted_text_name<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let taken: std::collections::HashSet<String> = names.into_iter().map(str::to_lowercase).collect();
+    std::iter::once("pasted-text.txt".to_owned())
+        .chain((2..).map(|n| format!("pasted-text-{n}.txt")))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_default()
+}
+
+/// Writes pasted text to a file named `name` in a folder of its own, so the name is kept.
+pub fn write_pasted(name: &str, text: &str) -> Option<String> {
+    let dir = std::env::temp_dir().join(format!("s5-pasted-{}", s5_net::uuid()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(name);
+    std::fs::write(&path, text).ok()?;
+    Some(path.display().to_string())
+}
+
+/// A queued image's tile is 64 points; it decodes to that on a 2x display, never the original.
+const THUMB_DECODE: u32 = 128;
+/// Images larger than this on disk show their name instead of a thumbnail.
+const MAX_THUMB_SOURCE: u64 = 20 * 1024 * 1024;
+
+/// A queued image's thumbnail (ComposerImageThumbnail), decoded off the UI thread.
+pub struct Thumb {
+    pub pixels: rune::Pixels,
+    broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A view has seen it decoded.
+    shown: bool,
+}
+
+impl Thumb {
+    pub fn failed(&self) -> bool {
+        self.broken.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+fn decode_thumb(path: &str) -> Option<image::RgbaImage> {
+    let size = std::fs::metadata(path).ok()?.len();
+    if size == 0 || size > MAX_THUMB_SOURCE {
+        return None;
+    }
+    let image = image::load_from_memory(&std::fs::read(path).ok()?).ok()?;
+    Some(image.thumbnail(THUMB_DECODE, THUMB_DECODE).to_rgba8())
+}
+
+fn load_thumb(path: &str, waker: Option<rune::Waker>, now: bool) -> Thumb {
+    let thumb = Thumb { pixels: rune::Pixels::new(), broken: Default::default(), shown: false };
+    let (path, pixels, broken) = (path.to_owned(), thumb.pixels.clone(), thumb.broken.clone());
+    let run = move || {
+        match decode_thumb(&path) {
+            Some(image) => pixels.set(image.width(), image.height(), image.into_raw()),
+            None => broken.store(true, std::sync::atomic::Ordering::Relaxed),
+        }
+        if let Some(wake) = &waker {
+            wake();
+        }
+    };
+    if now {
+        run();
+    } else {
+        std::thread::spawn(run);
+    }
+    thumb
+}
+
+/// Thumbnails of the images queued in drafts: views ask for them, `poll` decodes them, and one
+/// whose file left every draft is dropped.
+#[derive(Default)]
+pub struct Thumbs {
+    ready: std::collections::HashMap<String, Thumb>,
+    wanted: std::cell::RefCell<Vec<String>>,
+}
+
+impl Thumbs {
+    /// The thumbnail for `path`, asking for it when there is none yet.
+    pub fn get(&self, path: &str) -> Option<&Thumb> {
+        let thumb = self.ready.get(path);
+        if thumb.is_none() {
+            let mut wanted = self.wanted.borrow_mut();
+            if !wanted.iter().any(|w| w == path) {
+                wanted.push(path.to_owned());
+            }
+        }
+        thumb
+    }
+
+    /// Decodes `path` before returning, for scenes that draw one frame.
+    pub fn load_now(&mut self, path: &str) {
+        self.ready.insert(path.to_owned(), load_thumb(path, None, true));
+    }
+
+    /// Starts the wanted decodes and drops the thumbnails `keep` no longer names. True when a
+    /// view should draw again: one finished, or one was dropped.
+    pub fn poll(&mut self, waker: Option<rune::Waker>, keep: impl Fn(&str) -> bool) -> bool {
+        for path in std::mem::take(self.wanted.get_mut()) {
+            if keep(&path) && !self.ready.contains_key(&path) {
+                self.ready.insert(path.clone(), load_thumb(&path, waker.clone(), false));
+            }
+        }
+        let before = self.ready.len();
+        self.ready.retain(|path, _| keep(path));
+        let mut changed = self.ready.len() != before;
+        for thumb in self.ready.values_mut() {
+            if !thumb.shown && (thumb.pixels.size().0 > 0 || thumb.failed()) {
+                thumb.shown = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 pub struct FileUpload {
     path: String,
     /// Uploaded without a `type`, so the server stores it as an image.
@@ -395,6 +518,23 @@ mod tests {
         assert_eq!(intake(&mut queued, [notes.clone()]).as_deref(), Some("You can attach up to 100 files per message."));
         assert_eq!(queued.len(), MAX_ATTACHMENTS);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn long_pastes_fold_into_numbered_text_files_unless_pasted_as_text() {
+        let long = "x".repeat(PASTED_TEXT_THRESHOLD);
+        assert!(folds_paste(&long, false, false));
+        assert!(!folds_paste(&long[1..], false, false));
+        assert!(folds_paste(&"\u{e9}".repeat(PASTED_TEXT_THRESHOLD / 2), false, false), "FAILED: the threshold counts bytes");
+        assert!(folds_paste("short", false, true), "FAILED: a paste past the prompt limit folds");
+        assert!(!folds_paste(&long, true, true), "FAILED: Mod+Shift+V pastes inline");
+        assert!(!folds_paste("", false, true));
+        assert_eq!(pasted_text_name(["notes.md"]), "pasted-text.txt");
+        assert_eq!(pasted_text_name(["Pasted-Text.txt", "pasted-text-2.txt"]), "pasted-text-3.txt");
+        let path = write_pasted("pasted-text.txt", "hello").unwrap();
+        assert_eq!(file_name(&path), "pasted-text.txt");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        std::fs::remove_dir_all(Path::new(&path).parent().unwrap()).unwrap();
     }
 
     #[test]

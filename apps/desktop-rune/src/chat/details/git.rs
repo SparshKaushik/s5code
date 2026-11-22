@@ -779,6 +779,8 @@ fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {
                 .build(t),
         );
     }
+    // Web disables the open buttons without orchestration:operate or a working tree.
+    let can_open = super::grants(s, "orchestration:operate") && status.as_ref().is_some_and(|v| v["workingTree"]["rootPath"].is_string());
     let mut section = col().w_full().gap(4.0).child(files_head);
     if all.is_empty() {
         section = section.child(text("none").font(theme::SM_MEDIUM).color(t.c.foreground));
@@ -804,32 +806,38 @@ fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {
                 );
             }
             let target = path.clone();
-            let name = text(path.clone())
+            let mut name = text(path.clone())
                 .font(theme::mono(theme::TEXT_SM))
                 .color(if excluded { muted } else { t.c.foreground })
                 .truncate_head()
                 .grow(1.0)
                 .shrink()
                 .min_w(0.0)
-                .cursor(Cursor::Pointer)
                 .role("button")
                 .label(format!("Open {path} in editor"))
-                .on_press(move |s: &mut App| open_file(s, &target));
+                .disabled(!can_open);
+            if can_open {
+                name = name.cursor(Cursor::Pointer).on_press(move |s: &mut App| open_file(s, &target));
+            }
             line = line.child(name);
             line = line.child(if excluded { text("Excluded").font(theme::mono(theme::TEXT_SM)).color(muted) } else { diff_count(t, *add, *del) });
             list = list.child(line);
         }
         let (add, del) = selected.iter().fold((0, 0), |acc, f| (acc.0 + f.1, acc.1 + f.2));
-        section = section
-            .child(el().w_full().h(176.0).key("git-commit-files").radius(radius::LG).fill(if t.dark { Color::WHITE.alpha(0.025) } else { t.c.card }).border(1.0, if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.05) }).scroll(ScrollSpec { stick_bottom: false }).child(list))
-            .child(row().w_full().justify_end().child(diff_count(t, add, del)));
+        section = section.child(
+            col()
+                .w_full()
+                .gap(8.0)
+                .child(el().w_full().h(176.0).key("git-commit-files").radius(radius::LG).fill(if t.dark { Color::WHITE.alpha(0.025) } else { t.c.card }).border(1.0, if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.05) }).scroll(ScrollSpec { stick_bottom: false }).child(list))
+                .child(row().w_full().justify_end().child(diff_count(t, add, del))),
+        );
     }
     let summary = col()
         .w_full()
         .gap(12.0)
         .padding(12.0)
         .radius(radius::XL)
-        .fill(if t.dark { Color::WHITE.alpha(0.035) } else { t.c.muted.alpha_mul(0.5) })
+        .fill(if t.dark { Color::WHITE.alpha(0.035) } else { t.c.background })
         .border(1.0, if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.05) })
         .child(branch)
         .child(section);
@@ -846,8 +854,8 @@ fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .gap(8.0)
         .justify_end()
         .child(kit::Button::new("Cancel").variant("outline").size("sm").on_press(close_commit).build(t))
-        .child(kit::Button::new("Commit on new branch").variant("outline").size("sm").disabled(none_selected).on_press(|s: &mut App| submit_commit(s, true)).build(t))
-        .child(kit::Button::new("Commit").size("sm").disabled(none_selected).on_press(|s: &mut App| submit_commit(s, false)).build(t));
+        .child(kit::Button::new("Commit on new branch").variant("outline").size("sm").disabled(!super::can_change_branch(s) || none_selected).on_press(|s: &mut App| submit_commit(s, true)).build(t))
+        .child(kit::Button::new("Commit").size("sm").disabled(!writable(s) || none_selected).on_press(|s: &mut App| submit_commit(s, false)).build(t));
     kit::Dialog::new("git-commit", "Commit changes")
         .open(true)
         .description("Review and confirm your commit. Leave the message blank to auto-generate one.")

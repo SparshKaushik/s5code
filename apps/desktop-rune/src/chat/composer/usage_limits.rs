@@ -48,7 +48,7 @@ fn panel_key(s: &App) -> Option<String> {
         .map(|a| data::s(a, "id").to_owned())
         .or_else(|| crate::chat::timeline::question::active(s).map(|q| q.id().to_owned()))
         .unwrap_or_default();
-    Some(format!("{}:{instance}:{run}:{pending}", draft_key(s, s.frame_route())))
+    Some(format!("{}:{instance}:{run}:{pending}", draft_key(s, &super::route(s))))
 }
 
 /// The selected provider reports limits, natively or through a limit source.
@@ -149,8 +149,7 @@ fn has_limits(driver: &str, providers: &[Value], sources: &[Value]) -> bool {
 /// A usable read beats an unusable one, then the fresher read wins.
 fn wins(next: &Value, previous: &Value) -> bool {
     let (usable, was_usable) = (limits_notice(next).is_none(), limits_notice(previous).is_none());
-    let newer = matches!((data::ts(next, "checkedAt"), data::ts(previous, "checkedAt")), (Some(a), Some(b)) if a > b);
-    (usable && !was_usable) || (usable == was_usable && newer)
+    (usable && !was_usable) || (usable == was_usable && newer(next, previous))
 }
 
 /// The provider clients' labels.
@@ -188,33 +187,31 @@ pub(super) fn collect(instance: &str, providers: &[Value], sources: &[Value]) ->
     if !has_limits(driver, providers, sources) {
         return None;
     }
-    let mut native: Vec<(Option<String>, &Value)> = Vec::new();
+    // Per account: the read shown, and the freshest read that carries reset credits.
+    let mut native: Vec<(Option<String>, &Value, Option<&Value>)> = Vec::new();
     for p in providers.iter().filter(|p| reports_limits(p) && data::s(p, "driver") == driver) {
         let key = account_key(driver, p["auth"]["email"].as_str(), p["auth"]["workspaceId"].as_str(), &p["usageLimits"]);
-        let seen = key.as_ref().and_then(|k| native.iter().position(|(o, _)| o.as_ref() == Some(k)));
+        let credit = p["usageLimits"]["resetCredits"].is_object().then_some(p);
+        let seen = key.as_ref().and_then(|k| native.iter().position(|(o, ..)| o.as_ref() == Some(k)));
         match seen {
-            Some(at) if wins(&p["usageLimits"], &native[at].1["usageLimits"]) => native[at].1 = p,
-            Some(_) => {}
-            None => native.push((key, p)),
+            Some(at) => {
+                let (_, usage, credits) = &mut native[at];
+                if wins(&p["usageLimits"], &usage["usageLimits"]) {
+                    *usage = p;
+                }
+                if credit.is_some() && (*credits).is_none_or(|c| newer(&p["usageLimits"], &c["usageLimits"])) {
+                    *credits = credit;
+                }
+            }
+            None => native.push((key, p, credit)),
         }
     }
     let covered: Vec<&String> = native
         .iter()
-        .filter(|(_, p)| !windows(&p["usageLimits"]).is_empty() && p["usageLimits"]["unavailable"].is_null())
-        .filter_map(|(k, _)| k.as_ref())
+        .filter(|(_, p, _)| !windows(&p["usageLimits"]).is_empty() && p["usageLimits"]["unavailable"].is_null())
+        .filter_map(|(k, ..)| k.as_ref())
         .collect();
-    let mut accounts: Vec<Account> = native
-        .iter()
-        .map(|(_, p)| Account {
-            id: data::s(p, "instanceId").to_owned(),
-            label: instance_label(p),
-            plan: text_of(&p["auth"]["label"]),
-            driver: driver.to_owned(),
-            accent: text_of(&p["accentColor"]),
-            redeem: Some(json!({"instanceId": p["instanceId"]})),
-            limits: p["usageLimits"].clone(),
-        })
-        .collect();
+    let mut accounts: Vec<Account> = native.iter().map(|(key, p, credits)| native_account(p, *credits, key.as_deref(), sources)).collect();
     let mut notices = Vec::new();
     for src in sources {
         let matching: Vec<&Value> = list(&src["accounts"]).iter().filter(|a| data::s(a, "driver") == driver).collect();
@@ -242,6 +239,50 @@ pub(super) fn collect(instance: &str, providers: &[Value], sources: &[Value]) ->
         }
     }
     Some(Report { accounts, notices })
+}
+
+fn newer(next: &Value, previous: &Value) -> bool {
+    matches!((data::ts(next, "checkedAt"), data::ts(previous, "checkedAt")), (Some(a), Some(b)) if a > b)
+}
+
+/// A signed-in account's entry. Its credit redeems through the freshest usable limit-source copy
+/// of the same login when that copy names one, which clears the source's routing cooldown too;
+/// the balance shown is the fresher of the two reads.
+fn native_account(p: &Value, credits: Option<&Value>, key: Option<&str>, sources: &[Value]) -> Account {
+    let mut hub: Option<(&Value, &Value)> = None;
+    for src in sources {
+        for a in list(&src["accounts"]) {
+            let limits = &a["usageLimits"];
+            let same = key.is_some() && account_key(data::s(a, "driver"), a["email"].as_str(), a["workspaceId"].as_str(), limits).as_deref() == key;
+            if same && limits["resetCredits"].is_object() && limits_notice(limits).is_none() && hub.is_none_or(|(_, h)| newer(limits, &h["usageLimits"])) {
+                hub = Some((src, a));
+            }
+        }
+    }
+    let show_hub = hub.is_some_and(|(_, a)| credits.is_none_or(|c| newer(&a["usageLimits"], &c["usageLimits"])));
+    let shown = match (hub, credits) {
+        (Some((_, a)), _) if show_hub => Some(&a["usageLimits"]["resetCredits"]),
+        (_, Some(c)) => Some(&c["usageLimits"]["resetCredits"]),
+        _ => None,
+    };
+    let hub_credit = hub.and_then(|(src, a)| Some((src, a, text_of(&a["usageLimits"]["resetCredits"]["nextCreditId"])?)));
+    let redeem = match hub_credit {
+        Some((src, a, credit)) => json!({"sourceId": src["id"], "accountId": a["id"], "creditId": credit}),
+        None => json!({"instanceId": credits.unwrap_or(p)["instanceId"]}),
+    };
+    let mut limits = p["usageLimits"].clone();
+    if let Some(shown) = shown {
+        limits["resetCredits"] = shown.clone();
+    }
+    Account {
+        id: data::s(p, "instanceId").to_owned(),
+        label: instance_label(p),
+        plan: text_of(&p["auth"]["label"]),
+        driver: data::s(p, "driver").to_owned(),
+        accent: text_of(&p["accentColor"]),
+        redeem: Some(redeem),
+        limits,
+    }
 }
 
 /// AccountSummary: the label, an e-mail scrambled until revealed, then the plan.
@@ -471,6 +512,7 @@ fn reset_credits(s: &App, t: &T, account: &Account, now: i64) -> Option<El> {
         return None;
     }
     let busy = panel.redeeming.as_ref().is_some_and(|r| r.1 == account.id);
+    let allowed = can_redeem(s);
     let summary = crate::pages::usage_limits::credits_summary(credits, now, false);
     let mut line = row().w_full().gap(12.0).center_y().child(text(summary).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
     if count > 0 {
@@ -479,8 +521,12 @@ fn reset_credits(s: &App, t: &T, account: &Account, now: i64) -> Option<El> {
             crate::kit::Button::new(if busy { "Using…" } else { "Use reset" })
                 .size("xs")
                 .variant("outline")
-                .disabled(busy)
-                .on_press(move |s: &mut App| s.ui.chat.composer.usage.confirm = Some((key.clone(), input.clone())))
+                .disabled(busy || !allowed)
+                .on_press(move |s: &mut App| {
+                    if can_redeem(s) {
+                        s.ui.chat.composer.usage.confirm = Some((key.clone(), input.clone()));
+                    }
+                })
                 .build(t),
         );
     }
@@ -495,6 +541,11 @@ pub(super) fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some((key, input)) = s.ui.chat.composer.usage.confirm.clone() else { return };
     let allowed = crate::pages::usage_limits::can_redeem(s, &s.ui.env.active);
     crate::pages::usage_limits::reset_credit_dialog(t, layers, allowed, |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
+}
+
+/// useResetCredit's `canManageProviders`, on the environment the composer reads.
+fn can_redeem(s: &App) -> bool {
+    crate::pages::usage_limits::can_redeem(s, &s.ui.env.active)
 }
 
 /// useResetCredit's redeem, on the environment the composer reads.
@@ -587,6 +638,47 @@ mod tests {
         assert!(!has_limits("codex", &providers, &sources[..1]));
         assert!(collect("codex", &providers, &sources[..1]).is_none());
         assert!(is_command(" /Usage-Limits ") && !is_command("/usage-limits now"));
+    }
+
+    #[test]
+    fn a_login_redeems_through_the_limit_source_copy_that_names_its_credit() {
+        let window = json!([{"id": "s", "kind": "session", "label": "Session", "usedPercent": 40}]);
+        let mut banked = claude("claude-old", "ada@example.com", "2026-01-01T00:00:00Z", window.clone());
+        banked["usageLimits"]["resetCredits"] = json!({"availableCount": 1});
+        let providers = [claude("claudeAgent", "ada@example.com", "2026-01-01T00:10:00Z", window.clone()), banked];
+        let report = collect("claudeAgent", &providers, &[]).unwrap();
+        assert_eq!(report.accounts.len(), 1);
+        assert_eq!(report.accounts[0].redeem, Some(json!({"instanceId": "claude-old"})), "the read that banked the credit redeems it");
+        assert_eq!(report.accounts[0].limits["resetCredits"]["availableCount"], 1);
+        let hub = |checked: &str| {
+            json!({"id": "hub", "label": "Hub", "accounts": [{"id": "ada.json", "driver": "claudeAgent", "email": "ada@example.com",
+                "usageLimits": {"checkedAt": checked, "windows": window, "resetCredits": {"availableCount": 3, "nextCreditId": "c9"}}}]})
+        };
+        let via_hub = Some(json!({"sourceId": "hub", "accountId": "ada.json", "creditId": "c9"}));
+        let report = collect("claudeAgent", &providers, &[hub("2026-01-01T00:05:00Z")]).unwrap();
+        assert_eq!((report.accounts.len(), &report.accounts[0].redeem), (1, &via_hub));
+        assert_eq!(report.accounts[0].limits["resetCredits"]["availableCount"], 3, "the hub's read is fresher");
+        let report = collect("claudeAgent", &providers, &[hub("2025-12-31T23:00:00Z")]).unwrap();
+        assert_eq!(report.accounts[0].redeem, via_hub);
+        assert_eq!(report.accounts[0].limits["resetCredits"]["availableCount"], 1);
+    }
+
+    #[test]
+    fn reset_credits_redeem_only_where_providers_can_be_managed() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::offline());
+        let env = s.ui.env.active.clone();
+        let input = json!({"instanceId": "claude-work"});
+        redeem(&mut s, "claude-work", &input);
+        assert_eq!(s.ui.chat.composer.usage.redeeming, None, "denied until the session answers");
+        crate::settings::permissions::set_session(&mut s, &env, json!({"authenticated": true, "scopes": ["orchestration:read"]}));
+        assert!(!can_redeem(&s));
+        redeem(&mut s, "claude-work", &input);
+        assert_eq!(s.ui.chat.composer.usage.redeeming, None);
+        crate::settings::permissions::set_session(&mut s, &env, json!({"authenticated": true, "scopes": ["orchestration:operate"]}));
+        assert!(can_redeem(&s), "providers:manage comes with orchestration:operate");
+        redeem(&mut s, "claude-work", &input);
+        assert!(s.ui.chat.composer.usage.redeeming.as_ref().is_some_and(|r| r.1 == "claude-work"));
     }
 
     #[test]

@@ -116,6 +116,16 @@ pub fn notification(app: &App, item: &Value, t: &T) -> Option<El> {
     Some(link(app, agent, agent, s(item, "id"), child, event, t))
 }
 
+/// EnvironmentSubagentAvatar: the provider's mark with a dot for `state`.
+fn avatar(driver: &str, state: Option<&str>, t: &T) -> El {
+    el().size(24.0, 24.0)
+        .center()
+        .radius(radius::FULL)
+        .fill(t.c.muted.alpha_mul(0.6))
+        .child(crate::chat::composer::provider_icon(t, driver, 14.0))
+        .children(state.map(|state| el().absolute(17.0, 17.0).size(7.0, 7.0).radius(radius::FULL).fill(status(state, t).1).border(1.0, t.c.background)))
+}
+
 /// SubagentTimelineLink: `agent` is the task's live record, `item` what the timeline holds,
 /// `id` the timeline item it shows for.
 fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Option<Event>, t: &T) -> El {
@@ -140,17 +150,12 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
         }
     };
     let driver = if s(agent, "driver").is_empty() { s(item, "driver") } else { s(agent, "driver") };
-    let avatar = el()
-        .size(24.0, 24.0)
-        .center()
-        .radius(radius::FULL)
-        .fill(t.c.muted.alpha_mul(0.6))
-        .child(crate::chat::composer::provider_icon(t, driver, 14.0))
-        .children(state.map(|state| el().absolute(17.0, 17.0).size(7.0, 7.0).radius(radius::FULL).fill(status(state, t).1).border(1.0, t.c.background)));
+    let avatar = avatar(driver, state, t);
     let tone = if failed { t.c.destructive } else { t.c.muted_foreground };
     let name = title(if s(item, "title").is_empty() { "Subagent" } else { s(item, "title") });
     // A task running in a linked environment names it.
     let remote = [item, agent].into_iter().find(|v| v["remoteChild"].is_object()).map(|v| format!("on {}", s(&v["remoteChild"], "label")));
+    let target = target(app, agent, item, child);
     let mut body = row()
         .key(format!("subagent-{id}"))
         .w_full()
@@ -182,17 +187,339 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
         body = body.child(text(label).font(theme::TEXT_XS).color(tone));
     }
     body = body.child(text(time).font(theme::TEXT_XS).color(t.c.muted_foreground));
-    if !child.is_empty() {
-        let child = child.to_owned();
+    if let Some((key, thread)) = target {
         body = body
             .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)))
             .role("button")
             .focusable(true)
             .cursor(Cursor::Pointer)
             .hover(t.c.accent.alpha_mul(0.2))
-            .on_press(move |app: &mut App| crate::shell::sidebar::open_thread(app, &child));
+            .on_press(move |app: &mut App| open(app, key.as_deref(), &thread));
     }
     body.help(label)
+}
+
+/// The thread a task's row opens, with the environment to open it on: a task in a linked
+/// environment opens its thread there while this client is connected to it, else not at all.
+fn target(app: &App, agent: &Value, item: &Value, child: &str) -> Option<(Option<String>, String)> {
+    let Some(remote) = [item, agent].into_iter().map(|v| &v["remoteChild"]).find(|r| r.is_object()) else {
+        return (!child.is_empty()).then(|| (None, child.to_owned()));
+    };
+    let environment = s(remote, "environmentId");
+    let key = if crate::env::local_id(app).as_deref() == Some(environment) { crate::env::LOCAL.to_owned() } else { environment.to_owned() };
+    let thread = s(remote, "threadId");
+    (!thread.is_empty() && crate::env::connected(app, &key)).then(|| (Some(key), thread.to_owned()))
+}
+
+fn open(app: &mut App, key: Option<&str>, thread: &str) {
+    if let Some(key) = key {
+        crate::env::adopt(app, thread, key);
+    }
+    crate::shell::sidebar::open_thread(app, thread);
+}
+
+fn terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+/// WORKFLOW_SCRIPT_START: optional leading comments, then `export const meta`.
+fn is_script_text(text: &str) -> bool {
+    let mut rest = text.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.split_once('\n').map_or("", |(_, r)| r).trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            let Some((_, r)) = after.split_once("*/") else { return false };
+            rest = r.trim_start();
+        } else {
+            break;
+        }
+    }
+    fn word<'a>(rest: &'a str, w: &str) -> Option<&'a str> {
+        rest.strip_prefix(w).filter(|r| r.starts_with(char::is_whitespace)).map(str::trim_start)
+    }
+    let Some(rest) = word(rest, "export").and_then(|r| word(r, "const")) else { return false };
+    rest.strip_prefix("meta").is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// isWorkflowScriptMessage: the server's mark, else the text for threads recorded before it.
+fn is_script_message(message: &Value) -> bool {
+    s(message, "role") == "user" && message["workflowScript"].as_bool().unwrap_or_else(|| is_script_text(s(message, "text")))
+}
+
+/// WorkflowOpening: a workflow coordinator thread's first user message is the script; the
+/// coordinator row (on the parent thread) names the workflow and lists its agents.
+pub(super) struct Opening<'a> {
+    message_id: &'a str,
+    script: &'a str,
+    name: Option<&'a str>,
+    description: Option<&'a str>,
+    driver: &'a str,
+    /// The coordinator's status and `workflow`, null until the parent thread is loaded.
+    status: &'a str,
+    completed: Option<i64>,
+    workflow: Option<&'a Value>,
+}
+
+impl Opening<'_> {
+    /// Whether timeline user row `item` is the script this opening replaces.
+    pub(super) fn opens(&self, item: &Value) -> bool {
+        let id = if s(item, "messageId").is_empty() { s(item, "id") } else { s(item, "messageId") };
+        id == self.message_id
+    }
+}
+
+/// resolveWorkflowOpening for `thread` (its shell row), its `messages`, and the parent
+/// projection's subagents when loaded.
+fn resolve<'a>(thread: &Value, thread_id: &str, messages: &'a [Value], parent: Option<&'a [Value]>) -> Option<Opening<'a>> {
+    if !crate::chat::subagent_bar::native(thread) {
+        return None;
+    }
+    let first = messages.iter().find(|m| s(m, "role") == "user")?;
+    let coordinator = parent.and_then(|list| list.iter().find(|a| s(a, "childThreadId") == thread_id));
+    if first["workflowScript"] == false {
+        return None;
+    }
+    let workflow = coordinator.map(|c| &c["workflow"]).filter(|w| w.is_object());
+    if workflow.is_none() && !is_script_message(first) {
+        return None;
+    }
+    let field = |key: &str| coordinator.map(|c| s(c, key)).filter(|v| !v.is_empty());
+    Some(Opening {
+        message_id: s(first, "id"),
+        script: s(first, "text"),
+        name: workflow.map(|w| s(w, "name")).filter(|n| !n.is_empty()),
+        description: field("title"),
+        driver: field("driver").unwrap_or(""),
+        status: field("status").unwrap_or(""),
+        completed: coordinator.and_then(|c| ts(c, "completedAt")),
+        workflow,
+    })
+}
+
+/// The routed thread's workflow opening, if it opens with a workflow script.
+pub(super) fn opening<'a>(app: &'a App, thread_id: &str) -> Option<Opening<'a>> {
+    let state = app.state();
+    let p = &state.thread_views.get(thread_id)?.projection;
+    let thread = state.threads.iter().find(|r| s(r, "id") == thread_id).unwrap_or(&p["thread"]);
+    let parent = s(&thread["lineage"], "parentThreadId");
+    let parent = state.thread_views.get(parent).map(|v| rows::array(&v.projection, "subagents"));
+    resolve(thread, thread_id, rows::array(p, "messages"), parent)
+}
+
+/// workflowOpeningParentThreadId: loads the parent whose coordinator row describes the routed
+/// thread's workflow, so ordinary subagent threads never load their parent.
+pub fn poll(app: &mut App) -> bool {
+    let crate::Route::Thread(id) = app.frame_route() else { return false };
+    let state = app.state();
+    let Some(view) = state.thread_views.get(id) else { return false };
+    let Some(thread) = state.threads.iter().find(|r| s(r, "id") == id) else { return false };
+    let opens = crate::chat::subagent_bar::native(thread)
+        && rows::array(&view.projection, "messages").iter().find(|m| s(m, "role") == "user").is_some_and(is_script_message);
+    let parent = s(&thread["lineage"], "parentThreadId");
+    if !opens || parent.is_empty() || state.thread_views.contains_key(parent) {
+        return false;
+    }
+    let parent = parent.to_owned();
+    if let Some(net) = app.src.net() {
+        net.watch_thread(&parent);
+    }
+    false
+}
+
+/// A workflow agent as a member row reads it (workflowMembersToRuntime).
+struct Member<'a> {
+    agent: &'a Value,
+    status: &'a str,
+}
+
+impl<'a> Member<'a> {
+    fn new(agent: &'a Value, coordinator: &'a str) -> Self {
+        let state = s(agent, "state");
+        let status = match state {
+            "queued" | "running" if terminal(coordinator) => coordinator,
+            "queued" => "pending",
+            _ => state,
+        };
+        Member { agent, status }
+    }
+    fn index(&self) -> u64 {
+        self.agent["index"].as_u64().unwrap_or(0)
+    }
+    fn phase(&self) -> Option<u64> {
+        self.agent["phaseIndex"].as_u64()
+    }
+}
+
+struct Phase<'a> {
+    title: String,
+    members: Vec<Member<'a>>,
+}
+
+/// deriveWorkflowGroups for one coordinator: phases by index, titled by the declared plan over
+/// what members report, then the members outside any phase.
+fn group<'a>(workflow: &'a Value, coordinator: &'a str) -> (Vec<Phase<'a>>, Vec<Member<'a>>) {
+    let mut members: Vec<Member> = rows::array(workflow, "agents").iter().map(|a| Member::new(a, coordinator)).collect();
+    members.sort_by_key(Member::index);
+    let mut titles: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    for member in &members {
+        let Some(index) = member.phase() else { continue };
+        let reported = s(member.agent, "phaseTitle");
+        let title = if reported.is_empty() { titles.get(&index).cloned().unwrap_or_else(|| format!("Phase {}", index + 1)) } else { reported.to_owned() };
+        titles.insert(index, title);
+    }
+    for phase in rows::array(workflow, "phases") {
+        if let Some(index) = phase["index"].as_u64() {
+            titles.insert(index, s(phase, "title").to_owned());
+        }
+    }
+    let mut phases: Vec<(u64, Phase)> = titles.into_iter().map(|(index, title)| (index, Phase { title, members: Vec::new() })).collect();
+    let mut unphased = Vec::new();
+    for member in members {
+        match member.phase().and_then(|i| phases.iter().position(|(at, _)| *at == i)) {
+            Some(at) => phases[at].1.members.push(member),
+            None => unphased.push(member),
+        }
+    }
+    (phases.into_iter().map(|(_, phase)| phase).collect(), unphased)
+}
+
+/// workflowOpeningHeadline: the title, a description when it says more, and how the agents stand.
+fn headline(opening: &Opening, statuses: &[&str]) -> (String, Option<String>, Option<String>) {
+    let title = opening.name.or(opening.description).unwrap_or("Workflow").to_owned();
+    let description = opening.description.filter(|d| *d != title).map(str::to_owned);
+    let mut counts = [0usize; 4];
+    for status in statuses {
+        counts[match *status {
+            "completed" => 1,
+            "failed" => 2,
+            other if terminal(other) => 3,
+            _ => 0,
+        }] += 1;
+    }
+    let agents = (!statuses.is_empty()).then(|| {
+        let parts = ["working", "done", "failed", "stopped"].iter().zip(counts).filter(|(_, n)| *n > 0).map(|(k, n)| format!("{n} {k}"));
+        let noun = if statuses.len() == 1 { "agent" } else { "agents" };
+        std::iter::once(format!("{} {noun}", statuses.len())).chain(parts).collect::<Vec<_>>().join(" · ")
+    });
+    (title, description, agents)
+}
+
+/// scriptMarkdown: the script in a javascript fence longer than any backtick run inside it.
+fn script_markdown(script: &str) -> String {
+    let longest = script.split(|c: char| c != '`').map(str::len).max().unwrap_or(0).max(2);
+    let fence = "`".repeat(longest + 1);
+    format!("{fence}javascript\n{}\n{fence}", script.trim_end())
+}
+
+/// WorkflowMemberRow: the agent, what it does or did, its time; opens its thread when it has one.
+fn member_row(app: &App, driver: &str, member: &Member, coordinator_completed: Option<i64>, t: &T) -> El {
+    let agent = member.agent;
+    let name = s(agent, "label").to_owned();
+    let settled = terminal(member.status);
+    let prompt = s(agent, "prompt");
+    let detail = if settled { Some(s(agent, "result")).filter(|r| !r.is_empty()).unwrap_or(prompt) } else { prompt };
+    let detail = detail.replace('`', "").split_whitespace().collect::<Vec<_>>().join(" ");
+    let started = agent["startedAt"].as_i64();
+    let ended = agent["completedAt"].as_i64().or_else(|| started.zip(agent["durationMs"].as_i64()).map(|(a, d)| a + d)).or(coordinator_completed);
+    let elapsed = started.map(|from| rows::duration(from, if settled { ended.unwrap_or(from) } else { app.now_ms }));
+    let tone = if member.status == "failed" { t.c.destructive } else { t.c.muted_foreground };
+    let mut body = row()
+        .key(format!("workflow-member-{}", member.index()))
+        .w_full()
+        .min_w(0.0)
+        .px(8.0)
+        .py(6.0)
+        .gap(10.0)
+        .center_y()
+        .radius(radius::MD)
+        .child(avatar(driver, Some(member.status), t))
+        .child(
+            col()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .child(text(name.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).truncate())
+                .children((!detail.is_empty()).then(|| text(detail).font(theme::TEXT_2XS).color(tone).truncate())),
+        )
+        .children(elapsed.map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground)));
+    let child = s(agent, "childThreadId").to_owned();
+    if !child.is_empty() {
+        body = body
+            .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)))
+            .role("button")
+            .label(format!("Open {name}"))
+            .focusable(true)
+            .cursor(Cursor::Pointer)
+            .hover(t.c.accent.alpha_mul(0.2))
+            .on_press(move |app: &mut App| open(app, None, &child));
+    }
+    body.help(status(member.status, t).0)
+}
+
+/// WorkflowOpeningBlock: "Workflow started", the workflow and its agents by phase, then the
+/// script it runs, folded when long.
+pub(super) fn opening_view(app: &App, opening: &Opening, t: &T) -> El {
+    let (phases, unphased) = opening.workflow.map(|w| group(w, opening.status)).unwrap_or_default();
+    let statuses: Vec<&str> = phases.iter().flat_map(|p| &p.members).chain(&unphased).map(|m| m.status).collect();
+    let (title, description, agents) = headline(opening, &statuses);
+    let header = row()
+        .w_full()
+        .min_w(0.0)
+        .gap(8.0)
+        .child(icon(&icons::WORKFLOW, 14.0).color(t.c.muted_foreground).mt(2.0))
+        .child(
+            col()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text("Workflow started").font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground))
+                .child(text(title.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate().selectable(true))
+                .children(description.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().selectable(true))),
+        )
+        .children(agents.map(|a| text(a).font(theme::TEXT_2XS).color(t.c.muted_foreground)));
+    let mut block = col().w_full().min_w(0.0).gap(12.0).px(4.0).py(2.0).label(format!("Workflow started: {title}")).child(header);
+    for phase in phases.iter().filter(|p| !p.members.is_empty()) {
+        let settled = phase.members.iter().filter(|m| terminal(m.status)).count();
+        let mut section = col().w_full().label(format!("{} phase", phase.title)).child(
+            row()
+                .w_full()
+                .min_w(0.0)
+                .gap(8.0)
+                .px(8.0)
+                .pb(2.0)
+                .child(text(phase.title.clone()).font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0))
+                .child(text(format!("{settled}/{}", phase.members.len())).font(theme::TEXT_2XS).color(t.c.muted_foreground)),
+        );
+        for member in &phase.members {
+            section = section.child(member_row(app, opening.driver, member, opening.completed, t));
+        }
+        block = block.child(section);
+    }
+    if !unphased.is_empty() {
+        block = block.child(col().w_full().children(unphased.iter().map(|m| member_row(app, opening.driver, m, opening.completed, t))));
+    }
+    let fold_key = format!("workflow-script:{}", opening.message_id);
+    let foldable = super::collapses(opening.script);
+    let expanded = app.ui.chat.timeline.expanded.contains(&fold_key);
+    let script = super::markdown::view(app, &script_markdown(opening.script), &format!("workflow-script-{}", opening.message_id), t);
+    // max-h-44 with a 1.75rem fade, as the user message fold.
+    let script = if foldable && !expanded { col().w_full().max_h(176.0).clip_fade(0.0, 0.0, 0.0, 28.0).child(script) } else { col().w_full().child(script) };
+    let mut section = col().w_full().child(script);
+    if foldable {
+        section = section.child(
+            row().child(
+                crate::kit::button::Button::new(if expanded { "Show less" } else { "Show full script" })
+                    .variant("ghost-muted")
+                    .size("xs")
+                    .on_press(move |app: &mut App| super::toggle(app, &fold_key))
+                    .build(t)
+                    .expanded(expanded),
+            ),
+        );
+    }
+    block.child(section)
 }
 
 /// summarizeSubagentStatuses: "2 working · 1 done".
@@ -328,8 +655,36 @@ pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::{notified_task, outcome, status_summary, title};
+    use super::{group, headline, is_script_text, notified_task, open, outcome, resolve, script_markdown, status_summary, target, title};
+    use crate::{App, env};
     use serde_json::json;
+
+    #[test]
+    fn a_remote_task_opens_its_thread_on_the_machine_that_runs_it() {
+        let mut s = App::new();
+        let mut local = crate::data::empty_state();
+        local.config = Some(json!({"environment": {"environmentId": "local-id", "label": "Laptop"}, "settings": {}}));
+        local.shell_ready = true;
+        local.conn = s5_net::Conn::Open;
+        s.src = crate::data::Source::Fixture(local);
+        s.ui.env.active = env::LOCAL.into();
+        let remote = json!({"remoteChild": {"environmentId": "env-build", "threadId": "t-remote", "label": "Build box"}, "childThreadId": "t-copy"});
+        assert_eq!(target(&s, &remote, &remote, "t-copy"), None, "a machine this client is not connected to cannot open it");
+        let mut build = crate::data::empty_state();
+        build.shell_ready = true;
+        build.conn = s5_net::Conn::Open;
+        s.ui.env.saved.push(env::Saved { id: "env-build".into(), label: "Build box".into(), base: "https://build.example".into(), bearer: String::new() });
+        env::park(&mut s, "env-build", crate::data::Source::Fixture(build));
+        let Some((key, thread)) = target(&s, &remote, &remote, "t-copy") else { panic!("opens on the build box") };
+        assert_eq!((key.as_deref(), thread.as_str()), (Some("env-build"), "t-remote"));
+        open(&mut s, key.as_deref(), &thread);
+        assert_eq!(env::owner(&s, "t-remote"), "env-build");
+        assert_eq!(s.ui.env.active, "env-build");
+        assert_eq!(s.route, crate::Route::Thread("t-remote".into()));
+        let mine = json!({"remoteChild": {"environmentId": "local-id", "threadId": "t-here", "label": "Laptop"}});
+        assert_eq!(target(&s, &mine, &mine, ""), Some((Some(env::LOCAL.to_owned()), "t-here".to_owned())), "this machine's own id maps to its key");
+        assert_eq!(target(&s, &json!({}), &json!({}), "t-child"), Some((None, "t-child".to_owned())));
+    }
 
     #[test]
     fn notices_report_their_task_until_it_runs_again() {
@@ -362,5 +717,62 @@ mod tests {
         assert_eq!(title("Subagent: Review the diff"), "Review the diff");
         assert_eq!(title("/root/agents/code_reviewer/"), "Code Reviewer");
         assert_eq!(title("Explore"), "Explore");
+    }
+
+    #[test]
+    fn workflow_scripts_open_with_their_meta_export() {
+        assert!(is_script_text("export const meta = { name: 'audit' };"));
+        assert!(is_script_text("  // Audit billing\n/* phases\n */\nexport  const\tmeta={}"));
+        assert!(!is_script_text("export const metadata = {}"));
+        assert!(!is_script_text("// export const meta"));
+        assert!(!is_script_text("Please export const meta for me"));
+        assert!(!is_script_text("/* never closed export const meta"));
+    }
+
+    #[test]
+    fn a_workflow_thread_opens_with_its_coordinators_plan() {
+        let thread = json!({"id": "child", "creationSource": "provider", "lineage": {"relationshipToParent": "subagent", "parentThreadId": "parent"}});
+        let script = json!([{"id": "m1", "role": "user", "text": "export const meta = {}"}]);
+        let prose = json!([{"id": "m1", "role": "user", "text": "Fix the tests"}]);
+        let coordinator = json!([{"id": "w", "childThreadId": "child", "title": "Audit billing", "driver": "claudeAgent", "status": "running",
+            "workflow": {"name": "billing-audit", "phases": [], "agents": []}}]);
+        let list = |v: &serde_json::Value| v.as_array().map(Vec::as_slice).unwrap_or_default().to_vec();
+        let (script, prose, coordinator) = (list(&script), list(&prose), list(&coordinator));
+        let Some(opening) = resolve(&thread, "child", &script, None) else { panic!("a script opens the thread before its parent loads") };
+        assert_eq!((opening.message_id, opening.name, opening.workflow.is_some()), ("m1", None, false));
+        let opening = resolve(&thread, "child", &prose, Some(coordinator.as_slice())).expect("the coordinator's workflow marks it even without the script shape");
+        assert_eq!((opening.name, opening.description, opening.driver), (Some("billing-audit"), Some("Audit billing"), "claudeAgent"));
+        assert!(opening.opens(&json!({"id": "turn-item", "messageId": "m1"})));
+        assert!(resolve(&thread, "child", &prose, None).is_none(), "plain prose without a workflow");
+        let unmarked = list(&json!([{"id": "m1", "role": "user", "text": "export const meta = {}", "workflowScript": false}]));
+        assert!(resolve(&thread, "child", &unmarked, Some(coordinator.as_slice())).is_none(), "the server's mark wins");
+        let user_thread = json!({"id": "child", "creationSource": "user", "lineage": {"relationshipToParent": "subagent"}});
+        assert!(resolve(&user_thread, "child", &script, None).is_none());
+    }
+
+    #[test]
+    fn workflow_agents_group_by_phase_and_count_by_status() {
+        let workflow = json!({"name": "audit", "phases": [{"index": 0, "title": "Survey"}], "agents": [
+            {"index": 2, "label": "Patch", "state": "running", "phaseIndex": 1},
+            {"index": 0, "label": "Map", "state": "completed", "phaseIndex": 0, "phaseTitle": "Guessed"},
+            {"index": 1, "label": "Check", "state": "queued", "phaseIndex": 0},
+            {"index": 3, "label": "Loose", "state": "failed"}]});
+        let (phases, unphased) = group(&workflow, "running");
+        let names: Vec<(&str, Vec<&str>)> = phases.iter().map(|p| (p.title.as_str(), p.members.iter().map(|m| m.status).collect())).collect();
+        assert_eq!(names, vec![("Survey", vec!["completed", "pending"]), ("Phase 2", vec!["running"])]);
+        assert_eq!(unphased.iter().map(|m| m.status).collect::<Vec<_>>(), vec!["failed"]);
+        // A stopped coordinator settles the agents still waiting or working.
+        let (stopped, _) = group(&workflow, "cancelled");
+        assert_eq!(stopped[0].members[1].status, "cancelled");
+        let thread = json!({"id": "c", "creationSource": "provider", "lineage": {"relationshipToParent": "subagent"}});
+        let messages = vec![json!({"id": "m", "role": "user", "text": "export const meta = {}"})];
+        let mut opening = resolve(&thread, "c", &messages, None).expect("script");
+        assert_eq!(headline(&opening, &[]), ("Workflow".to_owned(), None, None));
+        opening.description = Some("Audit billing");
+        opening.name = Some("audit");
+        let (title, description, agents) = headline(&opening, &["completed", "pending", "running", "failed", "interrupted"]);
+        assert_eq!((title.as_str(), description.as_deref()), ("audit", Some("Audit billing")));
+        assert_eq!(agents.as_deref(), Some("5 agents · 2 working · 1 done · 1 failed · 1 stopped"));
+        assert_eq!(script_markdown("a ``` b\n"), "````javascript\na ``` b\n````");
     }
 }

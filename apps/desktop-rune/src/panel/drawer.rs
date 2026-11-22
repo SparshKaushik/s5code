@@ -710,6 +710,7 @@ fn action(
         .center_y()
         .role("button")
         .label(label)
+        .help(label)
         .focusable(true)
         .disabled(disabled)
         .child(
@@ -727,35 +728,45 @@ fn action(
     b
 }
 
-fn actions(t: &T, owner: Owner, full: bool, sidebar: bool) -> El {
-    let suffix = |base: &str| {
+/// `label (shortcut)` when `command` has a shortcut, as web's terminal action labels.
+fn with_shortcut(app: &App, label: &str, command: &str) -> String {
+    match crate::shell::palette::shortcut_label(app, command) {
+        shortcut if shortcut.is_empty() => label.to_owned(),
+        shortcut => format!("{label} ({shortcut})"),
+    }
+}
+
+fn actions(app: &App, t: &T, owner: Owner, full: bool, sidebar: bool) -> El {
+    // Every action needs terminal:operate, as web's `canOperateTerminal`.
+    let operate = crate::chat::details::grants(app, "terminal:operate");
+    let split_label = |base: &str, command: &str| {
         if full {
             format!("{base} (max {MAX_PER_GROUP} per group)")
         } else {
-            base.to_string()
+            with_shortcut(app, base, command)
         }
     };
     let buttons = [
         action(
             t,
-            &suffix("Split Terminal Horizontally"),
+            &split_label("Split Terminal Horizontally", "terminal.split"),
             &icons::SQUARE_SPLIT_HORIZONTAL,
-            full,
+            full || !operate,
             sidebar,
             move |s| split(s, owner, false),
         ),
         action(
             t,
-            &suffix("Split Terminal Vertically"),
+            &split_label("Split Terminal Vertically", "terminal.splitVertical"),
             &icons::SQUARE_SPLIT_VERTICAL,
-            full,
+            full || !operate,
             sidebar,
             move |s| split(s, owner, true),
         ),
-        action(t, "New Terminal", &icons::PLUS, false, sidebar, move |s| {
+        action(t, &with_shortcut(app, "New Terminal", "terminal.new"), &icons::PLUS, !operate, sidebar, move |s| {
             new_terminal(s, owner)
         }),
-        action(t, "Close Terminal", &icons::TRASH_2, false, sidebar, move |s| {
+        action(t, &with_shortcut(app, "Close Terminal", "terminal.close"), &icons::TRASH_2, !operate, sidebar, move |s| {
             if let Some(thread) = current_thread(s)
                 && let Some(active) = s
                     .ui
@@ -873,6 +884,21 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 t.c.muted_foreground
             };
             let (close_id, select_id) = (id.clone(), id.clone());
+            let close_label = if active { with_shortcut(app, &format!("Close {label}"), "terminal.close") } else { format!("Close {label}") };
+            // PanelTabCloseButton: a 16 box whose terminal glyph turns into an X while the row is hovered.
+            let mut close = row()
+                .size(16., 16.)
+                .center()
+                .radius(2.)
+                .role("button")
+                .label(close_label.clone())
+                .help(close_label)
+                .focusable(true)
+                .child(icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg).group_opacity(1., 0.))
+                .child(icon(&icons::X, 12.).size(12., 12.).color(t.c.foreground).group_opacity(0., 1.).pin(Some(2.), Some(2.), None, None));
+            if crate::chat::details::grants(app, "terminal:operate") {
+                close = close.hover(t.c.muted).on_press(move |s: &mut App| request_close(s, owner, &close_id));
+            }
             let mut entry = row()
                 .w_full()
                 .h(24.)
@@ -881,14 +907,8 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 .pr(8.)
                 .center_y()
                 .radius(6.)
-                .child(
-                    el().size(12., 12.)
-                        .role("button")
-                        .label(format!("Close {label}"))
-                        .focusable(true)
-                        .child(icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg))
-                        .on_press(move |s: &mut App| request_close(s, owner, &close_id)),
-                )
+                .hover_group()
+                .child(close)
                 .child(
                     row()
                         .grow(1.)
@@ -921,7 +941,7 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 .h(22.)
                 .w_full()
                 .justify_end()
-                .child(actions(t, owner, groups.split_full(), true)),
+                .child(actions(app, t, owner, groups.split_full(), true)),
         )
         .child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
         .child(
@@ -955,9 +975,10 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
                     .color(t.c.muted_foreground),
             )
             .child(
-                kit::Button::new("New Terminal")
+                kit::Button::new(with_shortcut(app, "New Terminal", "terminal.new"))
                     .variant("outline")
                     .size("xs")
+                    .disabled(!crate::chat::details::grants(app, "terminal:operate"))
                     .on_press(move |s: &mut App| new_terminal(s, owner))
                     .build(t),
             );
@@ -979,7 +1000,7 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
         // 4 buttons of 21 points, 3 dividers and the border.
         let floating_w = 4. * 21. + 3. + 2.;
         out = out.child(
-            actions(t, owner, groups.split_full(), false)
+            actions(app, t, owner, groups.split_full(), false)
                 .absolute((width - 8. - floating_w).max(0.), 8.)
                 .h(23.)
                 .radius(6.)
