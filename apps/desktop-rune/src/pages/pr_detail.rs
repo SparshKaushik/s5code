@@ -2627,7 +2627,7 @@ pub(super) fn scene_resolving(u: &mut Ui) {
     if let Some(d) = &mut u.detail {
         d["mergeability"] = json!("conflicting");
     }
-    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), task: Some((String::new(), Vec::new())), kind: "conflicts" });
+    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), env: String::new(), task: Some((String::new(), Vec::new())), kind: "conflicts" });
 }
 
 #[cfg(test)]
