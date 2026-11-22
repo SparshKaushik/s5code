@@ -90,8 +90,7 @@ pub struct Ui {
     saved: Option<Bounds>,
     due: Option<(i64, Bounds)>,
     prefs_loaded: bool,
-    /// The appearance last handed to AppKit.
-    #[cfg(target_os = "macos")]
+    /// The appearance last handed to the native chrome.
     appearance: Option<crate::Appearance>,
 }
 
@@ -122,6 +121,10 @@ thread_local! {
 
 fn with_window<R>(f: impl FnOnce(&rune::WindowHandle) -> R) -> Option<R> {
     WINDOW.with(|w| w.borrow().as_ref().map(f))
+}
+
+pub fn is_fullscreen() -> bool {
+    with_window(rune::WindowHandle::is_fullscreen).unwrap_or(false)
 }
 
 /// View › Toggle Full Screen off macOS (F11), where AppKit's menu item does it on macOS.
@@ -391,14 +394,24 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         changed |= activation::poll(s);
     }
     let ui = &mut s.ui.desktop;
-    #[cfg(target_os = "macos")]
+    // Electron's `nativeTheme.themeSource`: AppKit's chrome on macOS, the window frame elsewhere
+    // once the window exists.
     if ui.appearance != Some(s.appearance) && !rune::is_headless() {
-        ui.appearance = Some(s.appearance);
-        macos::set_appearance(match s.appearance {
+        let dark = match s.appearance {
             crate::Appearance::System => None,
             crate::Appearance::Light => Some(false),
             crate::Appearance::Dark => Some(true),
-        });
+        };
+        #[cfg(target_os = "macos")]
+        let applied = {
+            macos::set_appearance(dark);
+            true
+        };
+        #[cfg(not(target_os = "macos"))]
+        let applied = with_window(|w| w.set_theme(dark).is_ok()).unwrap_or(false);
+        if applied {
+            ui.appearance = Some(s.appearance);
+        }
     }
     if let Some(origin) = ui.origin.filter(|o| *o != [0, 0])
         && let Some(restored) = ui.restored.take()

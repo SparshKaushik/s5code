@@ -1012,6 +1012,73 @@ pub fn import_theme(raw: &str) -> Result<Value, String> {
     }
     Ok(theme)
 }
+const MAX_THEME_FILE_BYTES: u64 = 256 * 1024;
+
+/// ThemeImportDialog's `formatByteSize`.
+fn byte_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", (b as f64 / 1024.0).round()),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// A picked theme file's JSON, refusing what no theme is as large as (`describeOversizedThemeFile`).
+fn read_theme_file(path: &std::path::Path) -> Result<String, String> {
+    let unreadable = || "Could not read that file. Paste the JSON below instead.".to_owned();
+    let size = std::fs::metadata(path).map_err(|_| unreadable())?.len();
+    if size > MAX_THEME_FILE_BYTES {
+        return Err(format!(
+            "That file is {}. Theme files are only a few KB, so this one was not read (limit {}).",
+            byte_size(size),
+            byte_size(MAX_THEME_FILE_BYTES)
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|_| unreadable())
+}
+
+/// Electron's `pickThemeFiles`: a JSON picker that starts in VS Code's extensions folder, where
+/// installed themes live. The file fills the editor and imports as a paste would.
+fn choose_theme_file(tx: &mut rune::Tx) {
+    let extensions = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".vscode").join("extensions")).filter(|dir| dir.is_dir());
+    let options = rune::FileDialogOptions { title: "Choose theme file".into(), directory: extensions, ..Default::default() }.filter("JSON", &["json"]);
+    tx.open_file(options, |s: &mut App, picked: rune::FileDialogResult, _| {
+        let Ok(Some(path)) = picked else { return };
+        match read_theme_file(&path) {
+            Ok(raw) => {
+                s.ui.settings.theme_import = rune::TextEdit::new(&raw);
+                import_pasted(s);
+            }
+            Err(error) => s.ui.settings.theme_import_error = Some(error),
+        }
+    });
+}
+
+fn import_pasted(s: &mut App) {
+    match import_theme(&s.ui.settings.theme_import.text) {
+        Ok(theme) => {
+            let mut library = s.client_settings.values.get("customThemes").and_then(Value::as_array).cloned().unwrap_or_default();
+            let (id, label) = (theme["id"].clone(), theme["label"].as_str().unwrap_or("Theme").to_owned());
+            let modes = imported_modes(&theme);
+            library.push(theme);
+            super::update(s, "customThemes", json!(library));
+            // `onImported`: a one-mode theme becomes that half; one with both takes both.
+            for mode in &modes {
+                super::update(s, if *mode == "dark" { "themeDark" } else { "themeLight" }, id.clone());
+            }
+            let description = match modes.as_slice() {
+                [mode] => format!("It\u{2019}s now your {mode} theme."),
+                _ => "It\u{2019}s now active.".to_owned(),
+            };
+            crate::shell::palette::toast(s, &format!("{label} added"), Some(&description));
+            s.ui.settings.theme_import_open = false;
+            s.ui.settings.theme_import_error = None;
+            s.ui.settings.theme_import.clear();
+        }
+        Err(error) => s.ui.settings.theme_import_error = Some(error),
+    }
+}
+
 pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     if !s.ui.settings.theme_import_open {
         return;
@@ -1019,7 +1086,7 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     crate::kit::Dialog::new("import-theme", "Add theme")
         .open(true)
         .width(640.0)
-        .description("Paste a theme JSON file.")
+        .description("Paste a theme JSON file or choose one.")
         .on_close(|s: &mut App| {
             s.ui.settings.theme_import_open = false;
             s.ui.settings.theme_import_error = None;
@@ -1045,30 +1112,16 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .wrap(),
         )
         .child(
-            crate::kit::Button::new("Import theme")
-                .on_press(|s: &mut App| match import_theme(&s.ui.settings.theme_import.text) {
-                    Ok(theme) => {
-                        let mut library = s.client_settings.values.get("customThemes").and_then(Value::as_array).cloned().unwrap_or_default();
-                        let (id, label) = (theme["id"].clone(), theme["label"].as_str().unwrap_or("Theme").to_owned());
-                        let modes = imported_modes(&theme);
-                        library.push(theme);
-                        super::update(s, "customThemes", json!(library));
-                        // `onImported`: a one-mode theme becomes that half; one with both takes both.
-                        for mode in &modes {
-                            super::update(s, if *mode == "dark" { "themeDark" } else { "themeLight" }, id.clone());
-                        }
-                        let description = match modes.as_slice() {
-                            [mode] => format!("It\u{2019}s now your {mode} theme."),
-                            _ => "It\u{2019}s now active.".to_owned(),
-                        };
-                        crate::shell::palette::toast(s, &format!("{label} added"), Some(&description));
-                        s.ui.settings.theme_import_open = false;
-                        s.ui.settings.theme_import_error = None;
-                        s.ui.settings.theme_import.clear();
-                    }
-                    Err(error) => s.ui.settings.theme_import_error = Some(error),
-                })
-                .build(t),
+            row()
+                .gap(8.0)
+                .child(crate::kit::Button::new("Import theme").on_press(import_pasted).build(t))
+                .child(
+                    crate::kit::Button::new("Choose file")
+                        .variant("outline")
+                        .icon(&crate::icons::UPLOAD)
+                        .build(t)
+                        .on_press_tx(|_: &mut App, tx: &mut rune::Tx| choose_theme_file(tx)),
+                ),
         )
         .build(t, layers);
 }
@@ -1135,6 +1188,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_picked_theme_file_is_read_only_under_256_kb() {
+        let dir = std::env::temp_dir().join(format!("s5-theme-file-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.json");
+        std::fs::write(&small, r#"{"name":"Small"}"#).unwrap();
+        assert_eq!(read_theme_file(&small).as_deref(), Ok(r#"{"name":"Small"}"#));
+        let large = dir.join("large.json");
+        std::fs::write(&large, vec![b' '; 300 * 1024]).unwrap();
+        assert_eq!(
+            read_theme_file(&large),
+            Err("That file is 300 KB. Theme files are only a few KB, so this one was not read (limit 256 KB).".into())
+        );
+        assert!(read_theme_file(&dir.join("missing.json")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
