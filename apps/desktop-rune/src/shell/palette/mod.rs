@@ -29,7 +29,6 @@ pub struct Ui {
     search_due: Option<i64>,
     message_matches: Vec<serde_json::Value>,
     restart: Option<Restart>,
-    notice: Option<Notice>,
     /// Pages under the current one, so Escape and Backspace walk back.
     back: Vec<(String, String)>,
     /// Arrow keys picked a row; views without auto-highlight leave Enter to submit until then.
@@ -43,20 +42,8 @@ pub struct Ui {
     /// lists had when the palette opened; emptied while it is closed.
     order: std::cell::RefCell<[Vec<String>; 2]>,
 }
-struct Notice {
-    title: String,
-    description: Option<String>,
-    until: i64,
-    actions: Vec<ToastAction>,
-    error: bool,
-    warning: bool,
-    /// Actions shown disabled, by label.
-    disabled: Vec<String>,
-    /// Actions reading "Copied!" until their deadline, as web updates a toast after a copy.
-    copied: Vec<(String, i64)>,
-}
 /// A toast button: its label, whether it is the primary one, and what it does.
-pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
+pub(crate) type ToastAction = crate::shell::toast::Action;
 struct Restart {
     thread: String,
     remaining: Vec<String>,
@@ -441,81 +428,86 @@ fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     });
     label
 }
-const COPY_ERROR: &str = "Copy error";
+use crate::shell::toast::{self as stack, Kind, TIMEOUT_MS};
+
+/// Web's `type` for a toast raised without one here, by its title: the success, info and loading
+/// toasts web raises with the same titles.
+fn kind_of(title: &str) -> Kind {
+    const SUCCESS: &[&str] = &[
+        "ACP provider configured", "ACP provider disabled", "ACP session deleted", "Added to the composer", "Agent session will restart",
+        "Asked in a thread", "Backend added", "Brought back", "Checkout ready", "Keybindings updated", "Logged out of ACP agent",
+        "Plan saved to workspace", "Project created", "Provider instance added", "Recording saved", "Revert pull request opened", "Route added",
+        "Screenshot saved", "Server deregistered", "Shortcut saved", "Started in background", "T3 Connect enabled", "Thanks for the star!",
+        "Update downloaded", "Branch deleted",
+    ];
+    const SUCCESS_PREFIX: &[&str] = &["Cloned ", "Created ", "Deleted action ", "Imported ", "Linked ", "Published to ", "Started ", "Updated ", "Cleared "];
+    const SUCCESS_SUFFIX: &[&str] = &[" copied", " added", " created", " saved", " updated"];
+    const INFO: &[&str] = &[
+        "Annotation attached to draft", "Linked prompt ready", "Preview is desktop-only", "Process already exited", "Prompt added from a link",
+        "Still bringing attached context into this message.", "Still compressing a pasted image.", "The page copied text",
+        "This commit is not in the thread's workspace", "This thread is no longer available", "Turn stopped; the agent is still shutting down",
+        "Turn stopped; the agent process kept running", "Usage limits are unavailable for this provider", "Your typed text was set aside",
+    ];
+    const INFO_PREFIX: &[&str] = &["Downloaded ", "Large paste attached as ", "Give "];
+    if SUCCESS.contains(&title) || SUCCESS_PREFIX.iter().any(|p| title.starts_with(p)) || SUCCESS_SUFFIX.iter().any(|p| title.ends_with(p)) {
+        Kind::Success
+    } else if INFO.contains(&title) || INFO_PREFIX.iter().any(|p| title.starts_with(p)) {
+        Kind::Info
+    } else if title.ends_with('…') || title.ends_with("...") {
+        Kind::Loading
+    } else {
+        Kind::Plain
+    }
+}
+fn raise(s: &mut App, title: &str, description: Option<&str>, kind: Kind, actions: Vec<ToastAction>, timeout: Option<i64>) {
+    let mut toast = stack::Toast::new(title, description, kind);
+    toast.actions = actions;
+    stack::add(s, toast, timeout);
+}
 pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
     toast_with(s, title, description, Vec::new());
 }
 pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
-    s.ui.shell.palette.notice = Some(Notice {
-        title: title.into(),
-        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
-        until: data::now_ms() + 4000,
-        actions,
-        error: false,
-        warning: false,
-        disabled: Vec::new(),
-        copied: Vec::new(),
-    });
+    raise(s, title, description, kind_of(title), actions, Some(TIMEOUT_MS));
 }
 /// A `type: "warning"` toast; `disabled` greys out its actions.
 pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>, disabled: bool) {
     let labels = if disabled { actions.iter().map(|a| a.0.clone()).collect() } else { Vec::new() };
-    toast_with(s, title, description, actions);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.warning = true;
-        notice.disabled = labels;
+    raise(s, title, description, Kind::Warning, actions, Some(TIMEOUT_MS));
+    if let Some(toast) = stack::newest_mut(s) {
+        toast.disabled = labels;
     }
 }
 #[cfg(test)]
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
-    s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
+    stack::newest(s).map(|n| n.title.as_str())
 }
-/// The open toast's `label` action reads "Copied!", disabled, for 2 s.
+/// The newest toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
-    let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
-    let until = data::now_ms() + 2000;
-    notice.copied.retain(|(l, _)| l != label);
-    notice.copied.push((label.to_string(), until));
-    notice.until = notice.until.max(until);
-    tx.wake_after(std::time::Duration::from_millis(2000));
+    if let Some(id) = stack::newest(s).map(|t| t.id) {
+        stack::copied_on(s, tx, id, label);
+    }
 }
 /// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
 /// be read.
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
-    s.ui.shell.palette.notice = Some(Notice {
-        title: title.into(),
-        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
-        until: i64::MAX,
-        actions: Vec::new(),
-        error: true,
-        warning: false,
-        disabled: Vec::new(),
-        copied: Vec::new(),
-    });
+    raise(s, title, description, Kind::Error, Vec::new(), None);
 }
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
 pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
-    toast(s, title, description);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.until = i64::MAX;
-    }
+    raise(s, title, description, kind_of(title), Vec::new(), None);
 }
 /// An error toast that times out like a plain one (web's `type: "error"` without `timeout: 0`).
 pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&str>) {
-    toast_error(s, title, description);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.until = data::now_ms() + 4000;
-    }
+    raise(s, title, description, Kind::Error, Vec::new(), Some(TIMEOUT_MS));
 }
-/// Closes the open toast when it is still the one titled `title`.
+/// Closes the toasts titled `title`.
 pub(crate) fn dismiss_toast(s: &mut App, title: &str) {
-    if s.ui.shell.palette.notice.as_ref().is_some_and(|n| n.title == title) {
-        s.ui.shell.palette.notice = None;
-    }
+    stack::close_titled(s, title);
 }
 pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.actions = actions;
+    if let Some(toast) = stack::newest_mut(s) {
+        toast.actions = actions;
     }
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -1345,21 +1337,6 @@ pub fn poll(s: &mut App) -> bool {
         if s.src.net().and_then(|net| net.take_reply(id)).is_none() {
             s.ui.shell.palette.acknowledgements.push(id);
         }
-    }
-    if s.ui
-        .shell
-        .palette
-        .notice
-        .as_ref()
-        .is_some_and(|v| data::now_ms() >= v.until)
-    {
-        s.ui.shell.palette.notice = None;
-        changed = true;
-    }
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        let (now, before) = (data::now_ms(), notice.copied.len());
-        notice.copied.retain(|(_, until)| now < *until);
-        changed |= notice.copied.len() != before;
     }
     if let Some(mut restart) = s.ui.shell.palette.restart.take() {
         match s.src.net().and_then(|net| net.take_reply(restart.pending)) {
@@ -2301,7 +2278,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
     }
     entry
 }
-pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
+pub fn overlay(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut out = vec![];
     if s.ui.shell.palette.open {
         out.extend(palette(s, t));
@@ -2311,49 +2288,7 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         *orders = Default::default();
     }
     actions::link_dialog(s, t, &mut out);
-    if let Some(notice) = &s.ui.shell.palette.notice {
-        let mut toast = kit::Toast::new("palette-notice", notice.title.clone());
-        if let Some(description) = &notice.description {
-            toast = toast.description(description.clone());
-        }
-        for (label, primary, run) in &notice.actions {
-            let run = run.clone();
-            let copied = notice.copied.iter().any(|(l, _)| l == label);
-            let off = notice.disabled.contains(label);
-            let button = kit::Button::new(if copied { "Copied!".to_string() } else { label.clone() })
-                .variant(if *primary { "default" } else { "outline" })
-                .size("xs")
-                .disabled(copied || off)
-                .build(t);
-            toast = toast.button(*primary, if copied || off { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
-        }
-        if notice.warning {
-            toast = toast.lead(icon(&icons::TRIANGLE_ALERT, 16.).color(t.c.warning));
-        }
-        if notice.error {
-            toast = toast.lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive));
-        }
-        // `CopyErrorButton`: an error toast's description copies with one press.
-        if let Some(text) = notice.description.clone().filter(|_| notice.error) {
-            let copied = notice.copied.iter().any(|(l, _)| l == COPY_ERROR);
-            let label = if copied { "Copied error" } else { COPY_ERROR };
-            let button = kit::Button::new(label)
-                .icon(if copied { &icons::CHECK } else { &icons::COPY })
-                .size("icon-micro")
-                .variant("ghost-muted")
-                .build(t)
-                .key("palette-notice-copy-error")
-                .help(label);
-            let button = if copied { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                tx.copy(&text);
-                toast_copied(s, tx, COPY_ERROR);
-            }) };
-            toast = toast.button(false, button);
-        }
-        // Every toast can be dismissed ("Dismiss notification").
-        toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
-        out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
-    }
+    out.extend(crate::shell::toast::view(s, cx, t));
     out
 }
 fn palette(s: &App, t: &T) -> Vec<El> {

@@ -192,6 +192,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
+    changed |= shell::toast::poll(s, tx);
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);

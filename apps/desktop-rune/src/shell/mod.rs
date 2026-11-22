@@ -4,6 +4,7 @@ pub mod confirm;
 pub mod sidebar;
 pub mod palette;
 pub mod quit;
+pub mod toast;
 pub(crate) mod workspace;
 
 use rune::{Cx, El, KeyEvent, Tx, row};
@@ -18,6 +19,7 @@ pub struct Ui {
     pub panel_open: bool,
     pub confirm: confirm::Ui,
     pub quit: quit::QuitHold,
+    pub toasts: toast::Stack,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -39,6 +41,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.src = crate::data::Source::Fixture(state);
         s.ui.desktop.local_off = true;
         s.navigate(crate::Route::Home { project_id: None });
+    }),
+    ("toasts-stack", |s| {
+        open_titled(s, "Replay showcase");
+        toast::scene(s, false);
+    }),
+    ("toasts-expanded", |s| {
+        open_titled(s, "Replay showcase");
+        toast::scene(s, true);
     }),
 ];
 
@@ -106,7 +116,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(palette::overlay(s, cx, t));
     confirm::view(s, t, &mut overlays);
     overlays.extend(crate::search::overlay(s, t));
-    overlays.extend(crate::notify::overlays(s, t));
     crate::links::overlays(s, t, &mut overlays);
     crate::add_to_machine::overlays(s, t, &mut overlays);
     crate::wizard::overlays(s, t, &mut overlays);
