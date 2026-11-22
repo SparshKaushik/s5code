@@ -233,8 +233,9 @@ fn provider_list<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
 }
 
 fn resolved<'a>(provider: &'a Value, cwd: Option<&str>, key: &str) -> &'a [Value] {
-    let snapshot = cwd.and_then(|cwd| workspace_snapshot(provider, cwd));
-    snapshot.map_or(&provider[key], |w| &w[key]).as_array().map_or(&[], |v| v.as_slice())
+    // `snapshot?.skills ?? provider.skills`: a snapshot without the list keeps the global one.
+    let snapshot = cwd.and_then(|cwd| workspace_snapshot(provider, cwd)).map(|w| &w[key]).filter(|v| !v.is_null());
+    snapshot.unwrap_or(&provider[key]).as_array().map_or(&[], |v| v.as_slice())
 }
 
 /// The selected provider's skills for the cwd.
@@ -740,16 +741,25 @@ pub fn skill_pill_scene(s: &mut App) {
     super::on_replay_showcase(s);
     let slug = provider(s, "opencode").and_then(|p| p["models"][0]["slug"].as_str()).unwrap_or("").to_owned();
     draft_mut(s).model = Some(("opencode".into(), slug));
-    super::set_text(s, "$contr");
+    // This project's workspace snapshot lists its own skills in place of the global ones.
+    super::set_text(s, "$custom");
     if let Some(m) = open_menu(s) {
         choose(s, &m, 0, &mut Tx::default());
     }
-    draft_mut(s).edit.insert("triage the open pull requests");
+    draft_mut(s).edit.insert("for a dark theme");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_skill_pill_scene_holds_a_skill_chip() {
+        let mut s = App::new();
+        skill_pill_scene(&mut s);
+        let d = draft(&s).unwrap();
+        assert!(d.edit.pills().any(|(_, id)| id.starts_with(super::super::chips::SKILL)), "FAILED: {:?}", d.edit.text);
+    }
 
     #[test]
     fn a_workspace_snapshot_replaces_the_machine_wide_lists() {
@@ -759,6 +769,8 @@ mod tests {
         });
         let names = |cwd: Option<&str>, key: &str| resolved(&provider, cwd, key).iter().map(|v| data::s(v, "name").to_owned()).collect::<Vec<_>>();
         assert_eq!(names(Some("/repo"), "skills"), ["repo-skill"]);
+        let partial = json!({"skills": [{"name": "global"}], "workspaceSnapshots": [{"cwd": "/repo", "slashCommands": []}]});
+        assert_eq!(resolved(&partial, Some("/repo"), "skills").len(), 1, "FAILED: a snapshot without skills keeps the global list");
         assert!(names(Some("/repo"), "slashCommands").is_empty(), "the snapshot's empty list wins");
         assert_eq!(names(Some("/other"), "skills"), ["global"]);
         assert_eq!(names(None, "slashCommands"), ["init"]);
