@@ -378,6 +378,46 @@ fn inspected_role(path: &str) -> &'static str {
     "canvas"
 }
 
+/// `getThemeRoleLabel`: a few roles read differently; the rest split their camelCase.
+fn role_label(role: &str) -> String {
+    const LABELS: [(&str, &str); 14] = [
+        ("canvas", "Background"),
+        ("toolbar", "Toolbar background"),
+        ("toolbarForeground", "Toolbar text"),
+        ("toolbarBorder", "Toolbar border"),
+        ("toolbarControl", "Toolbar control"),
+        ("toolbarControlForeground", "Toolbar control text"),
+        ("toolbarControlHover", "Toolbar control hover"),
+        ("accent", "Accent color"),
+        ("errorForeground", "Error text"),
+        ("errorSurface", "Error background"),
+        ("warningForeground", "Warning text"),
+        ("warningSurface", "Warning background"),
+        ("updateForeground", "Update text"),
+        ("updateSurface", "Update background"),
+    ];
+    if let Some((_, label)) = LABELS.iter().find(|(r, _)| *r == role) {
+        return (*label).to_owned();
+    }
+    let mut out = String::new();
+    for (i, c) in role.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_ascii_uppercase() {
+            out.push(' ');
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The family filter: its label and its roles' labels, as web's `renderColorFields`.
+fn family_matches(label: &str, roles: &[&str], query: &str) -> bool {
+    query.is_empty() || std::iter::once(label.to_owned()).chain(roles.iter().map(|r| role_label(r))).collect::<Vec<_>>().join(" ").to_lowercase().contains(query)
+}
+
 fn family_label(role: &str) -> &'static str {
     GROUPS.iter().flat_map(|(_, families)| families.iter()).find(|(_, shown, _)| *shown == role).map_or("Background", |&(label, _, _)| label)
 }
@@ -498,7 +538,7 @@ fn fields(s: &App, t: &T, advanced: bool) -> El {
     let mut out = col().w_full().gap(20.0);
     let mut any = false;
     for (title, families) in GROUPS {
-        let shown: Vec<&Family> = families.iter().filter(|(label, _, roles)| query.is_empty() || format!("{label} {}", roles.join(" ")).to_lowercase().contains(&query)).collect();
+        let shown: Vec<&Family> = families.iter().filter(|(label, _, roles)| family_matches(label, roles, &query)).collect();
         if shown.is_empty() {
             continue;
         }
@@ -691,6 +731,16 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_color_filter_reads_role_labels_like_web() {
+        assert_eq!(role_label("toolbarForeground"), "Toolbar text");
+        assert_eq!(role_label("sidebarBorder"), "Sidebar Border", "others split their camelCase");
+        let text: Vec<&str> = vec!["text", "toolbarForeground", "toolbarControlForeground"];
+        assert!(family_matches("Text", &text, "toolbar text"), "a role's label matches");
+        assert!(!family_matches("Text", &text, "toolbarforeground"), "its id doesn't");
+        assert!(family_matches("Text", &text, ""));
+    }
 
     #[test]
     fn the_panel_stays_inside_the_window_and_resizes_within_it() {
