@@ -135,6 +135,8 @@ pub struct Ui {
     pub content: (String, Vec<String>),
     /// Since when the thread-jump modifiers have been held alone (`useThreadJumpHintsVisible`).
     jump_held: Option<i64>,
+    /// The thread row a file drag is over.
+    drop_over: Option<String>,
     /// The width the rail set, read from the window prefs on first use.
     width: std::cell::Cell<Option<f32>>,
     /// The Dev or Nightly header artwork, rasterized for the current width.
@@ -1480,6 +1482,7 @@ pub(crate) fn jump_labels(s: &App, model: &Model) -> HashMap<String, String> {
 /// `handleThreadFileDrop`: files dropped on a row open its thread with them attached; folders
 /// are left out, as web's row drop ignores them.
 pub fn drop_files(s: &mut App, id: &str, files: &[std::path::PathBuf]) {
+    s.ui.shell.sidebar.drop_over = None;
     let files: Vec<String> = files.iter().filter(|p| !p.is_dir()).map(|p| p.display().to_string()).collect();
     if files.is_empty() {
         return;
@@ -1488,6 +1491,27 @@ pub fn drop_files(s: &mut App, id: &str, files: &[std::path::PathBuf]) {
     if matches!(&s.route, Route::Thread(open) if open == id) {
         crate::chat::composer::add_files(s, files);
     }
+}
+
+/// A thread row that takes dropped files (`makeWorkspaceFileDropHandlers`), and follows the drag.
+pub(super) fn drop_target(e: El, id: &str) -> El {
+    let (dropped, hovered) = (id.to_owned(), id.to_owned());
+    e.on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| drop_files(s, &dropped, files))
+        .on_drop_hover(move |s: &mut App, over, _: &mut Tx| drop_hover(&mut s.ui.shell.sidebar, &hovered, over))
+}
+
+fn drop_hover(ui: &mut Ui, id: &str, over: bool) {
+    if over {
+        ui.drop_over = Some(id.to_owned());
+    } else if ui.drop_over.as_deref() == Some(id) {
+        ui.drop_over = None;
+    }
+}
+
+/// `ring-1 ring-inset ring-primary/70` on the row a file drag is over.
+pub(super) fn drop_ring(e: El, t: &T, over: bool) -> El {
+    use crate::theme::AlphaMul;
+    if over { e.border(1.0, t.sb.primary.alpha_mul(0.7)) } else { e }
 }
 
 /// `selectThreadSearchResult`: opens the thread, and find on its message match as the palette does.
@@ -1733,8 +1757,12 @@ mod tests {
         let mut s = App::new();
         s.route = Route::Home { project_id: None };
         let id = crate::data::s(&s.state().threads[0], "id").to_string();
+        drop_hover(&mut s.ui.shell.sidebar, &id, true);
+        drop_hover(&mut s.ui.shell.sidebar, "other", false);
+        assert_eq!(s.ui.shell.sidebar.drop_over.as_deref(), Some(id.as_str()), "leaving another row keeps this one lit");
         drop_files(&mut s, &id, &[std::env::temp_dir()]);
         assert!(matches!(s.route, Route::Home { .. }), "a folder alone is ignored");
+        assert_eq!(s.ui.shell.sidebar.drop_over, None, "the drop clears the highlight");
         let file = std::env::temp_dir().join("s5code-rune-drop-test.txt");
         std::fs::write(&file, "x").unwrap();
         drop_files(&mut s, &id, &[file.clone()]);
