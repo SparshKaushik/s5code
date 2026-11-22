@@ -102,6 +102,11 @@ struct Bounds {
 }
 
 impl Ui {
+    /// The window's size as the last view laid it out.
+    pub(crate) fn window_size(&self) -> Option<[f32; 2]> {
+        self.window.get()
+    }
+
     pub(crate) fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }

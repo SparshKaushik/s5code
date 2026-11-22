@@ -10,6 +10,7 @@ mod favicon;
 mod file_preview;
 mod files;
 mod history;
+pub(crate) mod html_frame;
 pub mod popout;
 mod proactive;
 pub(crate) mod pull_requests;
@@ -82,6 +83,7 @@ pub struct Ui {
     /// What `right-panel.json` holds; `None` until the first poll reads it.
     saved: Option<Value>,
     pub waker: Option<Waker>,
+    pub(crate) html_frames: html_frame::Frames,
     proactive: proactive::Watch,
     history: history::History,
 }
@@ -115,6 +117,7 @@ impl Default for Ui {
             stash_key: String::new(),
             saved: None,
             waker: None,
+            html_frames: Default::default(),
             proactive: Default::default(),
             history: Default::default(),
         }
@@ -643,7 +646,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | device::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)
-        | preview::poll(app, tx);
+        | preview::poll(app, tx)
+        | html_frame::poll(app);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key

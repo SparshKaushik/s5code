@@ -462,6 +462,34 @@ pub fn import(app: &mut App, scale: f32, source: &'static browser_import::Source
     Some(browser_import::start(source, directory, ui.browser.sender()?, waker))
 }
 
+/// Captures a page once for an inline frame, in the Default profile's Chrome. Chrome starts for
+/// it when no tab has, at the scale the panel last saw or 2; the panel relaunches it at the
+/// window's own scale when it opens, as after an import.
+pub fn snapshot(app: &mut App, url: String, width: u32, dark: bool) -> Option<browser::Shot> {
+    let shot = browser::Shot::new(url, width, dark);
+    inline_frame_cmd(app, Cmd::Snapshot(shot.clone())).then_some(shot)
+}
+
+/// Shows a page live inline, as `snapshot` starts Chrome for it; `inline_frame_cmd` drives it.
+pub fn live(app: &mut App, url: String, width: u32, height: u32, dark: bool) -> Option<browser::Live> {
+    let live = browser::Live::new(url, width, height, dark);
+    inline_frame_cmd(app, Cmd::LiveOpen(live.clone())).then_some(live)
+}
+
+/// Sends an inline frame's command to the Default profile's Chrome, starting it if need be.
+pub fn inline_frame_cmd(app: &mut App, cmd: Cmd) -> bool {
+    let Some(waker) = app.ui.panel.waker.clone() else { return false };
+    let ui = &mut app.ui.panel.browser;
+    if !ui.browser.started() {
+        let scale = ui.chrome_scale.unwrap_or(2.);
+        ui.browser.start(waker);
+        ui.browser.send(Cmd::Viewport { w: 0., h: 0., scale });
+        ui.chrome_scale = Some(scale);
+    }
+    ui.browser.send(cmd);
+    true
+}
+
 /// "Try again" after Chrome failed: a fresh worker, with the open tabs back on blank pages.
 fn restart(app: &mut App) {
     let Some(waker) = app.ui.panel.waker.clone() else { return };
@@ -569,6 +597,22 @@ fn adopt(app: &mut App, target: String, opener: String, url: String) {
             register(app, tab);
         }
     }
+}
+
+/// Electron's "new-tab" window open: the link loads afresh in a tab of its opener's profile,
+/// shown unless a middle or Ctrl/Cmd-click opened it (`emitOpenLink`'s `background`).
+fn open_link(app: &mut App, opener: TabId, url: String, background: bool) {
+    let Some(profile) = app.ui.panel.browser.tabs.get(&opener).map(|t| t.profile.clone()) else { return };
+    let floating = app.ui.panel.browser.pip == Some(opener);
+    let tab = open_tab(app, &profile);
+    send(app, Cmd::Navigate(tab, url));
+    match app.frame_route().clone() {
+        Route::Thread(thread) if background || floating => {
+            super::add_browser(app, &thread, tab, floating && !background);
+        }
+        _ => super::activate(app, super::Surface::Browser(tab)),
+    }
+    register(app, tab);
 }
 
 pub fn close(app: &mut App, tab: TabId) {
@@ -701,7 +745,7 @@ fn send(app: &mut App, cmd: Cmd) {
     }
     let ui = &app.ui.panel.browser;
     let tab = match &cmd {
-        Cmd::Mouse { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) | Cmd::ClearCookies | Cmd::ClearCache => ui.shown,
+        Cmd::Mouse { .. } | Cmd::Pointer { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) | Cmd::ClearCookies | Cmd::ClearCache => ui.shown,
         Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::ColorScheme(tab, _) => Some(*tab),
         _ => None,
     };
@@ -1182,6 +1226,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
+            browser::Event::OpenLink { tab, url, background } => open_link(app, tab, url, background),
+            browser::Event::PopupClosed(tab) => close(app, tab),
+            browser::Event::FrameLink(url) => super::open_preview(app, &url),
             browser::Event::Picked { tab, element, image } => pick(app, tab, element, image),
             browser::Event::Enclosed(tab, rect, elements) => enclosed(app, tab, rect, elements),
             browser::Event::DevTools(Ok(url)) => {
@@ -3545,8 +3592,9 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
     el().pixels(pixels)
         .focusable(true)
         .key(key.to_string())
-        // A mouse's back and forward buttons go back and forward, as on Electron's page.
-        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
+        // A mouse's back and forward buttons go back and forward, as on Electron's page; the
+        // middle one reaches the page, so a link opens in a background tab.
+        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward, rune::PointerButton::Middle])
         .on_press_tx(|s: &mut App, tx: &mut Tx| {
             let Some(tab) = s.ui.panel.browser.shown else { return };
             match tx.button() {
@@ -3556,8 +3604,15 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             }
         })
         .on_drag(move |s: &mut App, d, tx| {
-            if tx.button() != rune::PointerButton::Primary {
-                return;
+            let button = match tx.button() {
+                rune::PointerButton::Primary => "left",
+                rune::PointerButton::Middle => "middle",
+                _ => return,
+            };
+            if matches!(d.phase, Phase::Down) {
+                let mods = tx.mods();
+                let modifiers = u32::from(mods.alt) | u32::from(mods.ctrl) << 1 | u32::from(mods.logo || (mods.cmd && !mods.ctrl)) << 2 | u32::from(mods.shift) << 3;
+                send(s, Cmd::Pointer { button, modifiers });
             }
             send(
                 s,
