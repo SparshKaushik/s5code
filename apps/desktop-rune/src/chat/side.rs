@@ -27,8 +27,6 @@ pub struct State {
     /// Each parent thread's open side chat (rightPanelStore's `side-chat:` surface).
     pub open: HashMap<String, String>,
     pending: Option<Pending>,
-    /// The side chat whose delete waits for confirmation (`confirmThreadDelete`).
-    confirm_delete: Option<String>,
     requests: Vec<(u64, Request)>,
 }
 
@@ -242,7 +240,6 @@ fn show(s: &mut App, parent: &str, side: &str) {
         net.watch_thread(side);
     }
     s.ui.chat.side.open.insert(parent.to_owned(), side.to_owned());
-    s.ui.chat.side.confirm_delete = None;
     focus(s, side, true);
 }
 
@@ -302,7 +299,6 @@ fn poll_requests(s: &mut App) -> bool {
 fn close(s: &mut App, side: &str) {
     let parent = s.ui.chat.side.open.iter().find(|(_, open)| *open == side).map(|(parent, _)| parent.clone());
     s.ui.chat.side.open.retain(|_, open| open != side);
-    s.ui.chat.side.confirm_delete = None;
     if let Some(parent) = &parent {
         crate::panel::record_closed_side_chat(s, parent, side);
     }
@@ -326,16 +322,18 @@ fn confirm_delete(s: &App) -> bool {
     s.client_settings.values.get(key).or_else(|| crate::settings::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// `deleteSideChat`: web's destructive `dialogs.confirm` while `confirmThreadDelete` is on.
 fn request_delete(s: &mut App, side: &str) {
-    if confirm_delete(s) && s.ui.chat.side.confirm_delete.as_deref() != Some(side) {
-        s.ui.chat.side.confirm_delete = Some(side.to_owned());
-    } else {
-        delete(s, side);
+    if !confirm_delete(s) {
+        return delete(s, side);
     }
+    let title = thread(s, side).map(|r| data::s(r, "title")).filter(|r| !r.is_empty()).unwrap_or("Side chat");
+    let question = format!("Delete side chat \"{title}\"?\nThis permanently clears its conversation history.");
+    let side = side.to_owned();
+    crate::shell::confirm::request(s, question, true, move |s: &mut App| delete(s, &side));
 }
 
 fn delete(s: &mut App, side: &str) {
-    s.ui.chat.side.confirm_delete = None;
     let Some(net) = s.src.net() else { return };
     let rpc = net.dispatch(json!({"type": "thread.delete", "commandId": s5_net::uuid(), "threadId": side}));
     s.ui.chat.side.requests.push((rpc, Request::Delete(side.to_owned())));
@@ -415,9 +413,6 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
         .child(delete_button.build(t))
         .child(icon_button(&icons::X, "Close side chat").size("icon-xs").on_press(move |s: &mut App| close(s, &close_id)).build(t));
     let mut content = col().grow(1.0).min_w(0.0).h_full().child(header).child(el().h(1.0).w_full().fill(t.c.border));
-    if s.ui.chat.side.confirm_delete.as_deref() == Some(side) {
-        content = content.child(confirm(t, side, title));
-    }
     content = match shell {
         None if s.state().shell_ready => {
             content.child(text("This side chat was deleted.").font(theme::TEXT_XS).color(t.c.muted_foreground).padding(12.0))
@@ -449,26 +444,6 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
         .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| crate::chat::composer::side_shortcut(s, &key_id, e))
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content)
-}
-
-/// The destructive confirm web asks through `dialogs.confirm`.
-fn confirm(t: &T, side: &str, title: &str) -> El {
-    let id = side.to_owned();
-    col()
-        .w_full()
-        .padding(12.0)
-        .gap(8.0)
-        .child(text(format!("Delete side chat \"{title}\"?")).font(theme::XS_MEDIUM).color(t.c.foreground).wrap().w_full())
-        .child(text("This permanently clears its conversation history.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().w_full())
-        .child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .justify_end()
-                .child(Button::new("Cancel").variant("outline").size("xs").on_press(|s: &mut App| s.ui.chat.side.confirm_delete = None).build(t))
-                .child(Button::new("Delete").variant("destructive").size("xs").on_press(move |s: &mut App| delete(s, &id)).build(t)),
-        )
-        .child(el().h(1.0).w_full().fill(t.c.border))
 }
 
 #[cfg(test)]

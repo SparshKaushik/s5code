@@ -191,6 +191,12 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
 
 /// Parsing and highlighting a message is the costliest part of a timeline build, and the view
 /// rebuilds at least once a second (relative times), so each message builds once per version.
+/// A Mermaid source drawn as chat draws a ```` ```mermaid ```` fence, or `None` outside the
+/// diagrams Rune supports.
+pub(crate) fn diagram(source: &str, t: &T) -> Option<El> {
+    rune_kit::mermaid::render(source, &style(t, t.c.foreground))
+}
+
 pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
     memoized(app, source, id, t, ink(t), false)
 }

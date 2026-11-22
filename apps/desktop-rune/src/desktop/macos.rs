@@ -165,6 +165,15 @@ pub fn fix_menus(settings_title: &str, updates_title: &str, quit_title: &str) {
         {
             insert(edit, new_item("Paste as Text", c"paste:", "v", COMMAND | SHIFT), index(edit, paste) + 1);
         }
+        // Electron's Edit menu sets Select All apart.
+        if let Some(edit) = top_menu(root, "Edit")
+            && let Some(all) = find_action(edit, c"selectAll:")
+            && let Some(&before) = items(edit).get((index(edit, all) - 1).max(0) as usize)
+            && index(edit, all) > 0
+            && msg!(before, c"isSeparatorItem"; i8) == 0
+        {
+            insert(edit, separator(), index(edit, all));
+        }
         if let Some(view) = top_menu(root, "View")
             && find_action(view, c"toggleFullScreen:").is_none()
         {
