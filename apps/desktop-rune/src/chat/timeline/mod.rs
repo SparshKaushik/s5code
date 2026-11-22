@@ -6,7 +6,7 @@ pub mod error_banner;
 pub mod find;
 pub(crate) mod markdown;
 
-mod language_icons;
+pub(crate) mod language_icons;
 pub mod plan;
 pub mod question;
 pub mod queue;
@@ -18,10 +18,11 @@ mod secret;
 pub mod banners;
 mod child_approvals;
 mod link;
-mod worktree_setup;
+pub(crate) mod worktree_setup;
 mod inspector;
 mod history;
 mod md_links;
+mod math;
 pub(crate) mod citation;
 mod media;
 mod work;
@@ -974,11 +975,22 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         // The composer floats over the list's bottom. Scroll extent counts the stack's own
         // padding but not the viewport's, so the clearance lives here.
         .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banner_h);
+    // The list's children before the first timeline row.
+    let mut lead = 0;
     if let Some(control) = history::view(app, thread_id, t) {
         stack = stack.child(col().key("timeline-row-history").w_full().child(control));
+        lead += 1;
     }
     if let Some(parent) = parent_divider(app, thread_id, t) {
         stack = stack.child(col().key("timeline-row-parent").w_full().child(parent));
+        lead += 1;
+    }
+    // The minimap lights the prompts in view and finds the turn being read.
+    if routed {
+        let thread = thread_id.to_owned();
+        stack = stack.on_visible_rows(move |app: &mut App, r: std::ops::Range<usize>| {
+            minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead))
+        });
     }
     for (index, r) in rows.into_iter().enumerate() {
         let marks = marks.next().flatten();
@@ -1050,7 +1062,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         let body = rendered.unwrap_or(body);
                         // max-h-44 with a 1.75rem fade, as CollapsibleUserMessageBody folds.
                         let body = if folded { col().w_full().max_h(176.0).clip_fade(0.0, 0.0, 0.0, 28.0).child(body) } else { body };
-                        let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(t.c.message_surface).child(body);
+                        // guestBubbleClassName: a guest's message sits on the guest surface.
+                        let surface = if matches!(who, lifecycle::Attribution::Guest) { theme::guest_surface(&t.c) } else { t.c.message_surface };
+                        let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(surface).child(body);
                         if foldable {
                             let label = if folded { "Show full message" } else { "Show less" };
                             // A full-width row here would let the text measure at its unwrapped width.

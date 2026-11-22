@@ -5,7 +5,7 @@ use crate::{
     theme::{self, T},
 };
 use super::media::{self, Kind, Loaded};
-use rune::{El, col, el, icon, row, text};
+use rune::{Drag, El, Key, Phase, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -13,6 +13,27 @@ use std::collections::HashMap;
 const THUMBNAIL_DECODE: u32 = 480;
 /// The lightbox's own decode, held only while it is open.
 const LIGHTBOX_DECODE: u32 = 2048;
+/// ZoomableImage's MAX_ZOOM.
+const MAX_ZOOM: f32 = 8.0;
+const STAGE: &str = "image-lightbox-stage";
+
+/// ZoomableImage's zoom (1 fits the stage) and scroll offset into the zoomed picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct View {
+    zoom: f32,
+    scroll: [f32; 2],
+}
+
+/// The open picture's zoom; another picture refits, as web remounts ZoomableImage.
+struct Zoomed {
+    key: String,
+    view: View,
+    /// The stage and picture size its handlers last saw, for the lightbox's own arrow keys.
+    stage: [f32; 2],
+    natural: [f32; 2],
+    /// The scroll a drag started from.
+    grab: Option<[f32; 2]>,
+}
 
 #[derive(Default)]
 pub struct Assets {
@@ -26,6 +47,7 @@ pub struct Assets {
     pub gallery: Vec<String>,
     /// The open image at lightbox size, and whether a view has drawn it yet.
     zoom: Option<(String, Loaded, bool)>,
+    pan: Option<Zoomed>,
     /// The thread whose pictures are decoded; another thread's are dropped.
     thread: Option<String>,
     pub media: media::State,
@@ -40,6 +62,7 @@ impl Assets {
         self.open = None;
         self.gallery.clear();
         self.zoom = None;
+        self.pan = None;
         self.media.forget();
     }
 }
@@ -271,6 +294,7 @@ fn siblings(app: &App, id: &str) -> Vec<String> {
 fn close(app: &mut App) {
     app.ui.chat.timeline.assets.open = None;
     app.ui.chat.timeline.assets.gallery.clear();
+    app.ui.chat.timeline.assets.pan = None;
 }
 
 /// The open picture's place in its gallery and the gallery's size, when it has others.
@@ -286,13 +310,191 @@ fn step(app: &mut App, by: isize) {
     if let Some((index, count)) = place(assets) {
         let next = (index as isize + by).rem_euclid(count as isize) as usize;
         assets.open = Some(assets.gallery[next].clone());
+        assets.pan = None;
     }
 }
 
-/// Escape closes the lightbox; ← and → step through its gallery.
+/// The fitted picture's size at `zoom`, and its viewport: the picture capped to the stage. At 1
+/// the picture fits the stage and never draws past its own pixels.
+fn frame(stage: [f32; 2], natural: [f32; 2], zoom: f32) -> ([f32; 2], [f32; 2]) {
+    let fit = (stage[0] / natural[0].max(1.0)).min(stage[1] / natural[1].max(1.0)).min(1.0);
+    let content = natural.map(|n| n * fit * zoom);
+    (content, [content[0].min(stage[0]), content[1].min(stage[1])])
+}
+
+impl View {
+    const FIT: View = View { zoom: 1.0, scroll: [0.0, 0.0] };
+
+    fn clamped(self, stage: [f32; 2], natural: [f32; 2]) -> Self {
+        let (content, viewport) = frame(stage, natural, self.zoom);
+        let scroll = [0usize, 1].map(|i| self.scroll[i].clamp(0.0, (content[i] - viewport[i]).max(0.0)));
+        View { scroll, ..self }
+    }
+
+    /// changeZoom: `next` clamped to 1..=8, keeping the picture under `at` (viewport points; its
+    /// centre when None) in place. The viewport stays centred in the stage as it grows.
+    fn zoom_to(self, next: f32, at: Option<[f32; 2]>, stage: [f32; 2], natural: [f32; 2]) -> Self {
+        let zoom = next.clamp(1.0, MAX_ZOOM);
+        if !zoom.is_finite() || zoom == self.zoom {
+            return self;
+        }
+        let (_, before) = frame(stage, natural, self.zoom);
+        let (_, after) = frame(stage, natural, zoom);
+        let at = at.unwrap_or([before[0] / 2.0, before[1] / 2.0]);
+        let scroll = [0usize, 1].map(|i| {
+            let anchor = (self.scroll[i] + at[i]) / self.zoom;
+            anchor * zoom - (at[i] + (after[i] - before[i]) / 2.0)
+        });
+        View { zoom, scroll }.clamped(stage, natural)
+    }
+
+    /// A click or Enter: 2x, or back to fit once zoomed.
+    fn toggle(self, at: Option<[f32; 2]>, stage: [f32; 2], natural: [f32; 2]) -> Self {
+        self.zoom_to(if self.zoom > 1.0 { 1.0 } else { 2.0 }, at, stage, natural)
+    }
+
+    /// ZoomableImage's keys: Enter or Space toggles, + and - step 1.5x, 0 fits, and once zoomed
+    /// the arrows pan 40pt (← and → only when the picture is wider than its viewport, so they
+    /// still step the gallery otherwise).
+    fn keyed(self, key: &Key, stage: [f32; 2], natural: [f32; 2]) -> Option<Self> {
+        let (content, viewport) = frame(stage, natural, self.zoom);
+        let pan = |dx: f32, dy: f32| Some(View { scroll: [self.scroll[0] + dx, self.scroll[1] + dy], ..self }.clamped(stage, natural));
+        let zoomed = self.zoom > 1.0;
+        match key {
+            Key::Enter => Some(self.toggle(None, stage, natural)),
+            Key::Text(c) if c == " " => Some(self.toggle(None, stage, natural)),
+            Key::Text(c) if c == "+" || c == "=" => Some(self.zoom_to(self.zoom * 1.5, None, stage, natural)),
+            Key::Text(c) if c == "-" => Some(self.zoom_to(self.zoom / 1.5, None, stage, natural)),
+            Key::Text(c) if c == "0" => Some(self.zoom_to(1.0, None, stage, natural)),
+            Key::Left if zoomed && content[0] > viewport[0] => pan(-40.0, 0.0),
+            Key::Right if zoomed && content[0] > viewport[0] => pan(40.0, 0.0),
+            Key::Up if zoomed => pan(0.0, -40.0),
+            Key::Down if zoomed => pan(0.0, 40.0),
+            _ => None,
+        }
+    }
+}
+
+/// The open picture's zoom, its scroll clamped to the stage it shows in now.
+fn current(assets: &Assets, key: &str, stage: [f32; 2], natural: [f32; 2]) -> (View, bool) {
+    assets.pan.as_ref().filter(|z| z.key == key).map_or((View::FIT, false), |z| (z.view.clamped(stage, natural), z.grab.is_some()))
+}
+
+fn zoomed<'a>(app: &'a mut App, key: &str, stage: [f32; 2], natural: [f32; 2]) -> &'a mut Zoomed {
+    let pan = &mut app.ui.chat.timeline.assets.pan;
+    if pan.as_ref().is_some_and(|z| z.key != key) {
+        *pan = None;
+    }
+    let z = pan.get_or_insert_with(|| Zoomed { key: key.to_owned(), view: View::FIT, stage, natural, grab: None });
+    z.view = z.view.clamped(stage, natural);
+    z.stage = stage;
+    z.natural = natural;
+    z
+}
+
+fn zoom_by(app: &mut App, key: &str, stage: [f32; 2], natural: [f32; 2], k: f32, at: [f32; 2], tx: &mut Tx) {
+    tx.instant();
+    let z = zoomed(app, key, stage, natural);
+    z.view = z.view.zoom_to(z.view.zoom * k, Some(at), stage, natural);
+}
+
+/// ZoomableImage: the picture in a viewport the size of the fitted picture. Click toggles 2x at
+/// the pointer, the wheel or a pinch zooms there, a drag pans once zoomed, and the keys as in
+/// [`View::keyed`]. It repaints only on input.
+fn zoomable(app: &App, key: &str, name: &str, pixels: &rune::Pixels, stage: [f32; 2]) -> El {
+    let (w, h) = pixels.size();
+    let natural = [w as f32, h as f32];
+    let (view, grabbing) = current(&app.ui.chat.timeline.assets, key, stage, natural);
+    let (content, viewport) = frame(stage, natural, view.zoom);
+    let cursor = match grabbing {
+        _ if view.zoom <= 1.0 => rune::Cursor::Pointer,
+        true => rune::Cursor::Grabbing,
+        false => rune::Cursor::Grab,
+    };
+    let (wheel, pinch, drag, keys) = (key.to_owned(), key.to_owned(), key.to_owned(), key.to_owned());
+    el().key("image-lightbox-viewport")
+        .size(viewport[0], viewport[1])
+        .clip_rounded(theme::radius::LG)
+        .instant_changes()
+        .focusable(true)
+        .role("region")
+        .label(format!("{name}, zoomable image"))
+        .description("Click to zoom in or return to fit. Scroll to zoom, drag to pan. Use Enter to toggle zoom, plus or minus to zoom, and 0 to fit.")
+        .a11y_value(format!("{}% zoom", (view.zoom * 100.0).round()))
+        .cursor(cursor)
+        .child(el().absolute(-view.scroll[0], -view.scroll[1]).size(content[0], content[1]).pixels(pixels))
+        // Wheel deltas follow the content, so a wheel turned toward you (content up) zooms out.
+        .on_wheel(move |app: &mut App, e: rune::WheelEvent, tx: &mut Tx| {
+            if e.dy == 0.0 {
+                return false;
+            }
+            zoom_by(app, &wheel, stage, natural, (e.dy * 0.002).exp(), [e.x, e.y], tx);
+            true
+        })
+        .on_magnify(move |app: &mut App, e: rune::MagnifyEvent, tx: &mut Tx| {
+            zoom_by(app, &pinch, stage, natural, 1.0 + e.delta, [e.x, e.y], tx);
+            true
+        })
+        .on_drag(move |app: &mut App, d: &mut Drag, tx: &mut Tx| {
+            tx.instant();
+            // Layout points per window point (the app zoom).
+            let per = crate::desktop::from_window(1.0, 1.0).0;
+            let z = zoomed(app, &drag, stage, natural);
+            match d.phase {
+                Phase::Down => z.grab = (z.view.zoom > 1.0).then_some(z.view.scroll),
+                Phase::Move => {
+                    if let Some(from) = z.grab {
+                        z.view = View { scroll: [from[0] - d.dx * per, from[1] - d.dy * per], ..z.view }.clamped(stage, natural);
+                    }
+                }
+                Phase::Up => {
+                    let from = z.grab.take();
+                    if d.cancelled() {
+                        if let Some(from) = from {
+                            z.view.scroll = from;
+                        }
+                    // A drag past 4pt only pans; the second click of a double click does nothing.
+                    } else if d.dx.hypot(d.dy) * per <= 4.0 && d.clicks <= 1 {
+                        z.view = z.view.toggle(Some([d.x, d.y]), stage, natural);
+                    }
+                }
+            }
+        })
+        .on_key(move |app: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
+            if e.mods.cmd || e.mods.ctrl || e.mods.alt {
+                return false;
+            }
+            let (view, _) = current(&app.ui.chat.timeline.assets, &keys, stage, natural);
+            let Some(next) = view.keyed(&e.key, stage, natural) else { return false };
+            tx.instant();
+            zoomed(app, &keys, stage, natural).view = next;
+            true
+        })
+}
+
+/// Scenes: the open picture decoded for the lightbox, zoomed to `zoom` and scrolled by `scroll`.
+pub(super) fn scene_zoom(app: &mut App, zoom: f32, scroll: [f32; 2]) {
+    let Some(key) = app.ui.chat.timeline.assets.open.clone() else { return };
+    let Some((_, Some(loaded))) = media::find(app, &key) else { return };
+    let (w, h) = loaded.pixels.size();
+    let assets = &mut app.ui.chat.timeline.assets;
+    assets.zoom = Some((key.clone(), loaded, true));
+    assets.pan = Some(Zoomed { key, view: View { zoom, scroll }, stage: [0.0; 2], natural: [w as f32, h as f32], grab: None });
+}
+
+/// Escape closes the lightbox; once zoomed the arrows pan, else ← and → step through its gallery.
 pub fn on_key(app: &mut App, e: &rune::KeyEvent) -> bool {
     if app.ui.chat.timeline.assets.open.is_none() {
         return false;
+    }
+    let assets = &mut app.ui.chat.timeline.assets;
+    let open = assets.open.clone();
+    if matches!(e.key, Key::Left | Key::Right | Key::Up | Key::Down)
+        && let Some(z) = assets.pan.as_mut().filter(|z| open.as_ref() == Some(&z.key))
+        && let Some(next) = z.view.keyed(&e.key, z.stage, z.natural)
+    {
+        z.view = next;
+        return true;
     }
     match e.key {
         rune::Key::Escape => close(app),
@@ -311,8 +513,18 @@ pub fn lightbox(app: &App) -> Option<El> {
     let loaded = loaded?;
     let url = loaded.url.clone();
     let zoom = app.ui.chat.timeline.assets.zoom.as_ref().filter(|(k, z, _)| k == id && z.pixels.size().0 > 0);
-    let pixels = zoom.map_or(&loaded.pixels, |(_, z, _)| &z.pixels);
-    let picture = el().w_full().grow(1.0).min_h(0.0).pixels_fit(pixels, rune::SurfaceFit::Fit);
+    // The thumbnail fills in, fitted, until the full picture decodes and can zoom.
+    let stage = rune::memo::layout_size(STAGE).map(|s| s.map(f32::round)).filter(|s| s[0] >= 1.0 && s[1] >= 1.0);
+    let picture = match (zoom, stage) {
+        (Some((_, z, _)), Some(stage)) => {
+            let viewport = media::with_actions(zoomable(app, id, &loaded.name, &z.pixels, stage), id, &source, false);
+            el().key(STAGE).w_full().grow(1.0).min_h(0.0).center().child(viewport)
+        }
+        _ => {
+            let pixels = zoom.map_or(&loaded.pixels, |(_, z, _)| &z.pixels);
+            media::with_actions(el().key(STAGE).w_full().grow(1.0).min_h(0.0).pixels_fit(pixels, rune::SurfaceFit::Fit), id, &source, false)
+        }
+    };
     let place = place(&app.ui.chat.timeline.assets);
     let caption = match place {
         Some((index, count)) => format!("{} ({}/{count})", loaded.name, index + 1),
@@ -360,7 +572,7 @@ pub fn lightbox(app: &App) -> Option<El> {
                                     .min_w(0.0)
                                     .h_full()
                                     .gap(8.0)
-                                    .child(media::with_actions(picture, id, &source, false))
+                                    .child(picture)
                                     .child(row().w_full().justify_center().child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate())),
                             )
                             .children(place.map(|_| button("image-lightbox-next", &icons::CHEVRON_RIGHT, "Next media").on_press(|app: &mut App| step(app, 1)))),
@@ -380,8 +592,43 @@ pub fn lightbox(app: &App) -> Option<El> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_label, format_bytes};
+    use super::{View, file_label, format_bytes, frame};
+    use rune::Key;
     use serde_json::json;
+
+    #[test]
+    fn pictures_fit_without_growing_and_zoom_from_one_to_eight() {
+        let stage = [800.0, 600.0];
+        assert_eq!(frame(stage, [400.0, 300.0], 1.0), ([400.0, 300.0], [400.0, 300.0]), "a small picture keeps its size");
+        assert_eq!(frame(stage, [1600.0, 1200.0], 2.0), ([1600.0, 1200.0], [800.0, 600.0]), "zoomed past the stage, it scrolls");
+        let big = [1600.0, 1200.0];
+        let fit = View::FIT;
+        assert_eq!(fit.zoom_to(0.5, None, stage, big), fit);
+        assert_eq!(fit.zoom_to(100.0, None, stage, big).zoom, 8.0);
+        // The point under the pointer stays put: (scroll + at) / zoom is the same before and after.
+        let zoomed = fit.zoom_to(2.0, Some([200.0, 150.0]), stage, big);
+        assert_eq!(zoomed, View { zoom: 2.0, scroll: [200.0, 150.0] });
+        assert_eq!(zoomed.toggle(None, stage, big), fit, "a second click fits again");
+        // A viewport growing with the zoom can't scroll before the picture's edge.
+        assert_eq!(fit.zoom_to(2.0, Some([100.0, 75.0]), stage, [400.0, 300.0]).scroll, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn keys_zoom_and_pan_only_when_zoomed() {
+        let (stage, big) = ([800.0, 600.0], [1600.0, 1200.0]);
+        let fit = View::FIT;
+        assert_eq!(fit.keyed(&Key::Left, stage, big), None, "at fit, ← steps the gallery");
+        assert_eq!(fit.keyed(&Key::Enter, stage, big).map(|v| v.zoom), Some(2.0));
+        assert_eq!(fit.keyed(&Key::Text("+".into()), stage, big).map(|v| v.zoom), Some(1.5));
+        let zoomed = View { zoom: 2.0, scroll: [790.0, 0.0] };
+        assert_eq!(zoomed.keyed(&Key::Right, stage, big).map(|v| v.scroll), Some([800.0, 0.0]), "panning stops at the edge");
+        assert_eq!(zoomed.keyed(&Key::Up, stage, big).map(|v| v.scroll), Some([790.0, 0.0]));
+        assert_eq!(zoomed.keyed(&Key::Text("0".into()), stage, big), Some(View::FIT));
+        // A tall picture no wider than its viewport leaves ← and → to the gallery.
+        let tall = View { zoom: 2.0, scroll: [0.0, 0.0] };
+        assert_eq!(tall.keyed(&Key::Left, stage, [400.0, 1200.0]), None);
+        assert!(tall.keyed(&Key::Down, stage, [400.0, 1200.0]).is_some());
+    }
 
     #[test]
     fn file_cards_read_their_kind_and_size() {

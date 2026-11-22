@@ -40,10 +40,11 @@ pub struct Files {
     pub loaded: Option<String>,
     pub error: Option<String>,
 }
-/// Each step carries the environment the triage started on, which answers every follow-up.
+/// Each step carries the environment the triage started on, which answers every follow-up, and
+/// the route it started from: a user who went elsewhere meanwhile keeps their place.
 enum Triage {
-    Prepare(u64, String),
-    Scratch(u64, String, String),
+    Prepare(u64, String, Route),
+    Scratch(u64, String, String, Route),
 }
 
 fn config(s: &App) -> &Value {
@@ -242,14 +243,14 @@ pub fn triage(s: &mut App) {
     if !scratch {
         return triage_failed(s, "This machine cannot start threads without a project.");
     }
-    let client = json!({"deviceType": "desktop", "surface": "desktop", "os": std::env::consts::OS});
+    let from = s.route.clone();
     if let Some(net) = crate::env::net_of(s, &key) {
-        let id = net.request("server.prepareTriage", json!({"client": client}));
-        s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, key));
+        let id = net.request("server.prepareTriage", crate::chat::triage::prepare_input());
+        s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, key, from));
     }
 }
 fn triage_failed(s: &mut App, message: &str) {
-    toast(s, "Could not start triage", Some(&format!("{message} Run npx t3 triage in a terminal on that machine instead.")));
+    crate::chat::triage::failed(s, message);
 }
 /// `chat.find`: the thread's find bar.
 pub fn find(s: &mut App) {
@@ -656,8 +657,8 @@ pub fn poll(s: &mut App) -> bool {
         pending => s.ui.shell.palette.act.scratch = pending,
     }
     match s.ui.shell.palette.act.triage.take() {
-        Some(Triage::Prepare(id, env)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
-            None => s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, env)),
+        Some(Triage::Prepare(id, env, from)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
+            None => s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, env, from)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
                 changed = true;
@@ -665,23 +666,21 @@ pub fn poll(s: &mut App) -> bool {
             Some(Ok(v)) => {
                 let prompt = data::s(&v, "prompt").to_owned();
                 if let Some(net) = crate::env::net_of(s, &env) {
-                    s.ui.shell.palette.act.triage = Some(Triage::Scratch(net.request("projects.ensureScratch", json!({})), prompt, env));
+                    s.ui.shell.palette.act.triage = Some(Triage::Scratch(net.request("projects.ensureScratch", json!({})), prompt, env, from));
                 }
             }
         },
-        Some(Triage::Scratch(id, prompt, env)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
-            None => s.ui.shell.palette.act.triage = Some(Triage::Scratch(id, prompt, env)),
+        Some(Triage::Scratch(id, prompt, env, from)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
+            None => s.ui.shell.palette.act.triage = Some(Triage::Scratch(id, prompt, env, from)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
                 changed = true;
             }
+            Some(Ok(_)) if s.route != from => {}
             Some(Ok(v)) => {
                 let project = data::s(&v, "projectId").to_owned();
                 crate::env::adopt(s, &project, &env);
-                let route = Route::Home { project_id: Some(project) };
-                let key = crate::chat::composer::draft_key(s, &route);
-                s.ui.chat.composer.drafts.entry(key).or_default().edit = TextEdit::new(prompt);
-                crate::shell::sidebar::go(s, route);
+                crate::chat::triage::open_draft(s, project, &prompt);
                 changed = true;
             }
         },
