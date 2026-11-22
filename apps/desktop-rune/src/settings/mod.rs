@@ -63,6 +63,8 @@ pub struct Ui {
     pub theme_edit_dark: bool,
     pub theme_import_open: bool,
     pub theme_import: TextEdit,
+    /// Shown inside the import dialog, which covers the page's error banner.
+    pub theme_import_error: Option<String>,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
     pub theme_colors: HashMap<String, TextEdit>,
@@ -621,7 +623,7 @@ pub fn poll(s: &mut App) -> bool {
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
                     // Linked environments show their own failures, as web's section does.
-                    if method == "peerLinks.list" || method == projects::ARCHIVED_SNAPSHOT {
+                    if matches!(method.as_str(), "peerLinks.list" | source_control::DISCOVERY | projects::ARCHIVED_SNAPSHOT) {
                         let mut failed = json!({});
                         failed[LOAD_ERROR] = json!(message);
                         s.ui.settings.results.insert(method, failed);
@@ -829,12 +831,14 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
-    let reveal = search::reveal(page, title);
+    // Web keeps the `code-font` anchor on the simple Monospace row; only Prompt and Terminal
+    // font need the separate rows (`revealSettingsSearchTarget`).
+    let separate = value(s, "typographyAdvanced") == true;
+    let reveal = if title == "Code font" && !separate { "Monospace font" } else { search::reveal(page, title) };
     // Web's `AdvancedSettings` opens on a target inside it and stays open.
     s.ui.settings.advanced.extend(pages::fold_of(page, reveal));
     s.ui.settings.reveal = Some(reveal.to_owned());
-    // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
-    if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
+    if matches!(title, "Prompt font" | "Terminal font") {
         update(s, "typographyAdvanced", json!(true));
     }
     s.navigate(Route::Settings(page.to_owned()));

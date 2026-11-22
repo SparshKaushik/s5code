@@ -70,6 +70,29 @@ enum Kind {
     Portal,
     Gnome,
     Picker,
+    Hyprland,
+    Niri,
+}
+
+/// `captureSetupDesktopName`.
+fn desktop_name(kind: Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Gnome => Some("GNOME"),
+        Kind::Hyprland => Some("Hyprland"),
+        Kind::Niri => Some("Niri"),
+        _ => None,
+    }
+}
+
+/// `snapShotFeedbackUnavailableMessage`: GNOME's extension and Hyprland (one monitor) draw them.
+fn effects_status(state: &State) -> Option<&'static str> {
+    match kind(state) {
+        Kind::Direct | Kind::Hyprland => None,
+        Kind::Niri => Some("Capture effects aren't available on Niri."),
+        Kind::Gnome if extension(state).map(|(status, _)| status) == Some(Ext::Enabled) => None,
+        Kind::Gnome => Some("Finish extension setup to enable effects."),
+        Kind::Portal | Kind::Picker => Some(NO_EFFECTS),
+    }
 }
 
 /// Linux portal mode; scenes force it through `State::linux`.
@@ -88,6 +111,8 @@ fn kind(state: &State) -> Kind {
     let Some(setup) = &state.linux else { return Kind::Picker };
     let ext = extension(state).map(|(status, _)| status);
     match setup.backend {
+        Backend::Hyprland => Kind::Hyprland,
+        Backend::Niri => Kind::Niri,
         Backend::ScreenshotPortal => Kind::Portal,
         Backend::Picker if ext == Some(Ext::Unsupported) => Kind::Picker,
         Backend::GnomeExtension => Kind::Gnome,
@@ -163,12 +188,12 @@ fn setup_complete(state: &State, include_text: bool) -> bool {
 
 /// `snapShotSetupButtonLabel`.
 fn setup_label(state: &State) -> &'static str {
-    if access_ready(state) {
-        "Manage capture"
-    } else if kind(state) == Kind::Gnome {
-        "Set up GNOME capture"
-    } else {
-        "Continue setup"
+    match desktop_name(kind(state)) {
+        _ if access_ready(state) => "Manage capture",
+        Some("GNOME") => "Set up GNOME capture",
+        Some("Hyprland") => "Set up Hyprland capture",
+        Some(_) => "Set up Niri capture",
+        None => "Continue setup",
     }
 }
 
@@ -186,14 +211,6 @@ fn shortcut_status(ui: &Ui, state: &State) -> Option<String> {
     }
 }
 
-fn modifier_symbol(modifier: &str) -> &'static str {
-    match modifier {
-        "meta" => "⌘",
-        "control" => "⌃",
-        "alt" => "⌥",
-        _ => "⇧",
-    }
-}
 
 /// `formatShortcutKeyLabel`.
 fn key_label(key: &str) -> String {
@@ -209,30 +226,47 @@ fn key_label(key: &str) -> String {
     }
 }
 
-/// `snapShotShortcutKeyLabels` on macOS: one keycap per key.
+const MAC: bool = cfg!(target_os = "macos");
+
 fn key_labels(shortcut: &Value) -> Vec<String> {
+    key_labels_for(shortcut, MAC)
+}
+
+/// `snapShotShortcutKeyLabels`: one keycap per key, names instead of glyphs off macOS.
+fn key_labels_for(shortcut: &Value, mac: bool) -> Vec<String> {
+    let cap = |modifier| super::controls::modifier_cap(modifier, mac).to_owned();
     if let Some(modifier) = capture::pair_modifier(shortcut) {
-        return vec![modifier_symbol(modifier).into(); 2];
+        return vec![cap(modifier); 2];
     }
     let flag = |k: &str| shortcut[k].as_bool().unwrap_or(false);
-    let mut labels: Vec<String> = [(flag("ctrlKey"), "⌃"), (flag("altKey"), "⌥"), (flag("shiftKey"), "⇧"), (flag("metaKey") || flag("modKey"), "⌘")]
+    let mod_key = flag("modKey");
+    let mut labels: Vec<String> = [(flag("ctrlKey") || (mod_key && !mac), "control"), (flag("altKey"), "alt"), (flag("shiftKey"), "shift"), (flag("metaKey") || (mod_key && mac), "meta")]
         .into_iter()
         .filter(|(on, _)| *on)
-        .map(|(_, l)| l.to_owned())
+        .map(|(_, modifier)| cap(modifier))
         .collect();
     labels.push(key_label(shortcut["key"].as_str().unwrap_or_default()));
     labels
 }
 
-/// `formatSnapShotShortcutLabel` on macOS.
 fn shortcut_label(shortcut: &Value) -> String {
-    capture::pair_modifier(shortcut).map_or_else(|| key_labels(shortcut).concat(), capture::pair_label)
+    shortcut_label_for(shortcut, MAC)
+}
+
+/// `formatSnapShotShortcutLabel`: "⌃⇧2" on macOS, "Ctrl+Shift+2" elsewhere.
+fn shortcut_label_for(shortcut: &Value, mac: bool) -> String {
+    match capture::pair_modifier(shortcut) {
+        Some(modifier) => capture::pair_label(modifier),
+        None if mac => key_labels_for(shortcut, mac).concat(),
+        None => key_labels_for(shortcut, mac).join("+"),
+    }
 }
 
 /// `sameSnapShotShortcut`.
 fn same(a: &Value, b: &Value) -> bool {
     match (capture::pair_modifier(a), capture::pair_modifier(b)) {
         (Some(x), Some(y)) => x == y,
+        // `shortcutConflictKey`: mod is ⌘ on macOS and Ctrl elsewhere.
         (None, None) => key_labels(a) == key_labels(b),
         _ => false,
     }
@@ -450,13 +484,9 @@ fn locked_switch(t: &T, label: &str) -> El {
     kit::Switch::new(false).label(label).hide_label().disabled(true).build(&kit::theme(t))
 }
 
-/// `snapShotAccessibilityUnavailableMessage`; the extension's app text (AT-SPI) isn't read here.
+/// `snapShotAccessibilityUnavailableMessage`: only backends that name the window can read its text.
 fn linux_text_status(state: &State) -> Option<&'static str> {
-    match kind(state) {
-        Kind::Direct => None,
-        Kind::Portal | Kind::Picker => Some("This desktop only provides a screenshot."),
-        Kind::Gnome => Some("App text isn't available on Linux in this app yet."),
-    }
+    matches!(kind(state), Kind::Portal | Kind::Picker).then_some("This desktop only provides a screenshot.")
 }
 
 fn switch(t: &T, on: bool, label: &str, f: impl Fn(&mut App) + 'static) -> El {
@@ -528,11 +558,12 @@ pub fn view(s: &App, t: &T) -> El {
     let mut rows = vec![setting(t, title("SnapShots", false, t), description, Some(status(&state, on).into()), toggle)];
     if on {
         let text_on = include_text(s);
-        let text_control = if linux {
+        let text_control = if linux_text_status(&state).is_some() {
             locked_switch(t, "Include app text in snapshots")
         } else {
             switch(t, text_on, "Include app text in snapshots", move |s: &mut App| {
-                if !text_on {
+                // Linux reads AT-SPI, which asks for no permission.
+                if !text_on && !linux {
                     capture::request_accessibility(s);
                 }
                 super::update(s, "snapShotIncludeAccessibility", json!(!text_on));
@@ -548,12 +579,13 @@ pub fn view(s: &App, t: &T) -> El {
         ));
         let sound = sound_select(s).label("Capture sound").on_toggle(|s: &mut App| s.ui.settings.snapshots.sound_open ^= true).trigger(&kit::theme(t));
         rows.push(setting(t, title("Capture sound", true, t), "Choose the sound played when capture starts.", None, row().child(sound)));
-        let effects = linux.then(|| NO_EFFECTS.to_owned());
+        let effects = effects_status(&state).map(str::to_owned);
+        let locked = effects.is_some();
         let flash = super::value(s, "snapShotFlash") != false;
-        let flash_control = if linux { locked_switch(t, "Flash captured window") } else { switch(t, flash, "Flash captured window", move |s: &mut App| super::update(s, "snapShotFlash", json!(!flash))) };
+        let flash_control = if locked { locked_switch(t, "Flash captured window") } else { switch(t, flash, "Flash captured window", move |s: &mut App| super::update(s, "snapShotFlash", json!(!flash))) };
         rows.push(setting(t, title("Capture flash", true, t), "Show a gentle cue on the captured window.", effects.clone(), flash_control));
         let animate = super::value(s, "snapShotAnimations") != false;
-        let animate_control = if linux { locked_switch(t, "Animate snapshots") } else { switch(t, animate, "Animate snapshots", move |s: &mut App| super::update(s, "snapShotAnimations", json!(!animate))) };
+        let animate_control = if locked { locked_switch(t, "Animate snapshots") } else { switch(t, animate, "Animate snapshots", move |s: &mut App| super::update(s, "snapShotAnimations", json!(!animate))) };
         rows.push(setting(t, title("Capture animations", true, t), "Animate captured windows into your draft.", effects, animate_control));
     }
     c::section("SnapShots", vec![c::card(rows, t)], t)
@@ -685,6 +717,7 @@ fn linux_access_copy(state: &State, ready: bool) -> (&'static str, &'static str)
             Ext::Unsupported => ("Automatic capture isn't available", "Use Take snapshot from the command palette to choose a window."),
             Ext::Error => ("Couldn't set up the extension", "Check T3 Code SnapShots in GNOME Extensions, then try again."),
         },
+        (Kind::Hyprland | Kind::Niri, _) => ("Capture is ready", "Next, choose your shortcut."),
         (Kind::Picker, _) if state.linux.is_some() => ("Choose a window each time", "Your desktop doesn't support automatic capture. You'll choose the window to capture instead."),
         _ => ("Allow snapshots", "Your desktop may ask for permission when you first capture."),
     }
@@ -830,7 +863,7 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
                 .build(t)
         }
     });
-    let title = if kind == Kind::Gnome { "Set up snapshots for GNOME" } else { "Set up snapshots" };
+    let title = desktop_name(kind).map_or_else(|| "Set up snapshots".to_owned(), |desktop| format!("Set up snapshots for {desktop}"));
     kit::Dialog::new("snap-shot-setup", title)
         .width(512.0)
         .on_close(|s: &mut App| {
@@ -880,6 +913,15 @@ pub(crate) const SCENES: &[(&str, fn(&mut App))] = &[
         mac_scene(s, true, state);
         let shortcut = json!({"key": "2", "metaKey": false, "ctrlKey": true, "altKey": false, "shiftKey": true, "modKey": false});
         s.client_settings.values.insert("snapShotShortcut".into(), shortcut);
+    }),
+    ("settings-snap-shot-hyprland", |s| {
+        mac_scene(s, true, State { shortcut_registered: true, ..linux_state(Backend::Hyprland, None) });
+        let shortcut = json!({"key": "2", "metaKey": false, "ctrlKey": true, "altKey": false, "shiftKey": true, "modKey": false});
+        s.client_settings.values.insert("snapShotShortcut".into(), shortcut);
+    }),
+    ("settings-snap-shot-wizard-niri", |s| {
+        mac_scene(s, false, linux_state(Backend::Niri, None));
+        s.ui.settings.snapshots.wizard = Some(Wizard { step: Step::Access, was_enabled: false });
     }),
     ("settings-snap-shot-linux-picker", |s| mac_scene(s, true, State { shortcut_message: Some(linux::MODIFIER_PAIR_UNAVAILABLE.into()), ..linux_state(Backend::Picker, None) })),
     ("settings-snap-shot-wizard-gnome", |s| {
@@ -966,7 +1008,16 @@ mod tests {
         let unsupported = linux_state(Backend::Picker, Some(Ext::Unsupported));
         assert_eq!(kind(&unsupported), Kind::Picker);
         assert_eq!(linux_status(&unsupported, true), "Manual capture only. You'll choose a window each time");
+        let hyprland = linux_state(Backend::Hyprland, None);
+        assert_eq!((kind(&hyprland), access_ready(&hyprland), linux_text_status(&hyprland), effects_status(&hyprland)), (Kind::Hyprland, true, None, None));
+        assert_eq!(linux_access_copy(&hyprland, true).0, "Capture is ready");
+        let niri = linux_state(Backend::Niri, None);
+        assert_eq!(effects_status(&niri), Some("Capture effects aren't available on Niri."));
+        assert_eq!(setup_label(&State { message: Some("x".into()), ..niri }), "Set up Niri capture");
+        assert_eq!(effects_status(&installing), Some("Finish extension setup to enable effects."));
+        assert_eq!(effects_status(&enabled), None, "the extension draws them");
         let portal = linux_state(Backend::ScreenshotPortal, None);
+        assert_eq!(effects_status(&portal), Some(NO_EFFECTS));
         assert_eq!((kind(&portal), linux_text_status(&portal)), (Kind::Portal, Some("This desktop only provides a screenshot.")));
         assert_eq!(shortcut_status(&Ui::default(), &State { shortcut_registered: true, ..portal }), None, "a portal shortcut needs no status");
     }
@@ -977,11 +1028,16 @@ mod tests {
         let cmd_shift = Mods { cmd: true, shift: true, ..Mods::default() };
         let recorded = chord(&event(Key::Text("@".into()), cmd_shift), None).unwrap();
         assert_eq!(recorded, json!({"key": "2", "metaKey": false, "ctrlKey": false, "altKey": false, "shiftKey": true, "modKey": true}));
-        assert_eq!(shortcut_label(&recorded), "⇧⌘2");
-        assert_eq!(key_labels(&json!({"key": " ", "ctrlKey": true, "altKey": true})), ["⌃", "⌥", "Space"]);
-        assert_eq!(shortcut_label(&json!({"kind": "both-shift-keys"})), "Shift + Shift");
-        assert_eq!(key_labels(&json!({"kind": "modifier-pair", "modifier": "meta"})), ["⌘", "⌘"]);
-        assert!(same(&recorded, &json!({"key": "2", "metaKey": true, "shiftKey": true})), "mod and meta are one key on macOS");
+        assert_eq!(shortcut_label_for(&recorded, true), "⇧⌘2");
+        assert_eq!(shortcut_label_for(&recorded, false), "Ctrl+Shift+2", "Linux and Windows spell modifiers out");
+        assert_eq!(key_labels_for(&json!({"key": " ", "ctrlKey": true, "altKey": true}), true), ["⌃", "⌥", "Space"]);
+        assert_eq!(key_labels_for(&json!({"key": " ", "ctrlKey": true, "altKey": true}), false), ["Ctrl", "Alt", "Space"]);
+        assert_eq!(shortcut_label_for(&json!({"kind": "both-shift-keys"}), false), "Shift + Shift");
+        assert_eq!(key_labels_for(&json!({"kind": "modifier-pair", "modifier": "meta"}), true), ["⌘", "⌘"]);
+        assert_eq!(key_labels_for(&json!({"kind": "modifier-pair", "modifier": "control"}), false), ["Ctrl", "Ctrl"]);
+        let meta_shift_2 = json!({"key": "2", "metaKey": true, "shiftKey": true});
+        assert_eq!(key_labels_for(&recorded, true), key_labels_for(&meta_shift_2, true), "mod and meta are one key on macOS");
+        assert_ne!(key_labels_for(&recorded, false), key_labels_for(&meta_shift_2, false), "mod is Ctrl elsewhere");
         assert!(!same(&recorded, &json!({"kind": "both-shift-keys"})));
         assert_eq!(chord(&event(Key::Function(5), Mods { alt: true, ..Mods::default() }), None).unwrap()["key"], "f5");
     }

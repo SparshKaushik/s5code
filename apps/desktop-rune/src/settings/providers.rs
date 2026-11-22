@@ -644,6 +644,7 @@ fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
                 kit::Switch::new(enabled)
                     .label(format!("Enable {name}"))
                     .hide_label()
+                    .disabled(usage::read_only(s))
                     .on_toggle(move |s: &mut App| update(s, &toggle_id, "enabled", json!(!enabled)))
                     .build(&kit::theme(t)),
             ),
@@ -1537,6 +1538,9 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
     let live = crate::chat::composer::provider(s, &r.id);
     let enabled = resolve_enabled(&instance);
     let name = display_name(&instance);
+    let read_only = usage::read_only(s);
+    // `ProviderInstanceCard`: without `providers:manage` the fields show but can't be changed.
+    let lock = |el: El| if read_only { el.inert().opacity(0.64) } else { el };
     let mut sections = vec![flat_section(
         row()
             .gap(8.0)
@@ -1546,11 +1550,10 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         Some(header_action(s, t, r, live, enabled)),
         vec![
             status_row(t, live, enabled),
-            display_name_row(s, t, &r.id, &name, label(&r.driver)),
+            lock(display_name_row(s, t, &r.id, &name, label(&r.driver))),
         ],
         t,
     )];
-    let read_only = usage::read_only(s);
     if let Some(p) = live.filter(|p| p["setup"]["canAuthenticate"] == true && !read_only) {
         sections.push(flat_section(heading("Setup", t), None, vec![col().w_full().px(16.0).child(super::auth::view(s, t, p))], t));
     } else if r.driver == "cursor" && !read_only && live.is_some_and(|p| p["setup"]["canAuthenticate"] == false) {
@@ -1582,11 +1585,11 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
             }
             rows
         };
-        sections.push(flat_section(heading("Runtime", t), None, rows, t));
+        sections.push(flat_section(heading("Runtime", t), None, rows.into_iter().map(lock).collect(), t));
     }
-    sections.push(flat_section(heading("Environment", t), None, vec![environment_row(s, t, &r.id)], t));
+    sections.push(flat_section(heading("Environment", t), None, vec![lock(environment_row(s, t, &r.id))], t));
     if DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {
-        sections.push(flat_section(heading("Models", t), None, vec![models_section(s, t, &r.id, &r.driver, live, &instance)], t));
+        sections.push(flat_section(heading("Models", t), None, vec![lock(models_section(s, t, &r.id, &r.driver, live, &instance))], t));
     }
     sections
 }

@@ -6,6 +6,9 @@ use crate::{
 use rune::{El, col, row, text};
 use serde_json::{Value, json};
 
+/// `ProjectSettingsPanel` without `orchestration:operate`.
+pub const CANNOT_CHANGE: &str = "This connection cannot change this project.";
+
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let selected =
         s.ui.settings
@@ -23,8 +26,14 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     // Older servers drop pin and archive, so their projects don't offer them.
     let organize = config.is_some_and(|c| c["environment"]["capabilities"]["projectOrganization"] == true);
     let key = |field: &str| format!("project::{id}::{field}");
+    let operate = super::permissions::can(s, "orchestration:operate");
+    let lock = || (!operate).then(|| CANNOT_CHANGE.to_owned());
 
-    let mut overview = vec![
+    let mut overview = Vec::new();
+    if !operate {
+        overview.push(text(CANNOT_CHANGE).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w_full().px(16.0).py(10.0));
+    }
+    overview.extend([
         c::setting_row(
             s,
             cx,
@@ -32,8 +41,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
             &json!({"key": key("title"), "title": "Name", "kind": "input", "width": 256, "placeholder": "Project name",
                 "description": "The shared name for this project group in the sidebar and thread lists."}),
         ),
-        super::project_icon::settings_row(t, project),
-    ];
+        super::permissions::gate("project-icon", super::project_icon::settings_row(t, project), lock()),
+    ]);
     if organize {
         overview.push(c::setting_row(
             s,
@@ -52,11 +61,15 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
             } else {
                 "Hides the project from project pickers. Threads and files are kept."
             },
-            crate::kit::Button::new(if archived { "Unarchive" } else { "Archive" })
-                .variant("outline")
-                .size("sm")
-                .on_press(move |s: &mut App| super::update(s, &archive, json!(!archived)))
-                .build(t),
+            super::permissions::gate(
+                "project-archive",
+                crate::kit::Button::new(if archived { "Unarchive" } else { "Archive" })
+                    .variant("outline")
+                    .size("sm")
+                    .on_press(move |s: &mut App| super::update(s, &archive, json!(!archived)))
+                    .build(t),
+                lock(),
+            ),
         ));
     }
 
@@ -92,14 +105,25 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         t,
         "Remove project",
         "Deletes the project entry and its threads. Files on disk are not touched.",
-        crate::kit::Button::new("Remove project")
-            .variant("destructive-outline")
-            .size("sm")
-            .icon(&crate::icons::TRASH_2)
-            .on_press(move |s: &mut App| ask_remove(s, &remove.0, &remove.1))
-            .build(t),
+        super::permissions::gate(
+            "project-remove",
+            crate::kit::Button::new("Remove project")
+                .variant("destructive-outline")
+                .size("sm")
+                .icon(&crate::icons::TRASH_2)
+                .on_press(move |s: &mut App| ask_remove(s, &remove.0, &remove.1))
+                .build(t),
+            lock(),
+        ),
     );
-    page.child(c::section("Checkouts", vec![checkout], t))
+    let intro = text("Grouping rule decides how each checkout joins project groups in the sidebar. Changing it can move a checkout to a different project.")
+        .font(theme::TEXT_XS)
+        .color(t.c.muted_foreground)
+        .wrap()
+        .w_full()
+        .px(16.0)
+        .py(10.0);
+    page.child(c::section("Checkouts", vec![intro, checkout], t))
         .child(c::section("Danger", vec![danger], t))
 }
 

@@ -206,11 +206,17 @@ pub fn required(method: &str) -> Option<&'static str> {
 /// Web `SettingsRow`'s reason a server-saved row's control is inert, if it is.
 pub fn row_lock(s: &App, key: &str) -> Option<String> {
     let label = || crate::env::label(s, &target(s));
-    lock_message(
-        can_write_settings(s),
-        locked_by(s.state().config.as_ref().map(|c| &c["managedPolicy"]), key),
-        &label,
-    )
+    let policy = s.state().config.as_ref().map(|c| &c["managedPolicy"]);
+    lock_message(can_write_settings(s), locked_by(policy, key), &label).or_else(|| {
+        (key == "guestSharingEnabled").then(|| connect_denial(policy, super::value(s, key) == true)).flatten()
+    })
+}
+
+/// Guest links arrive through T3 Connect, so a policy that turns Connect off locks them on;
+/// turning them off still works (`LabsSettingsPanel`'s `connectDenial`).
+fn connect_denial(policy: Option<&Value>, on: bool) -> Option<String> {
+    let policy = policy?;
+    (!on && policy["limits"]["connect"] == false).then(|| format!("{}'s policy does not allow T3 Connect.", policy["organization"].as_str().unwrap_or("Your organization")))
 }
 
 fn lock_message(can_write: bool, managed_by: Option<&str>, label: &dyn Fn() -> String) -> Option<String> {
@@ -289,6 +295,10 @@ mod tests {
         assert_eq!(locked_by(Some(&policy), "storageCleanup.logsAfterDays"), Some("Example Corp"));
         assert_eq!(locked_by(Some(&policy), "storageCleanup"), Some("Example Corp"));
         assert_eq!(locked_by(Some(&policy), "storageCleanupX"), None);
+        let no_connect = json!({"organization": "Acme", "limits": {"connect": false}});
+        assert_eq!(connect_denial(Some(&no_connect), false).as_deref(), Some("Acme's policy does not allow T3 Connect."));
+        assert_eq!(connect_denial(Some(&no_connect), true), None, "guest links can still be turned off");
+        assert_eq!(connect_denial(Some(&policy), false), None);
         let nested = json!({"organization": "O", "lockedSettings": ["a.b"]});
         assert_eq!(locked_by(Some(&nested), "a"), Some("O"));
         let label = || "Laptop".to_owned();
