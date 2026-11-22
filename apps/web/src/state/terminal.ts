@@ -2,4 +2,5 @@ import { createTerminalEnvironmentAtoms } from "@t3tools/client-runtime/state/te
 
 import { connectionAtomRuntime } from "../connection/runtime";
 
-export const terminalEnvironment = createTerminalEnvironmentAtoms(connectionAtomRuntime);
+export const terminalEnvironment: ReturnType<typeof createTerminalEnvironmentAtoms> =
+  createTerminalEnvironmentAtoms(connectionAtomRuntime);
