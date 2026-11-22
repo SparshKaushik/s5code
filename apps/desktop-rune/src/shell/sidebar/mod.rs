@@ -9,7 +9,7 @@ pub mod favicon;
 pub(crate) mod folders;
 pub mod logic;
 mod menu;
-mod row;
+pub(crate) mod row;
 pub mod share;
 mod snooze;
 mod updates;
@@ -173,6 +173,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             ask_delete(s, &id);
         }
     }),
+    // Two new-thread drafts (newest first) and a thread holding unsent text.
+    ("sidebar-drafts", |s| {
+        scene_on(s, "Replay showcase");
+        scene_drafts(s);
+    }),
+    ("sidebar-drafts-hover", |s| {
+        scene_on(s, "Replay showcase");
+        scene_drafts(s);
+        s.ui.shell.sidebar.card = thread_titled(s, "Todo list replay");
+    }),
     ("sidebar-scope", |s| {
         scene_on(s, "Replay showcase");
         toggle_scope(s);
@@ -269,6 +279,19 @@ fn thread_titled(s: &App, title: &str) -> Option<String> {
     s.state().threads.iter().find(|t| t["title"].as_str().is_some_and(|x| x.starts_with(title))).map(|t| crate::data::s(t, "id").to_string())
 }
 
+fn scene_drafts(s: &mut App) {
+    let now = s.now_ms;
+    let projects: Vec<String> = s.state().projects.iter().take(2).map(|p| crate::data::s(p, "id").to_string()).collect();
+    for (n, project) in projects.iter().enumerate() {
+        let draft = s.ui.chat.composer.drafts.entry(crate::chat::composer::home_key(project)).or_default();
+        draft.edit = TextEdit::new(if n == 0 { "Sketch the retry policy for webhooks" } else { "Ask about the flaky login test" });
+        draft.created_at = now - (n as i64 + 1) * 600_000;
+    }
+    if let Some(id) = thread_titled(s, "Todo list replay") {
+        s.ui.chat.composer.drafts.entry(id).or_default().edit = TextEdit::new("Half a follow-up question");
+    }
+}
+
 /// The web's `/` redirects to the newest thread; the reference shots open on "New thread".
 fn scene_home(s: &mut App) {
     scene_on(s, "New thread");
@@ -334,9 +357,11 @@ impl Model {
         let state = s.state();
         let ui = &s.ui.shell.sidebar;
         let scope = &ui.project_scope;
+        let (hidden, _) = tag_hidden(s);
         let threads = state
             .threads
             .iter()
+            .filter(|v| hidden.is_empty() || !hidden.contains(&logic::thread_key(&crate::env::of(s, v), crate::data::s(v, "id"))))
             .map(|v| patched(Thread::from_shell(v), &ui.patches))
             .filter(|t| scope.is_empty() || scope.contains(&t.project_id))
             .collect::<Vec<_>>();
@@ -509,6 +534,28 @@ fn patched(mut t: Thread, patches: &HashMap<String, Patch>) -> Thread {
 // --- Commands ---------------------------------------------------------------------------------
 
 /// The environment key a row acts on.
+/// The tag filter over every loaded environment (`useHiddenThreadKeys`): the hidden thread keys,
+/// and whether any environment hides tags (`useAnyEnvironmentHiding`).
+pub fn tag_hidden(s: &App) -> (HashSet<String>, bool) {
+    let mut tags = HashMap::new();
+    for key in crate::env::keys(s) {
+        let found = if key == s.ui.env.active {
+            logic::hidden_tags(crate::settings::server_settings(s))
+        } else {
+            crate::env::source(s, &key).and_then(|src| src.state().config.as_ref().and_then(|c| logic::hidden_tags(&c["settings"])))
+        };
+        if let Some(found) = found {
+            tags.insert(key, found);
+        }
+    }
+    if tags.is_empty() {
+        return (HashSet::new(), false);
+    }
+    let keys: Vec<String> = s.state().threads.iter().map(|v| crate::env::of(s, v)).collect();
+    let rows: Vec<(&str, &Value)> = keys.iter().map(String::as_str).zip(s.state().threads.iter()).collect();
+    (logic::hidden_threads(&rows, &tags), true)
+}
+
 pub fn env_key<'a>(s: &'a App, th: &'a Thread) -> &'a str {
     th.env.as_deref().unwrap_or(&s.ui.env.active)
 }
@@ -605,6 +652,11 @@ fn failed(s: &mut App, done: &Inflight, error: &Value) {
 }
 
 /// Runs a row action when `checkThreadOperations` allows it.
+/// `useAcknowledgeThreadWoke`: a visit at the wake time clears "Woke" without opening the thread.
+pub fn acknowledge_woke(s: &mut App, id: &str, woke_at: i64) {
+    dispatch(s, "thread.visit", id, json!({ "visitedAt": iso(woke_at) }));
+}
+
 pub fn checked(s: &mut App, id: &str, f: fn(&mut App, &str)) {
     if check_operations(s, &[id.to_string()]) {
         f(s, id);
@@ -1003,7 +1055,7 @@ pub fn commit_rename(s: &mut App) {
     let Some((id, edit)) = s.ui.shell.sidebar.rename.take() else { return };
     let next = edit.text.trim().to_string();
     if next.is_empty() {
-        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        crate::shell::palette::toast_warning(s, "Thread title cannot be empty", None, vec![], false);
         return;
     }
     let current = Model::build(s).thread(&id).map(|t| t.title.clone()).unwrap_or_default();

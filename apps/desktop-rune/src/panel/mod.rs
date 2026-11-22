@@ -655,12 +655,19 @@ pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
 }
 
 fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn(&str) -> bool) -> Option<&'a str> {
+    // Shift turns "[" into "{" on the key event; bindings name the unshifted key, and Space "space".
+    let char_key = |c: char| match if e.mods.shift { crate::settings::unshift(c) } else { c } {
+        ' ' => "space".to_string(),
+        c => c.to_string(),
+    };
     let key = match &e.key {
-        // Shift turns "[" into "{" on the key event; bindings name the unshifted key.
-        Key::Command('{') => "[".to_string(),
-        Key::Command('}') => "]".to_string(),
-        Key::Command(c) => c.to_string(),
+        Key::Command(c) => char_key(*c),
+        Key::Text(v) if v.chars().count() == 1 => char_key(v.chars().next().unwrap_or(' ')),
         Key::Text(v) => v.clone(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::PageUp => "pageup".into(),
+        Key::PageDown => "pagedown".into(),
         Key::Function(n) => format!("f{n}"),
         Key::Enter => "enter".into(),
         Key::Tab => "tab".into(),
@@ -1601,6 +1608,23 @@ mod tests {
         let bindings = app.state().config.as_ref().unwrap()["keybindings"].as_array().unwrap().clone();
         assert_eq!(resolve(&bindings, &press('d'), &context), Some("terminal.split"));
         assert!(when(&id("true"), &context) && !when(&id("unknown"), &context));
+        // Keys the recorder saves by name, and shifted punctuation by its unshifted key.
+        let named = serde_json::json!([
+            {"command": "a.space", "shortcut": {"key": "space", "modKey": true}},
+            {"command": "a.home", "shortcut": {"key": "home", "modKey": true}},
+            {"command": "a.help", "shortcut": {"key": "/", "modKey": true, "shiftKey": true}},
+        ]);
+        let named = named.as_array().unwrap();
+        let with = |key: Key, shift: bool| {
+            let mut event = KeyEvent::from(key);
+            event.mods.cmd = true;
+            event.mods.ctrl = !cfg!(target_os = "macos");
+            event.mods.shift = shift;
+            event
+        };
+        assert_eq!(resolve(named, &with(Key::Command(' '), false), &context), Some("a.space"));
+        assert_eq!(resolve(named, &with(Key::Home, false), &context), Some("a.home"));
+        assert_eq!(resolve(named, &with(Key::Command('?'), true), &context), Some("a.help"));
     }
 
     #[test]

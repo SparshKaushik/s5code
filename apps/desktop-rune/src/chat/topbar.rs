@@ -122,7 +122,7 @@ fn commit_rename(s: &mut App) {
     }
     let next = edit.text.trim().to_string();
     if next.is_empty() {
-        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        crate::shell::palette::toast_warning(s, "Thread title cannot be empty", None, vec![], false);
         return;
     }
     if next == title(s) {
@@ -310,21 +310,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .on_press(move |s: &mut App| crate::chat::details::toggle(s, fits)),
         );
     }
-    let toggles = toggles
-        .child(
-            toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open)
-                .help(with_shortcut(s, "Toggle terminal drawer", "terminal.toggle"))
-                .on_press(|s: &mut App| {
-                    crate::panel::toggle_terminal(s);
-                }),
-        )
-        .child(
-            toggle(t, &icons::PANEL_RIGHT, "Toggle right panel", s.ui.shell.panel_open)
-                .help(with_shortcut(s, "Toggle right panel", "rightPanel.toggle"))
-                .on_press(|s: &mut App| {
-                    s.ui.shell.panel_open = !s.ui.shell.panel_open;
-                }),
-        );
+    // `PanelLayoutControls`: both need a project; the terminal also the terminal grant.
+    let has_project = composer::ctx(s).project.is_some();
+    let terminal = toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open);
+    let terminal = if has_project && crate::chat::details::grants(s, "terminal:operate") {
+        terminal.help(with_shortcut(s, "Toggle terminal drawer", "terminal.toggle")).on_press(|s: &mut App| {
+            crate::panel::toggle_terminal(s);
+        })
+    } else {
+        terminal.opacity(0.64).help("Terminal drawer is unavailable")
+    };
+    let right = toggle(t, &icons::PANEL_RIGHT, "Toggle right panel", s.ui.shell.panel_open);
+    let right = if has_project {
+        right.help(with_shortcut(s, "Toggle right panel", "rightPanel.toggle")).on_press(|s: &mut App| {
+            s.ui.shell.panel_open = !s.ui.shell.panel_open;
+        })
+    } else {
+        right.opacity(0.64).help("Right panel is unavailable")
+    };
+    let toggles = toggles.child(terminal).child(right);
 
     row()
         .key("topbar")

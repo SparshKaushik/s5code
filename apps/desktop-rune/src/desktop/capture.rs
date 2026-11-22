@@ -32,11 +32,11 @@ const PERMISSION_POLL: Duration = Duration::from_secs(2);
 const SCREEN_RECORDING_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const ACCESSIBILITY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 /// `ACCESSIBILITY_TIMEOUT_MS`; the script stops itself a little sooner to return what it read.
-const TEXT_TIMEOUT: Duration = Duration::from_millis(3_000);
+pub(crate) const TEXT_TIMEOUT: Duration = Duration::from_millis(3_000);
 const TEXT_SCRIPT_BUDGET_MS: u64 = 2_500;
 /// `SNAP_SHOT_ACCESSIBLE_TEXT_MAX_CHARS` and `MAX_ACCESSIBILITY_TREE_NODES`.
 pub const ACCESSIBLE_TEXT_MAX_CHARS: usize = 32_000;
-const ACCESSIBILITY_MAX_NODES: u32 = 10_000;
+pub(crate) const ACCESSIBILITY_MAX_NODES: u32 = 10_000;
 /// `SnapShotTransition`'s duration range, distance scale and easing.
 const FLIGHT_MIN_MS: f32 = 280.0;
 const FLIGHT_MAX_MS: f32 = 680.0;
@@ -231,6 +231,8 @@ pub struct Shot {
     bounds: Bounds,
     source: Value,
     thumbnail: Option<rune::Pixels>,
+    /// Our window's origin in the overlay's space, where Wayland reports the composer at (0, 0).
+    origin: (f32, f32),
 }
 
 /// The flight overlay's state: the captured picture and the card's frame inside the overlay.
@@ -317,6 +319,8 @@ struct Live {
     flight_stage: Option<FlightStage>,
     /// The composer's frame in screen points, where a flight lands.
     composer: Option<[f32; 4]>,
+    /// The window's size in points, for the GNOME extension's relative landing frame.
+    window: Option<[f32; 2]>,
     applied: Option<Plan>,
     registration: Registration,
     generation: u64,
@@ -344,13 +348,14 @@ fn push(event: Event, waker: &Option<Waker>) {
 /// Keeps the app handle for shortcuts and, on macOS, adds the flash overlay.
 pub fn register(app: &mut rune::App<App>) {
     let handle = app.handle();
-    // Overlays need global window positions, which Wayland hides.
-    let flash = cfg!(target_os = "macos").then(|| {
+    // Overlays need window positions, which Wayland hides; Hyprland reports them through hyprctl.
+    let overlays = cfg!(target_os = "macos") || crate::desktop::capture_linux::hyprland_session();
+    let flash = overlays.then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flash", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flash_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
         app.overlay(spec.options(options), ())
     });
-    let flight = cfg!(target_os = "macos").then(|| {
+    let flight = overlays.then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flight", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flight_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
         app.overlay(spec.options(options), Flight::default())
@@ -408,10 +413,32 @@ pub fn flight_frames(source: [f32; 4], target: [f32; 4]) -> ([f32; 4], [f32; 4],
 }
 
 /// The composer reports its frame here so a capture knows where to fly.
-pub fn note_composer(_: &mut App, rect: [f32; 4]) {
+pub fn note_composer(_: &mut App, rect: [f32; 4], window: Option<[f32; 2]>) {
     if supported() {
-        LIVE.with(|live| live.borrow_mut().composer = Some(rect));
+        LIVE.with(|live| {
+            let mut live = live.borrow_mut();
+            live.composer = Some(rect);
+            live.window = window;
+        });
     }
+}
+
+/// The window's size, read where the composer is drawn.
+pub fn window_size(cx: &mut rune::Cx<App>) -> Option<[f32; 2]> {
+    cx.layout_with(super::FRAME, |r| [r[2], r[3]])
+}
+
+/// Where the GNOME extension lands its flight: the composer's attachment row as fractions of
+/// the window. The window's aspect is unknown before capture, so the card is 16:10.
+pub fn relative_landing(composer: [f32; 4], window: [f32; 2]) -> Option<[f64; 4]> {
+    let [w, h] = window;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let width = (FLIGHT_CARD_HEIGHT * 1.6).min((composer[2] - 26.0).max(1.0));
+    let frame = [(composer[0] + 13.0) / w, (composer[1] + 13.0) / h, width / w, FLIGHT_CARD_HEIGHT / h];
+    let fits = frame.iter().all(|v| v.is_finite() && *v >= 0.0) && frame[2] > 0.0 && frame[0] + frame[2] <= 1.01 && frame[1] + frame[3] <= 1.01;
+    fits.then(|| frame.map(f64::from))
 }
 
 pub fn state() -> State {
@@ -554,15 +581,17 @@ fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
         resized.save_with_format(path, image::ImageFormat::Png).map_err(|_| failed)?;
         image = Some(resized);
     }
-    let thumbnail = extras.thumbnail.then(|| image.map_or_else(decoded, Ok).ok()).flatten().map(|image| {
-        let small = image.thumbnail(FLIGHT_IMAGE_MAX, FLIGHT_IMAGE_MAX).to_rgba8();
-        let pixels = rune::Pixels::new();
-        pixels.set(small.width(), small.height(), small.into_raw());
-        pixels
-    });
+    let thumbnail = extras.thumbnail.then(|| image.map_or_else(decoded, Ok).ok()).flatten().map(flight_pixels);
     let text = extras.text.then(|| read_text(front.pid, &window.title)).flatten();
     let source = snap_shot_source(&front.owner, &window.title, text.as_deref());
-    Ok(Shot { bounds: window.bounds, source, thumbnail })
+    Ok(Shot { bounds: window.bounds, source, thumbnail, origin: (0.0, 0.0) })
+}
+
+fn flight_pixels(image: image::DynamicImage) -> rune::Pixels {
+    let small = image.thumbnail(FLIGHT_IMAGE_MAX, FLIGHT_IMAGE_MAX).to_rgba8();
+    let pixels = rune::Pixels::new();
+    pixels.set(small.width(), small.height(), small.into_raw());
+    pixels
 }
 
 /// The window's text through System Events, or None when Accessibility isn't allowed or the
@@ -656,10 +685,18 @@ pub fn pair_modifier(shortcut: &Value) -> Option<&'static str> {
 
 /// `snapShotModifierPairLabel` on macOS.
 pub fn pair_label(modifier: &str) -> String {
-    let label = match modifier {
-        "meta" => "Command",
-        "control" => "Control",
-        "alt" => "Option",
+    pair_label_for(modifier, cfg!(target_os = "macos"))
+}
+
+/// `snapShotModifierPairLabel`: Apple names on macOS, else Ctrl/Alt/Super.
+fn pair_label_for(modifier: &str, apple: bool) -> String {
+    let label = match (modifier, apple) {
+        ("meta", true) => "Command",
+        ("control", true) => "Control",
+        ("alt", true) => "Option",
+        ("meta", false) => "Super",
+        ("control", false) => "Ctrl",
+        ("alt", false) => "Alt",
         _ => "Shift",
     };
     format!("{label} + {label}")
@@ -958,14 +995,29 @@ pub fn start(s: &mut App) {
     let waker = s.ui.panel.waker.clone();
     let dir = crate::host::t3_home().join("userdata").join("snap-shots");
     if let Some(Some(backend)) = linux_backend {
+        use crate::desktop::capture_linux as linux;
+        let (composer, window) = LIVE.with(|live| (live.borrow().composer, live.borrow().window));
+        let feedback = linux::Feedback {
+            flash: crate::settings::value(s, "snapShotFlash") != false,
+            animate: crate::settings::value(s, "snapShotAnimations") != false,
+            relative: composer.zip(window).and_then(|(c, w)| relative_landing(c, w)),
+        };
+        let text = crate::settings::value(s, "snapShotIncludeAccessibility") != false && backend.knows_window();
         std::thread::spawn(move || {
             let path = dir.join(format!("window-{}.png", crate::shell::palette::add_project::iso_now().replace(':', "-")));
-            let captured = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| crate::desktop::capture_linux::capture(backend, &path));
+            let captured = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| linux::capture(backend, &path, feedback));
             let event = match captured {
-                Ok(source) => {
+                Ok(captured) => {
+                    let window = captured.window.unwrap_or_default();
+                    let app_text = text.then(|| linux::app_text(&window)).flatten();
+                    let source = snap_shot_source(&window.app, &window.title, app_text.as_deref());
                     let _ = std::fs::write(source_path(&path.to_string_lossy()), source.to_string());
-                    let bounds = Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
-                    Event::Captured(Ok((Shot { bounds, source, thumbnail: None }, path)))
+                    let bounds = window.bounds.filter(|_| !captured.effects_done).map_or(Bounds { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }, |[x, y, width, height]| Bounds { x, y, width, height });
+                    let thumbnail = (feedback.animate && bounds.width > 0.0 && captured.own.is_some())
+                        .then(|| image::open(&path).ok().map(flight_pixels))
+                        .flatten();
+                    let origin = captured.own.map_or((0.0, 0.0), |o| (o[0] as f32, o[1] as f32));
+                    Event::Captured(Ok((Shot { bounds, source, thumbnail, origin }, path)))
                 }
                 Err(message) => Event::CaptureFailed(message),
             };
@@ -1098,11 +1150,13 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                 }
                 match result {
                     Ok((shot, path)) => {
-                        if crate::settings::value(s, "snapShotFlash") != false {
+                        // Linux without a window frame, or with the compositor's own effects, has none to draw.
+                        let framed = shot.bounds.width > 0.0 && shot.bounds.height > 0.0;
+                        if framed && crate::settings::value(s, "snapShotFlash") != false {
                             flash(shot.bounds);
                         }
-                        if let Some(pixels) = shot.thumbnail.filter(|_| crate::settings::value(s, "snapShotAnimations") != false) {
-                            fly(shot.bounds, pixels);
+                        if let Some(pixels) = shot.thumbnail.filter(|_| framed && crate::settings::value(s, "snapShotAnimations") != false) {
+                            fly(shot.bounds, pixels, shot.origin);
                         }
                         deliver(s, path);
                     }
@@ -1219,10 +1273,11 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
 
 /// `SnapShotTransition`: shows the picture over the captured window, then on the next poll moves
 /// it to the composer on Electron's curve; the overlay hides once it lands. One flight, no loop.
-fn fly(bounds: Bounds, pixels: rune::Pixels) {
+fn fly(bounds: Bounds, pixels: rune::Pixels, origin: (f32, f32)) {
     LIVE.with(|live| {
         let mut live = live.borrow_mut();
         let (Some(flight), Some(composer)) = (live.flight.clone(), live.composer) else { return };
+        let composer = [composer[0] + origin.0, composer[1] + origin.1, composer[2], composer[3]];
         let source = [bounds.x as f32, bounds.y as f32, bounds.width as f32, bounds.height as f32];
         let target = flight_target(composer, bounds);
         let (frame, from, to) = flight_frames(source, target);
@@ -1359,7 +1414,8 @@ mod tests {
         assert_eq!(plan(true, granted, false, &json!({"key": "k"})), Plan::Invalid, "a chord needs a modifier");
         assert_eq!(accelerator(&json!({"key": " ", "ctrlKey": true, "altKey": true})).as_deref(), Some("ctrl+alt+space"));
         assert!("shift+cmd+2".parse::<rune::Shortcut>().is_ok(), "Rune parses the accelerator");
-        assert_eq!(pair_label("meta"), "Command + Command");
+        assert_eq!(pair_label_for("meta", true), "Command + Command");
+        assert_eq!(pair_label_for("control", false), "Ctrl + Ctrl");
         assert_eq!(pair_shortcut("shift"), pair);
     }
 

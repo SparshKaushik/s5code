@@ -24,6 +24,7 @@ mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
 mod keybindings;
+pub(crate) use keybindings::unshift;
 pub(crate) mod machines;
 mod models;
 mod host_logos;
@@ -48,6 +49,7 @@ mod licenses;
 mod secrets;
 pub(crate) mod tasks;
 pub(crate) mod themes;
+mod vivid;
 pub use themes::apply as apply_theme;
 
 use crate::theme::{self, AlphaMul, T};
@@ -61,6 +63,8 @@ pub struct Ui {
     pub theme_edit_dark: bool,
     pub theme_import_open: bool,
     pub theme_import: TextEdit,
+    /// Shown inside the import dialog, which covers the page's error banner.
+    pub theme_import_error: Option<String>,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
     pub theme_colors: HashMap<String, TextEdit>,
@@ -79,11 +83,8 @@ pub struct Ui {
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
-    pub delete_thread: Option<(String, String)>,
     /// The archived thread whose right-click menu is open: id, title, and where.
     pub archive_menu: Option<(String, String, f32, f32)>,
-    /// The project the Danger section is confirming removal of: id and title.
-    pub delete_project: Option<(String, String)>,
     pub icon_picker: Option<project_icon::Draft>,
     pub accent: Option<accent::Draft>,
     pub provider_picker: bool,
@@ -127,8 +128,6 @@ pub struct Ui {
     pub resource_telemetry: resource_telemetry::Ui,
     pub licenses: licenses::Ui,
     pub telemetry: telemetry::Ui,
-    /// General's Restore device defaults confirmation is open.
-    pub restore_confirm: bool,
     /// The custom theme whose removal is being confirmed.
     pub theme_remove: Option<String>,
     pub thread_details_open: bool,
@@ -624,7 +623,7 @@ pub fn poll(s: &mut App) -> bool {
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
                     // Linked environments show their own failures, as web's section does.
-                    if method == "peerLinks.list" {
+                    if matches!(method.as_str(), "peerLinks.list" | source_control::DISCOVERY | projects::ARCHIVED_SNAPSHOT) {
                         let mut failed = json!({});
                         failed[LOAD_ERROR] = json!(message);
                         s.ui.settings.results.insert(method, failed);
@@ -832,12 +831,14 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
-    let reveal = search::reveal(page, title);
+    // Web keeps the `code-font` anchor on the simple Monospace row; only Prompt and Terminal
+    // font need the separate rows (`revealSettingsSearchTarget`).
+    let separate = value(s, "typographyAdvanced") == true;
+    let reveal = if title == "Code font" && !separate { "Monospace font" } else { search::reveal(page, title) };
     // Web's `AdvancedSettings` opens on a target inside it and stays open.
     s.ui.settings.advanced.extend(pages::fold_of(page, reveal));
     s.ui.settings.reveal = Some(reveal.to_owned());
-    // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
-    if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
+    if matches!(title, "Prompt font" | "Terminal font") {
         update(s, "typographyAdvanced", json!(true));
     }
     s.navigate(Route::Settings(page.to_owned()));
@@ -1012,7 +1013,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .icon(&icons::ROTATE_CCW)
                 .disabled(restore::changed_labels(s).is_empty())
                 .build(t)
-                .on_press(|s: &mut App| s.ui.settings.restore_confirm = !restore::changed_labels(s).is_empty()),
+                .on_press(restore::ask),
         );
     }
     header = header.child(
@@ -1083,11 +1084,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::archive_menu(s, t, &mut overlays);
-    projects::confirm_delete(s, t, &mut overlays);
     secrets::overlays(s, t, &mut overlays);
-    diagnostics::overlays(s, t, &mut overlays);
-    resource_telemetry::overlays(s, t, &mut overlays);
-    projects::confirm_remove(s, t, &mut overlays);
     project_icon::dialog(s, t, &mut overlays);
     if crate::chat::details::scripts::settings_editor_open(s) {
         crate::chat::details::scripts::overlays(s, t, &mut overlays);
@@ -1097,7 +1094,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     about::update_dialog(s, t, &mut overlays);
     about::overlays(s, t, &mut overlays);
     checkout_grouping::overlays(s, t, &mut overlays);
-    restore::confirm(s, t, &mut overlays);
     thread_details::overlay(s, t, &mut overlays);
     themes::remove_dialog(s, t, &mut overlays);
     crate::desktop::exposure::confirm(s, t, &mut overlays);
@@ -1621,8 +1617,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             s.ui.settings.theme_import_open = false;
             return true;
         }
-        if std::mem::take(&mut s.ui.settings.restore_confirm)
-            || std::mem::take(&mut s.ui.settings.thread_details_open)
+        if std::mem::take(&mut s.ui.settings.thread_details_open)
             || s.ui.settings.theme_remove.take().is_some()
             || about::escape(s)
         {
@@ -1638,9 +1633,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         }
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
-            || s.ui.settings.delete_thread.take().is_some()
             || s.ui.settings.archive_menu.take().is_some()
-            || s.ui.settings.delete_project.take().is_some()
         {
             return true;
         }
