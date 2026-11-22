@@ -3156,13 +3156,13 @@ fn pip_fit(desired: f32, aspect: f32, (max_w, max_h): (f32, f32), min_w: f32) ->
     (w, (w / aspect).round())
 }
 
-fn pip_clamp((x, y): (f32, f32), (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
+pub(super) fn pip_clamp((x, y): (f32, f32), (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
     (x.max(PIP_GAP).min((cw - w - PIP_GAP).max(PIP_GAP)), y.max(PIP_GAP).min((ch - h - PIP_GAP).max(PIP_GAP)))
 }
 
 /// `resolvePreviewMiniPlayerFrame`: `[x, y, w, h]` in the chat area; a moved or resized
 /// preview keeps its width, the default sits top right at up to 320 pt.
-fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f32; 4] {
+pub(super) fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f32; 4] {
     let max = (container.0 - 2. * PIP_GAP, container.1 - 2. * PIP_GAP);
     let (desired, min_w) = match frame {
         Some([_, _, w]) => (w, w),
@@ -3175,7 +3175,7 @@ fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f3
 }
 
 /// `resizePreviewMiniPlayer`; `dir` is -1/0/1 per axis (west/north is -1).
-fn pip_resize([x, y, w, h]: [f32; 4], (dx, dy): (i8, i8), (mx, my): (f32, f32), aspect: f32, (cw, ch): (f32, f32)) -> [f32; 4] {
+pub(super) fn pip_resize([x, y, w, h]: [f32; 4], (dx, dy): (i8, i8), (mx, my): (f32, f32), aspect: f32, (cw, ch): (f32, f32)) -> [f32; 4] {
     let (right, bottom) = (x + w, y + h);
     let max_w = match dx {
         -1 => right - PIP_GAP,
