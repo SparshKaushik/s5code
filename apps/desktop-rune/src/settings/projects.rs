@@ -378,8 +378,11 @@ pub fn archived(s: &App, t: &T) -> El {
     let groups = archive_groups(&projects, &threads);
     if groups.is_empty() {
         let loading = result.is_none() && s.ui.settings.pending.values().any(|m| m == ARCHIVED_SNAPSHOT);
+        let error = result.and_then(|r| r[super::LOAD_ERROR].as_str());
         let (glyph, title, description) = if loading {
             (crate::kit::Spinner::new().size("sm").tone("muted").build(&crate::kit::theme(t)), "Loading archived threads", "Checking connected environments.")
+        } else if let Some(error) = error {
+            (rune::icon(&crate::icons::ARCHIVE, 14.0).color(t.c.muted_foreground), "Could not load archived threads", error)
         } else {
             (rune::icon(&crate::icons::ARCHIVE, 14.0).color(t.c.muted_foreground), "No archived threads", "Archived threads will appear here.")
         };

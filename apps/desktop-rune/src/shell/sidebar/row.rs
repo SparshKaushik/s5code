@@ -484,7 +484,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     line1 = line1.child(super::favicon::mark(s, t, &th.project_id, model.project(th), false, 16.0));
     if th.pinned {
-        line1 = line1.child(icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
+        line1 = line1.child(unpin_button(s, t, th, hovered));
     }
     line1 = line1.child(text(model.project(th).to_string()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
     if let Some((_, verb)) = rc.dragging {
@@ -494,7 +494,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         let rest = match top_status(t, model, th, status) {
             Some((glyph, label, color)) => {
-                row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color))
+                woke_button(row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color)), model, th)
             }
             None => row().child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label)),
         };
@@ -560,6 +560,25 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
+}
+
+/// The pin glyph is an "Unpin thread" button, showing PIN_OFF while the row is hovered.
+fn unpin_button(s: &App, t: &T, th: &Thread, hovered: bool) -> El {
+    let glyph = icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink();
+    if !super::can_operate(s, &[th]) {
+        return glyph;
+    }
+    let id = th.id.clone();
+    glyph.key(format!("sb-unpin-{}", th.id)).role("button").label("Unpin thread").help("Unpin thread").cursor(Cursor::Pointer).on_press(move |s: &mut App| super::checked(s, &id, super::unpin))
+}
+
+/// "Woke" is a button that acknowledges the wake (`handleAcknowledgeWokeClick`); other statuses
+/// stay labels.
+fn woke_button(e: El, model: &Model, th: &Thread) -> El {
+    let shown = logic::status(th) == Status::Ready && th.woke(model.now);
+    let Some(at) = shown.then(|| th.woke_at(model.now)).flatten() else { return e };
+    let id = th.id.clone();
+    e.key(format!("sb-woke-{}", th.id)).role("button").label("Dismiss Woke notification").cursor(Cursor::Pointer).on_press(move |s: &mut App| super::acknowledge_woke(s, &id, at))
 }
 
 /// A pull request state's glyph and tone (`resolvePullRequestState` presentation).
@@ -659,7 +678,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         r = r.child(trailing_icons(s, t, model, th, false));
     }
     if th.pinned {
-        r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
+        r = r.child(unpin_button(s, t, th, hovered));
     }
     if !two_line && crate::panel::terminal::running(s, &th.id) > 0 {
         r = r.child(terminal_glyph(t));
@@ -673,7 +692,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let at = th.snoozed_until.unwrap_or(model.now);
             row().gap(4.0).center_y().child(icon(&i::ALARM_CLOCK, 12.0).color(t.sb.info_foreground)).child(text(wake_label(at, model.now, crate::data::Zone::Local)).font(theme::TEXT_XS).color(t.sb.info_foreground))
         } else if let Some((glyph, label, color)) = top_status(t, model, th, status).filter(|_| rc.folder) {
-            row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color))
+            woke_button(row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color)), model, th)
         } else {
             let at = if settled { th.settled_time() } else { th.card_time() };
             row().child(text(logic::relative_label(at, model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))

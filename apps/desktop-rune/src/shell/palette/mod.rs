@@ -441,6 +441,7 @@ fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     });
     label
 }
+const COPY_ERROR: &str = "Copy error";
 pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
     toast_with(s, title, description, Vec::new());
 }
@@ -2332,10 +2333,25 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         if notice.error {
             toast = toast.lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive));
         }
-        // A toast that never times out needs a way to go.
-        if notice.error || notice.until == i64::MAX {
-            toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
+        // `CopyErrorButton`: an error toast's description copies with one press.
+        if let Some(text) = notice.description.clone().filter(|_| notice.error) {
+            let copied = notice.copied.iter().any(|(l, _)| l == COPY_ERROR);
+            let label = if copied { "Copied error" } else { COPY_ERROR };
+            let button = kit::Button::new(label)
+                .icon(if copied { &icons::CHECK } else { &icons::COPY })
+                .size("icon-micro")
+                .variant("ghost-muted")
+                .build(t)
+                .key("palette-notice-copy-error")
+                .help(label);
+            let button = if copied { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                tx.copy(&text);
+                toast_copied(s, tx, COPY_ERROR);
+            }) };
+            toast = toast.button(false, button);
         }
+        // Every toast can be dismissed ("Dismiss notification").
+        toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }
     out

@@ -29,9 +29,23 @@ pub fn icon_button(t: &T, key: &str, glyph: &'static rune::Icon, size: f32, icon
 pub fn header(s: &App, t: &T, inset: f32) -> El {
     let left = brand_left(inset);
     let ui = &s.ui.shell.sidebar;
-    let nav = |key: &str, glyph, enabled: bool| {
-        let b = el().key(key).size(28.0, 28.0).radius(layout::CONTROL_RADIUS).center().child(icon(glyph, 14.0).color(t.c.muted_foreground));
-        if enabled { b.hover(t.sb.sidebar_row_hover).press(t.sb.sidebar_row_active).cursor(Cursor::Pointer) } else { b.opacity(0.5) }
+    // `SidebarHistoryButton`: "Go back" / "Go forward" with the shortcut, inert when there is
+    // nowhere to go.
+    let shortcut = |label: &str, command: &str| {
+        let keys = crate::shell::palette::shortcut_label(s, command);
+        if keys.is_empty() { label.to_owned() } else { format!("{label} ({keys})") }
+    };
+    let nav = |key: &str, glyph, label: &str, command: &str, enabled: bool, go: fn(&mut App)| {
+        let b = el()
+            .key(key)
+            .role("button")
+            .label(label)
+            .help(shortcut(label, command))
+            .size(28.0, 28.0)
+            .radius(layout::CONTROL_RADIUS)
+            .center()
+            .child(icon(glyph, 14.0).color(t.c.muted_foreground));
+        if enabled { b.hover(t.sb.sidebar_row_hover).press(t.sb.sidebar_row_active).cursor(Cursor::Pointer).on_press(go) } else { b.opacity(0.5) }
     };
     el().key("sb-header")
         .w_full()
@@ -41,12 +55,25 @@ pub fn header(s: &App, t: &T, inset: f32) -> El {
         .child(
             icon_button(t, "sb-toggle", &brand::PANEL_LEFT_CLOSE, layout::TITLEBAR_CONTROL, 16.0, t.c.muted_foreground, false)
                 .absolute(left, 12.0)
+                .role("button")
+                .label("Toggle main sidebar")
+                .help(shortcut("Toggle main sidebar", "sidebar.toggle"))
                 .on_press(|s: &mut App| s.ui.shell.sidebar.collapsed = true),
         )
-        .child(icon(&brand::T3_WORDMARK, 16.84).color(t.sb.sidebar_foreground).absolute(left + 39.0, 20.92))
-        .child(text("Code").font(theme::SM_MEDIUM).color(t.sb.muted_foreground).absolute(left + 59.84, 16.0))
-        .child(nav("sb-back", &i::ARROW_LEFT, !ui.back.is_empty()).absolute(188.45, 12.0).on_press(super::go_back))
-        .child(nav("sb-forward", &i::ARROW_RIGHT, !ui.forward.is_empty()).absolute(216.45, 12.0).on_press(super::go_forward))
+        .child(
+            // `SidebarBrand`: the wordmark links home.
+            el().key("sb-brand")
+                .role("link")
+                .label("S5 Code home")
+                .size(64.0, 28.0)
+                .absolute(left + 36.0, 12.0)
+                .cursor(Cursor::Pointer)
+                .on_press(|s: &mut App| super::go(s, crate::Route::Home { project_id: None }))
+                .child(icon(&brand::T3_WORDMARK, 16.84).color(t.sb.sidebar_foreground).absolute(3.0, 8.92))
+                .child(text("Code").font(theme::SM_MEDIUM).color(t.sb.muted_foreground).absolute(23.84, 4.0)),
+        )
+        .child(nav("sb-back", &i::ARROW_LEFT, "Go back", "navigation.back", !ui.back.is_empty(), super::go_back).absolute(188.45, 12.0))
+        .child(nav("sb-forward", &i::ARROW_RIGHT, "Go forward", "navigation.forward", !ui.forward.is_empty(), super::go_forward).absolute(216.45, 12.0))
 }
 
 /// Shown in place of the header while the sidebar is collapsed.
@@ -55,6 +82,8 @@ pub fn floating_toggle(t: &T, inset: f32) -> El {
     icon_button(t, "sb-expand", &brand::PANEL_LEFT, layout::TITLEBAR_CONTROL, 16.0, t.c.muted_foreground, false)
         .absolute(left, 12.0)
         .transition(rune::Transition::none())
+        .role("button")
+        .label("Toggle main sidebar")
         .on_press(|s: &mut App| s.ui.shell.sidebar.collapsed = false)
 }
 

@@ -24,6 +24,7 @@ mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
 mod keybindings;
+pub(crate) use keybindings::unshift;
 pub(crate) mod machines;
 mod models;
 mod host_logos;
@@ -620,7 +621,7 @@ pub fn poll(s: &mut App) -> bool {
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
                     // Linked environments show their own failures, as web's section does.
-                    if method == "peerLinks.list" {
+                    if method == "peerLinks.list" || method == projects::ARCHIVED_SNAPSHOT {
                         let mut failed = json!({});
                         failed[LOAD_ERROR] = json!(message);
                         s.ui.settings.results.insert(method, failed);

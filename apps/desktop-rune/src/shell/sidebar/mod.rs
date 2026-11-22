@@ -652,6 +652,11 @@ fn failed(s: &mut App, done: &Inflight, error: &Value) {
 }
 
 /// Runs a row action when `checkThreadOperations` allows it.
+/// `useAcknowledgeThreadWoke`: a visit at the wake time clears "Woke" without opening the thread.
+pub fn acknowledge_woke(s: &mut App, id: &str, woke_at: i64) {
+    dispatch(s, "thread.visit", id, json!({ "visitedAt": iso(woke_at) }));
+}
+
 pub fn checked(s: &mut App, id: &str, f: fn(&mut App, &str)) {
     if check_operations(s, &[id.to_string()]) {
         f(s, id);
