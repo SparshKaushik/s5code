@@ -710,14 +710,14 @@ pub(crate) fn terminal_focused(app: &App) -> bool {
 
 thread_local! {
     /// What a key handler's `Tx` knew about the key the window is handling: the key, its
-    /// physical code (winit's name, "KeyA") and whether a control had focus.
+    /// physical code (winit's name, "KeyA") and whether a text field had focus.
     static KEY_CONTEXT: std::cell::RefCell<Option<(Key, Option<String>, bool)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Records the key's physical code and focus for the shortcut matcher, which handlers call
 /// without their `Tx`.
 pub fn note_key(e: &KeyEvent, tx: &Tx) {
-    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused().is_some());
+    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused_editable());
     KEY_CONTEXT.with(|c| *c.borrow_mut() = Some(context));
 }
 
@@ -726,8 +726,7 @@ fn physical_code(e: &KeyEvent) -> Option<String> {
     KEY_CONTEXT.with(|c| c.borrow().as_ref().filter(|(key, _, _)| *key == e.key).and_then(|(_, code, _)| code.clone()))
 }
 
-/// `editableFocus`. Rune names only the focused element, not whether it edits text, so a control
-/// having focus stands in, as the sidebar's undo key already reads it.
+/// `editableFocus` (`isEditableFocused`): a text field has focus.
 fn editable_focus() -> bool {
     KEY_CONTEXT.with(|c| c.borrow().as_ref().is_some_and(|(_, _, focused)| *focused))
 }
@@ -1750,7 +1749,25 @@ mod tests {
         assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), None, "without a physical code only the typed key counts");
         KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), Some("Digit7".into()), true)));
         assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), Some("seven"));
-        assert!(editable_focus());
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn editable_focus_is_a_focused_text_field_unless_the_undo_notice_claims_the_key() {
+        let app = App::new();
+        let e = KeyEvent::from(Key::Command('z'));
+        for (editable, expected) in [(false, false), (true, true)] {
+            KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), None, editable)));
+            assert_eq!(when_context(&app, "editableFocus"), expected, "a focused button is not a text field");
+        }
+        let bindings = serde_json::json!([{"command": "thread.undo", "shortcut": {"key": "z", "modKey": true}, "whenAst": {"type": "not", "node": {"type": "identifier", "name": "editableFocus"}}}]);
+        let mut cmd_z = e.clone();
+        cmd_z.mods.cmd = true;
+        cmd_z.mods.ctrl = !cfg!(target_os = "macos");
+        let context = |name: &str| when_context(&app, name);
+        assert_eq!(resolve(bindings.as_array().unwrap(), &cmd_z, &context), None, "the field keeps its own undo");
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), None, false)));
+        assert_eq!(resolve(bindings.as_array().unwrap(), &cmd_z, &context), Some("thread.undo"));
         KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
     }
 
