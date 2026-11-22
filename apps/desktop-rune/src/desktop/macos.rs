@@ -182,6 +182,24 @@ pub fn fix_menus(settings_title: &str, updates_title: &str, quit_title: &str) {
         {
             insert(edit, separator(), index(edit, all));
         }
+        // Electron's Edit › Speech. Its items are AppKit's own, sent to Rune's view: Rune's menu
+        // places items only in top-level menus, and removes each from the menu it put it in, so
+        // one moved into a submenu would make AppKit raise when Rune rebuilds or drops its menu.
+        if let Some(edit) = top_menu(root, "Edit")
+            && find(edit, |i| title(i) == "Speech").is_none()
+            && answer_speech()
+        {
+            let speech = msg!(msg!(class(c"NSMenu"), c"alloc"; Id), c"initWithTitle:", ns_string("Speech") => Id; Id);
+            add(speech, new_item("Start Speaking", c"startSpeaking:", "", 0));
+            add(speech, new_item("Stop Speaking", c"stopSpeaking:", "", 0));
+            // `submenuAction:` is AppKit's own action for an item that opens a submenu.
+            let item = new_item("Speech", c"submenuAction:", "", 0);
+            msg!(item, c"setSubmenu:", speech => Id; ());
+            msg!(speech, c"release"; ());
+            add(edit, separator());
+            add(edit, item);
+            msg!(item, c"release"; ());
+        }
         if let Some(view) = top_menu(root, "View")
             && find_action(view, c"toggleFullScreen:").is_none()
         {
@@ -267,6 +285,30 @@ unsafe fn answer_delete() -> bool {
     }
     unsafe { class_addMethod(view, sel(c"delete:"), delete as *const c_void, c"v@:@".as_ptr()) };
     true
+}
+
+/// Teaches winit's view Speech's `startSpeaking:` and `stopSpeaking:`.
+unsafe fn answer_speech() -> bool {
+    let view = class(c"WinitView");
+    if view.is_null() {
+        return false;
+    }
+    unsafe {
+        class_addMethod(view, sel(c"startSpeaking:"), start_speaking as *const c_void, c"v@:@".as_ptr());
+        class_addMethod(view, sel(c"stopSpeaking:"), stop_speaking as *const c_void, c"v@:@".as_ptr());
+    }
+    true
+}
+
+/// The app reads the text selection on its own thread, as a Rune menu item would.
+extern "C" fn start_speaking(_: Id, _: Id, _: Id) {
+    if let Some(app) = OPENED.lock().ok().and_then(|a| a.clone()) {
+        app.update(|_, tx| speak(Some(tx.text_selection().map_or("", |t| t.text()))));
+    }
+}
+
+extern "C" fn stop_speaking(_: Id, _: Id, _: Id) {
+    speak(None);
 }
 
 /// Delete presses Backspace in the view, which erases a field's selection.

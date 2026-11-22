@@ -687,20 +687,90 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
     if key.is_empty() {
         return None;
     }
+    let keys = event_keys(&key.to_lowercase(), physical_code(e).as_deref());
     bindings
         .iter()
         .rev()
         .find(|v| {
             let k = &v["shortcut"];
-            let yes = |name: &str| k[name].as_bool().unwrap_or(false);
             (v["whenAst"].is_null() || when(&v["whenAst"], context))
-                && k["key"].as_str().is_some_and(|v| v.eq_ignore_ascii_case(&key))
-                && e.mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
-                && e.mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
-                && e.mods.shift == yes("shiftKey")
-                && e.mods.alt == yes("altKey")
+                && k["key"].as_str().is_some_and(|v| keys.iter().any(|key| v.eq_ignore_ascii_case(key)))
+                && modifiers_match(k, e.mods)
         })
         .and_then(|v| v["command"].as_str())
+}
+
+pub(crate) fn terminal_focused(app: &App) -> bool {
+    app.ui.panel.terminal.focused()
+}
+
+thread_local! {
+    /// What a key handler's `Tx` knew about the key the window is handling: the key, its
+    /// physical code (winit's name, "KeyA") and whether a control had focus.
+    static KEY_CONTEXT: std::cell::RefCell<Option<(Key, Option<String>, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records the key's physical code and focus for the shortcut matcher, which handlers call
+/// without their `Tx`.
+pub fn note_key(e: &KeyEvent, tx: &Tx) {
+    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused().is_some());
+    KEY_CONTEXT.with(|c| *c.borrow_mut() = Some(context));
+}
+
+/// The noted physical code, when it was noted for this key.
+fn physical_code(e: &KeyEvent) -> Option<String> {
+    KEY_CONTEXT.with(|c| c.borrow().as_ref().filter(|(key, _, _)| *key == e.key).and_then(|(_, code, _)| code.clone()))
+}
+
+/// `editableFocus`. Rune names only the focused element, not whether it edits text, so a control
+/// having focus stands in, as the sidebar's undo key already reads it.
+fn editable_focus() -> bool {
+    KEY_CONTEXT.with(|c| c.borrow().as_ref().is_some_and(|(_, _, focused)| *focused))
+}
+
+/// `EVENT_CODE_SHORTCUT_KEYS`: the US key at a physical position.
+fn code_key(code: &str) -> Option<String> {
+    if let Some(letter) = code.strip_prefix("Key").filter(|l| l.len() == 1) {
+        return Some(letter.to_lowercase());
+    }
+    if let Some(digit) = code.strip_prefix("Digit").filter(|d| d.len() == 1) {
+        return Some(digit.to_owned());
+    }
+    let key = match code {
+        "Backquote" => "`",
+        "Backslash" => "\\",
+        "BracketLeft" => "[",
+        "BracketRight" => "]",
+        "Comma" => ",",
+        "Equal" => "=",
+        "Minus" => "-",
+        "Period" => ".",
+        "Quote" => "'",
+        "Semicolon" => ";",
+        "Slash" => "/",
+        _ => return None,
+    };
+    Some(key.to_owned())
+}
+
+/// `resolveEventKeys`: the typed key, and unless it is a Latin letter the key at its physical
+/// position, so ⌘⇧7 on a German layout (typed "/") and ⌘К on a Russian one match ⌘⇧7 and ⌘K.
+fn event_keys(typed: &str, code: Option<&str>) -> Vec<String> {
+    let mut keys = vec![typed.to_owned()];
+    let letter = typed.len() == 1 && typed.chars().all(|c| c.is_ascii_lowercase());
+    if let Some(physical) = code.and_then(code_key).filter(|k| !letter && *k != typed) {
+        keys.push(physical);
+    }
+    keys
+}
+
+/// `matchesKeybindingShortcutModifiers`: exactly the shortcut's modifiers are held.
+pub(crate) fn modifiers_match(k: &serde_json::Value, mods: rune::Mods) -> bool {
+    let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
+        && mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
+        && mods.shift == yes("shiftKey")
+        && mods.alt == yes("altKey")
 }
 
 /// `evaluateWhenNode`: unknown identifiers are false.
@@ -732,6 +802,8 @@ fn when_context(app: &App, name: &str) -> bool {
         "composerFocus" => crate::chat::composer::focused(app),
         "turnRunning" => crate::chat::composer::running(app),
         "draftThreadRoute" => matches!(app.frame_route(), crate::Route::Home { .. }),
+        // While the sidebar's undo notice claims mod+z it is not a text field's (AppSidebarLayout).
+        "editableFocus" => editable_focus() && !(!app.ui.shell.sidebar.collapsed && app.ui.shell.sidebar.undos.claims_key(crate::data::now_ms())),
         _ => false,
     }
 }
@@ -1128,6 +1200,17 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
     }),
+    ("panel-diff-tree", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+    }),
+    ("panel-diff-tree-split", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+        s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
+    }),
+    ("git-commit", crate::chat::details::git::commit_scene),
+    ("details-pr-conflict", crate::chat::details::pr::conflict_scene),
     ("panel-diff-split", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
@@ -1194,6 +1277,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
         device::float_fixture(s);
+    }),
+    ("panel-device-tools-more", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::tools_more_fixture(s);
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1629,6 +1717,26 @@ mod tests {
         assert_eq!(resolve(named, &with(Key::Command(' '), false), &context), Some("a.space"));
         assert_eq!(resolve(named, &with(Key::Home, false), &context), Some("a.home"));
         assert_eq!(resolve(named, &with(Key::Command('?'), true), &context), Some("a.help"));
+    }
+
+    #[test]
+    fn other_layouts_match_by_the_keys_physical_position() {
+        assert_eq!(event_keys("/", Some("Digit7")), ["/", "7"], "German ⌘⇧7");
+        assert_eq!(event_keys("к", Some("KeyR")), ["к", "r"], "Russian letters fall back to the key's place");
+        assert_eq!(event_keys("q", Some("KeyA")), ["q"], "AZERTY letters keep their own letter");
+        assert_eq!(event_keys("ö", Some("Semicolon")), ["ö", ";"]);
+        assert_eq!(event_keys("space", Some("Space")), ["space"]);
+        let bindings = serde_json::json!([{"command": "seven", "shortcut": {"key": "7", "modKey": true, "shiftKey": true}}]);
+        let mut e = KeyEvent::from(Key::Command('/'));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        let context = |_: &str| false;
+        assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), None, "without a physical code only the typed key counts");
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), Some("Digit7".into()), true)));
+        assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), Some("seven"));
+        assert!(editable_focus());
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 pub(crate) mod comments;
 pub(crate) mod file_menu;
+mod file_icons;
 mod find;
 pub(crate) mod state;
 pub(crate) mod view;
@@ -1514,10 +1515,9 @@ fn tree_pane(app: &App, t: &T) -> El {
             let file = &st.files()[f];
             let selected = f == current;
             let (letter, color, title) = git_status(file.status, t.dark);
-            let glyph = match crate::chat::timeline::language_icons::for_path(file.path()) {
-                Some((glyph, light, dark)) => icon(glyph, 16.0).color(rune::color::hex(if t.dark { dark } else { light }).unwrap_or(tree_muted())),
-                None => icon(&icons::FILE, 14.0).color(rune::color::hex(if t.dark { "#adadb1" } else { "#84848a" }).unwrap_or(tree_muted())),
-            };
+            let glyph = file_icons::for_path(file.path()).iter().fold(el().size(16.0, 16.0), |mark, &(glyph, light, dark)| {
+                mark.child(icon(glyph, 16.0).color(rune::color::hex(if t.dark { dark } else { light }).unwrap_or(tree_muted())).absolute(0.0, 0.0))
+            });
             base.fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(file.path().to_string())
@@ -1848,6 +1848,28 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
+/// Several files across folders, every one expanded and the file tree open, for headless scenes.
+pub fn tree_fixture(app: &mut App) {
+    let mut diff = String::from("diff --git a/src/greet.ts b/src/greet.ts\nindex 1234567..abcdef0 100644\n--- a/src/greet.ts\n+++ b/src/greet.ts\n");
+    diff += "@@ -3,4 +3,5 @@\n export function greet(name: string) {\n-  return \"Hello \" + name;\n+  const message = `Hello, ${name}!`;\n+  return message;\n }\n \n";
+    diff += "@@ -40,3 +41,3 @@\n export function farewell(name: string) {\n-  return \"Bye \" + name;\n+  return `Goodbye, ${name}.`;\n }\n";
+    diff += "diff --git a/src/components/Button.tsx b/src/components/Button.tsx\nnew file mode 100644\n--- /dev/null\n+++ b/src/components/Button.tsx\n@@ -0,0 +1,3 @@\n+export function Button() {\n+  return <button type=\"button\" />;\n+}\n";
+    diff += "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -2,3 +2,3 @@\n   \"name\": \"greeter\",\n-  \"version\": \"1.0.0\",\n+  \"version\": \"1.1.0\",\n   \"type\": \"module\"\n";
+    diff += "diff --git a/Cargo.toml b/Cargo.toml\n--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1,2 +1,3 @@\n [package]\n name = \"greeter\"\n+edition = \"2024\"\n";
+    diff += "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\nnew file mode 100644\n--- /dev/null\n+++ b/.github/workflows/ci.yaml\n@@ -0,0 +1,2 @@\n+name: ci\n+on: push\n";
+    diff += "diff --git a/docs/old-guide.md b/docs/old-guide.md\ndeleted file mode 100644\n--- a/docs/old-guide.md\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-# Guide\n-Old.\n";
+    diff += "diff --git a/docs/intro.md b/docs/guide.md\nsimilarity index 100%\nrename from docs/intro.md\nrename to docs/guide.md\n";
+    let mut files = rune_kit::diff::parse(&diff);
+    files.sort_by(|a, b| a.path().cmp(b.path()));
+    let ui = &mut app.ui.panel.diff;
+    ui.files = files;
+    ui.touched = true;
+    ui.shown = Some(ui.scope.clone());
+    ui.tree_open = true;
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+}
+
 /// The fixture as a cut preview still listing untracked files, for headless scenes.
 pub fn banners_fixture(app: &mut App) {
     fixture(app);
@@ -1868,6 +1890,22 @@ fn sync_settings(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_icons_resolve_in_pierres_order_with_web_overrides_untinted() {
+        let mark = |path: &str| file_icons::for_path(path).iter().map(|(glyph, light, dark)| (glyph.name, *light, *dark)).collect::<Vec<_>>();
+        // T3's own file names win and carry no token, so they keep the muted icon colour.
+        assert_eq!(mark("package.json"), [("file-tree-builtin-npm-0", "#84848a", "#84848a")]);
+        assert_eq!(mark("apps/web/tsconfig.json"), [("file-tree-builtin-typescript-0", "#84848a", "#84848a")]);
+        assert_eq!(mark("pnpm-lock.yaml").len(), 2);
+        // T3's extensions, then Pierre's names, the complete set's overrides and extensions.
+        assert_eq!(mark("Cargo.toml")[0].0, "t3-file-icon-toml-0");
+        assert_eq!(mark("Dockerfile"), [("file-tree-builtin-docker-0", "#1a85d4", "#69b1ff")]);
+        assert_eq!(mark("src/App.tsx")[0].0, "file-tree-builtin-react-0");
+        assert_eq!(mark("types/index.d.ts"), [("file-tree-builtin-typescript-0", "#1a85d4", "#69b1ff")]);
+        assert_eq!(mark(".github/ci.yaml"), [("file-tree-builtin-yml-0", "#d52c36", "#ff6762")]);
+        assert_eq!(mark("notes.xyz"), [("file-tree-builtin-default-0", "#84848a", "#adadb1")]);
+    }
 
     #[test]
     fn tool_call_patches_gain_headers_and_wrap_raw_contents() {

@@ -24,6 +24,7 @@ pub mod activation;
 #[cfg(unix)]
 pub mod signals;
 pub mod single;
+pub mod updates;
 #[cfg(target_os = "linux")]
 mod url_handler;
 
@@ -53,8 +54,8 @@ const SETTINGS_TITLE: &str = "Settings…";
 const QUIT_TITLE: &str = "Quit S5 Code";
 #[cfg(target_os = "macos")]
 const UPDATES_TITLE: &str = "Check for Updates...";
-const UPDATES_UNAVAILABLE: &str = "Automatic updates are not available right now.";
-/// Electron's reason for a build without `app-update.yml`, which every Rune build is.
+/// Electron's reason for a build without `app-update.yml`: here, one the release workflow didn't
+/// stamp with a version (`updates::version`).
 pub const NO_UPDATE_FEED: &str = "Automatic updates are not available because no update feed is configured.";
 /// Chromium's zoom: each step is half a level, a level is a factor of 1.2.
 const ZOOM_STEP: f32 = 0.5;
@@ -74,6 +75,7 @@ pub struct Ui {
     pub activation: activation::State,
     #[cfg(unix)]
     pub cli: cli::State,
+    pub updates: updates::Ui,
     zoom_level: f32,
     /// Ctrl + wheel travel not yet turned into a zoom step.
     wheel_zoom: f32,
@@ -213,9 +215,6 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("check-for-updates"))
         .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("help-check-for-updates").menu("Help"))
         .menu_item(MenuItem::new(QUIT_TITLE, |s: &mut App, tx: &mut Tx| crate::shell::quit::menu_quit(s, tx)).id("quit").key_equivalent(key("cmd+q")).keys_first())
-        .menu_item(MenuItem::separator().menu("Edit"))
-        .menu_item(MenuItem::new("Start Speaking", |_: &mut App, tx: &mut Tx| macos::speak(Some(tx.text_selection().map_or("", |t| t.text())))).id("start-speaking").menu("Edit"))
-        .menu_item(MenuItem::new("Stop Speaking", |_: &mut App, _: &mut Tx| macos::speak(None)).id("stop-speaking").menu("Edit"))
         .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
         .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
         .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
@@ -225,17 +224,22 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first())
 }
 
-/// Check for Updates, as Electron's with no feed configured: its reason, in an alert on macOS
-/// (App and Help menus) and in the app's toast elsewhere (About and the command palette, since
-/// Rune has no menu bar there).
+/// Check for Updates (App and Help menus, About, the command palette): the outcome shows as
+/// Electron's menu check shows it.
 pub fn check_for_updates(s: &mut App) {
+    updates::check(s, true);
+}
+
+/// Electron's `showMessageBox` info box on macOS; the app's toast elsewhere, where Rune has no
+/// native dialogs.
+pub fn show_alert(s: &mut App, title: &str, detail: &str) {
     #[cfg(target_os = "macos")]
     {
         let _ = s;
-        macos::alert(UPDATES_UNAVAILABLE, NO_UPDATE_FEED);
+        macos::alert(title, detail);
     }
     #[cfg(not(target_os = "macos"))]
-    crate::shell::palette::toast(s, UPDATES_UNAVAILABLE, Some(NO_UPDATE_FEED));
+    crate::shell::palette::toast(s, title, Some(detail));
 }
 
 fn open_settings(s: &mut App) {
@@ -347,6 +351,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= exposure::poll(s);
+    changed |= updates::poll(s, tx);
     #[cfg(unix)]
     {
         changed |= activation::poll(s);
