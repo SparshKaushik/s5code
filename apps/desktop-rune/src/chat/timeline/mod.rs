@@ -465,7 +465,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
-    if let Some(page) = crate::chat::details::html_render::row_view(item, t) {
+    if let Some(page) = crate::chat::details::html_render::row_view(app, item, t) {
         return page;
     }
     if kind == "assistant_message" {

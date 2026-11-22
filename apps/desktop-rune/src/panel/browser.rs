@@ -5,7 +5,7 @@
 //! One browser-level connection carries every tab as a flattened target session. Chrome rejects
 //! request ids outside int32, so replies are matched through a map, not tagged ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -45,6 +45,9 @@ pub enum Cmd {
     /// A tab's `prefers-color-scheme`: "" follows Chrome's default.
     ColorScheme(TabId, &'static str),
     Mouse { kind: &'static str, x: f32, y: f32, clicks: u32 },
+    /// The button and CDP modifier bits (Alt 1, Ctrl 2, Meta 4, Shift 8) of the press that
+    /// follows, so a middle or modified click opens its link as Chrome decides.
+    Pointer { button: &'static str, modifiers: u32 },
     Wheel { x: f32, y: f32, dx: f32, dy: f32 },
     Text(String),
     Key(&'static str),
@@ -83,8 +86,149 @@ pub enum Cmd {
     Enclosed(TabId, [f32; 4]),
     /// Answers the page's `navigator.clipboard.readText()`: the text, or None to refuse it.
     ClipboardAnswer(TabId, u64, Option<String>),
+    /// Captures a page once, off screen, as an `html_render` frame shows it inline.
+    Snapshot(Shot),
+    /// Shows a page live inline (`Live`), until `LiveClose`.
+    LiveOpen(Live),
+    LiveInput(u64, LiveInput),
+    LiveResize(u64, u32, u32),
+    /// Runs a script in the live page, such as a host's reply posted to its app.
+    LiveEval(u64, String),
+    LiveClose(u64),
     /// Stops this profile's Chrome; `wipe` deletes the profile's data after.
     Quit { wipe: bool },
+}
+
+/// One capture of a page `width` CSS pixels wide, in a browser context of its own that goes
+/// when the shot is taken: its PNG lands in `pixels`, its CSS height in `done`.
+#[derive(Clone)]
+pub struct Shot {
+    pub url: String,
+    pub width: u32,
+    pub dark: bool,
+    pub pixels: Pixels,
+    done: Arc<Mutex<Option<Option<f32>>>>,
+}
+
+impl Shot {
+    pub fn new(url: String, width: u32, dark: bool) -> Shot {
+        Shot { url, width, dark, pixels: Pixels::new(), done: Arc::default() }
+    }
+
+    /// The captured height once finished, or `Some(None)` when it failed or its Chrome went
+    /// away without taking it.
+    pub fn result(&self) -> Option<Option<f32>> {
+        let done = *self.done.lock().unwrap();
+        done.or_else(|| (Arc::strong_count(&self.done) == 1).then_some(None))
+    }
+
+    fn finish(&self, height: Option<f32>) {
+        *self.done.lock().unwrap() = Some(height);
+    }
+}
+
+/// What Electron's `previewWindowOpenAction` does with a page's new window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Opened {
+    Popup,
+    Tab,
+    Navigate,
+    Deny,
+}
+
+/// Electron's `IN_PLACE_DENIED_PROTOCOLS`: never loaded from a window open.
+const DENIED_PROTOCOLS: [&str; 8] = ["about", "chrome", "data", "devtools", "file", "filesystem", "javascript", "view-source"];
+
+/// `previewWindowOpenAction` from what `Page.windowOpen` reports. Chrome lists `menubar` (with
+/// the other toolbars) for a window that opens as a tab, a `target=_blank` link or a bare
+/// `window.open`, and leaves it out for a popup, one asked for with a size or `popup`. Chrome
+/// doesn't say whether a form POSTed, which Electron keeps in place.
+fn window_open_action(url: &str, features: &[&str]) -> Opened {
+    let scheme = url.split_once(':').map(|(scheme, _)| scheme).filter(|s| s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+    let Some(scheme) = scheme.map(str::to_ascii_lowercase) else { return Opened::Deny };
+    if DENIED_PROTOCOLS.contains(&scheme.as_str()) {
+        Opened::Deny
+    } else if scheme != "http" && scheme != "https" {
+        Opened::Navigate
+    } else if features.contains(&"menubar") {
+        Opened::Tab
+    } else {
+        Opened::Popup
+    }
+}
+
+/// A page live inline, as web's iframe in a chat row: its own browser context, a CSS viewport the
+/// row's size, screencast frames only when the page paints, and the row's pointer and keys. The
+/// page reaches its host through `window.__s5Frame(text)`, read with `Live::messages`.
+#[derive(Clone)]
+pub struct Live {
+    pub id: u64,
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub dark: bool,
+    pub pixels: Pixels,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl Live {
+    pub fn new(url: String, width: u32, height: u32, dark: bool) -> Live {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Live { id, url, width, height, dark, pixels: Pixels::new(), messages: Arc::default() }
+    }
+
+    /// Its Chrome let it go without `LiveClose` (a relaunch).
+    pub fn gone(&self) -> bool {
+        Arc::strong_count(&self.messages) == 1
+    }
+
+    /// What the page sent since the last call.
+    pub fn messages(&self) -> Vec<String> {
+        std::mem::take(&mut *self.messages.lock().unwrap())
+    }
+}
+
+/// Input for a live frame, in its CSS pixels.
+pub enum LiveInput {
+    Mouse { kind: &'static str, x: f32, y: f32, button: &'static str, clicks: u32, modifiers: u32 },
+    Text(String),
+    Key(&'static str),
+}
+
+struct LiveFrame {
+    live: Live,
+    context: Option<String>,
+    target: Option<String>,
+    session: Option<String>,
+    /// Calls made before the session attached.
+    queue: Vec<(&'static str, Value)>,
+    pressed: Option<&'static str>,
+}
+
+/// The tallest page an inline shot covers, and the most device pixels it may be tall: the rest
+/// shows full screen.
+const SHOT_MAX_HEIGHT: f32 = 4000.;
+const SHOT_MAX_PIXELS: f32 = 8000.;
+
+/// htmlRenderFrameHeight's live measure, once fonts are in and a first animation frame settled.
+const SHOT_MEASURE_JS: &str = "(async () => { try { await document.fonts.ready; } catch (e) {} await new Promise(r => setTimeout(r, 300)); const e = document.documentElement; return Math.ceil(e.scrollHeight > e.clientHeight ? e.scrollHeight : e.getBoundingClientRect().height); })()";
+
+/// The CSS height a page measured at `content` is shot at, and the screenshot's clip scale so
+/// the PNG stays within `SHOT_MAX_PIXELS` device pixels at `scale`.
+fn shot_size(content: f64, scale: f32) -> Option<(f32, f32)> {
+    let content = content.is_finite().then(|| (content.ceil() as f32).clamp(80., 20_000.))?;
+    let height = content.min(SHOT_MAX_HEIGHT);
+    Some((height, (SHOT_MAX_PIXELS / (height * scale.max(0.01))).min(1.)))
+}
+
+struct Snap {
+    shot: Shot,
+    context: Option<String>,
+    session: Option<String>,
+    started: std::time::Instant,
+    navigated: bool,
+    measuring: bool,
 }
 
 /// Which tab a command acts on, when it names one.
@@ -142,6 +286,13 @@ pub enum Event {
     Screenshot(Result<PathBuf, String>),
     /// A page opened a new window; it becomes a tab beside its opener.
     Popup { target: String, opener: String, url: String },
+    /// A link the page opened in a new tab, which Electron loads afresh: `background` when a
+    /// middle or Ctrl/Cmd-click opened it, so it doesn't take over.
+    OpenLink { tab: TabId, url: String, background: bool },
+    /// A popup closed itself (`window.close()`).
+    PopupClosed(TabId),
+    /// A live inline frame opened a link.
+    FrameLink(String),
     /// A picked element's details (`PickedElementPayload` fields plus its rect) and its PNG crop.
     Picked { tab: TabId, element: Value, image: Option<Vec<u8>> },
     DevTools(Result<String, String>),
@@ -321,7 +472,7 @@ impl Browser {
                 }
             }
             Cmd::Open(tab, pixels) => self.open(tab, pixels, DEFAULT_PROFILE),
-            Cmd::SetCookies(..) => {
+            Cmd::SetCookies(..) | Cmd::Snapshot(_) | Cmd::LiveOpen(_) | Cmd::LiveInput(..) | Cmd::LiveResize(..) | Cmd::LiveEval(..) | Cmd::LiveClose(_) => {
                 if let Some(tx) = self.workers.get(DEFAULT_PROFILE) {
                     let _ = tx.send(cmd);
                 }
@@ -507,6 +658,15 @@ enum Reply {
     KeyPress(String),
     MuteScript(TabId),
     Favicon(TabId),
+    SnapContext(u64),
+    SnapCreated(u64),
+    SnapAttached(u64),
+    SnapNavigated(u64),
+    SnapMeasured(u64),
+    SnapShot(u64, f32),
+    LiveContext(u64),
+    LiveCreated(u64),
+    LiveAttached(u64),
 }
 
 /// A recording: an encoder page in the same Chrome draws the tab's screencast frames into a
@@ -571,6 +731,18 @@ struct Worker {
     /// Whether this Chrome shows PDFs itself: no when its switches or profile rule it out, else
     /// once a page has said.
     native_pdf: Option<bool>,
+    snaps: HashMap<u64, Snap>,
+    snap_next: u64,
+    lives: HashMap<u64, LiveFrame>,
+    /// Each `Page.windowOpen` waiting for its target: the opener, the URL and what to do.
+    opening: Vec<(TabId, String, Opened, std::time::Instant)>,
+    /// Targets adopted as popups, which may not open more.
+    popups: HashSet<String>,
+    /// The button and modifiers `Cmd::Pointer` set for the next press.
+    button: &'static str,
+    modifiers: u32,
+    /// When a middle or modified click last pressed, and whether its link opens in the background.
+    modified: Option<(std::time::Instant, bool)>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
@@ -587,7 +759,11 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
             }
             return Ok(());
         }
-        let scale = if let Cmd::Viewport { scale, .. } = &cmd { Some(*scale) } else { None };
+        let scale = match &cmd {
+            Cmd::Viewport { scale, .. } => Some(*scale),
+            Cmd::Snapshot(_) | Cmd::LiveOpen(_) => Some(2.),
+            _ => None,
+        };
         early.push(cmd);
         if let Some(scale) = scale {
             break scale;
@@ -620,6 +796,14 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
         agent_downloads: HashMap::new(),
         crashes: HashMap::new(),
         native_pdf,
+        snaps: HashMap::new(),
+        snap_next: 0,
+        lives: HashMap::new(),
+        opening: Vec::new(),
+        popups: HashSet::new(),
+        button: "left",
+        modifiers: 0,
+        modified: None,
         shared,
         waker,
     };
@@ -645,6 +829,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         }
+        w.expire_snaps();
         let msg = match w.ws.read() {
             Ok(Message::Text(t)) => t,
             Ok(_) => continue,
@@ -744,6 +929,60 @@ impl Worker {
 
     fn command(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::Pointer { button, modifiers } => {
+                (self.button, self.modifiers) = (button, modifiers);
+                let (middle, command, shift) = (button == "middle", modifiers & 6 != 0, modifiers & 8 != 0);
+                self.modified = (middle || command || shift).then(|| (std::time::Instant::now(), (middle || command) && !shift));
+            }
+            Cmd::LiveOpen(live) => {
+                let id = live.id;
+                self.lives.insert(id, LiveFrame { live, context: None, target: None, session: None, queue: Vec::new(), pressed: None });
+                self.send(None, "Target.createBrowserContext", json!({ "disposeOnDetach": true }), Some(Reply::LiveContext(id)));
+            }
+            Cmd::LiveInput(id, input) => match input {
+                LiveInput::Mouse { kind, x, y, button, clicks, modifiers } => {
+                    let Some(frame) = self.lives.get_mut(&id) else { return };
+                    match kind {
+                        "mousePressed" => frame.pressed = Some(button),
+                        "mouseReleased" => frame.pressed = None,
+                        _ => {}
+                    }
+                    let held = frame.pressed;
+                    let button = if kind == "mouseMoved" { held.unwrap_or("none") } else { button };
+                    let buttons = match held {
+                        None => 0,
+                        Some("middle") => 4,
+                        Some(_) => 1,
+                    };
+                    let clicks = if kind == "mouseMoved" { 0 } else { clicks.max(1) };
+                    self.live_call(id, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "modifiers": modifiers, "clickCount": clicks }));
+                }
+                LiveInput::Text(text) => self.live_call(id, "Input.insertText", json!({ "text": text })),
+                LiveInput::Key(key) => {
+                    let text = if key == "Enter" { "\r" } else { "" };
+                    let down = if text.is_empty() { "rawKeyDown" } else { "keyDown" };
+                    for kind in [down, "keyUp"] {
+                        self.live_call(id, "Input.dispatchKeyEvent", json!({ "type": kind, "key": key, "code": key, "windowsVirtualKeyCode": key_code(key), "text": if kind == "keyUp" { "" } else { text } }));
+                    }
+                }
+            },
+            Cmd::LiveResize(id, width, height) => {
+                let Some(frame) = self.lives.get_mut(&id) else { return };
+                (frame.live.width, frame.live.height) = (width.max(1), height.max(1));
+                self.live_view(id);
+            }
+            Cmd::LiveEval(id, expression) => self.live_call(id, "Runtime.evaluate", json!({ "expression": expression })),
+            Cmd::LiveClose(id) => {
+                if let Some(context) = self.lives.remove(&id).and_then(|f| f.context) {
+                    self.send(None, "Target.disposeBrowserContext", json!({ "browserContextId": context }), None);
+                }
+            }
+            Cmd::Snapshot(shot) => {
+                self.snap_next += 1;
+                let id = self.snap_next;
+                self.snaps.insert(id, Snap { shot, context: None, session: None, started: std::time::Instant::now(), navigated: false, measuring: false });
+                self.send(None, "Target.createBrowserContext", json!({ "disposeOnDetach": true }), Some(Reply::SnapContext(id)));
+            }
             Cmd::Open(tab, pixels) => {
                 self.tabs.insert(tab, Tab { pixels: Some(pixels), zoom: 1., ..Default::default() });
                 self.shared.lock().unwrap().tabs.insert(tab, Status::default());
@@ -884,9 +1123,16 @@ impl Worker {
                     "mouseReleased" => self.pressed = false,
                     _ => {}
                 }
-                let button = if kind != "mouseMoved" || self.pressed { "left" } else { "none" };
-                let buttons = if self.pressed { 1 } else { 0 };
-                self.call(tab, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x / zoom, "y": y / zoom, "button": button, "buttons": buttons, "clickCount": if kind == "mouseMoved" { 0 } else { clicks.max(1) } }), None);
+                let button = if kind != "mouseMoved" || self.pressed { self.button } else { "none" };
+                let buttons = match (self.pressed, self.button) {
+                    (false, _) => 0,
+                    (true, "middle") => 4,
+                    (true, _) => 1,
+                };
+                self.call(tab, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x / zoom, "y": y / zoom, "button": button, "buttons": buttons, "modifiers": self.modifiers, "clickCount": if kind == "mouseMoved" { 0 } else { clicks.max(1) } }), None);
+                if kind == "mouseReleased" {
+                    (self.button, self.modifiers) = ("left", 0);
+                }
                 if let Some(r) = self.recording.as_ref().filter(|r| r.tab == tab && r.path.is_none()) {
                     let (cx, cy) = (x / zoom, y / zoom);
                     let press = match kind {
@@ -1105,11 +1351,31 @@ impl Worker {
         let p = &v["params"];
         if method == "Target.targetCreated" {
             let info = &p["targetInfo"];
-            let opener = info["openerId"].as_str().unwrap_or_default();
-            let ours = |id: &str| self.tabs.values().any(|t| t.target.as_deref() == Some(id));
-            if info["type"] == "page" && !opener.is_empty() && ours(opener) {
-                if let Some(target) = info["targetId"].as_str().filter(|id| !ours(id)) {
-                    self.event(Event::Popup { target: target.to_string(), opener: opener.to_string(), url: info["url"].as_str().unwrap_or_default().to_string() });
+            let tab_of = |id: &str| self.tabs.iter().find(|(_, t)| t.target.as_deref() == Some(id)).map(|(tab, _)| *tab);
+            let (Some(target), "page") = (info["targetId"].as_str().filter(|id| tab_of(id).is_none()), info["type"].as_str().unwrap_or_default()) else { return };
+            let (target, opener, url) = (target.to_owned(), info["openerId"].as_str().unwrap_or_default().to_owned(), info["url"].as_str().unwrap_or_default().to_owned());
+            match tab_of(&opener).filter(|_| !opener.is_empty()) {
+                Some(tab) => self.window_opened(tab, target, opener, url),
+                None if self.lives.values().any(|f| f.target.as_deref() == Some(opener.as_str())) => {
+                    self.send(None, "Target.closeTarget", json!({ "targetId": target }), None);
+                }
+                // A middle or modified click opens its link with no opener and no `windowOpen`.
+                None if opener.is_empty() && url.starts_with("http") => {
+                    let click = self.modified.take().filter(|(at, _)| at.elapsed() < Duration::from_secs(2));
+                    if let (Some((_, background)), Some(tab)) = (click, self.shown) {
+                        self.send(None, "Target.closeTarget", json!({ "targetId": target }), None);
+                        self.event(Event::OpenLink { tab, url, background });
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
+        if method == "Target.targetDestroyed" {
+            let target = p["targetId"].as_str().unwrap_or_default();
+            if self.popups.remove(target) {
+                if let Some(tab) = self.tabs.iter().find(|(_, t)| t.target.as_deref() == Some(target)).map(|(tab, _)| *tab) {
+                    self.event(Event::PopupClosed(tab));
                 }
             }
             return;
@@ -1183,6 +1449,38 @@ impl Worker {
             });
             return;
         }
+        if let Some(id) = v["sessionId"].as_str().and_then(|s| self.lives.iter().find(|(_, f)| f.session.as_deref() == Some(s))).map(|(id, _)| *id) {
+            match method {
+                "Page.screencastFrame" => {
+                    let session = v["sessionId"].as_str().unwrap_or_default().to_owned();
+                    self.send(Some(&session), "Page.screencastFrameAck", json!({ "sessionId": p["sessionId"] }), None);
+                    if let Some(frame) = self.lives.get(&id) {
+                        show(&frame.live.pixels, p["data"].as_str());
+                    }
+                }
+                "Runtime.bindingCalled" if p["name"] == "__s5Frame" => {
+                    if let Some(frame) = self.lives.get(&id) {
+                        frame.live.messages.lock().unwrap().push(p["payload"].as_str().unwrap_or_default().to_owned());
+                        (self.waker)();
+                    }
+                }
+                // A link the page opens goes to a browser tab, as web's frame hands it to the panel.
+                "Page.windowOpen" => {
+                    let url = p["url"].as_str().unwrap_or_default().to_owned();
+                    if url.starts_with("http") {
+                        self.event(Event::FrameLink(url));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(id) = v["sessionId"].as_str().and_then(|s| self.snaps.iter().find(|(_, n)| n.session.as_deref() == Some(s))).map(|(id, _)| *id) {
+            if method == "Page.loadEventFired" && self.snaps.get(&id).is_some_and(|n| n.navigated) {
+                self.snap_measure(id);
+            }
+            return;
+        }
         let Some(&tab) = v["sessionId"].as_str().and_then(|s| self.sessions.get(s)) else { return };
         // A page target's main frame shares the target's id.
         let target = self.tabs.get(&tab).and_then(|t| t.target.clone());
@@ -1235,6 +1533,13 @@ impl Worker {
                 }
             }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
+            "Page.windowOpen" => {
+                let features: Vec<&str> = p["windowFeatures"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let url = p["url"].as_str().unwrap_or_default().to_owned();
+                let action = window_open_action(&url, &features);
+                self.opening.retain(|o| o.3.elapsed() < Duration::from_secs(2));
+                self.opening.push((tab, url, action, std::time::Instant::now()));
+            }
             "Page.frameStartedLoading" if main(&p["frameId"]) => self.update(tab, |s| s.loading = true),
             "Page.frameStoppedLoading" | "Page.loadEventFired" if method == "Page.loadEventFired" || main(&p["frameId"]) => {
                 self.update(tab, |s| s.loading = false);
@@ -1285,6 +1590,91 @@ impl Worker {
 
     fn reply(&mut self, reply: Reply, r: &Value, error: &Value) {
         match reply {
+            Reply::LiveContext(id) => {
+                let Some(context) = r["browserContextId"].as_str().map(str::to_owned) else { return };
+                let open = self.lives.get_mut(&id).map(|f| f.context = Some(context.clone())).is_some();
+                if open {
+                    self.send(None, "Target.createTarget", json!({ "url": "about:blank", "browserContextId": context }), Some(Reply::LiveCreated(id)));
+                } else {
+                    self.send(None, "Target.disposeBrowserContext", json!({ "browserContextId": context }), None);
+                }
+            }
+            Reply::LiveCreated(id) => {
+                let Some(target) = r["targetId"].as_str().map(str::to_owned) else { return };
+                if let Some(frame) = self.lives.get_mut(&id) {
+                    frame.target = Some(target.clone());
+                    self.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(Reply::LiveAttached(id)));
+                }
+            }
+            Reply::LiveAttached(id) => {
+                let Some(session) = r["sessionId"].as_str().map(str::to_owned) else { return };
+                let Some(frame) = self.lives.get_mut(&id) else { return };
+                frame.session = Some(session.clone());
+                let queue = std::mem::take(&mut frame.queue);
+                let (url, dark) = (frame.live.url.clone(), frame.live.dark);
+                for (method, params) in [
+                    ("Page.enable", json!({})),
+                    ("Runtime.enable", json!({})),
+                    ("Runtime.addBinding", json!({ "name": "__s5Frame" })),
+                    ("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": if dark { "dark" } else { "light" } }] })),
+                ] {
+                    self.send(Some(&session), method, params, None);
+                }
+                self.live_view(id);
+                self.send(Some(&session), "Page.navigate", json!({ "url": url }), None);
+                for (method, params) in queue {
+                    self.send(Some(&session), method, params, None);
+                }
+            }
+            Reply::SnapContext(id) => {
+                let Some(context) = r["browserContextId"].as_str().map(str::to_owned) else { return self.snap_finish(id, None) };
+                let waiting = self.snaps.get_mut(&id).map(|snap| snap.context = Some(context.clone())).is_some();
+                if waiting {
+                    self.send(None, "Target.createTarget", json!({ "url": "about:blank", "browserContextId": context }), Some(Reply::SnapCreated(id)));
+                } else {
+                    self.send(None, "Target.disposeBrowserContext", json!({ "browserContextId": context }), None);
+                }
+            }
+            Reply::SnapCreated(id) => match r["targetId"].as_str() {
+                Some(target) => self.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(Reply::SnapAttached(id))),
+                None => self.snap_finish(id, None),
+            },
+            Reply::SnapAttached(id) => {
+                let session = r["sessionId"].as_str().map(str::to_owned);
+                let started = session.and_then(|session| {
+                    let snap = self.snaps.get_mut(&id)?;
+                    snap.session = Some(session.clone());
+                    Some((session, snap.shot.url.clone(), snap.shot.width.max(1), snap.shot.dark))
+                });
+                let Some((session, url, width, dark)) = started else { return self.snap_finish(id, None) };
+                let session = session.as_str();
+                self.send(Some(session), "Page.enable", json!({}), None);
+                self.send(Some(session), "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": 80, "deviceScaleFactor": self.scale, "mobile": false }), None);
+                let scheme = if dark { "dark" } else { "light" };
+                self.send(Some(session), "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }, { "name": "prefers-reduced-motion", "value": "reduce" }] }), None);
+                self.send(Some(session), "Page.navigate", json!({ "url": url }), Some(Reply::SnapNavigated(id)));
+            }
+            Reply::SnapNavigated(id) => {
+                if !error.is_null() || r["errorText"].as_str().is_some_and(|e| !e.is_empty()) {
+                    return self.snap_finish(id, None);
+                }
+                if let Some(snap) = self.snaps.get_mut(&id) {
+                    snap.navigated = true;
+                }
+            }
+            Reply::SnapMeasured(id) => {
+                let content = r["result"]["value"].as_f64().filter(|_| r["exceptionDetails"].is_null());
+                let size = content.and_then(|c| shot_size(c, self.scale));
+                let page = self.snaps.get(&id).and_then(|n| Some((n.session.clone()?, n.shot.width.max(1))));
+                let (Some((height, clip)), Some((session, width))) = (size, page) else { return self.snap_finish(id, None) };
+                self.send(Some(&session), "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height as u32, "deviceScaleFactor": self.scale, "mobile": false }), None);
+                let clip = json!({ "x": 0, "y": 0, "width": width, "height": height, "scale": clip });
+                self.send(Some(&session), "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::SnapShot(id, height)));
+            }
+            Reply::SnapShot(id, height) => {
+                let shown = self.snaps.get(&id).is_some_and(|n| show(&n.shot.pixels, r["data"].as_str()));
+                self.snap_finish(id, shown.then_some(height));
+            }
             Reply::Created(tab) => {
                 let Some(target) = r["targetId"].as_str().map(str::to_owned) else { return };
                 match self.tabs.get_mut(&tab) {
@@ -1549,6 +1939,90 @@ impl Worker {
                     .map(|_| path);
                 self.event(Event::Screenshot(saved));
             }
+        }
+    }
+
+    /// A page's new window, as Electron's `setWindowOpenHandler` treats it: a popup stays a live
+    /// window (here a tab) so its opener survives; a tab loads afresh; others stay in place or go.
+    fn window_opened(&mut self, tab: TabId, target: String, opener: String, url: String) {
+        let waiting = self.opening.iter().position(|o| o.0 == tab && o.3.elapsed() < Duration::from_secs(2)).map(|i| self.opening.remove(i));
+        // Electron's popup windows deny every window open of their own.
+        let action = if self.popups.contains(&opener) { Some((url.clone(), Opened::Deny)) } else { waiting.map(|(_, url, action, _)| (url, action)) };
+        let closes = matches!(action, Some((_, Opened::Tab | Opened::Navigate | Opened::Deny)));
+        if closes {
+            self.send(None, "Target.closeTarget", json!({ "targetId": target }), None);
+        }
+        match action {
+            // No `windowOpen` said what it is: a tab beside its opener, as before Chrome reported it.
+            None => self.event(Event::Popup { target, opener, url }),
+            Some((_, Opened::Popup)) => {
+                self.popups.insert(target.clone());
+                self.event(Event::Popup { target, opener, url });
+            }
+            Some((url, Opened::Tab)) => self.event(Event::OpenLink { tab, url, background: false }),
+            Some((url, Opened::Navigate)) if url.starts_with("blob:") => self.command(Cmd::Navigate(tab, url)),
+            Some((url, Opened::Navigate)) => self.event(Event::External { tab, url }),
+            Some((_, Opened::Deny)) => {}
+        }
+    }
+
+    /// A call on a live frame's page, held until it attaches.
+    fn live_call(&mut self, id: u64, method: &'static str, params: Value) {
+        let Some(frame) = self.lives.get_mut(&id) else { return };
+        match frame.session.clone() {
+            Some(session) => self.send(Some(&session), method, params, None),
+            None => frame.queue.push((method, params)),
+        }
+    }
+
+    /// Sizes a live frame's page and its screencast to the row.
+    fn live_view(&mut self, id: u64) {
+        let Some(frame) = self.lives.get(&id) else { return };
+        let (w, h, scale) = (frame.live.width.max(1), frame.live.height.max(1), self.scale);
+        self.live_call(id, "Emulation.setDeviceMetricsOverride", json!({ "width": w, "height": h, "deviceScaleFactor": scale, "mobile": false }));
+        self.live_call(id, "Page.stopScreencast", json!({}));
+        let (mw, mh) = ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32);
+        self.live_call(id, "Page.startScreencast", json!({ "format": "jpeg", "quality": 92, "maxWidth": mw, "maxHeight": mh }));
+    }
+
+    /// Measures a snapshot's page, once it loaded or took too long to.
+    fn snap_measure(&mut self, id: u64) {
+        let Some(snap) = self.snaps.get_mut(&id).filter(|n| !n.measuring) else { return };
+        let Some(session) = snap.session.clone() else { return };
+        snap.measuring = true;
+        self.send(Some(&session), "Runtime.evaluate", json!({ "expression": SHOT_MEASURE_JS, "awaitPromise": true, "returnByValue": true }), Some(Reply::SnapMeasured(id)));
+    }
+
+    /// Ends a snapshot: its context goes, with every page it opened, and the waiting row wakes.
+    fn snap_finish(&mut self, id: u64, height: Option<f32>) {
+        let Some(snap) = self.snaps.remove(&id) else { return };
+        if let Some(context) = snap.context {
+            self.send(None, "Target.disposeBrowserContext", json!({ "browserContextId": context }), None);
+        }
+        snap.shot.finish(height);
+        (self.waker)();
+    }
+
+    /// A page that never fires `load` is shot as it stands after 10 s; one that can't be
+    /// measured fails after 30 s.
+    fn expire_snaps(&mut self) {
+        if self.snaps.is_empty() {
+            return;
+        }
+        let late: Vec<(u64, bool)> = self
+            .snaps
+            .iter()
+            .filter_map(|(id, n)| {
+                let age = n.started.elapsed();
+                if age > Duration::from_secs(30) {
+                    Some((*id, false))
+                } else {
+                    (age > Duration::from_secs(10) && n.session.is_some() && !n.measuring).then_some((*id, true))
+                }
+            })
+            .collect();
+        for (id, measure) in late {
+            if measure { self.snap_measure(id) } else { self.snap_finish(id, None) }
         }
     }
 
@@ -1957,6 +2431,16 @@ const PAGE_JS: &str = r#"(() => {
     addEventListener(type, () => { set = null; }, true);
     addEventListener(type, (e) => { const text = e.defaultPrevented ? set : String(getSelection() || ""); if (text) send({ kind: "copy", text }); });
   }
+  // Electron's window-open handler returns no window for a scheme it denies or keeps in place.
+  const open = window.open;
+  window.open = function (url, ...rest) {
+    let to;
+    try { to = new URL(url === undefined || url === null || url === "" ? "about:blank" : String(url), document.baseURI); } catch { return null; }
+    if (/^(about|chrome|data|devtools|file|filesystem|javascript|view-source):$/.test(to.protocol)) return null;
+    if (to.protocol === "blob:") { location.assign(to.href); return null; }
+    if (!/^https?:$/.test(to.protocol)) { send({ kind: "external", url: to.href }); return null; }
+    return open.call(this, url, ...rest);
+  };
   addEventListener("click", (e) => {
     if (e.defaultPrevented || e.button !== 0) return;
     const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
@@ -2189,6 +2673,53 @@ fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_opens_resolve_like_electrons_handler() {
+        // `windowFeatures` as Chrome 14x reports them in `Page.windowOpen`.
+        let tab = ["menubar", "toolbar", "status", "scrollbars", "resizable"];
+        let link = ["menubar", "toolbar", "status", "scrollbars", "resizable", "noopener"];
+        let sized = ["width=500", "height=600", "resizable"];
+        // A scripted popup keeps a window, so OAuth's opener survives.
+        assert_eq!(window_open_action("https://accounts.google.com/o/oauth2/auth", &sized), Opened::Popup);
+        assert_eq!(window_open_action("http://localhost:5173/auth", &["resizable"]), Opened::Popup);
+        assert_eq!(window_open_action("https://example.com/", &[]), Opened::Popup);
+        // A target=_blank link or a bare window.open is a new tab.
+        assert_eq!(window_open_action("https://example.com/a", &link), Opened::Tab);
+        assert_eq!(window_open_action("HTTPS://example.com/b", &tab), Opened::Tab);
+        // Schemes Electron can't harden stay in place; local and inline ones are denied.
+        for url in ["vscode://vscode-remote/ssh-remote+box/tmp", "blob:https://example.com/0b6c6a5e", "mailto:a@b.c"] {
+            assert_eq!(window_open_action(url, &sized), Opened::Navigate, "{url}");
+        }
+        for url in ["about:blank", "javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "view-source:https://a.b", "chrome://settings", "", "not a url", "1http://x"] {
+            assert_eq!(window_open_action(url, &tab), Opened::Deny, "{url}");
+        }
+    }
+
+    #[test]
+    fn an_inline_shot_fits_its_page_within_its_caps() {
+        // htmlRenderFrameHeight's live fit: at least 80, whole pixels up.
+        assert_eq!(shot_size(12.2, 2.), Some((80., 1.)));
+        assert_eq!(shot_size(420.4, 2.), Some((421., 1.)));
+        // A tall page is shot to its first 4000 CSS pixels, at most 8000 device pixels tall.
+        assert_eq!(shot_size(9000., 1.), Some((4000., 1.)));
+        assert_eq!(shot_size(9000., 2.), Some((4000., 1.)));
+        assert_eq!(shot_size(9000., 3.), Some((4000., 8000. / 12000.)));
+        assert_eq!(shot_size(f64::NAN, 2.), None);
+    }
+
+    #[test]
+    fn a_shot_its_chrome_dropped_reads_as_failed() {
+        let shot = Shot::new("http://x/a.html".into(), 728, true);
+        let sent = shot.clone();
+        assert_eq!(shot.result(), None);
+        drop(sent);
+        assert_eq!(shot.result(), Some(None));
+        let shot = Shot::new("http://x/a.html".into(), 728, true);
+        let worker = shot.clone();
+        worker.finish(Some(421.));
+        assert_eq!(shot.result(), Some(Some(421.)));
+    }
 
     #[test]
     fn the_page_script_reports_copies_reads_and_links_to_other_apps() {
