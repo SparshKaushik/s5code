@@ -22,8 +22,16 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { RpcClient, RpcSerialization } from "effect/rpc";
+import type * as Scope from "effect/Scope";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import {
+  FetchHttpClient,
+  HttpClient,
+  type HttpClientError,
+  HttpClientRequest,
+  HttpClientResponse,
+} from "effect/http";
+import { RpcClient, type RpcClientError, type RpcGroup, RpcSerialization } from "effect/rpc";
 import { Socket } from "effect/socket";
 
 import { APP_DIR, T3_HOME } from "../e2e.config.ts";
@@ -245,8 +253,20 @@ export const environmentId = (baseUrl: string) =>
     Effect.provide(FetchHttpClient.layer),
   );
 
+type ScenarioRpcClient = RpcClient.RpcClient<
+  RpcGroup.Rpcs<typeof WsRpcGroup>,
+  RpcClientError.RpcClientError
+>;
+
 /** The typed RPC client of the server on `home` at `origin`, signed in through its own CLI. */
-export const rpcClient = Effect.fn("scenario.rpcClient")(function* (home: string, origin: string) {
+export const rpcClient = Effect.fn("scenario.rpcClient")(function* (
+  home: string,
+  origin: string,
+): Effect.fn.Return<
+  ScenarioRpcClient,
+  ScenarioError | HttpClientError.HttpClientError | Schema.SchemaError,
+  ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
+> {
   const issued = yield* makeState(home).cli(["auth", "session", "issue", "--token-only"]);
   const { ticket } = yield* HttpClient.execute(
     HttpClientRequest.post(`${origin}/api/auth/websocket-ticket`).pipe(
