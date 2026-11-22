@@ -1443,7 +1443,7 @@ mod tests {
         ], &ctx);
         let mut handed = effects.iter().filter(|e| !matches!(e, Effect::Post(_)));
         assert_eq!(handed.next(), Some(&Effect::CallTool { id: json!(2), name: "refresh".into(), arguments: json!({"days": 3}) }));
-        assert_eq!(handed.next(), Some(&Effect::CallTool { id: json!(3), name: "refresh".into(), arguments: json!({}) }), "arguments default to {}");
+        assert_eq!(handed.next(), Some(&Effect::CallTool { id: json!(3), name: "refresh".into(), arguments: json!({}) }), "arguments default to an empty object");
         assert_eq!(handed.next(), Some(&Effect::ReadResource { id: json!("r"), uri: "ui://weather/data.json".into() }));
         assert_eq!(handed.next(), Some(&Effect::OpenLink { id: json!(7), url: "HTTPS://example.com/a".into() }));
         assert_eq!(handed.next(), Some(&Effect::UpdateModelContext { id: json!(12), context: json!({"content": [{"type": "text", "text": "Oslo picked"}]}) }));
