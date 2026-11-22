@@ -168,6 +168,8 @@ pub struct Live {
     pub height: u32,
     pub dark: bool,
     pub pixels: Pixels,
+    /// Runs in each of its documents before the page's own scripts.
+    pub script: Option<String>,
     messages: Arc<Mutex<Vec<String>>>,
 }
 
@@ -175,7 +177,7 @@ impl Live {
     pub fn new(url: String, width: u32, height: u32, dark: bool) -> Live {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Live { id, url, width, height, dark, pixels: Pixels::new(), messages: Arc::default() }
+        Live { id, url, width, height, dark, pixels: Pixels::new(), script: None, messages: Arc::default() }
     }
 
     /// Its Chrome let it go without `LiveClose` (a relaunch).
@@ -183,14 +185,18 @@ impl Live {
         Arc::strong_count(&self.messages) == 1
     }
 
-    /// What the page sent since the last call.
+    /// What the page sent since the last call. Each main-frame load adds `LIVE_LOAD` first, so a
+    /// host can tell a page that navigated away.
     pub fn messages(&self) -> Vec<String> {
         std::mem::take(&mut *self.messages.lock().unwrap())
     }
 }
 
+pub const LIVE_LOAD: &str = r#"{"s5":"load"}"#;
+
 /// Input for a live frame, in its CSS pixels.
 pub enum LiveInput {
+    Wheel { x: f32, y: f32, dx: f32, dy: f32 },
     Mouse { kind: &'static str, x: f32, y: f32, button: &'static str, clicks: u32, modifiers: u32 },
     Text(String),
     Key(&'static str),
@@ -957,6 +963,7 @@ impl Worker {
                     let clicks = if kind == "mouseMoved" { 0 } else { clicks.max(1) };
                     self.live_call(id, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "modifiers": modifiers, "clickCount": clicks }));
                 }
+                LiveInput::Wheel { x, y, dx, dy } => self.live_call(id, "Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": x, "y": y, "deltaX": -dx, "deltaY": -dy })),
                 LiveInput::Text(text) => self.live_call(id, "Input.insertText", json!({ "text": text })),
                 LiveInput::Key(key) => {
                     let text = if key == "Enter" { "\r" } else { "" };
@@ -1458,6 +1465,12 @@ impl Worker {
                         show(&frame.live.pixels, p["data"].as_str());
                     }
                 }
+                "Page.frameNavigated" if p["frame"]["parentId"].is_null() && p["frame"]["url"] != "about:blank" => {
+                    if let Some(frame) = self.lives.get(&id) {
+                        frame.live.messages.lock().unwrap().push(LIVE_LOAD.to_owned());
+                        (self.waker)();
+                    }
+                }
                 "Runtime.bindingCalled" if p["name"] == "__s5Frame" => {
                     if let Some(frame) = self.lives.get(&id) {
                         frame.live.messages.lock().unwrap().push(p["payload"].as_str().unwrap_or_default().to_owned());
@@ -1611,7 +1624,7 @@ impl Worker {
                 let Some(frame) = self.lives.get_mut(&id) else { return };
                 frame.session = Some(session.clone());
                 let queue = std::mem::take(&mut frame.queue);
-                let (url, dark) = (frame.live.url.clone(), frame.live.dark);
+                let (url, dark, script) = (frame.live.url.clone(), frame.live.dark, frame.live.script.clone());
                 for (method, params) in [
                     ("Page.enable", json!({})),
                     ("Runtime.enable", json!({})),
@@ -1619,6 +1632,9 @@ impl Worker {
                     ("Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": if dark { "dark" } else { "light" } }] })),
                 ] {
                     self.send(Some(&session), method, params, None);
+                }
+                if let Some(source) = script {
+                    self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": source }), None);
                 }
                 self.live_view(id);
                 self.send(Some(&session), "Page.navigate", json!({ "url": url }), None);
@@ -2218,6 +2234,16 @@ pub(super) fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> 
         .chain((1..=99).map(|n| format!("{stem} ({n}){ext}")))
         .map(|n| dir.join(n))
         .find(|p| !p.exists())
+}
+
+/// Saves bytes to the Downloads folder under the first free name, as a person's download.
+pub fn save_bytes(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = std::path::Path::new(&downloads_staging()).join(format!("save-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(staging.parent().unwrap_or(&staging)).map_err(|e| e.to_string())?;
+    std::fs::write(&staging, bytes).map_err(|e| e.to_string())?;
+    save_download(&staging, &downloads_dir(), name)
 }
 
 fn save_download(from: &std::path::Path, dir: &std::path::Path, name: &str) -> Result<PathBuf, String> {

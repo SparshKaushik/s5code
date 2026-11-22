@@ -987,22 +987,42 @@ fn add_imported(s: &mut App) {
     }
 }
 
-/// Reads a picked theme file into the JSON field, refusing anything past web's 256 KB guard.
+/// ThemeImportDialog's `formatByteSize`.
+fn byte_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", (b as f64 / 1024.0).round()),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// A picked theme file's JSON, refusing what no theme is as large as (`describeOversizedThemeFile`).
+fn read_theme_file(path: &std::path::Path) -> Result<String, String> {
+    let unreadable = || "Could not read that file. Paste the JSON below instead.".to_owned();
+    let size = std::fs::metadata(path).map_err(|_| unreadable())?.len();
+    if size > MAX_THEME_FILE_BYTES {
+        return Err(format!(
+            "That file is {}. Theme files are only a few KB, so this one was not read (limit {}).",
+            byte_size(size),
+            byte_size(MAX_THEME_FILE_BYTES)
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|_| unreadable())
+}
+
+/// Electron's `pickThemeFiles`: a JSON picker that starts in VS Code's extensions folder, where
+/// installed themes live. The file fills the JSON field.
 fn choose_theme_file(tx: &mut rune::Tx) {
-    let options = rune::FileDialogOptions { title: "Choose a theme file".into(), ..Default::default() }.filter("JSON", &["json"]);
+    let extensions = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".vscode").join("extensions")).filter(|dir| dir.is_dir());
+    let options = rune::FileDialogOptions { title: "Choose a theme file".into(), directory: extensions, ..Default::default() }.filter("JSON", &["json"]);
     tx.open_file(options, |s: &mut App, picked: rune::FileDialogResult, _| {
         let Ok(Some(path)) = picked else { return };
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        if size > MAX_THEME_FILE_BYTES {
-            s.ui.settings.theme_import_error = Some(format!("That file is {} KB. Theme files are only a few KB, so this one was not read (limit 256 KB).", size.div_ceil(1024)));
-            return;
-        }
-        match std::fs::read_to_string(&path) {
+        match read_theme_file(&path) {
             Ok(contents) => {
                 s.ui.settings.theme_import = rune::TextEdit::new(&contents);
                 s.ui.settings.theme_import_error = None;
             }
-            Err(e) => s.ui.settings.theme_import_error = Some(e.to_string()),
+            Err(error) => s.ui.settings.theme_import_error = Some(error),
         }
     });
 }
@@ -1188,6 +1208,23 @@ mod tests {
         assert!(copy.get("collection").is_none(), "a copy leaves the collection");
         assert_eq!(app.ui.settings.form["form.themeEditor"]["advanced"], false, "a managed original opens with two colors");
         assert_eq!(copy["variants"]["light"]["accent"], "#654321");
+    }
+
+    #[test]
+    fn a_picked_theme_file_is_read_only_under_256_kb() {
+        let dir = std::env::temp_dir().join(format!("s5-theme-file-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.json");
+        std::fs::write(&small, r#"{"name":"Small"}"#).unwrap();
+        assert_eq!(read_theme_file(&small).as_deref(), Ok(r#"{"name":"Small"}"#));
+        let large = dir.join("large.json");
+        std::fs::write(&large, vec![b' '; 300 * 1024]).unwrap();
+        assert_eq!(
+            read_theme_file(&large),
+            Err("That file is 300 KB. Theme files are only a few KB, so this one was not read (limit 256 KB).".into())
+        );
+        assert!(read_theme_file(&dir.join("missing.json")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

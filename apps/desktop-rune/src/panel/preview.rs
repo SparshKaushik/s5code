@@ -471,8 +471,9 @@ pub fn snapshot(app: &mut App, url: String, width: u32, dark: bool) -> Option<br
 }
 
 /// Shows a page live inline, as `snapshot` starts Chrome for it; `inline_frame_cmd` drives it.
-pub fn live(app: &mut App, url: String, width: u32, height: u32, dark: bool) -> Option<browser::Live> {
-    let live = browser::Live::new(url, width, height, dark);
+pub fn live(app: &mut App, url: String, width: u32, height: u32, dark: bool, script: Option<&str>) -> Option<browser::Live> {
+    let mut live = browser::Live::new(url, width, height, dark);
+    live.script = script.map(str::to_owned);
     inline_frame_cmd(app, Cmd::LiveOpen(live.clone())).then_some(live)
 }
 

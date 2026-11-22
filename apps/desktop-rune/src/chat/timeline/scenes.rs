@@ -278,6 +278,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-video-fallback", video_fallback),
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
+    ("timeline-mcp-app", mcp_app),
     ("timeline-subagent-remote", subagent_remote),
     ("composer-subagent-bar", subagent_bar),
     ("composer-subagent-bar-instance", subagent_bar_instance),
@@ -1401,6 +1402,25 @@ fn html_render(app: &mut App) {
     ]);
     app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
     crate::panel::html_frame::scene_seed(app, "scene-html-page", 420.);
+}
+
+/// An MCP app's tool call, its app running in the row with the border it asks for.
+fn mcp_app(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let at = |s: u32| format!("2026-12-13T00:00:{s:02}.000Z");
+    let run = "scene-mcp-run";
+    push_items(app, "runs", vec![json!({"id": run, "ordinal": 996, "status": "completed", "startedAt": at(0), "completedAt": at(20)})]);
+    let item = |id: &str, kind: &str, end: u32, fields: serde_json::Value| scene_item(run, &at, id, kind, end, fields);
+    let reference = json!({"t3McpApp": {"attachmentId": "scene-mcp-page", "server": "weather", "tool": "forecast", "resourceUri": "ui://weather/forecast.html", "prefersBorder": true}});
+    let tool = item("scene-mcp-tool", "dynamic_tool", 14, json!({"toolName": "weather.forecast", "input": {"city": "Oslo"}, "output": {"structuredContent": reference}}));
+    push_visible(app, vec![
+        item("scene-mcp-prompt", "user_message", 0, json!({"inputIntent": "turn_start", "text": "What's the week like in Oslo?", "attachments": []})),
+        tool.clone(),
+        item("scene-mcp-reply", "assistant_message", 20, json!({"text": "Mostly clear, warming through Friday."})),
+    ]);
+    app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
+    crate::panel::mcp_app::scene_seed(app, &tool, 360.);
 }
 
 /// A delegated task running in a linked environment, named after its row title.

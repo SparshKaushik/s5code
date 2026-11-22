@@ -2,13 +2,14 @@ use crate::data::{s, ts};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Item kinds that join a tool group. A rendered HTML page is its own row (session-logic.ts
-/// "html-render" entries), not tool work.
+/// Item kinds that join a tool group. A rendered HTML page and an MCP app are their own rows
+/// (session-logic.ts "html-render" and "mcp-app" entries), not tool work.
 pub fn groupable(item: &Value) -> bool {
     matches!(
         s(item, "type"),
         "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "reasoning" | "thread_created"
     ) && crate::chat::details::html_render::reference(item).is_none()
+        && crate::panel::mcp_app::reference(item).is_none()
 }
 
 pub fn item_active(item: &Value) -> bool {
