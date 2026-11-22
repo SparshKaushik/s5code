@@ -14,6 +14,10 @@ use crate::{App, icons};
 use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
+mod acp_sessions;
+mod custom_models;
+pub(super) mod policy;
+mod setup;
 mod updates;
 mod usage;
 pub use usage::IDLE_KEY;
@@ -55,6 +59,28 @@ pub struct Ui {
     pub scene_bottom: bool,
     pub usage: usage::Ui,
     pub updates: updates::Ui,
+    /// The instance whose project-override popover is open.
+    inherit: Option<String>,
+    /// The custom model whose editor is open, and its draft.
+    editing: Option<custom_models::Draft>,
+    setup: setup::Ui,
+    sessions: acp_sessions::Ui,
+    /// Requests whose replies this page handles itself; kept when another instance is selected.
+    pending: Pending,
+}
+
+#[derive(Default)]
+struct Pending {
+    accept: Vec<u64>,
+    removals: Vec<Removal>,
+    uninstall: Vec<u64>,
+}
+
+/// A remove or reset in flight, and the registry agent whose managed files go with it.
+struct Removal {
+    id: u64,
+    reset: bool,
+    agent: Option<String>,
 }
 
 /// `ProviderEnvironmentEditor`'s rows while they differ from what was published: blank rows,
@@ -165,10 +191,6 @@ fn upsert(s: &mut App, id: &str, instance: Value, patch: Value) {
     request(s, "server.updateSettings", upsert_payload(id, instance, patch));
 }
 
-fn remove_instance(s: &mut App, id: &str) {
-    request(s, "server.updateSettings", json!({"patch": {}, "providerInstanceMutation": {"operation": "remove", "instanceId": id}}));
-}
-
 /// Folds what `request` sends beyond a plain patch into the optimistic settings copy.
 pub fn apply_extras(settings: &mut Value, payload: &Value) {
     let patch = &payload["patch"];
@@ -233,6 +255,16 @@ pub fn field_value(s: &App, id: &str, field: &str) -> Value {
     if id == usage::PAGE {
         return usage::value(s, field);
     }
+    if field == "sessions.project" {
+        return acp_sessions::value(s);
+    }
+    if field.starts_with("envfield.") {
+        return json!("");
+    }
+    if let Some(index) = field.strip_prefix("arg.").and_then(|i| i.parse::<usize>().ok()) {
+        let driver = driver_of(s, id);
+        return command_args(&instance_of(s, id, &driver)).get(index).map_or(json!(""), |a| json!(a));
+    }
     if let Some((index, part)) = env_field(field) {
         let row = env_rows(s, id).get(index).cloned().unwrap_or(Value::Null);
         return match part {
@@ -291,6 +323,27 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
     }
     // Choosing "Use default" omits the field (`clearWhenEmpty: "omit"`).
     let value = if field == "idleCompaction" && value == "default" { json!("") } else { value };
+    if field == "sessions.project" {
+        return acp_sessions::set(s, &value);
+    }
+    if let Some(name) = field.strip_prefix("envfield.") {
+        // An empty commit keeps the stored key; Clear is how it is removed.
+        if let Some(text) = value.as_str().filter(|v| !v.trim().is_empty()) {
+            set_env_field(s, id, name, text);
+        }
+        return;
+    }
+    if let Some(index) = field.strip_prefix("arg.").and_then(|i| i.parse::<usize>().ok()) {
+        let text = value.as_str().unwrap_or("").to_owned();
+        let driver = driver_of(s, id);
+        let instance = instance_of(s, id, &driver);
+        let mut args = command_args(&instance);
+        if let Some(arg) = args.get_mut(index).filter(|a| **a != text) {
+            *arg = text;
+            upsert(s, id, with_command_args(&instance, args), json!({}));
+        }
+        return;
+    }
     if let Some((index, part)) = env_field(field) {
         let mut rows = env_rows(s, id);
         if rows.get_mut(index).is_some_and(|row| edit_row(row, part, value.as_str().unwrap_or(""))) {
@@ -366,6 +419,122 @@ fn clear_secret(s: &mut App, id: &str, field: &str) {
     let driver = driver_of(s, id);
     let next = config_patch(server_settings(s), id, &driver, field, json!(""))["providerInstances"][id].clone();
     upsert(s, id, next, json!({}));
+}
+
+// --- Dedicated variables and command arguments -------------------------------------------------
+
+/// The client definitions' `environmentFields`: one sensitive variable each, edited in Setup:
+/// name, label, description, placeholder.
+pub(super) fn env_fields(driver: &str) -> &'static [(&'static str, &'static str, &'static str, &'static str)] {
+    match driver {
+        "cursor" => &[("CURSOR_API_KEY", "Cursor API key", "Optional. Overrides browser sign-in for this provider.", "Paste API key")],
+        "kiro" => &[("KIRO_API_KEY", "Kiro API key", "Optional. Signs in without `kiro-cli login` (Kiro Pro and above).", "Paste API key")],
+        _ => &[],
+    }
+}
+
+/// `nextProviderEnvironmentWithFieldValue`: the variable set to `value`, or dropped when empty.
+pub fn with_field_value(environment: &[Value], name: &str, value: &str) -> Vec<Value> {
+    let trimmed = value.trim();
+    let entry = json!({"name": name, "value": trimmed, "sensitive": true});
+    let mut found = false;
+    let mut next = Vec::new();
+    for variable in environment {
+        if variable["name"] != name {
+            next.push(variable.clone());
+            continue;
+        }
+        found = true;
+        if !trimmed.is_empty() {
+            next.push(entry.clone());
+        }
+    }
+    if !found && !trimmed.is_empty() {
+        next.push(entry);
+    }
+    next
+}
+
+fn set_env_field(s: &mut App, id: &str, name: &str, value: &str) {
+    let driver = driver_of(s, id);
+    let rows = published_environment(s, id).as_array().cloned().unwrap_or_default();
+    let next = environment_instance(&instance_of(s, id, &driver), with_field_value(&rows, name, value));
+    upsert(s, id, next, json!({}));
+}
+
+/// A local ACP command's literal arguments (`commandArgs`).
+fn command_args(instance: &Value) -> Vec<String> {
+    instance["config"]["commandArgs"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect()
+}
+
+/// The instance with its arguments replaced, as web's `ProviderCommandArguments` publishes them.
+pub fn with_command_args(instance: &Value, args: Vec<String>) -> Value {
+    let mut next = instance.clone();
+    if !next["config"].is_object() {
+        next["config"] = json!({});
+    }
+    next["config"]["commandArgs"] = json!(args);
+    next
+}
+
+fn set_command_args(s: &mut App, id: &str, edit: impl FnOnce(&mut Vec<String>)) {
+    // Typed text is keyed by row index, so it lands before rows move.
+    super::commit_edits(s, true);
+    let driver = driver_of(s, id);
+    let instance = instance_of(s, id, &driver);
+    let mut args = command_args(&instance);
+    edit(&mut args);
+    upsert(s, id, with_command_args(&instance, args), json!({}));
+}
+
+// --- Project scope ------------------------------------------------------------------------------
+
+/// Web's `projectOverride` for a row: the project's own value and the effective one, while a
+/// project scope is open on a server that stores per-project provider enablement.
+fn project_override(s: &App, id: &str, instance: &Value) -> Option<(Option<bool>, bool)> {
+    let project = s.ui.settings.project.as_ref()?;
+    if s.state().config.as_ref()?["environment"]["capabilities"]["projectProviderInstanceOverrides"] != true {
+        return None;
+    }
+    let value = server_settings(s)["projectSettingsOverrides"][project.as_str()]["providerInstances"][id]["enabled"].as_bool();
+    Some((value, value.unwrap_or_else(|| resolve_enabled(instance))))
+}
+
+/// `buildProviderInstanceOverridePatch` for one project; `None` removes the override.
+pub fn project_override_patch(settings: &Value, project: &str, id: &str, value: Option<bool>) -> Value {
+    let current = &settings["projectSettingsOverrides"][project];
+    let mut instances = current["providerInstances"].as_object().cloned().unwrap_or_default();
+    let mut instance = instances.get(id).and_then(Value::as_object).cloned().unwrap_or_default();
+    match value {
+        Some(enabled) => {
+            instance.insert("enabled".into(), json!(enabled));
+        }
+        None => {
+            instance.remove("enabled");
+        }
+    }
+    if instance.is_empty() {
+        instances.remove(id);
+    } else {
+        instances.insert(id.to_owned(), Value::Object(instance));
+    }
+    let mut entry = current.as_object().cloned().unwrap_or_default();
+    entry.remove("providerInstances");
+    // `providerInstances` goes out even when empty: omitting it keeps the stored map.
+    let entry = if entry.is_empty() && instances.is_empty() {
+        Value::Null
+    } else {
+        entry.insert("providerInstances".into(), Value::Object(instances));
+        Value::Object(entry)
+    };
+    json!({"projectSettingsOverrides": {project: entry}})
+}
+
+fn write_project_override(s: &mut App, id: &str, value: Option<bool>) {
+    let Some(project) = s.ui.settings.project.clone() else { return };
+    let patch = project_override_patch(server_settings(s), &project, id, value);
+    s.ui.settings.providers_ui.inherit = None;
+    request(s, "server.updateSettings", json!({"patch": patch}));
 }
 
 // --- Environment variables --------------------------------------------------------------------
@@ -509,8 +678,139 @@ fn toggle_sensitive(s: &mut App, id: &str, index: usize) {
 fn select(s: &mut App, id: &str) {
     super::commit_edits(s, true);
     s.ui.settings.provider = Some(id.to_owned());
-    let confirm = s.ui.settings.providers_ui.confirm.take();
-    s.ui.settings.providers_ui = Ui { confirm, ..Ui::default() };
+    let ui = &mut s.ui.settings.providers_ui;
+    let (confirm, pending) = (ui.confirm.take(), std::mem::take(&mut ui.pending));
+    *ui = Ui { confirm, pending, ..Ui::default() };
+}
+
+// --- Replies this page handles ----------------------------------------------------------------
+
+/// `request` for a settings write whose reply the page handles itself. The write stays in
+/// `pending`, which keeps the optimistic copy, until [`take_reply`] claims it ahead of the
+/// generic handler in `settings::poll`.
+pub(super) fn send_settings(s: &mut App, payload: Value) -> Option<u64> {
+    if matches!(s.src, crate::data::Source::Live(_)) {
+        let mut current = server_settings(s).clone();
+        super::apply_patch(&mut current, &payload["patch"]);
+        apply_extras(&mut current, &payload);
+        s.ui.settings.optimistic_settings = Some(current);
+    }
+    let id = crate::env::net_for(s, "")?.request("server.updateSettings", payload);
+    s.ui.settings.pending.insert(id, "server.updateSettings".into());
+    Some(id)
+}
+
+/// Whether this session may add, edit, or remove provider instances.
+pub(super) fn can_manage(s: &App) -> bool {
+    !usage::read_only(s)
+}
+
+pub(super) fn take_reply(s: &mut App, id: u64) -> Option<Result<Value, Value>> {
+    let reply = s.src.net()?.take_reply(id)?;
+    s.ui.settings.pending.remove(&id);
+    Some(reply)
+}
+
+/// A request outside `settings::request`'s bookkeeping, for a reply the page reads itself.
+fn send(s: &mut App, method: &str, payload: Value) -> Option<u64> {
+    Some(s.src.net()?.request(method, payload))
+}
+
+fn take(s: &mut App, id: u64) -> Option<Result<Value, Value>> {
+    s.src.net()?.take_reply(id)
+}
+
+/// Web's `error instanceof Error ? error.message : fallback`.
+fn failure(error: &Value, fallback: &str) -> String {
+    super::failure_detail(error).unwrap_or_else(|| fallback.to_owned())
+}
+
+/// The registry agent whose managed files go with a deleted instance; local commands have none.
+pub fn registry_agent(instance: &Value) -> Option<String> {
+    if instance["driver"] != "acpRegistry" || instance["config"]["source"] == "local" {
+        return None;
+    }
+    instance["config"]["agentId"].as_str().map(str::trim).filter(|a| !a.is_empty()).map(str::to_owned)
+}
+
+/// Removes an instance (or resets a default slot), then uninstalls a registry agent's files.
+fn remove_instance(s: &mut App, id: &str, reset: bool) {
+    let driver = driver_of(s, id);
+    let agent = if reset { None } else { registry_agent(&instance_of(s, id, &driver)) };
+    let payload = json!({"patch": {}, "providerInstanceMutation": {"operation": "remove", "instanceId": id}});
+    if let Some(reply) = send_settings(s, payload) {
+        s.ui.settings.providers_ui.pending.removals.push(Removal { id: reply, reset, agent });
+    }
+}
+
+/// The status row's "Continue authentication": opens the agent's page and accepts the request.
+fn accept_url_auth(s: &mut App, id: &str, action: &Value) {
+    if let Some(url) = action["url"].as_str() {
+        super::auth::open_url(s, url);
+    }
+    if let Some(reply) = send(s, "server.acceptAcpRegistryUrlAuth", json!({"instanceId": id, "elicitationId": action["elicitationId"]})) {
+        s.ui.settings.providers_ui.pending.accept.push(reply);
+    }
+}
+
+fn poll_pending(s: &mut App) -> bool {
+    let mut changed = false;
+    for r in std::mem::take(&mut s.ui.settings.providers_ui.pending.removals) {
+        match take_reply(s, r.id) {
+            None => s.ui.settings.providers_ui.pending.removals.push(r),
+            Some(Err(error)) => {
+                let title = if r.reset { "Could not reset provider instance" } else { "Could not delete provider instance" };
+                crate::shell::palette::toast_error_brief(s, title, Some(&failure(&error, "The settings update failed.")));
+                changed = true;
+            }
+            Some(Ok(_)) => {
+                s.ui.settings.error = None;
+                // The server decides whether another instance still uses the agent.
+                if let Some(agent) = r.agent
+                    && let Some(reply) = send(s, "server.uninstallAcpRegistryManagedBinary", json!({"agentId": agent}))
+                {
+                    s.ui.settings.providers_ui.pending.uninstall.push(reply);
+                }
+                changed = true;
+            }
+        }
+    }
+    for id in std::mem::take(&mut s.ui.settings.providers_ui.pending.uninstall) {
+        match take(s, id) {
+            None => s.ui.settings.providers_ui.pending.uninstall.push(id),
+            Some(reply) => {
+                if let Err(error) = reply {
+                    let detail = failure(&error, "Managed binary cleanup failed.");
+                    crate::shell::palette::toast_warning(s, "Provider deleted, but managed files remain", Some(&detail), Vec::new(), false);
+                }
+                changed = true;
+            }
+        }
+    }
+    for id in std::mem::take(&mut s.ui.settings.providers_ui.pending.accept) {
+        match take(s, id) {
+            None => s.ui.settings.providers_ui.pending.accept.push(id),
+            Some(reply) => {
+                match reply {
+                    Ok(result) if result["accepted"] == false => crate::shell::palette::toast_warning(
+                        s,
+                        "Authentication request expired",
+                        Some("Refresh the provider and start the authentication flow again."),
+                        Vec::new(),
+                        false,
+                    ),
+                    Ok(_) => {}
+                    Err(error) => crate::shell::palette::toast_error_brief(
+                        s,
+                        "Could not continue authentication",
+                        Some(&failure(&error, "The authentication request expired.")),
+                    ),
+                }
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 // --- Status -----------------------------------------------------------------------------------
@@ -591,7 +891,8 @@ fn dot(key: &str, t: &T) -> Option<El> {
 fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
     let instance = r.explicit.clone().unwrap_or_else(|| json!({"driver": r.driver}));
     let live = crate::chat::composer::provider(s, &r.id);
-    let enabled = resolve_enabled(&instance);
+    let project = project_override(s, &r.id, &instance);
+    let enabled = project.map_or_else(|| resolve_enabled(&instance), |(_, effective)| effective);
     let name = display_name(&instance);
     let st = status(live, enabled);
     let attention = matches!(st.key, "warning" | "error");
@@ -630,6 +931,26 @@ fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
         .on_press(move |s: &mut App| select(s, &id))
         .child(el().size(20.0, 20.0).center().child(super::acp_icons::instance_mark(s, t, &r.driver, r.explicit.as_ref(), 16.0)))
         .child(col().grow(1.0).min_w(0.0).child(title).child(status_line));
+    let switch = kit::Switch::new(enabled)
+        .label(format!("Enable {name}"))
+        .hide_label()
+        .disabled(usage::read_only(s) || (project.is_some() && !super::permissions::can_write_settings(s)))
+        .on_toggle(move |s: &mut App| {
+            // In a project scope the switch writes the project's override, not the instance.
+            if project.is_some() {
+                write_project_override(s, &toggle_id, Some(!enabled));
+            } else {
+                update(s, &toggle_id, "enabled", json!(!enabled));
+            }
+        })
+        .build(&kit::theme(t));
+    // The policy refuses switching it on; switching it off stays the user's call.
+    let denial = (!enabled).then(|| policy::driver_denial(policy::of(s), &r.driver, label(&r.driver))).flatten();
+    let mut controls = row().h(20.0).gap(4.0).center_y();
+    if let Some((Some(_), _)) = project {
+        controls = controls.child(project_marker(s, t, &r.id, &name));
+    }
+    controls = controls.child(super::permissions::gate(&format!("provider-enable-{}", r.id), switch, denial));
     let mut line = row()
         .key(format!("provider-row-{}", r.id))
         .w_full()
@@ -639,18 +960,71 @@ fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
         .gap(12.0)
         .center_y()
         .child(body)
-        .child(
-            row().h(20.0).center_y().child(
-                kit::Switch::new(enabled)
-                    .label(format!("Enable {name}"))
-                    .hide_label()
-                    .disabled(usage::read_only(s))
-                    .on_toggle(move |s: &mut App| update(s, &toggle_id, "enabled", json!(!enabled)))
-                    .build(&kit::theme(t)),
-            ),
-        );
+        .child(controls);
     line = if selected { line.fill(t.c.foreground.alpha_mul(0.06)) } else { line.hover(t.c.muted.alpha_mul(0.25)) };
     line
+}
+
+/// Web's `ProjectOverrideInheritance` trigger and the reset back to the device setting.
+fn project_marker(s: &App, t: &T, id: &str, name: &str) -> El {
+    let (open_id, reset_id) = (id.to_owned(), id.to_owned());
+    let trigger = row().key(format!("provider-inherit-{id}-trigger")).child(
+        kit::Button::new("Overridden for this project. Show where this value comes from")
+            .variant("ghost-muted")
+            .size("icon-micro")
+            .on_press(move |s: &mut App| {
+                let inherit = &mut s.ui.settings.providers_ui.inherit;
+                *inherit = if inherit.as_deref() == Some(open_id.as_str()) { None } else { Some(open_id.clone()) };
+            })
+            .build(t)
+            .help("Overridden for this project")
+            .child(icon(&icons::LAYERS, 12.0).color(t.c.primary)),
+    );
+    let blocked = usage::read_only(s) || !super::permissions::can_write_settings(s);
+    let reset = kit::Button::new(format!("Reset {name} enablement"))
+        .variant("ghost-muted")
+        .size("icon-micro")
+        .icon(&icons::UNDO_2)
+        .disabled(blocked)
+        .on_press(move |s: &mut App| write_project_override(s, &reset_id, None))
+        .build(t)
+        .help("Reset to the device setting");
+    row().center_y().child(trigger).child(reset)
+}
+
+/// The open marker's two layers: the project's value, which wins, over the device's.
+fn project_popover(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some(id) = s.ui.settings.providers_ui.inherit.clone() else { return };
+    let driver = driver_of(s, &id);
+    let instance = instance_of(s, &id, &driver);
+    let Some((Some(project), _)) = project_override(s, &id, &instance) else { return };
+    let mut body = col().w_full().px(12.0).py(10.0).gap(2.0).role("list");
+    for (label, enabled, effective) in [("Project", project, true), ("Device", resolve_enabled(&instance), false)] {
+        let tone = if effective { t.c.foreground } else { t.c.muted_foreground };
+        body = body.child(
+            row()
+                .w_full()
+                .px(8.0)
+                .py(4.0)
+                .gap(12.0)
+                .center_y()
+                .radius(6.0)
+                .fill(if effective { t.c.foreground.alpha_mul(0.06) } else { t.c.foreground.alpha_mul(0.0) })
+                .child(text(label).font(if effective { theme::SM_MEDIUM } else { theme::TEXT_SM }).color(tone).grow(1.0).truncate())
+                .child(text(if enabled { "On" } else { "Off" }).font(theme::TEXT_SM).color(tone))
+                .child(if effective { icon(&icons::CHECK, 14.0).color(t.c.primary) } else { el().size(14.0, 14.0) }),
+        );
+    }
+    let _ = kit::Popover::new(format!("provider-inherit-{id}"))
+        .open(true)
+        .padding(0.0)
+        .gutter(4.0)
+        .width("md")
+        .placement(kit::Placement::BottomEnd)
+        .label("Where this value comes from")
+        .child(body)
+        .on_close(|s: &mut App| s.ui.settings.providers_ui.inherit = None)
+        .build(&kit::theme(t), layers);
 }
 
 fn list(s: &App, t: &T, rows: &[Row], selected: Option<&str>) -> El {
@@ -662,10 +1036,11 @@ fn list(s: &App, t: &T, rows: &[Row], selected: Option<&str>) -> El {
         }
         items = items.child(list_row(s, t, r, selected == Some(r.id.as_str())));
     }
-    if !rows.is_empty() && !usage::read_only(s) {
+    let can_add = !usage::read_only(s) && policy::can_add(policy::of(s));
+    if !rows.is_empty() && can_add {
         items = items.child(divider());
     }
-    if !usage::read_only(s) {
+    if can_add {
         items = items.child(
         row()
             .key("providers-add-row")
@@ -801,25 +1176,25 @@ pub(super) fn runtime_fields(driver: &str, config: &Value) -> Vec<(&'static str,
             binary("Path to the Pi coding agent binary.", "pi"),
             launch("Additional CLI arguments passed to pi --mode rpc on session start.", ""),
         ],
-        "acpRegistry" => {
-            let mut fields = Vec::new();
-            if config["source"] != "local" {
-                fields.push(("agentId", "Registry agent ID", "Agent identifier from the official ACP Registry, for example 'devin'.", "devin"));
-            }
-            fields.push((
+        // A local command shows only its executable; its arguments get their own row.
+        "acpRegistry" if config["source"] == "local" => {
+            vec![("commandPath", "Executable", "Executable name or path on this environment.", "e.g. dsh")]
+        }
+        "acpRegistry" => vec![
+            ("agentId", "Registry agent ID", "Agent identifier from the official ACP Registry, for example 'devin'.", "devin"),
+            (
                 "commandPath",
                 "Executable override",
                 "Executable on this environment. For registry agents, this overrides the distribution executable while keeping its arguments and environment.",
                 "Registry default",
-            ));
-            fields.push((
+            ),
+            (
                 "authMethodId",
                 "Authentication method",
                 "Optional ACP authentication method ID. By default, the first agent-managed method is selected.",
                 "auto",
-            ));
-            fields
-        }
+            ),
+        ],
         _ => vec![],
     }
 }
@@ -860,7 +1235,7 @@ fn header_action(s: &App, t: &T, r: &Row, live: Option<&Value>, enabled: bool) -
     action.child(tail)
 }
 
-fn status_row(t: &T, live: Option<&Value>, enabled: bool) -> El {
+fn status_row(s: &App, t: &T, id: &str, live: Option<&Value>, enabled: bool) -> El {
     let st = status(live, enabled);
     let attention = matches!(st.key, "warning" | "error");
     let detail = compatibility_warning(live, enabled).map(str::to_owned).or(st.detail.clone());
@@ -882,13 +1257,35 @@ fn status_row(t: &T, live: Option<&Value>, enabled: bool) -> El {
         line = line.child(el().h(16.0).center_y().child(d));
     }
     line = line.child(text(parts.join(" · ")).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.0).min_w(0.0));
-    col()
+    let mut out = col()
         .w_full()
         .px(16.0)
         .py(12.0)
         .gap(4.0)
         .child(row().min_h(20.0).center_y().child(text("Status").font(theme::SM_MEDIUM).color(t.c.foreground)))
-        .child(line)
+        .child(line);
+    // An ACP agent's URL sign-in request (`auth.action`), continued in the browser.
+    if let Some(action) = live.map(|p| &p["auth"]["action"]).filter(|a| a["url"].is_string() && !usage::read_only(s)) {
+        let (owned, accepted) = (id.to_owned(), action.clone());
+        out = out.child(
+            col()
+                .max_w(576.0)
+                .pt(4.0)
+                .gap(6.0)
+                .child(text(action["message"].as_str().unwrap_or("").to_owned()).font(theme::TEXT_XS).color(t.c.foreground).wrap())
+                .child(text(action["url"].as_str().unwrap_or("").to_owned()).font(theme::mono(theme::TEXT_2XS)).color(t.c.foreground).wrap().selectable(true))
+                .child(
+                    kit::Button::new("Continue authentication")
+                        .variant("outline")
+                        .size("xs")
+                        .icon(&icons::EXTERNAL_LINK)
+                        .on_press(move |s: &mut App| accept_url_auth(s, &owned, &accepted))
+                        .build(t)
+                        .self_start(),
+                ),
+        );
+    }
+    out
 }
 
 fn small_input(edit: &TextEdit, key: &str, placeholder: &str, t: &T, mono: bool) -> El {
@@ -1050,8 +1447,11 @@ fn variable_row(s: &App, t: &T, id: &str, index: usize, v: &Value) -> El {
         .child(bottom)
 }
 
-fn environment_row(s: &App, t: &T, id: &str) -> El {
+fn environment_row(s: &App, t: &T, id: &str, locks: Option<&policy::Locks>) -> El {
     let rows = env_rows(s, id);
+    let driver = driver_of(s, id);
+    // Setup edits the driver's dedicated variables; the list shows the rest.
+    let shown: Vec<usize> = (0..rows.len()).filter(|&i| !env_fields(&driver).iter().any(|f| rows[i]["name"] == f.0)).collect();
     let add_id = id.to_owned();
     let line = row()
         .w_full()
@@ -1078,14 +1478,28 @@ fn environment_row(s: &App, t: &T, id: &str) -> El {
                 .on_press(move |s: &mut App| add_variable(s, &add_id))
                 .build(t),
         );
-    if rows.is_empty() {
+    if shown.is_empty() {
         return line.px(16.0).py(12.0);
     }
     let mut list = col().w_full().mt(12.0).pb(8.0).gap(8.0);
-    for (index, v) in rows.iter().enumerate() {
-        list = list.child(variable_row(s, t, id, index, v));
+    for &index in &shown {
+        let v = &rows[index];
+        let managed = locks.filter(|l| !l.whole_environment).and_then(|l| l.variable_reason(v["name"].as_str().unwrap_or("")));
+        list = list.child(match managed {
+            // A pinned variable is the policy's: listed by name, never edited or removed.
+            Some(reason) => col()
+                .key(format!("provider-env-{index}"))
+                .w_full()
+                .gap(2.0)
+                .padding(8.0)
+                .radius(theme::radius::LG)
+                .border(1.0, t.c.border)
+                .child(text(v["name"].as_str().unwrap_or("").to_owned()).font(theme::MONO_SM).color(t.c.foreground).truncate())
+                .child(text(reason).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+            None => variable_row(s, t, id, index, v),
+        });
     }
-    let saved = rows.iter().any(|r| r["valueRedacted"] == true);
+    let saved = shown.iter().any(|&i| rows[i]["valueRedacted"] == true);
     list = list.child(
         text(format!(
             "Sensitive values are stored separately and never returned to the app.{}",
@@ -1296,6 +1710,7 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
     let query = ui.filter.text.trim().to_lowercase();
     let filtering = show_filter && !query.is_empty();
     let antigravity = driver == "antigravity";
+    let read_only = usage::read_only(s);
 
     let mut summary = row().gap(8.0).center_y();
     if !built_in.is_empty() {
@@ -1440,6 +1855,17 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
         if m.custom {
             let (owned, slug) = (id.to_owned(), m.slug.clone());
             actions = actions.child(
+                kit::Button::new(format!("Edit {}", m.slug))
+                    .variant("ghost-muted")
+                    .size("icon-micro")
+                    .icon(&icons::PENCIL)
+                    .disabled(read_only)
+                    .on_press(move |s: &mut App| custom_models::toggle(s, &owned, &slug))
+                    .build(t)
+                    .help("Edit name and options"),
+            );
+            let (owned, slug) = (id.to_owned(), m.slug.clone());
+            actions = actions.child(
                 kit::Button::new(format!("Remove {}", m.slug))
                     .variant("ghost-muted")
                     .size("icon-micro")
@@ -1476,6 +1902,9 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                         .build(&kit::theme(t)),
                 ),
         );
+        if m.custom && !read_only && let Some(editor) = custom_models::editor(s, t, id, driver, live, &m.slug) {
+            list = list.child(editor);
+        }
     }
 
     let mut body = col()
@@ -1536,9 +1965,10 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
 fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
     let instance = instance_of(s, &r.id, &r.driver);
     let live = crate::chat::composer::provider(s, &r.id);
-    let enabled = resolve_enabled(&instance);
+    let enabled = project_override(s, &r.id, &instance).map_or_else(|| resolve_enabled(&instance), |(_, effective)| effective);
     let name = display_name(&instance);
     let read_only = usage::read_only(s);
+    let locks = policy::locks(policy::of(s), &r.driver);
     // `ProviderInstanceCard`: without `providers:manage` the fields show but can't be changed.
     let lock = |el: El| if read_only { el.inert().opacity(0.64) } else { el };
     let mut sections = vec![flat_section(
@@ -1549,15 +1979,31 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
             .child(heading(&name, t)),
         Some(header_action(s, t, r, live, enabled)),
         vec![
-            status_row(t, live, enabled),
+            status_row(s, t, &r.id, live, enabled),
             lock(display_name_row(s, t, &r.id, &name, label(&r.driver))),
         ],
         t,
     )];
-    if let Some(p) = live.filter(|p| p["setup"]["canAuthenticate"] == true && !read_only) {
-        sections.push(flat_section(heading("Setup", t), None, vec![col().w_full().px(16.0).child(super::auth::view(s, t, p))], t));
+    let managed_codex = r.driver == "codex" && instance["config"]["setupMode"] == "managed";
+    let mut setup: Vec<El> = if r.driver == "antigravity" {
+        setup::antigravity(s, t, &r.id, &instance, live, resolve_enabled(&instance), read_only)
+    } else if managed_codex && live.is_none_or(|p| p["setup"]["canAuthenticate"] != true) {
+        vec![plain_row(t, "ChatGPT account", "Preparing sign-in.")]
+    } else if let Some(p) = live.filter(|p| {
+        !read_only && (p["setup"]["canAuthenticate"] == true || (p["driver"] == "acpRegistry" && p["installed"] == true))
+    }) {
+        vec![col().w_full().px(16.0).child(super::auth::view(s, t, p))]
     } else if r.driver == "cursor" && !read_only && live.is_some_and(|p| p["setup"]["canAuthenticate"] == false) {
-        sections.push(flat_section(heading("Setup", t), None, vec![cursor_account(t)], t));
+        vec![cursor_account(t)]
+    } else {
+        vec![]
+    };
+    for &(variable, title, description, placeholder) in env_fields(&r.driver) {
+        let reason = locks.as_ref().and_then(|l| l.variable_reason(variable));
+        setup.push(lock(env_field_row(s, t, &r.id, variable, title, description, placeholder, reason)));
+    }
+    if !setup.is_empty() {
+        sections.push(flat_section(heading("Setup", t), None, setup, t));
     }
     let fields = runtime_fields(&r.driver, &instance["config"]);
     if !fields.is_empty() || !DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {
@@ -1577,21 +2023,180 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
                     ),
             ]
         } else {
-            let mut rows: Vec<El> =
-                fields.into_iter().map(|(field, title, description, placeholder)| text_row(s, cx, t, &r.id, field, title, description, placeholder)).collect();
+            let mut rows: Vec<El> = fields
+                .into_iter()
+                .map(|(field, title, description, placeholder)| match locks.as_ref().and_then(|l| l.config_reason(field)) {
+                    Some(reason) => managed_field_row(s, t, &r.id, field, title, description, placeholder, reason),
+                    None => text_row(s, cx, t, &r.id, field, title, description, placeholder),
+                })
+                .collect();
             // Contracts `ClaudeSettings` order: binary, home, auto-compact, idle compaction, launch.
             if r.driver == "claudeAgent" {
                 rows.insert(3.min(rows.len()), usage::instance_idle_row(s, cx, t, &r.id));
+            }
+            if r.driver == "acpRegistry" && instance["config"]["source"] == "local" {
+                rows.push(arguments_row(s, t, &r.id, &instance, locks.as_ref().and_then(|l| l.config_reason("commandArgs"))));
             }
             rows
         };
         sections.push(flat_section(heading("Runtime", t), None, rows.into_iter().map(lock).collect(), t));
     }
-    sections.push(flat_section(heading("Environment", t), None, vec![lock(environment_row(s, t, &r.id))], t));
+    let environment = match locks.as_ref().filter(|l| l.whole_environment) {
+        // Under a whole-environment lock every variable is the administrator's.
+        Some(l) => col().w_full().child(managed_notice(t, &l.reason)).child(environment_row(s, t, &r.id, locks.as_ref()).inert().opacity(0.5)),
+        None => environment_row(s, t, &r.id, locks.as_ref()),
+    };
+    sections.push(flat_section(heading("Environment", t), None, vec![lock(environment)], t));
+    if let Some(p) = live.filter(|p| p["driver"] == "acpRegistry")
+        && let Some(section) = acp_sessions::section(s, t, &r.id, p, read_only)
+    {
+        sections.push(section);
+    }
     if DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {
         sections.push(flat_section(heading("Models", t), None, vec![lock(models_section(s, t, &r.id, &r.driver, live, &instance))], t));
     }
     sections
+}
+
+/// A `SettingsRow` with copy only.
+fn plain_row(t: &T, title: &str, description: &str) -> El {
+    col()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(4.0)
+        .child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(description.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap())
+}
+
+/// A `SettingsRow` with copy on the left and `control` on the right.
+fn control_row(t: &T, key: &str, title: &str, description: &str, control: El) -> El {
+    row()
+        .key(format!("row-{key}"))
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(description.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
+        )
+        .child(control)
+}
+
+/// Web `ManagedNotice`: one line of policy text with the building mark.
+fn managed_notice(t: &T, reason: &str) -> El {
+    row()
+        .w_full()
+        .px(16.0)
+        .py(8.0)
+        .gap(8.0)
+        .items_start()
+        .child(el().h(19.5).center_y().child(icon(&icons::BUILDING, 14.0).color(t.c.muted_foreground)))
+        .child(text(reason.to_owned()).font(theme::TEXT_XS.lh(19.5)).color(t.c.muted_foreground).wrap().grow(1.0).min_w(0.0))
+}
+
+/// A runtime field the policy pins: the same control, inert, with the reason on hover.
+#[allow(clippy::too_many_arguments)]
+fn managed_field_row(s: &App, t: &T, id: &str, field: &str, title: &str, description: &str, placeholder: &str, reason: String) -> El {
+    let key = field_key(id, field);
+    let control = if is_secret_field(&driver_of(s, id), field) {
+        secret_control(s, t, &key, title, placeholder)
+    } else {
+        c::input(s, t, &key, 224.0, placeholder, false)
+    };
+    control_row(t, &key, title, description, super::permissions::inert(&key, control, reason))
+}
+
+/// Web `ProviderEnvironmentFieldRow`: a dedicated variable (an API key) as its own secret field.
+#[allow(clippy::too_many_arguments)]
+fn env_field_row(s: &App, t: &T, id: &str, variable: &str, title: &str, description: &str, placeholder: &str, reason: Option<String>) -> El {
+    let key = field_key(id, &format!("envfield.{variable}"));
+    let saved = published_environment(s, id).as_array().and_then(|rows| rows.iter().find(|v| v["name"] == variable).cloned());
+    let placeholder = if saved.as_ref().is_some_and(|v| v["valueRedacted"] == true) { "Stored secret" } else { placeholder };
+    let mut control = row().w(224.0).gap(8.0).center_y().child(secret_input(s, t, &key, placeholder, false).grow(1.0).min_w(0.0).label(title.to_owned()));
+    if saved.is_some() {
+        let (owned, name) = (id.to_owned(), variable.to_owned());
+        control = control.child(
+            kit::Button::new(format!("Clear {title}"))
+                .variant("ghost-destructive")
+                .size("icon-sm")
+                .icon(&icons::X)
+                .on_press(move |s: &mut App| {
+                    let driver = driver_of(s, &owned);
+                    let rows = published_environment(s, &owned).as_array().cloned().unwrap_or_default();
+                    let rest: Vec<Value> = rows.into_iter().filter(|v| v["name"] != name.as_str()).collect();
+                    let next = environment_instance(&instance_of(s, &owned, &driver), rest);
+                    upsert(s, &owned, next, json!({}));
+                })
+                .build(t),
+        );
+    }
+    control_row(t, &key, title, description, super::permissions::gate(&key, control, reason))
+}
+
+/// Web `ProviderCommandArguments`: one literal argument per row, saved as each one changes.
+fn arguments_row(s: &App, t: &T, id: &str, instance: &Value, reason: Option<String>) -> El {
+    let args = command_args(instance);
+    let add_id = id.to_owned();
+    let add = kit::Button::new("Add argument")
+        .variant("outline")
+        .size("sm")
+        .icon(&icons::PLUS)
+        .on_press(move |s: &mut App| set_command_args(s, &add_id, |args| args.push(String::new())))
+        .build(t);
+    let line = row()
+        .w_full()
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Arguments").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text("One literal argument per row, in launch order.").font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
+        )
+        .child(super::permissions::gate(&field_key(id, "commandArgs"), add, reason.clone()));
+    if args.is_empty() {
+        return line.px(16.0).py(12.0);
+    }
+    let mut list = col().w_full().mt(12.0).pb(8.0).gap(8.0);
+    for (index, arg) in args.iter().enumerate() {
+        if reason.is_some() {
+            list = list.child(text(arg.clone()).font(theme::MONO_XS).color(t.c.foreground).truncate());
+            continue;
+        }
+        let remove_id = id.to_owned();
+        list = list.child(
+            row()
+                .key(format!("provider-arg-{index}"))
+                .w_full()
+                .gap(6.0)
+                .center_y()
+                .child(c::input(s, t, &field_key(id, &format!("arg.{index}")), 0.0, "", false).font(theme::MONO_SM).grow(1.0).min_w(0.0).label(format!("Argument {}", index + 1)))
+                .child(
+                    kit::Button::new(format!("Remove argument {}", index + 1))
+                        .variant("ghost-destructive")
+                        .size("icon-micro")
+                        .icon(&icons::X)
+                        .on_press(move |s: &mut App| {
+                            set_command_args(s, &remove_id, |args| {
+                                if index < args.len() {
+                                    args.remove(index);
+                                }
+                            })
+                        })
+                        .build(t),
+                ),
+        );
+    }
+    col().w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(list)
 }
 
 /// Web's Cursor setup row while `CURSOR_API_KEY` stands in for browser sign-in.
@@ -1753,7 +2358,7 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
         .child(el().w(1.0).h_full().fill(t.c.border.alpha_mul(0.6)))
         .child(col().grow(1.0).min_w(0.0).h_full().child(detail));
     let body = col().w_full().gap(12.0).children(usage::limited(s, t)).child(card);
-    let add = (!usage::read_only(s)).then_some(add);
+    let add = (!usage::read_only(s) && policy::can_add(policy::of(s))).then_some(add);
     col()
         .w_full()
         .gap(32.0)
@@ -1768,7 +2373,21 @@ pub fn escape(s: &mut App) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    usage::poll(s) | updates::poll(s)
+    usage::poll(s) | updates::poll(s) | poll_pending(s) | setup::poll(s) | acp_sessions::poll(s)
+}
+
+/// Subscriptions the selected instance's setup rows read.
+pub fn wanted(s: &App) -> Vec<(String, Value)> {
+    if !matches!(&s.route, crate::Route::Settings(p) if p == "providers") {
+        return Vec::new();
+    }
+    let Some(id) = selected_id(s) else { return Vec::new() };
+    let driver = driver_of(s, &id);
+    let managed_codex = driver == "codex" && server_settings(s)["providerInstances"][id.as_str()]["config"]["setupMode"] == "managed";
+    if (driver == "antigravity" || managed_codex) && crate::chat::composer::provider(s, &id).is_some() {
+        return vec![("provider.install.subscribe".to_owned(), json!({"instanceId": id}))];
+    }
+    Vec::new()
 }
 
 /// The compact idle threads "Never" option on a server that can't store it.
@@ -1783,6 +2402,7 @@ pub fn scene_usage(s: &mut App, open: &str) {
 /// The remove and reset confirmations (`confirmProviderInstanceRemoval`).
 pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
     usage::overlays(s, t, layers);
+    project_popover(s, t, layers);
     let Some((id, reset)) = s.ui.settings.providers_ui.confirm.clone() else { return };
     let driver = driver_of(s, &id);
     let instance = instance_of(s, &id, &driver);
@@ -1811,8 +2431,8 @@ pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
                     kit::Button::new(verb)
                         .variant("destructive")
                         .on_press(move |s: &mut App| {
-                            remove_instance(s, &id);
                             s.ui.settings.providers_ui.confirm = None;
+                            remove_instance(s, &id, reset);
                         })
                         .build(t),
                 ),
@@ -1924,5 +2544,28 @@ mod tests {
         let shown = redact_instance(&opencode);
         assert_eq!(shown["config"]["serverPassword"], SECRET_REDACTED);
         assert_eq!(shown["config"]["serverUrl"], "http://127.0.0.1:4096");
+    }
+
+    #[test]
+    fn dedicated_fields_arguments_and_project_overrides_patch_like_web() {
+        let env = [json!({"name": "OTHER", "value": "x", "sensitive": false}), json!({"name": "CURSOR_API_KEY", "value": "old", "sensitive": true})];
+        assert_eq!(with_field_value(&env, "CURSOR_API_KEY", " new ")[1], json!({"name": "CURSOR_API_KEY", "value": "new", "sensitive": true}));
+        assert_eq!(with_field_value(&env, "CURSOR_API_KEY", ""), [env[0].clone()], "clearing drops the variable");
+        assert_eq!(with_field_value(&env[..1], "KIRO_API_KEY", "k").len(), 2);
+
+        let local = json!({"driver": "acpRegistry", "config": {"source": "local", "commandPath": "dsh"}});
+        assert_eq!(runtime_fields("acpRegistry", &local["config"]).iter().map(|f| f.0).collect::<Vec<_>>(), ["commandPath"]);
+        let next = with_command_args(&local, vec!["--acp".into(), "two words".into()]);
+        assert_eq!(command_args(&next), ["--acp", "two words"]);
+        assert_eq!(next["config"]["commandPath"], "dsh");
+        assert_eq!(registry_agent(&local), None, "a local command has no managed files");
+        assert_eq!(registry_agent(&json!({"driver": "acpRegistry", "config": {"agentId": " devin "}})).as_deref(), Some("devin"));
+
+        let settings = json!({"projectSettingsOverrides": {"p1": {"model": "m", "providerInstances": {"codex": {"enabled": false}}}}});
+        let on = project_override_patch(&settings, "p1", "cursor", Some(true));
+        assert_eq!(on["projectSettingsOverrides"]["p1"], json!({"model": "m", "providerInstances": {"codex": {"enabled": false}, "cursor": {"enabled": true}}}));
+        let reset = project_override_patch(&settings, "p1", "codex", None);
+        assert_eq!(reset["projectSettingsOverrides"]["p1"], json!({"model": "m", "providerInstances": {}}));
+        assert_eq!(project_override_patch(&json!({}), "p2", "codex", None)["projectSettingsOverrides"]["p2"], Value::Null);
     }
 }

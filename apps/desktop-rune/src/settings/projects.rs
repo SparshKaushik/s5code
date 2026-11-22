@@ -18,6 +18,10 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let Some(project) = selected else {
         return chooser(s, t);
     };
+    // Web derives `isScratch` from the server's scratch root; the shell rows don't carry it.
+    let mut project = project.clone();
+    project["isScratch"] = json!(crate::shell::palette::actions::is_scratch_project(s, &project));
+    let project = &project;
     let id = crate::data::s(project, "id").to_owned();
     let title = crate::data::s(project, "title").to_owned();
     let root = crate::data::s(project, "workspaceRoot").to_owned();
@@ -34,14 +38,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         overview.push(text(CANNOT_CHANGE).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w_full().px(16.0).py(10.0));
     }
     overview.extend([
-        c::setting_row(
-            s,
-            cx,
-            t,
-            &json!({"key": key("title"), "title": "Name", "kind": "input", "width": 256, "placeholder": "Project name",
-                "description": "The shared name for this project group in the sidebar and thread lists."}),
-        ),
-        super::permissions::gate("project-icon", super::project_icon::settings_row(t, project), lock()),
+        name_row(s, t, project, &key("title"), lock()),
+        super::permissions::gate("project-icon", super::project_icon::settings_row(s, t, project), lock()),
     ]);
     if organize {
         overview.push(c::setting_row(
@@ -127,6 +125,43 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(c::section("Danger", vec![danger], t))
 }
 
+/// `SCRATCH_PROJECT_TITLE`: what a scratch project's name resets to.
+const SCRATCH_TITLE: &str = "No project";
+
+/// Web's Name row: the shared name, and Reset back to "No project" on a renamed scratch project.
+fn name_row(s: &App, t: &T, project: &Value, key: &str, lock: Option<String>) -> El {
+    let mut heading = row().gap(6.0).center_y().child(text("Name").key(super::title_key("Name")).font(theme::SM_MEDIUM).color(t.c.foreground));
+    if project["isScratch"] == true && crate::data::s(project, "title") != SCRATCH_TITLE {
+        let id = crate::data::s(project, "id").to_owned();
+        heading = heading.child(
+            crate::kit::Button::new("Reset project name")
+                .variant("ghost-muted")
+                .size("icon-micro")
+                .icon(&crate::icons::UNDO_2)
+                .disabled(lock.is_some())
+                .on_press(move |s: &mut App| {
+                    s.ui.settings.edits.remove(&format!("project::{id}::title"));
+                    update(s, &id, "title", json!(SCRATCH_TITLE));
+                })
+                .build(t),
+        );
+    }
+    let copy = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .child(heading)
+        .child(
+            text("The shared name for this project group in the sidebar and thread lists.")
+                .font(theme::TEXT_XS.lh(18.0))
+                .color(t.c.muted_foreground)
+                .wrap(),
+        );
+    let input = super::permissions::gate(key, c::input(s, t, key, 256.0, "Project name", false), lock);
+    let line = row().key(format!("row-{key}")).w_full().px(16.0).py(12.0).gap(32.0).center_y().child(copy).child(input);
+    super::pulsed(s, t, "Name", line)
+}
+
 /// Web `ProjectDefaultsSettings` with category "project": the picked project's own model and
 /// workspace for new threads, read from and written to its `projectSettingsOverrides` entry.
 /// The fallback model is environment-wide, so it stays on Threads.
@@ -202,10 +237,22 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
     use crate::chat::details::scripts;
     let id = crate::data::s(project, "id").to_owned();
     let add = id.clone();
-    let mut rows = vec![super::about::about_row(
-        t,
-        "Actions",
-        "Commands that run in this project's checkout or its worktree, with optional shortcuts.",
+    let imports = scripts::project_imports(s, project);
+    let mut controls = row().gap(6.0).center_y();
+    if imports.as_ref().is_some_and(|list| !list.is_empty()) {
+        let (open, toggle) = (scripts::imports_open(s, &id), id.clone());
+        controls = controls.child(
+            row().key(scripts::IMPORT_ANCHOR).child(
+                crate::kit::Button::new("Import scripts")
+                    .variant("ghost")
+                    .size("xs")
+                    .on_press(move |s: &mut App| scripts::toggle_imports(s, &toggle))
+                    .build(t)
+                    .expanded(open),
+            ),
+        );
+    }
+    controls = controls.child(
         crate::kit::Button::new("Add action")
             .variant("outline")
             .size("xs")
@@ -213,6 +260,12 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
             .on_press(move |s: &mut App| scripts::open_for_project(s, &add, None))
             .build(t)
             .key("project-add-action"),
+    );
+    let mut rows = vec![super::about::about_row(
+        t,
+        "Actions",
+        "Commands that run in this project's checkout or its worktree, with optional shortcuts.",
+        controls,
     )];
     let scripts = scripts::resolve(super::server_settings(s), project);
     if scripts.is_empty() {
@@ -284,6 +337,22 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                         ),
                 )
                 .child(control),
+        );
+    }
+    if imports.is_none() {
+        rows.push(
+            col()
+                .w_full()
+                .px(16.0)
+                .py(12.0)
+                .gap(4.0)
+                .child(text("t3.json is invalid").font(theme::SM_MEDIUM).color(t.c.warning))
+                .child(
+                    text("A t3.json exists in this checkout but fails to parse, so every action and icon it declares is ignored. Check the JSON syntax and icon values.")
+                        .font(theme::TEXT_XS.lh(18.0))
+                        .color(t.c.warning)
+                        .wrap(),
+                ),
         );
     }
     c::section("Actions", rows, t)

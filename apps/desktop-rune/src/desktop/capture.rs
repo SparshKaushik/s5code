@@ -233,6 +233,8 @@ pub struct Shot {
     thumbnail: Option<rune::Pixels>,
     /// Our window's origin in the overlay's space, where Wayland reports the composer at (0, 0).
     origin: (f32, f32),
+    /// Linux: why the capture took another path, shown once it lands.
+    notice: Option<String>,
 }
 
 /// The flight overlay's state: the captured picture and the card's frame inside the overlay.
@@ -584,7 +586,7 @@ fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
     let thumbnail = extras.thumbnail.then(|| image.map_or_else(decoded, Ok).ok()).flatten().map(flight_pixels);
     let text = extras.text.then(|| read_text(front.pid, &window.title)).flatten();
     let source = snap_shot_source(&front.owner, &window.title, text.as_deref());
-    Ok(Shot { bounds: window.bounds, source, thumbnail, origin: (0.0, 0.0) })
+    Ok(Shot { bounds: window.bounds, source, thumbnail, origin: (0.0, 0.0), notice: None })
 }
 
 fn flight_pixels(image: image::DynamicImage) -> rune::Pixels {
@@ -1017,7 +1019,7 @@ pub fn start(s: &mut App) {
                         .then(|| image::open(&path).ok().map(flight_pixels))
                         .flatten();
                     let origin = captured.own.map_or((0.0, 0.0), |o| (o[0] as f32, o[1] as f32));
-                    Event::Captured(Ok((Shot { bounds, source, thumbnail, origin }, path)))
+                    Event::Captured(Ok((Shot { bounds, source, thumbnail, origin, notice: captured.notice }, path)))
                 }
                 Err(message) => Event::CaptureFailed(message),
             };
@@ -1157,6 +1159,9 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                         }
                         if let Some(pixels) = shot.thumbnail.filter(|_| framed && crate::settings::value(s, "snapShotAnimations") != false) {
                             fly(shot.bounds, pixels, shot.origin);
+                        }
+                        if let Some(notice) = &shot.notice {
+                            crate::shell::palette::toast(s, "Snapshot taken with the window picker", Some(notice.as_str()));
                         }
                         deliver(s, path);
                     }
