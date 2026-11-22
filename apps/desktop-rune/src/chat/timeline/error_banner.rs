@@ -61,22 +61,35 @@ pub struct RuntimeError {
 
 pub fn runtime_error(p: &Value) -> Option<RuntimeError> {
     let (runs, items) = (array(p, "runs"), array(p, "turnItems"));
-    let instance = &p["thread"]["providerInstanceId"];
-    let session = array(p, "providerSessions").iter().rev().find(|v| &v["providerInstanceId"] == instance);
-    let session_error = session.and_then(|v| v["lastError"].as_str());
+    let session_error = session_error(p);
     let limited = usage_limit_presented(runs, items, session_error);
     let presented = limited.or_else(|| latest_unheld(runs));
     if presented.is_none() && p["thread"]["activeProviderThreadId"].is_null() && !watching_pull_request(p) {
         return None;
     }
     let (message, class, code) = summary(presented.and_then(|r| root_failure(r, items)), session_error);
-    let activity = runs.iter().filter(|r| ACTIVITY.contains(&s(r, "status"))).max_by_key(|r| ordinal(r)).or(presented);
+    let activity = newest_active(runs).or(presented);
     Some(RuntimeError {
         message: message?,
         class,
         code,
         failed: limited.is_some() || activity.is_some_and(|r| s(r, "status") == "failed"),
     })
+}
+
+fn session_error(p: &Value) -> Option<&str> {
+    let instance = &p["thread"]["providerInstanceId"];
+    array(p, "providerSessions").iter().rev().find(|v| &v["providerInstanceId"] == instance).and_then(|v| v["lastError"].as_str())
+}
+
+fn newest_active(runs: &[Value]) -> Option<&Value> {
+    runs.iter().filter(|r| ACTIVITY.contains(&s(r, "status"))).max_by_key(|r| ordinal(r))
+}
+
+/// `deriveThreadActivityRun`: the newest run at work, else the run presented as latest.
+pub(super) fn activity_run(p: &Value) -> Option<&Value> {
+    let runs = array(p, "runs");
+    newest_active(runs).or_else(|| usage_limit_presented(runs, array(p, "turnItems"), session_error(p)).or_else(|| latest_unheld(runs)))
 }
 
 /// `pullRequestWatchTasks`: a watched, open pull request holds a thread that never ran.
@@ -109,7 +122,7 @@ fn summary(failure: Option<&Value>, session_error: Option<&str>) -> (Option<Stri
 }
 
 /// `latestExecutedRun`, ordering by completion with unfinished runs last.
-fn latest_executed(runs: &[Value]) -> Option<&Value> {
+pub(super) fn latest_executed(runs: &[Value]) -> Option<&Value> {
     let end = |r: &Value| ts(r, "completedAt").unwrap_or(i64::MAX);
     runs.iter()
         .filter(|r| s(r, "status") != "queued" && !(s(r, "status") == "cancelled" && r["startedAt"].is_null()))

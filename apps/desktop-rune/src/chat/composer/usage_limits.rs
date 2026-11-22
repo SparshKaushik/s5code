@@ -294,6 +294,35 @@ fn summary(account: &Account, email_shown: bool) -> String {
     }
 }
 
+/// ThreadDetailsUsage's rows: this instance's limit windows as room left, or why there are none.
+pub(crate) fn detail_rows(s: &App) -> Option<Vec<crate::chat::details::usage::Row>> {
+    use crate::chat::details::usage::{Row, Tone};
+    let (instance, _) = selection(s)?;
+    let now = s.now_ms;
+    // Only this instance's read: another account of the report may be another login.
+    let report = collect(&instance, providers(s), sources(s));
+    let limits = report
+        .and_then(|r| r.accounts.into_iter().find(|a| a.id == instance).map(|a| a.limits))
+        .or_else(|| providers(s).iter().find(|p| data::s(p, "instanceId") == instance).map(|p| p["usageLimits"].clone()))
+        .filter(Value::is_object)?;
+    if let Some(notice) = limits_notice(&limits) {
+        return Some(vec![Row { label: "Limits".into(), fill: None, tone: Tone::Plain, tick: None, value: "Unavailable".into(), help: vec![notice], muted: false }]);
+    }
+    let rows = windows(&limits).iter().map(|w| {
+        let (label, left) = (data::s(w, "label").to_owned(), remaining_percent(w));
+        let mut help = vec![format!("{label}: {left}% left")];
+        if let Some(at) = data::ts(w, "resetsAt").filter(|at| *at > now) {
+            help.push(format!("Resets in {} · {}", duration(at - now), crate::chat::timeline::banners::upcoming_label(s, data::s(w, "resetsAt"))));
+        }
+        if let Some((_, pace)) = pace(w, now) {
+            help.push(if pace.starts_with("Ahead") { "Ahead of pace" } else if pace.starts_with("Under") { "Under pace" } else { "On pace" }.into());
+        }
+        let tone = if left <= 10 { Tone::Error } else if left <= 20 { Tone::Warning } else { Tone::Plain };
+        Row { label, fill: Some(left as f64), tone, tick: None, value: format!("{left}%"), help, muted: false }
+    });
+    Some(rows.collect())
+}
+
 fn remaining_percent(w: &Value) -> i64 {
     (100.0 - w["usedPercent"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0)).round() as i64
 }

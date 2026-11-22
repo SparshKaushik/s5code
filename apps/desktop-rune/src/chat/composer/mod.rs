@@ -7,7 +7,7 @@ pub(crate) mod attachments;
 pub mod banners;
 pub mod chips;
 mod code_block;
-mod context;
+pub(crate) mod context;
 pub mod fanout;
 mod lists;
 mod menu;
@@ -15,7 +15,7 @@ mod picker;
 pub mod provider_icons;
 mod search;
 mod stash;
-mod usage_limits;
+pub(crate) mod usage_limits;
 
 use std::collections::{HashMap, HashSet};
 
@@ -3180,6 +3180,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         if let Some(open) = s.ui.chat.composer.usage.open.as_mut() {
             open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
         }
+    }),
+    // The details card with "Usage limits" and "Context window" shown.
+    ("chat-details-usage", |s| {
+        on_replay_showcase(s);
+        patch_config(s, usage_limits::scene_limits);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        s.client_settings.values.insert("threadDetailsUsageEnabled".into(), serde_json::json!(true));
+        s.now_ms = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(s.now_ms);
     }),
     // `/usage-limits` sent from a side chat's composer opens the panel on that composer.
     ("chat-side-composer-usage-limits", |s| {

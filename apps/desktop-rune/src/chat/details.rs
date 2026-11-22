@@ -27,6 +27,7 @@ pub mod run_on;
 pub mod scripts;
 pub mod servers;
 pub(crate) mod strip;
+pub(crate) mod usage;
 
 #[derive(Default)]
 pub struct Ui {
@@ -1394,6 +1395,19 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             body = body.child(panel);
             divided = true;
         }
+    }
+    // ThreadDetailsUsage and ThreadDetailsContext, off unless chosen.
+    if on("usage")
+        && let Some(panel) = usage::limits(s, t, divided)
+    {
+        body = body.child(panel);
+        divided = true;
+    }
+    if on("context")
+        && let Some(panel) = usage::context(s, t, divided)
+    {
+        body = body.child(panel);
+        divided = true;
     }
     // Shown only when no section has content, so an emptied card can be refilled.
     if !divided {

@@ -24,6 +24,7 @@ mod history;
 pub(crate) mod md_links;
 mod math;
 mod katex;
+mod announcer;
 pub(crate) mod citation;
 mod media;
 mod work;
@@ -40,6 +41,7 @@ use rune::{Cx, El, GrowthSpec, ScrollSpec, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+pub use announcer::view as announcer;
 pub use minimap::view as minimap;
 pub use scenes::SCENES;
 
@@ -47,6 +49,7 @@ pub use scenes::SCENES;
 pub struct Ui {
     assets: attachments::Assets,
     katex: katex::State,
+    announcer: announcer::State,
     follow: Follow,
     /// A side chat pane's own follow state, so its scrolling leaves the chat's alone.
     side_follow: Follow,
@@ -802,7 +805,7 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
     let mut changed = attachments::poll(app, tx) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
         | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | subagent::poll(app) | worktree_setup::poll(app)
         | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app)
-        | pending::poll(app, tx) | crate::chat::guest::poll(app) | katex::poll(app);
+        | pending::poll(app, tx) | crate::chat::guest::poll(app) | katex::poll(app) | announcer::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
