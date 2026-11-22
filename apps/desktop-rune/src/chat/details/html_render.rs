@@ -61,19 +61,23 @@ pub fn is_tool(name: &str) -> bool {
     T3_SERVERS.contains(&server.trim_end_matches(['.', ':', '/', '_', '-', ' ', '\u{b7}']))
 }
 
-/// toolOutput.ts readResult: the result's data (here its `htmlRender`, null when it has none)
-/// and whether it reports a failure, through JSON text, content blocks and MCP envelopes.
 fn read_result(value: &Value, depth: usize) -> (Option<Value>, bool) {
+    read_field(value, "htmlRender", depth)
+}
+
+/// toolOutput.ts readResult: the result data's `key` (null when it has none) and whether it
+/// reports a failure, through JSON text, content blocks and MCP envelopes.
+pub(crate) fn read_field(value: &Value, key: &str, depth: usize) -> (Option<Value>, bool) {
     if depth > 8 {
         return (None, false);
     }
     match value {
-        Value::String(raw) => serde_json::from_str::<Value>(raw).map_or((None, false), |parsed| read_result(&parsed, depth + 1)),
+        Value::String(raw) => serde_json::from_str::<Value>(raw).map_or((None, false), |parsed| read_field(&parsed, key, depth + 1)),
         Value::Array(blocks) => {
             let (mut data, mut failed) = (None, false);
             for block in blocks {
                 let text = &block["text"];
-                let (found, broke) = read_result(if text.is_object() && !text["text"].is_null() { &text["text"] } else { text }, depth + 1);
+                let (found, broke) = read_field(if text.is_object() && !text["text"].is_null() { &text["text"] } else { text }, key, depth + 1);
                 data = data.or(found);
                 failed |= broke;
             }
@@ -83,10 +87,10 @@ fn read_result(value: &Value, depth: usize) -> (Option<Value>, bool) {
             let failed = value["isError"] == true || value["is_error"] == true || data::s(value, "_tag") == "OrchestratorMcpFailure" || !value["error"].is_null();
             match fields.get("structuredContent").filter(|c| !c.is_null()).or_else(|| fields.get("content")) {
                 Some(content) => {
-                    let (found, broke) = read_result(content, depth + 1);
+                    let (found, broke) = read_field(content, key, depth + 1);
                     (found, failed || broke)
                 }
-                None => (Some(value["htmlRender"].clone()), failed),
+                None => (Some(value[key].clone()), failed),
             }
         }
         _ => (None, false),

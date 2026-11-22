@@ -1380,6 +1380,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "connections");
         connections::scene(s, "route-remove");
     }),
+    ("settings-connections-outdated", |s| {
+        scene(s, "connections");
+        connections::scene(s, "outdated");
+    }),
     ("settings-connections-machines", |s| {
         scene(s, "connections");
         connections::scene(s, "machines");

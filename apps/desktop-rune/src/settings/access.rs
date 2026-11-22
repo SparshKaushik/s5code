@@ -1194,9 +1194,12 @@ mod tests {
 pub(super) fn scene_share(s: &mut App) {
     // Without the page, the first poll resets this state as a page change.
     s.ui.settings.connections.page = Some("access".into());
+    crate::scene_clock(s);
+    let iso = crate::settings::tasks::draft::iso;
+    let (created, expires) = (iso(s.now_ms), iso(s.now_ms + 15 * 60_000));
     let state = &mut s.ui.settings.connections.access;
     state.scene = Some(json!({"payload": {
-        "pairingLinks": [{"id": "link-1", "label": "Phone", "scopes": ["orchestration:read", "orchestration:operate"]}],
+        "pairingLinks": [{"id": "link-1", "label": "Phone", "createdAt": created, "expiresAt": expires, "scopes": ["orchestration:read", "orchestration:operate"]}],
         "clientSessions": [{"sessionId": "s-1", "current": true, "connected": true, "client": {"label": "This desktop", "os": "Linux"}}],
     }}));
     state.clients_open = true;

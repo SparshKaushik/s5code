@@ -16,11 +16,11 @@ run=""
 for _ in $(seq 1 24); do
   run=$(gh run list --commit "$sha" --limit 20 --json databaseId,workflowName -q "[.[] | select(.workflowName == \"$name\")][0].databaseId // empty")
   [ -n "$run" ] && break
-  sleep 5
+  sleep 15
 done
 [ -n "$run" ] || { echo "no CI run for $sha on $ref" >&2; exit 1; }
 echo "CI run $run ($ref @ ${sha:0:10})" >&2
-if ! gh run watch "$run" --exit-status --interval 20 >/dev/null 2>&1; then
+if ! gh run watch "$run" --exit-status --interval 90 >/dev/null 2>&1; then
   gh run view "$run" --log-failed 2>/dev/null | grep -E "error(\[|:)|-->|panicked|FAILED|^ *= " | head -80 >&2
   exit 1
 fi

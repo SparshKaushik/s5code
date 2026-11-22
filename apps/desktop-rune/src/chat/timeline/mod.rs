@@ -21,7 +21,7 @@ mod link;
 pub(crate) mod worktree_setup;
 mod inspector;
 mod history;
-mod md_links;
+pub(crate) mod md_links;
 mod math;
 pub(crate) mod citation;
 mod media;
@@ -468,6 +468,9 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
     if let Some(page) = crate::chat::details::html_render::row_view(app, item, t) {
         return page;
+    }
+    if let Some(frame) = crate::panel::mcp_app::row_view(app, item, t) {
+        return frame;
     }
     if kind == "assistant_message" {
         // The same inset as a top-level assistant row.
