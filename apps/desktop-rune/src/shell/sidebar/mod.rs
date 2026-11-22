@@ -12,6 +12,7 @@ mod menu;
 pub(crate) mod row;
 pub mod share;
 mod snooze;
+mod stage;
 mod updates;
 
 pub use self::row::monogram;
@@ -136,6 +137,8 @@ pub struct Ui {
     jump_held: Option<i64>,
     /// The width the rail set, read from the window prefs on first use.
     width: std::cell::Cell<Option<f32>>,
+    /// The Dev or Nightly header artwork, rasterized for the current width.
+    stage: stage::Art,
     /// Each matched thread's first message match (`threadId`, `snippet`, `source`), by `content`.
     content_matches: Vec<serde_json::Value>,
     content_due: Option<(i64, String)>,
@@ -165,6 +168,14 @@ impl Ui {
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("sidebar-home", scene_home),
+    ("sidebar-stage-nightly", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("nightly-artwork"));
+    }),
+    ("sidebar-stage-dev", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("dev-artwork"));
+    }),
     // Search with message matches: a title hit with its excerpt, and a thread found only by one.
     ("sidebar-search-excerpts", |s| {
         scene_home(s);
@@ -1336,21 +1347,29 @@ const MIN_W: f32 = 208.0;
 /// The main area keeps 40rem beside the sidebar.
 const MAIN_MIN_W: f32 = 640.0;
 
-/// `clampThreadSidebarWidth`: at least 13rem, and no wider than leaves the main area 40rem.
-fn clamp_width(width: f32, viewport: Option<f32>) -> f32 {
-    let max = viewport.map_or(f32::MAX, |v| (v.floor() - MAIN_MIN_W).max(MIN_W));
-    width.max(MIN_W).min(max).round()
+/// `clampThreadSidebarWidth`: at least 13rem and the header's brand and history buttons
+/// (`resolveThreadSidebarMinimumWidth`), and no wider than leaves the main area 40rem.
+fn clamp_width(width: f32, viewport: Option<f32>, brand: f32) -> f32 {
+    let min = MIN_W.max(brand.ceil());
+    let max = viewport.map_or(f32::MAX, |v| (v.floor() - MAIN_MIN_W).max(min));
+    width.max(min).min(max).round()
+}
+
+/// The window's width and the header's natural width (`SidebarBrandWidthProbe`).
+fn bounds(cx: &mut Cx<App>) -> (Option<f32>, f32) {
+    (cx.layout_with("shell", |r| r[2]), chrome::brand_width(cx.titlebar_inset()))
 }
 
 /// The sidebar's content width.
-pub fn width(s: &App, viewport: Option<f32>) -> f32 {
+pub fn width(s: &App, cx: &mut Cx<App>) -> f32 {
+    let (viewport, brand) = bounds(cx);
     let ui = &s.ui.shell.sidebar;
     let stored = ui.width.get().unwrap_or_else(|| {
         let saved = crate::desktop::prefs().get::<f32>(WIDTH_KEY).filter(|w| w.is_finite()).unwrap_or(layout::SIDEBAR_W);
         ui.width.set(Some(saved));
         saved
     });
-    clamp_width(stored, viewport)
+    clamp_width(stored, viewport, brand)
 }
 
 fn save_width(width: Option<f32>) {
@@ -1363,7 +1382,7 @@ fn save_width(width: Option<f32>) {
 }
 
 /// `SidebarRail`: drag to resize, double-click for the default width, both kept across launches.
-fn rail(viewport: Option<f32>) -> El {
+fn rail(width: f32, (viewport, brand): (Option<f32>, f32)) -> El {
     el().key("sb-rail")
         .role("separator")
         .label("Resize Sidebar")
@@ -1373,7 +1392,7 @@ fn rail(viewport: Option<f32>) -> El {
         .cursor(rune::Cursor::ResizeColumn)
         .on_drag(move |s: &mut App, d, _| {
             if d.phase == rune::Phase::Down {
-                d.data = width(s, viewport);
+                d.data = width;
                 if d.clicks == 2 {
                     s.ui.shell.sidebar.width.set(Some(layout::SIDEBAR_W));
                     save_width(None);
@@ -1383,7 +1402,7 @@ fn rail(viewport: Option<f32>) -> El {
             if d.cancelled() || d.clicks == 2 {
                 return;
             }
-            let next = clamp_width(d.data + d.dx, viewport);
+            let next = clamp_width(d.data + d.dx, viewport, brand);
             s.ui.shell.sidebar.width.set(Some(next));
             if d.phase == rune::Phase::Up {
                 save_width(Some(next));
@@ -1618,12 +1637,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     folders::menu(s, t, overlays);
     drafts::menu(s, t, overlays);
     // The width plus 1pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
-    let viewport = cx.layout_with("shell", |r| r[2]);
-    let w = width(s, viewport);
+    let w = width(s, cx);
+    let art = stage::variant(s).and_then(|v| stage::backdrop(s, t, v, w + 1.0, cx.env().scale));
     let content = col()
         .w(w + 1.0)
         .h_full()
-        .child(chrome::header(s, t, inset))
+        .child(chrome::header(s, t, inset, art, stage::pill(s)))
         .child(chrome::search_bar(s, t))
         .child(list)
         .child(chrome::footer(s, &model, t));
@@ -1634,7 +1653,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .fill(t.sb.sidebar)
         .child(content)
         .child(el().w(1.0).h_full().fill(t.sb.contrast_sidebar_border))
-        .child(rail(viewport))
+        .child(rail(w, bounds(cx)))
 }
 
 impl Shelf {
@@ -1725,12 +1744,11 @@ mod tests {
 
     #[test]
     fn the_width_stays_between_13rem_and_what_leaves_the_main_area_40rem() {
-        assert_eq!(clamp_width(100.0, None), MIN_W);
-        assert_eq!(clamp_width(300.4, Some(1400.0)), 300.0);
-        assert_eq!(clamp_width(900.0, Some(1200.0)), 560.0);
-        assert_eq!(clamp_width(300.0, Some(700.0)), MIN_W, "a narrow window still keeps the minimum");
-        let s = App::new();
-        assert_eq!(width(&s, Some(1400.0)), layout::SIDEBAR_W, "headless prefs start at the default");
+        assert_eq!(clamp_width(100.0, None, 0.0), MIN_W);
+        assert_eq!(clamp_width(300.4, Some(1400.0), 0.0), 300.0);
+        assert_eq!(clamp_width(900.0, Some(1200.0), 0.0), 560.0);
+        assert_eq!(clamp_width(300.0, Some(700.0), 0.0), MIN_W, "a narrow window still keeps the minimum");
+        assert_eq!(clamp_width(100.0, None, chrome::brand_width(28.0)), 245.0, "the macOS header's brand and history buttons stay whole");
     }
 
     #[test]

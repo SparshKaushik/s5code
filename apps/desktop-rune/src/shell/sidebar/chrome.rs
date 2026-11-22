@@ -26,8 +26,22 @@ pub fn icon_button(t: &T, key: &str, glyph: &'static rune::Icon, size: f32, icon
 }
 
 /// The brand row under the traffic lights: collapse toggle, wordmark, back and forward.
-pub fn header(s: &App, t: &T, inset: f32) -> El {
+/// Where the history buttons start: just after the brand (`SidebarBrandMark` and `gap-1`).
+fn nav_left(inset: f32) -> f32 {
+    brand_left(inset) + 36.0 + 61.45
+}
+
+/// The header's natural width up to the history buttons' end.
+pub(super) fn brand_width(inset: f32) -> f32 {
+    nav_left(inset) + 56.0
+}
+
+pub fn header(s: &App, t: &T, inset: f32, art: Option<El>, pill: Option<&str>) -> El {
     let left = brand_left(inset);
+    // `media-navigation` on the artwork: white controls and wordmark.
+    let on_art = art.is_some();
+    let white = rune::Color::WHITE;
+    let control = if on_art { white.alpha_mul(0.9) } else { t.c.muted_foreground };
     let ui = &s.ui.shell.sidebar;
     // `SidebarHistoryButton`: "Go back" / "Go forward" with the shortcut, inert when there is
     // nowhere to go.
@@ -44,16 +58,17 @@ pub fn header(s: &App, t: &T, inset: f32) -> El {
             .size(28.0, 28.0)
             .radius(layout::CONTROL_RADIUS)
             .center()
-            .child(icon(glyph, 14.0).color(t.c.muted_foreground));
-        if enabled { b.hover(t.sb.sidebar_row_hover).press(t.sb.sidebar_row_active).cursor(Cursor::Pointer).on_press(go) } else { b.opacity(0.5) }
+            .child(icon(glyph, 14.0).color(control));
+        let (hover, press) = if on_art { (white.alpha_mul(0.1), white.alpha_mul(0.1)) } else { (t.sb.sidebar_row_hover, t.sb.sidebar_row_active) };
+        if enabled { b.hover(hover).press(press).cursor(Cursor::Pointer).on_press(go) } else { b.opacity(0.5) }
     };
-    el().key("sb-header")
-        .w_full()
-        .h(layout::TOPBAR_H)
-        .shrink()
-        .window_drag()
+    let mut header = el().key("sb-header").w_full().h(layout::TOPBAR_H).shrink().window_drag();
+    if let Some(art) = art {
+        header = header.child(art);
+    }
+    let header = header
         .child(
-            icon_button(t, "sb-toggle", &brand::PANEL_LEFT_CLOSE, layout::TITLEBAR_CONTROL, 16.0, t.c.muted_foreground, false)
+            icon_button(t, "sb-toggle", &brand::PANEL_LEFT_CLOSE, layout::TITLEBAR_CONTROL, 16.0, control, false)
                 .absolute(left, 12.0)
                 .role("button")
                 .label("Toggle main sidebar")
@@ -69,11 +84,16 @@ pub fn header(s: &App, t: &T, inset: f32) -> El {
                 .absolute(left + 36.0, 12.0)
                 .cursor(Cursor::Pointer)
                 .on_press(|s: &mut App| super::go(s, crate::Route::Home { project_id: None }))
-                .child(icon(&brand::T3_WORDMARK, 16.84).color(t.sb.sidebar_foreground).absolute(3.0, 8.92))
-                .child(text("Code").font(theme::SM_MEDIUM).color(t.sb.muted_foreground).absolute(23.84, 4.0)),
+                .child(icon(&brand::T3_WORDMARK, 16.84).color(if on_art { white } else { t.sb.sidebar_foreground }).absolute(3.0, 8.92))
+                .child(text("Code").font(theme::SM_MEDIUM).color(if on_art { white.alpha_mul(0.7) } else { t.sb.muted_foreground }).absolute(23.84, 4.0)),
         )
-        .child(nav("sb-back", &i::ARROW_LEFT, "Go back", "navigation.back", !ui.back.is_empty(), super::go_back).absolute(188.45, 12.0))
-        .child(nav("sb-forward", &i::ARROW_RIGHT, "Go forward", "navigation.forward", !ui.forward.is_empty(), super::go_forward).absolute(216.45, 12.0))
+        .child(nav("sb-back", &i::ARROW_LEFT, "Go back", "navigation.back", !ui.back.is_empty(), super::go_back).absolute(nav_left(inset), 12.0))
+        .child(nav("sb-forward", &i::ARROW_RIGHT, "Go forward", "navigation.forward", !ui.forward.is_empty(), super::go_forward).absolute(nav_left(inset) + 28.0, 12.0));
+    // The "Version pill" identification mode.
+    match pill {
+        Some(label) => header.child(crate::kit::badge(label, "secondary", "sm", t).key("sb-stage-pill").absolute(brand_width(inset) + 4.0, 16.0)),
+        None => header,
+    }
 }
 
 /// Shown in place of the header while the sidebar is collapsed.

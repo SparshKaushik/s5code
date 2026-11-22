@@ -983,7 +983,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let items = model.items(ui);
     let jumps = super::jump_labels(s, model);
-    let width = super::width(s, cx.layout_with("shell", |r| r[2]));
+    let width = super::width(s, cx);
     if let Some(h) = &ui.hover {
         ui.hover_rect.set(cx.layout(&format!("sb-row-{h}")).map(|r| [r[0], r[1], r[2], r[3]]));
     }
