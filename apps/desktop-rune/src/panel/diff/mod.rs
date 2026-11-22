@@ -1777,6 +1777,10 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
     let turns = turns(app);
     let current = turn_of(&ui.scope, &turns);
     let latest = matches!(ui.scope, Scope::Turn(_)) && current == turns.first().map(|t| t.count);
+    let measure = |label: &str, font| rune::text::measure(label, &[], font, None).0.ceil();
+    // The submenu sizes to its widest row, as web's does: the menu's padding and border, the
+    // item's padding, label, gap-2, time, and the radio's check.
+    let turns_w = turns.iter().map(|turn| measure(&format!("Turn {}", turn.count), theme::TEXT_SM) + 8.0 + measure(&clock(app, turn.at), theme::TEXT_XS)).fold(0.0, f32::max) + 60.0;
     let turn_entries: Vec<MenuEntry> = turns
         .iter()
         .map(|turn| {
@@ -1784,7 +1788,8 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
             MenuEntry::item(
                 MenuItem::new(format!("Turn {n}"))
                     .radio(matches!(ui.scope, Scope::Turn(_)) && current == Some(n))
-                    .shortcut(clock(app, turn.at))
+                    // `ml-auto text-xs tabular-nums text-muted-foreground`, not a shortcut's style.
+                    .trailing(text(clock(app, turn.at)).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground))
                     .on_select(move |s: &mut App| {
                         open_turn(s, n);
                         load(s);
@@ -1832,7 +1837,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         .item(MenuItem::new("Changes").radio(ui.scope == Scope::Branch).on_select(|s: &mut App| select(s, Scope::Branch)))
         .item(MenuItem::new("Uncommitted").radio(ui.scope == Scope::Unstaged).on_select(|s: &mut App| select(s, Scope::Unstaged)))
         .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, latest_turn(s))))
-        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
+        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).submenu_min_width(turns_w.max(160.0)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
         .item(MenuItem::new("Commits").submenu(commit_entries, sub == Some(Sub::Commits)).submenu_min_width(320.0).on_submenu_change(|s: &mut App, on| {
