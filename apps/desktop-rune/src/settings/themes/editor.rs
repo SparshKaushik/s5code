@@ -313,6 +313,11 @@ fn clamp_pos([x, y]: [f32; 2], width: f32, [vw, vh]: [f32; 2]) -> [f32; 2] {
 }
 
 /// The resize handle's bounds: the minimum size, and the window's edge past the panel's corner.
+/// Web's `max-h-[min(42rem,calc(100dvh-6rem))]`, never below the resize minimum.
+fn default_height(window: Option<[f32; 2]>) -> f32 {
+    window.map_or(672.0, |[_, vh]| (vh - 96.0).clamp(MIN_H, 672.0))
+}
+
 fn clamp_size([w, h]: [f32; 2], [x, y]: [f32; 2], [vw, vh]: [f32; 2]) -> [f32; 2] {
     [w.clamp(MIN_W, (vw - MARGIN - x).max(MIN_W)), h.clamp(MIN_H, (vh - MARGIN - y).max(MIN_H))]
 }
@@ -678,7 +683,9 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         .child(header);
     panel = match size {
         Some([_, h]) if !minimized => panel.h(h),
-        _ => panel.max_h(s.ui.desktop.window_size().map_or(672.0, |[_, vh]| (vh - 2.0 * MARGIN).min(672.0))),
+        // The scrolling body has no intrinsic height, so the open panel takes web's cap.
+        _ if !minimized => panel.h(default_height(s.ui.desktop.window_size())),
+        _ => panel,
     };
     if !minimized {
         let save_button = Button::new(if editing.is_some() { "Save changes" } else { "Create theme" }).size("sm").disabled(s.ui.settings.theme_name.text.trim().is_empty()).on_press(save);
@@ -744,6 +751,9 @@ mod tests {
 
     #[test]
     fn the_panel_stays_inside_the_window_and_resizes_within_it() {
+        assert_eq!(default_height(Some([1200.0, 900.0])), 672.0, "42rem on a tall window");
+        assert_eq!(default_height(Some([1200.0, 600.0])), 504.0, "the viewport less 6rem");
+        assert_eq!(default_height(Some([800.0, 260.0])), MIN_H);
         let window = [1200.0, 800.0];
         assert_eq!(clamp_pos([-40.0, -5.0], WIDTH, window), [MARGIN, MARGIN]);
         assert_eq!(clamp_pos([1100.0, 900.0], WIDTH, window), [1200.0 - WIDTH - MARGIN, 800.0 - 48.0]);
