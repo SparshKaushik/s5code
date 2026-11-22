@@ -666,8 +666,20 @@ fn serve_confirm(s: &App, t: &T, layers: &mut Vec<El>) {
     }
 }
 
-/// Electron's `setServerExposureMode`, then the server restart its relaunch did.
+/// Web shows a failed change inline and as a toast.
+fn toast_failure(s: &mut App, title: &str) {
+    if let Some(error) = s.ui.desktop.exposure.error.clone() {
+        crate::shell::palette::toast_error(s, title, Some(&error));
+    }
+}
+
 fn set(s: &mut App, network: bool) {
+    apply_network(s, network);
+    toast_failure(s, "Could not update network access");
+}
+
+/// Electron's `setServerExposureMode`, then the server restart its relaunch did.
+fn apply_network(s: &mut App, network: bool) {
     let port = port(s);
     let ui = &mut s.ui.desktop.exposure;
     ui.pending = None;
@@ -695,9 +707,14 @@ fn set(s: &mut App, network: bool) {
     crate::host::restart();
 }
 
+fn set_serve(s: &mut App, enabled: bool, port: Option<u16>) {
+    apply_serve(s, enabled, port);
+    toast_failure(s, if enabled { "Could not set up Tailscale HTTPS" } else { "Could not disable Tailscale HTTPS" });
+}
+
 /// Electron's `setTailscaleServeEnabled`: persists Serve and its port (defaults omitted), and
 /// restarts the server only when either changed.
-fn set_serve(s: &mut App, enabled: bool, port: Option<u16>) {
+fn apply_serve(s: &mut App, enabled: bool, port: Option<u16>) {
     let ui = &mut s.ui.desktop.exposure;
     ui.serve_dialog = None;
     ui.error = None;

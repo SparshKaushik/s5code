@@ -380,15 +380,17 @@ fn set_local(s: &mut App, enabled: bool) {
 }
 
 /// Web `savedBackendStatus`, from `env::status`'s wording.
-fn saved_status(off: bool, status: &str) -> (String, bool) {
-    if off {
-        return ("Off".into(), false);
-    }
-    match status {
-        "Connected" => ("Connected".into(), false),
-        "Connecting..." => ("Connecting".into(), false),
-        "Reconnecting..." => ("Reconnecting".into(), true),
-        other => (other.trim_end_matches('.').to_owned(), true),
+/// Web `savedBackendStatus`: the row's status and whether it reads as an error. A refused
+/// credential is web's blocked "error" phase; any other drop reconnects.
+fn saved_status(off: bool, conn: Option<(&s5_net::Conn, bool)>) -> (String, bool) {
+    let with = |phase: &str, reason: &str| if reason.is_empty() { phase.to_owned() } else { format!("{phase}: {reason}") };
+    match conn {
+        _ if off => ("Off".into(), false),
+        None => ("Not connected".into(), false),
+        Some((s5_net::Conn::Open, true)) => ("Connected".into(), false),
+        Some((s5_net::Conn::Open | s5_net::Conn::Connecting, _)) => ("Connecting".into(), false),
+        Some((s5_net::Conn::Closed(reason), _)) if env::rejected(reason) => (with("Connection failed", reason), true),
+        Some((s5_net::Conn::Closed(reason), _)) => (with("Reconnecting", reason), true),
     }
 }
 
@@ -422,7 +424,7 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
         Some(state) => (state, false),
         // Web `savedBackendStatus` "unsupported"; the reason is the tooltip.
         None if env::outdated(s, &saved.id).is_some() => ("Client not supported".to_owned(), false),
-        None => saved_status(off, &env::status(s, &saved.id)),
+        None => saved_status(off, env::source(s, &saved.id).map(|src| (&src.state().conn, src.state().shell_ready))),
     };
     // Web `environmentTransportLabel`: SSH and its target, else the address.
     let transport = env::ssh::transport(s, &saved.id).unwrap_or_else(|| saved.base.clone());
@@ -508,8 +510,10 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
             row().mt(4.0).gap(8.0).center_y().child(el().w(6.0).h(6.0).radius(3.0).fill(color)).child(text(line.clone()).font(theme::XS_MEDIUM).color(color).truncate().help(line).shrink().min_w(0.0)),
         );
     }
-    let switch = kit::Switch::new(!off)
-        .label(format!("{} {}", if off { "Switch on" } else { "Switch off" }, saved.label))
+    let outdated = env::outdated(s, &saved.id).is_some();
+    // Web shows an unsupported server switched off.
+    let switch = kit::Switch::new(!off && !outdated)
+        .label(format!("{} {}", if off || outdated { "Switch on" } else { "Switch off" }, saved.label))
         .hide_label()
         .size("sm")
         .on_toggle(move |s: &mut App| {
@@ -517,17 +521,16 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
             env::set_enabled(s, &id, on);
         })
         .build(&kit::theme(t));
-    // Web's row `ServerUpdateAction` (icon appearance) while this server is behind the client.
-    // An outdated server is not connected, but its requests-only socket can still update it.
+    // Web's row `ServerUpdateAction` (icon appearance) while this server is behind the client, or
+    // `OutdatedServerUpdateAction` (a text button) for an outdated server's requests-only socket.
     let update = (gap.is_some() && !updating && super::machines::row_update(s, &saved.id)).then(|| {
         let label = if super::machines::row_failure(s, &saved.id).is_some() { "Retry update" } else { "Update" };
         let key = saved.id.clone();
-        kit::icon_button(&icons::CIRCLE_ARROW_UP, label)
-            .variant("ghost-muted")
-            .size("icon-xs")
-            .on_press(move |s: &mut App| super::machines::update_row(s, &key))
-            .build(t)
-            .help(label)
+        let press = move |s: &mut App| super::machines::update_row(s, &key);
+        if outdated {
+            return kit::Button::new(label).variant("outline").size("xs").on_press(press).build(t);
+        }
+        kit::icon_button(&icons::CIRCLE_ARROW_UP, label).variant("ghost-muted").size("icon-xs").on_press(press).build(t).help(label)
     });
     let more = saved.id.clone();
     let line = row()
@@ -1752,6 +1755,13 @@ pub(super) fn scene(s: &mut App, open: &str) {
             s.ui.env.alternates.insert("env-box".into(), vec![alt("http://192.168.1.20:3773"), alt("https://box.example.com")]);
         }
         "machines" | "update-confirm" => super::machines::scene(s, open),
+        // A server older than this client, saved to be updated over its requests-only socket.
+        "outdated" => {
+            s.ui.env.outdated.insert("env-box".into(), json!({"environmentId": "env-box", "label": "Hetzner box", "serverVersion": "0.1.5", "capabilities": {"serverSelfUpdate": "boot-service"}}));
+            if let Some(crate::data::Source::Fixture(state)) = env::source_mut(s, "env-box") {
+                state.conn = s5_net::Conn::Open;
+            }
+        }
         "link" => {
             // A second machine with the same name, told apart by its address.
             s.ui.env.saved.push(Saved { id: "env-box-2".into(), label: "Hetzner box".into(), base: "http://10.0.0.7:3773".into(), bearer: String::new() });
@@ -1884,9 +1894,14 @@ mod tests {
         assert_eq!(route_label("https://Backend.Example.com./x"), "backend.example.com");
         assert_eq!(mcp_url("https://box.example.com:8443/app?x=1").as_deref(), Some("https://box.example.com:8443/mcp"));
         assert_eq!(mcp_url("not a url"), None);
-        assert_eq!(saved_status(true, "Connected"), ("Off".into(), false));
-        assert_eq!(saved_status(false, "Connecting..."), ("Connecting".into(), false));
-        assert_eq!(saved_status(false, "Reconnecting..."), ("Reconnecting".into(), true));
+        use s5_net::Conn;
+        assert_eq!(saved_status(true, Some((&Conn::Open, true))), ("Off".into(), false));
+        assert_eq!(saved_status(false, None), ("Not connected".into(), false));
+        assert_eq!(saved_status(false, Some((&Conn::Open, false))), ("Connecting".into(), false));
+        assert_eq!(saved_status(false, Some((&Conn::Closed(String::new()), false))), ("Reconnecting".into(), true));
+        assert_eq!(saved_status(false, Some((&Conn::Closed("refused".into()), false))), ("Reconnecting: refused".into(), true));
+        let denied = Conn::Closed("HTTP error: 401 Unauthorized".into());
+        assert_eq!(saved_status(false, Some((&denied, false))), ("Connection failed: HTTP error: 401 Unauthorized".into(), true));
     }
 
     #[test]

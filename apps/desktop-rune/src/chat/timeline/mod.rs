@@ -21,7 +21,7 @@ mod link;
 pub(crate) mod worktree_setup;
 mod inspector;
 mod history;
-mod md_links;
+pub(crate) mod md_links;
 mod math;
 pub(crate) mod citation;
 mod media;

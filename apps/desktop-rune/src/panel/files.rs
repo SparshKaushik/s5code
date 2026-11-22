@@ -1059,9 +1059,9 @@ fn tree(ui: &Ui, t: &T) -> El {
     for r in visible {
         let selected = !r.dir && r.path == ui.selected;
         let glyph = match (r.dir, r.open) {
-            (true, true) => &icons::FOLDER_OPEN,
-            (true, false) => &icons::FOLDER,
-            _ => &icons::FILE,
+            (true, true) => icon(&icons::FOLDER_OPEN, 14.).size(14., 14.).color(t.c.muted_foreground),
+            (true, false) => icon(&icons::FOLDER, 14.).size(14., 14.).color(t.c.muted_foreground),
+            _ => crate::panel::diff::file_icon(&r.path, 14., t.dark),
         };
         let mut line = row()
             .key(format!("files-row-{}", r.path))
@@ -1081,7 +1081,7 @@ fn tree(ui: &Ui, t: &T) -> El {
             } else {
                 el().size(12., 12.)
             })
-            .child(icon(glyph, 14.).size(14., 14.).color(t.c.muted_foreground))
+            .child(glyph)
             .child(text(name(&r.path).to_string()).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate().grow(1.).min_w(0.));
         if selected {
             line = line.fill(t.c.accent);

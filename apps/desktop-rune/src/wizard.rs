@@ -14,7 +14,7 @@ use crate::{App, Route, data, icons, kit};
 const STAGES: [&str; 3] = ["Connect", "Agents", "Projects"];
 /// `PRIMARY_AGENT_DRIVERS`.
 const AGENTS: [(&str, &str); 2] = [("codex", "Codex"), ("claudeAgent", "Claude Code")];
-const PRIVACY_POLICY_URL: &str = "https://t3.codes/privacy";
+const PRIVACY_POLICY_URL: &str = "https://t3.codes/privacy-policy";
 /// `RECENT_PROJECT_WINDOW_MS` and `DEFAULT_SELECTION_MIN_THREADS` (onboarding/projectImport.logic.ts).
 const RECENT_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_SELECTION_MIN_THREADS: u64 = 3;
