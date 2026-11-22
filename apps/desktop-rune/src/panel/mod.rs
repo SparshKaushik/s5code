@@ -11,6 +11,7 @@ mod file_preview;
 mod files;
 mod history;
 pub(crate) mod html_frame;
+pub(crate) mod mcp_app;
 pub mod popout;
 mod proactive;
 pub(crate) mod pull_requests;
@@ -84,6 +85,7 @@ pub struct Ui {
     saved: Option<Value>,
     pub waker: Option<Waker>,
     pub(crate) html_frames: html_frame::Frames,
+    pub(crate) mcp_apps: mcp_app::Apps,
     proactive: proactive::Watch,
     history: history::History,
 }
@@ -118,6 +120,7 @@ impl Default for Ui {
             saved: None,
             waker: None,
             html_frames: Default::default(),
+            mcp_apps: Default::default(),
             proactive: Default::default(),
             history: Default::default(),
         }
@@ -647,7 +650,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | terminal::poll(app, tx)
         | drawer::poll(app)
         | preview::poll(app, tx)
-        | html_frame::poll(app);
+        | html_frame::poll(app)
+        | mcp_app::poll(app);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
@@ -1437,6 +1441,7 @@ pub(super) fn notice(t: &T, message: &str) -> El {
 
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
     let mut out = vec![];
+    mcp_app::overlay(app, t, &mut out);
     preview::pip(app, t, &mut out);
     device::float(app, t, &mut out);
     if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {

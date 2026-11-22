@@ -51,6 +51,13 @@ mod chat {
         }
     }
 }
+mod panel {
+    pub mod mcp_app {
+        pub fn reference(_: &serde_json::Value) -> Option<()> {
+            None
+        }
+    }
+}
 fn main() {
     let base = std::env::var("S5_SERVER_URL").unwrap_or("http://127.0.0.1:13773".into());
     let token = std::fs::read_to_string(
