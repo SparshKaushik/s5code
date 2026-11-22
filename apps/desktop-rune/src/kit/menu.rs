@@ -3,7 +3,12 @@ use super::actions::Acts;
 use crate::theme::{self, AlphaMul};
 use rune::{El, Icon, PointerPress, Shadow, Tx, col, el, icon, row, text};
 use rune_kit::{Kit, Placement, State};
+use std::any::Any;
 use std::rc::Rc;
+
+/// An item's action, typed by the state it was given, for a native pop-up menu to call back.
+type Pick = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
+type NativePopup = Rc<dyn Fn(rune::PopupMenu, rune::PopupAnchor, Rc<Vec<(String, Pick)>>) -> El>;
 
 /// A compositional menu row. `MenuEntry::item(MenuItem::new("Open"))`.
 pub enum MenuEntry {
@@ -38,6 +43,7 @@ pub struct MenuItem {
     trailing: Option<El>,
     description: Option<String>,
     acts: Acts,
+    pick: Option<Pick>,
 }
 impl MenuItem {
     #[cfg(test)]
@@ -68,6 +74,7 @@ impl MenuItem {
             trailing: None,
             description: None,
             acts: Acts::default(),
+            pick: None,
         }
     }
     pub fn icon(mut self, glyph: &'static Icon) -> Self {
@@ -154,11 +161,25 @@ impl MenuItem {
         self
     }
     pub fn on_select<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
-        self.acts.press(f);
+        let f = Rc::new(f);
+        let pick = f.clone();
+        self.pick = Some(Rc::new(move |s: &mut dyn Any, _: &mut Tx| {
+            if let Some(s) = s.downcast_mut::<S>() {
+                pick(s);
+            }
+        }));
+        self.acts.press(move |s: &mut S| f(s));
         self
     }
     pub fn on_select_tx<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
-        self.acts.press_tx(f);
+        let f = Rc::new(f);
+        let pick = f.clone();
+        self.pick = Some(Rc::new(move |s: &mut dyn Any, tx: &mut Tx| {
+            if let Some(s) = s.downcast_mut::<S>() {
+                pick(s, tx);
+            }
+        }));
+        self.acts.press_tx(move |s: &mut S, tx: &mut Tx| f(s, tx));
         self
     }
 
@@ -419,6 +440,7 @@ pub struct Menu {
     anchor: Option<String>,
     width: Option<f32>,
     dismiss: Option<(El, Box<dyn FnOnce(El) -> El>)>,
+    popup: Option<NativePopup>,
 }
 impl Menu {
     pub fn new(key: impl Into<String>) -> Self {
@@ -436,6 +458,7 @@ impl Menu {
             anchor: None,
             width: None,
             dismiss: None,
+            popup: None,
         }
     }
     pub fn role(mut self, role: &'static str) -> Self {
@@ -504,6 +527,21 @@ impl Menu {
     pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         let close = Rc::new(f);
         let outside = close.clone();
+        let dismissed = close.clone();
+        self.popup = Some(Rc::new(move |menu: rune::PopupMenu, anchor: rune::PopupAnchor, picks: Rc<Vec<(String, Pick)>>| {
+            let dismissed = dismissed.clone();
+            let request = Rc::new(move |tx: &mut Tx| {
+                let (dismissed, picks) = (dismissed.clone(), picks.clone());
+                tx.popup_menu(menu.clone(), anchor.clone(), move |s: &mut S, picked, tx| {
+                    match picked.and_then(|id| picks.iter().find(|(item, _)| item == id)) {
+                        // The item's own handler closes the menu, as a drawn menu's row does.
+                        Some((_, pick)) => pick(s, tx),
+                        None => dismissed(s),
+                    }
+                });
+            });
+            el().absolute(0., 0.).size(0., 0.).on_layout_tx(move |_: &mut S, _, tx| request(tx))
+        }));
         self.dismiss = Some((
             el().key(format!("{}-scrim", self.key))
                 .absolute(0., 0.)
@@ -559,6 +597,20 @@ impl Menu {
     pub fn overlay(self, k: &Kit, layer: &mut Vec<El>) {
         self.build(k, layer);
     }
+    /// On macOS an open `native(true)` menu opens as an `NSMenu` through rune's pop-up menu: a
+    /// zero-size probe asks once its first layout runs. Menus it can't express stay drawn.
+    fn native_popup(&self, trigger: &str) -> Option<El> {
+        if !self.native || !rune::popup_menu_supported() {
+            return None;
+        }
+        let popup = self.popup.as_ref()?;
+        let (menu, picks) = native_menu(&self.entries)?;
+        let (anchor, probe) = match self.at {
+            Some((x, y)) => (rune::PopupAnchor::Point(x, y), format!("{}-native-{}-{}", self.key, x.round(), y.round())),
+            None => (rune::PopupAnchor::Key(trigger.to_owned()), format!("{}-native", self.key)),
+        };
+        Some(popup(menu, anchor, Rc::new(picks)).key(probe))
+    }
     pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {
         let key = self
             .anchor
@@ -569,6 +621,10 @@ impl Menu {
             .key(key.clone())
             .children(self.trigger.take().map(|t| t.expanded(self.open)));
         if !self.open {
+            return trigger;
+        }
+        if let Some(probe) = self.native_popup(&key) {
+            layer.push(probe);
             return trigger;
         }
         let dismiss = self.dismiss.take();
@@ -605,6 +661,71 @@ pub fn context_menu(key: impl Into<String>, trigger: El, point: Option<PointerPr
     } else {
         menu
     }
+}
+
+/// The native form of a menu's entries, with each item's action by id; `None` when an entry
+/// only a drawn menu shows (custom rows, or an enabled item with no action).
+fn native_menu(entries: &[MenuEntry]) -> Option<(rune::PopupMenu, Vec<(String, Pick)>)> {
+    fn walk(entries: &[MenuEntry], picks: &mut Vec<(String, Pick)>, next: &mut usize) -> Option<rune::PopupMenu> {
+        let mut menu = rune::PopupMenu::new();
+        for entry in entries {
+            menu = match entry {
+                MenuEntry::Separator => menu.separator(),
+                MenuEntry::Label(label) => {
+                    *next += 1;
+                    menu.item(rune::PopupItem::new(format!("label{next}"), label).enabled(false))
+                }
+                MenuEntry::Row(_) => return None,
+                MenuEntry::Item(item) => {
+                    if let Some((sub, _)) = &item.sub {
+                        menu.submenu(item.label.clone(), walk(sub, picks, next)?)
+                    } else {
+                        *next += 1;
+                        let id = format!("item{next}");
+                        let enabled = item.state != State::Disabled;
+                        match (&item.pick, enabled) {
+                            (Some(pick), true) => picks.push((id.clone(), pick.clone())),
+                            (None, true) => return None,
+                            _ => {}
+                        }
+                        let key = item.shortcut.as_deref().and_then(key_equivalent);
+                        let title = match (&item.shortcut, &key) {
+                            (Some(hint), None) => format!("{}  {hint}", item.label),
+                            _ => item.label.clone(),
+                        };
+                        let mut native = rune::PopupItem::new(id, title).enabled(enabled).checked(item.checked == Some(true));
+                        if let Some(key) = key {
+                            native = native.key_equivalent(key);
+                        }
+                        menu.item(native)
+                    }
+                }
+            };
+        }
+        Some(menu)
+    }
+    let mut picks = vec![];
+    let menu = walk(entries, &mut picks, &mut 0)?;
+    Some((menu, picks))
+}
+
+/// A shortcut hint as an accelerator: `⌘⇧N` or `Ctrl+N`; free text such as `1280 × 720` is not one.
+fn key_equivalent(hint: &str) -> Option<rune::Shortcut> {
+    let mut parts = vec![];
+    let mut rest = String::new();
+    for c in hint.chars() {
+        match c {
+            '⌘' => parts.push("cmd".to_owned()),
+            '⇧' => parts.push("shift".to_owned()),
+            '⌥' => parts.push("alt".to_owned()),
+            '⌃' => parts.push("ctrl".to_owned()),
+            c => rest.push(c),
+        }
+    }
+    if !rest.is_empty() {
+        parts.push(rest);
+    }
+    parts.join("+").parse().ok()
 }
 
 struct NativeColors {
@@ -663,4 +784,58 @@ pub(crate) fn glass(e: El, k: &Kit, native: bool) -> El {
             color: rune::Color::BLACK.alpha_mul(if k.dark { 0.8 } else { 0.55 }),
             ..Default::default()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct App(Vec<&'static str>);
+
+
+    fn titles(menu: &rune::PopupMenu, ids: &[&str]) -> Vec<(String, bool, bool)> {
+        ids.iter().map(|id| {
+            let item = menu.find(id).unwrap();
+            (item.title().to_owned(), item.is_enabled(), item.is_checked())
+        }).collect()
+    }
+
+    #[test]
+    fn a_native_menu_carries_items_checks_submenus_and_actions() {
+        let entries = vec![
+            MenuEntry::item(MenuItem::new("Rename").shortcut("⌘R").on_select(|s: &mut App| s.0.push("rename"))),
+            MenuEntry::Separator,
+            MenuEntry::item(MenuItem::new("Pinned").checked(true).on_select_tx(|s: &mut App, _: &mut Tx| s.0.push("pin"))),
+            MenuEntry::item(MenuItem::new("Desktop").shortcut("1280 × 720").disabled(true)),
+            MenuEntry::item(MenuItem::new("Move to").submenu(
+                vec![MenuEntry::item(MenuItem::new("Inbox").on_select(|s: &mut App| s.0.push("inbox")))],
+                false,
+            )),
+        ];
+        let (menu, picks) = native_menu(&entries).unwrap();
+        assert_eq!(
+            titles(&menu, &["item1", "item2", "item3", "item4"]),
+            [
+                ("Rename".into(), true, false),
+                ("Pinned".into(), true, true),
+                ("Desktop  1280 × 720".into(), false, false),
+                ("Inbox".into(), true, false),
+            ]
+        );
+        assert_eq!(picks.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["item1", "item2", "item4"]);
+    }
+
+    #[test]
+    fn menus_with_custom_rows_or_inert_items_stay_drawn() {
+        assert!(native_menu(&[MenuEntry::Row(el())]).is_none());
+        assert!(native_menu(&[MenuEntry::item(MenuItem::new("Nothing"))]).is_none());
+        assert!(native_menu(&[MenuEntry::item(MenuItem::new("Off").disabled(true))]).is_some());
+    }
+
+    #[test]
+    fn shortcut_glyphs_become_accelerators() {
+        assert_eq!(key_equivalent("⌘⇧N"), "shift+cmd+n".parse().ok());
+        assert_eq!(key_equivalent("Ctrl+N"), "ctrl+n".parse().ok());
+        assert_eq!(key_equivalent("1280 × 720"), None);
+    }
 }

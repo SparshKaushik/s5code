@@ -710,15 +710,15 @@ mod tests {
 
         // `KeybindingsConfigWarning`: the open button greys out without a file or an editor.
         keybindings_warning(&mut app, "bad key");
-        let notice = app.ui.shell.palette.notice.as_ref().expect("a warning");
-        assert!(notice.warning && notice.title == INVALID_KEYBINDINGS);
+        let notice = crate::shell::toast::newest(&app).expect("a warning");
+        assert!(notice.kind == crate::shell::toast::Kind::Warning && notice.title == INVALID_KEYBINDINGS);
         assert_eq!(notice.actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["Open keybindings.json"]);
         assert_eq!(notice.disabled, vec!["Open keybindings.json".to_string()], "FAILED: no keybindingsConfigPath, so the button is disabled");
         if let crate::data::Source::Fixture(st) = &mut app.src {
             st.config = Some(json!({ "keybindingsConfigPath": "/home/me/.t3/keybindings.json", "availableEditors": ["vscode"] }));
         }
         keybindings_warning(&mut app, "bad key");
-        assert!(app.ui.shell.palette.notice.as_ref().unwrap().disabled.is_empty(), "FAILED: a file and an editor enable it");
+        assert!(crate::shell::toast::newest(&app).unwrap().disabled.is_empty(), "FAILED: a file and an editor enable it");
     }
     #[test]
     fn pull_request_urls_and_numbers_resolve() {
