@@ -138,6 +138,7 @@ pub fn window_focus(s: &mut App, focused: bool) {
 }
 
 fn clear_pending(s: &mut App) {
+    os::withdraw(&s.ui.notify.pending);
     s.ui.notify.pending.clear();
     sync_badge(s);
 }
@@ -390,29 +391,104 @@ mod os {
         });
     }
 
-    /// On Linux, `notify-send --wait` prints the action the user clicked; older libnotify
-    /// without `--action` fails, and the plain notification shows instead.
+    /// Linux notifications on screen, by the thread they're for: a newer one for the same thread
+    /// replaces it, as web's notification `tag` does, and focusing the window closes them all.
+    #[derive(Default)]
+    pub struct Shown(Vec<(String, u32)>);
+
+    impl Shown {
+        pub fn id(&self, thread: &str) -> Option<u32> {
+            self.0.iter().find(|(t, _)| t == thread).map(|&(_, id)| id)
+        }
+
+        pub fn record(&mut self, thread: &str, id: u32) {
+            self.0.retain(|(t, _)| t != thread);
+            self.0.push((thread.to_owned(), id));
+        }
+
+        /// The notification closed (its helper exited); a replacement keeps its id.
+        pub fn forget(&mut self, thread: &str, id: u32) {
+            self.0.retain(|(t, i)| !(t == thread && *i == id));
+        }
+
+        pub fn take(&mut self, threads: &[String]) -> Vec<u32> {
+            let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|(t, _)| threads.contains(t));
+            self.0 = kept;
+            gone.into_iter().map(|(_, id)| id).collect()
+        }
+    }
+
+    static SHOWN: std::sync::Mutex<Shown> = std::sync::Mutex::new(Shown(Vec::new()));
+
+    pub fn notify_send_args(title: &str, body: &str, replace: Option<u32>) -> Vec<String> {
+        let mut args = vec!["--app-name".to_owned(), "S5 Code".to_owned(), "--action=default=Open".to_owned(), "--wait".to_owned(), "--print-id".to_owned()];
+        args.extend(replace.map(|id| format!("--replace-id={id}")));
+        args.extend([title.to_owned(), body.to_owned()]);
+        args
+    }
+
+    /// Closes the desktop notifications still showing for these threads.
+    pub fn withdraw(threads: &[String]) {
+        if cfg!(target_os = "linux") {
+            let ids = SHOWN.lock().map(|mut s| s.take(threads)).unwrap_or_default();
+            if ids.is_empty() {
+                return;
+            }
+            std::thread::spawn(move || {
+                for id in ids {
+                    let _ = std::process::Command::new("gdbus")
+                        .args(["call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.CloseNotification", &id.to_string()])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            });
+            return;
+        }
+        let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
+        rune_mac::notify::remove(&ids);
+    }
+
+    /// On Linux, `notify-send --wait --print-id` prints the notification's id, then the action
+    /// the user clicked; older libnotify without `--action` fails, and the plain notification
+    /// shows instead.
     pub fn notify(title: &str, body: &str, thread: &str, wake: Option<rune::Waker>) {
         if cfg!(target_os = "linux") {
+            use std::io::BufRead;
             let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
+            let replace = SHOWN.lock().ok().and_then(|s| s.id(&thread));
             std::thread::spawn(move || {
-                let out = std::process::Command::new("notify-send")
-                    .args(["--app-name", "S5 Code", "--action=default=Open", "--wait", &title, &body])
+                let child = std::process::Command::new("notify-send")
+                    .args(notify_send_args(&title, &body, replace))
                     .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
-                    .output();
-                match out {
-                    Ok(out) if out.status.success() => {
-                        if String::from_utf8_lossy(&out.stdout).trim() == "default" {
-                            super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
-                            if let Some(wake) = wake {
-                                wake();
+                    .spawn();
+                let Ok(mut child) = child else { return };
+                let (mut id, mut clicked) = (None, false);
+                if let Some(out) = child.stdout.take() {
+                    for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                        match (id, line.trim().parse::<u32>()) {
+                            (None, Ok(n)) => {
+                                id = Some(n);
+                                SHOWN.lock().map(|mut s| s.record(&thread, n)).ok();
                             }
+                            _ => clicked |= line.trim() == "default",
                         }
                     }
-                    _ => {
-                        let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
+                }
+                let ok = child.wait().is_ok_and(|s| s.success());
+                if let Some(n) = id {
+                    SHOWN.lock().map(|mut s| s.forget(&thread, n)).ok();
+                }
+                if clicked {
+                    super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
+                    if let Some(wake) = wake {
+                        wake();
                     }
+                } else if !ok && id.is_none() {
+                    let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
                 }
             });
             return;
@@ -529,6 +605,26 @@ mod tests {
         assert_eq!(args[6], format!("application://{}.desktop", crate::APP_ID));
         assert_eq!(args[7], "{'count': <int64 3>, 'count-visible': <true>}");
         assert_eq!(os::launcher_entry(0)[7], "{'count': <int64 0>, 'count-visible': <false>}");
+    }
+
+    #[test]
+    fn a_threads_linux_notification_replaces_its_last_until_focus_closes_them() {
+        let mut shown = os::Shown::default();
+        assert!(!os::notify_send_args("Thread completed", "Fix tests", None).iter().any(|a| a.starts_with("--replace-id")));
+        shown.record("t1", 7);
+        shown.record("t2", 9);
+        let args = os::notify_send_args("Input needed", "Fix tests", shown.id("t1"));
+        assert!(args.contains(&"--replace-id=7".to_owned()) && args.contains(&"--print-id".to_owned()), "{args:?}");
+        assert_eq!(args[args.len() - 2..], ["Input needed".to_owned(), "Fix tests".to_owned()]);
+
+        // The replaced helper exits with the id the replacement now holds: the newer one stays.
+        shown.record("t1", 7);
+        shown.forget("t1", 6);
+        assert_eq!(shown.id("t1"), Some(7));
+        assert_eq!(shown.take(&["t1".to_owned()]), vec![7]);
+        assert_eq!((shown.id("t1"), shown.id("t2")), (None, Some(9)));
+        shown.forget("t2", 9);
+        assert_eq!(shown.take(&["t2".to_owned()]), Vec::<u32>::new());
     }
 
     fn obs(attention: Option<&str>, completed_at: Option<i64>) -> Observation {
