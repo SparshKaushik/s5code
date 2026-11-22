@@ -1031,6 +1031,7 @@ mod tests {
         let list = vec![it("model", "Switch response model"), it("review", "Review the side diff")];
         assert_eq!(labels(ranked_slash(list, 1, "side")), ["/review"]);
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let d = draft_mut(&mut s);
         d.model = Some(("codex".into(), "m".into()));
         d.edit = rune::TextEdit::new("fix it /");
@@ -1070,6 +1071,7 @@ mod tests {
     #[test]
     fn side_chat_commands_follow_the_built_ins_on_a_thread_whose_server_has_side_chats() {
         let mut s = App::new();
+        s.client_settings.values.insert("planModeEnabled".into(), serde_json::json!(true));
         let id = s.state().threads.iter().find(|t| t["lineage"]["relationshipToParent"] != "subagent" && t["lineage"]["sideChat"] != true && t["delegatedFrom"].is_null()).map(|t| data::s(t, "id").to_owned()).unwrap();
         if let data::Source::Fixture(state) = &mut s.src {
             state.config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["sideChats"] = json!(true);
