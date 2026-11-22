@@ -1354,7 +1354,7 @@ pub fn width(s: &App, viewport: Option<f32>) -> f32 {
 }
 
 fn save_width(width: Option<f32>) {
-    let prefs = crate::desktop::prefs();
+    let mut prefs = crate::desktop::prefs();
     if let Some(w) = width {
         let _ = prefs.set(WIDTH_KEY, &w);
     } else {
