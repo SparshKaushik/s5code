@@ -158,12 +158,14 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     let mut detail_loaded = false;
+    let mut revised = false;
     if let Some(net) = s.src.net() {
         let u = &mut s.ui.pages.detail;
         if let Some(reply) = u.pending_detail.and_then(|id| net.take_reply(id)) {
             u.pending_detail = None;
             match reply {
                 Ok(d) => {
+                    revised = u.detail.as_ref().is_some_and(|old| revision_moved(old, &d));
                     follow_auto_merge(u, &d);
                     u.detail = Some(d);
                     u.error = None;
@@ -221,6 +223,10 @@ pub fn poll(s: &mut App) -> bool {
     if detail_loaded {
         super::pr_actions::want_stack(s);
     }
+    if revised {
+        // The Code tab's refresh token: its first page and viewed ticks read again.
+        super::pr_code::turn_finished(s);
+    }
     changed |= super::pr_edit::poll(s);
     let u = ui(s);
     if u.tab == 2 && u.entry.is_some() && u.files.is_none() && u.pending_diff.is_none() && u.diff_error.is_none() {
@@ -266,6 +272,11 @@ fn recorded_detail(recorded: &Value, entry: &Value) -> Value {
         d["body"] = json!("");
     }
     d
+}
+
+/// shouldRefreshPullRequestActivity: the same pull request read again at a newer revision.
+fn revision_moved(old: &Value, new: &Value) -> bool {
+    old["url"] == new["url"] && !field(new, "updatedAt").is_empty() && field(old, "updatedAt") != field(new, "updatedAt")
 }
 
 /// A finished turn rereads the open pull request, keeping it shown meanwhile.
@@ -2718,6 +2729,15 @@ mod tests {
         let draft = &s.ui.chat.composer.drafts[&crate::chat::composer::home_key(&project)];
         assert!(draft.edit.text.starts_with("Fix it.") && draft.contexts.len() == 1, "the task and its thread land in the draft");
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Checkout ready"));
+    }
+
+    #[test]
+    fn only_a_newer_revision_of_the_same_pull_request_rereads_the_diff() {
+        let d = |url: &str, at: &str| json!({"url": url, "updatedAt": at});
+        assert!(revision_moved(&d("u/1", "2026-11-14T10:00:00Z"), &d("u/1", "2026-11-14T11:00:00Z")));
+        assert!(!revision_moved(&d("u/1", "2026-11-14T10:00:00Z"), &d("u/1", "2026-11-14T10:00:00Z")));
+        assert!(!revision_moved(&d("u/1", "2026-11-14T10:00:00Z"), &d("u/2", "2026-11-14T11:00:00Z")), "another pull request is a first read");
+        assert!(!revision_moved(&d("u/1", "2026-11-14T10:00:00Z"), &json!({"url": "u/1"})));
     }
 
     #[test]
