@@ -19,7 +19,7 @@ pub mod automations;
 pub mod child_work;
 pub mod cleanup;
 pub mod editor_icons;
-mod git;
+pub(crate) mod git;
 pub mod html_render;
 pub mod items;
 pub mod pr;

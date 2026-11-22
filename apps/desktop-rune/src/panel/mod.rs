@@ -1124,6 +1124,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
     }),
+    ("panel-diff-tree", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+    }),
+    ("panel-diff-tree-split", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+        s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
+    }),
+    ("git-commit", crate::chat::details::git::commit_scene),
     ("panel-diff-split", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
