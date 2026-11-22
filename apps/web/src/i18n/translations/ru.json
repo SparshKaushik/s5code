@@ -1787,7 +1787,7 @@
   "4b4b64cc95acb8da": "Новый тред в...",
   "3f581e98c86df72a": "Новый тред без проекта",
   "e510d9a7b684fbfe": "Разобрать проблему",
-  "9639cada460837e2": "An agent investigates an S5 Code problem and helps file an issue",
+  "9639cada460837e2": "Агент изучит проблему с S5 Code и поможет создать issue",
   "44e13c9deb30e03c": "Найти в текущем треде",
   "2a5cc71a171eca12": "Найти на странице в браузере",
   "f496ce44f0581269": "Копировать ссылку на промпт",
@@ -2684,9 +2684,9 @@
   "78a04e0e625c0990": "Ошибка обновления",
   "c24de5eb69373a55": "Эта сборка {build} игнорирует выпуски {track}. Проверьте канал обновлений в настройках, чтобы завершить переключение.",
   "b02ae45a6109c93b": "Последняя версия",
-  "1c5117f64b245c69": "Install update {version} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "dff6c4bf3715f401": "Install update and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "0e2589ce9acae8c5": "On Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes.",
+  "1c5117f64b245c69": "Установить обновление {version} и перезапустить S5 Code?\n\nВсе выполняющиеся задачи будут прерваны. Убедитесь, что вы готовы.",
+  "dff6c4bf3715f401": "Установить обновление и перезапустить S5 Code?\n\nВсе выполняющиеся задачи будут прерваны. Убедитесь, что вы готовы.",
+  "0e2589ce9acae8c5": "В Windows S5 Code может оставаться закрытым несколько минут во время установки, а окно установщика может не появиться. По завершении установки S5 Code откроется автоматически.",
   "9ed4d8a1531b9631": "Автоматические обновления недоступны в этой сборке.",
   "c8c23435e780a60c": "Обновления недоступны",
   "1af5f9767371ffd7": "Проверить обновления",
@@ -3050,8 +3050,8 @@
   "7a4b3f3b83e121d7": "{organization} отключила анонимные данные об использовании.",
   "d85822b18e9475df": "Управляется {organization}.",
   "a6dd531d58080010": "Подключитесь к этому серверу, чтобы проверить выпуски.",
-  "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
-  "24aa7437d51814a3": "Could not check S5 Code releases from this environment. Check its internet connection.",
+  "9c1471a7fba9ae4a": "Этот сервер не поддерживает поиск выпусков. Обновите его перед сменой канала.",
+  "24aa7437d51814a3": "Не удалось проверить выпуски S5 Code в этой среде. Проверьте подключение к интернету.",
   "2fc0f7a698c95c90": "Подключитесь к серверу, чтобы проверить выпуски.",
   "922269f8691aa3ba": "Не удалось определить, работает ли это окружение на этом компьютере.",
   "35cade9cc8a01363": "Для перенаправления портов нужно приложение для компьютера.",
@@ -3154,10 +3154,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "на компьютере, который открыл эту страницу"
-      ]
+      "c": [" ", "на компьютере, который открыл эту страницу"]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3169,10 +3166,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "· этот доступ получит любой, кто это запустит"
-      ]
+      "c": [" ", "· этот доступ получит любой, кто это запустит"]
     }
   ],
   "c54cc9c75db9dc58": "Подтверждайте только тот вход, который вы только что начали.",
@@ -4959,7 +4953,7 @@
   "3647d568e852c86d": "Мобильные клиенты",
   "943d150a9045394c": "Мобильные устройства, получающие уведомления от ваших окружений.",
   "fe4e834cd36123fe": "Нет мобильных клиентов",
-  "c5edff105bb737bd": "Install S5 Code on your phone and sign in to S5 Connect to get push notifications and Live Activities.",
+  "c5edff105bb737bd": "Установите S5 Code на телефон и войдите в S5 Connect, чтобы получать push-уведомления и Live Activities.",
   "de111af2fe5653a6": "Не удалось загрузить мобильные клиенты",
   "5d138bbbce733537": "Настройки T3 Connect",
   "ff2d5256c7b57d7f": "Его больше нет в вашем аккаунте T3 Connect.",
@@ -11440,7 +11434,7 @@
   "404f92786aa9a22f": "Блоки кода, диффы, предпросмотр файлов и терминал.",
   "5897f301f96f8abe": "Типографика",
   "eb72dbf46620a039": "Семейство: {title}",
-  "e6f5ec60986ef92b": "Could not find the latest {label} release. Try again later.",
+  "e6f5ec60986ef92b": "Не удалось найти последний выпуск {label}. Повторите попытку позже.",
   "ddc1bd4973399c8d": "Проверка релизов…",
   "9ddd2f9f1c9367bc": "Не удалось переключиться на {label}",
   "3d71fc8318449b6c": "Приложение ничего не загрузило — ни {version}, ни новее.",
@@ -12212,29 +12206,29 @@
       }
     }
   ],
-  "be4aa84cb2b3cb39": "Tag {model}",
-  "3c904edb70864f02": "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
-  "010266eddc214efc": "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
-  "474b857fbe56ad48": "Pick the model this really is, and its rates apply to this usage everywhere.",
-  "a172f1734dab143c": "Search models…",
-  "36472b6d1faf065b": "No models match that search.",
-  "520fcdb3cc6b751b": "Search the models.dev catalog by model or provider name.",
+  "be4aa84cb2b3cb39": "Пометить {model}",
+  "3c904edb70864f02": "Сейчас этот расход учитывается как {model}. Выберите другую модель или снимите метку, чтобы не рассчитывать стоимость.",
+  "010266eddc214efc": "Предоставляется через {provider}. Выберите фактическую модель, чтобы её тарифы применялись к этому расходу во всех средах.",
+  "474b857fbe56ad48": "Выберите фактическую модель, чтобы её тарифы применялись к этому расходу во всех средах.",
+  "a172f1734dab143c": "Поиск моделей…",
+  "36472b6d1faf065b": "По запросу не найдено ни одной модели.",
+  "520fcdb3cc6b751b": "Ищите в каталоге models.dev по названию модели или поставщика.",
   "07a968019432d2ea": [
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " in /",
+    " ввод /",
     " ",
     {
       "i": 2,
       "k": "_gt_value_2",
       "v": "v"
     },
-    " out per 1M"
+    " вывод за 1 млн токенов"
   ],
-  "dc88cf91928fbec4": "Remove tag",
+  "dc88cf91928fbec4": "Снять метку",
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "С {start} по {end}",
   "77100b4211d5cf8c": "Навигация по использованию",
@@ -12265,8 +12259,8 @@
   "0886cdaa4f5357cf": "Разбивка использования",
   "d89ad31bf0aebe92": "Час",
   "5e2236ccf9b5ffba": "День",
-  "9e5c8f14d8b62252": "Tagged",
-  "e5da95eff95b75d3": "Tag",
+  "9e5c8f14d8b62252": "Помечено",
+  "e5da95eff95b75d3": "Пометить",
   "c400ae5f6f27b81d": "Разбивка использования по времени",
   "8d2a69e65d453cce": "Учитывается один раз для окружений с общей папкой расшифровок: {sources}",
   "0f3b14055f7bba6f": "{count, plural, one {{count} окружение} few {{count} окружения} many {{count} окружений} other {{count} окружения}}",

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- node:sqlite reads the native session database read-only.
-import * as NodeSqlite from "node:sqlite";
+import { DatabaseSync } from "../sqliteCompat.ts";
 import * as NodeURL from "node:url";
 
 import * as Effect from "effect/Effect";
@@ -69,9 +69,9 @@ async function readDatabaseWorkspacePaths(
   )?.path;
   if (databasePath === undefined) return undefined;
 
-  let database: NodeSqlite.DatabaseSync | undefined;
+  let database: import("node:sqlite").DatabaseSync | undefined;
   try {
-    database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+    database = new DatabaseSync(databasePath, { readOnly: true });
     database.exec("PRAGMA busy_timeout = 100");
     const rows = database
       .prepare("SELECT data FROM trajectory_metadata_blob WHERE length(data) <= ? LIMIT 2")

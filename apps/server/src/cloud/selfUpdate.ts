@@ -266,7 +266,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
           Effect.catchCause((cause) =>
             Effect.logError("Could not restart into the updated server binary.", { cause }),
           ),
-          Effect.delay(Duration.seconds(1)),
+          Effect.delay("1 second"),
           Effect.forkDetach,
         );
 

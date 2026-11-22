@@ -1786,7 +1786,7 @@
   "4b4b64cc95acb8da": "新しいスレッドの作成先...",
   "3f581e98c86df72a": "プロジェクトなしで新しいスレッド",
   "e510d9a7b684fbfe": "問題をトリアージ",
-  "9639cada460837e2": "An agent investigates an S5 Code problem and helps file an issue",
+  "9639cada460837e2": "エージェントが S5 Code の問題を調査し、Issue の作成を手伝います",
   "44e13c9deb30e03c": "現在のスレッド内を検索",
   "2a5cc71a171eca12": "ブラウザーでページ内を検索",
   "f496ce44f0581269": "プロンプトのリンクをコピー",
@@ -2682,9 +2682,9 @@
   "78a04e0e625c0990": "更新に失敗しました",
   "c24de5eb69373a55": "この {build} ビルドは {track} のリリースを無視します。切り替えを完了するには、設定で更新トラックを確認してください。",
   "b02ae45a6109c93b": "最新の状態です",
-  "1c5117f64b245c69": "Install update {version} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "dff6c4bf3715f401": "Install update and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "0e2589ce9acae8c5": "On Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes.",
+  "1c5117f64b245c69": "更新 {version} をインストールして S5 Code を再起動しますか？\n\n実行中のタスクはすべて中断されます。準備ができていることを確認してから続行してください。",
+  "dff6c4bf3715f401": "更新をインストールして S5 Code を再起動しますか？\n\n実行中のタスクはすべて中断されます。準備ができていることを確認してから続行してください。",
+  "0e2589ce9acae8c5": "Windows では、インストール中に S5 Code が数分間閉じたままになり、インストーラーのウィンドウが表示されないことがあります。インストールが完了すると S5 Code は自動的に再起動します。",
   "9ed4d8a1531b9631": "このビルドでは自動更新を利用できません。",
   "c8c23435e780a60c": "更新を利用できません",
   "1af5f9767371ffd7": "更新を確認",
@@ -3048,8 +3048,8 @@
   "7a4b3f3b83e121d7": "{organization} は匿名の使用状況データを無効にしています。",
   "d85822b18e9475df": "{organization} によって管理されています。",
   "a6dd531d58080010": "リリースを確認するには、このサーバーに接続してください。",
-  "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
-  "24aa7437d51814a3": "Could not check S5 Code releases from this environment. Check its internet connection.",
+  "9c1471a7fba9ae4a": "このサーバーではリリースを検索できません。更新チャンネルを切り替える前にサーバーを更新してください。",
+  "24aa7437d51814a3": "この環境から S5 Code のリリースを確認できませんでした。インターネット接続を確認してください。",
   "2fc0f7a698c95c90": "リリースを確認するにはサーバーに接続してください。",
   "922269f8691aa3ba": "この環境がこのコンピューターで動いているか判断できませんでした。",
   "35cade9cc8a01363": "ポート転送にはデスクトップアプリが必要です。",
@@ -3152,10 +3152,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "(このページを開いたコンピューター上)"
-      ]
+      "c": [" ", "(このページを開いたコンピューター上)"]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3167,10 +3164,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "· 実行した人にこのアクセス権が付与されます"
-      ]
+      "c": [" ", "· 実行した人にこのアクセス権が付与されます"]
     }
   ],
   "c54cc9c75db9dc58": "自分で開始したばかりのサインインだけを承認してください。",
@@ -4949,7 +4943,7 @@
   "3647d568e852c86d": "モバイルクライアント",
   "943d150a9045394c": "環境から通知を受け取るモバイルデバイスです。",
   "fe4e834cd36123fe": "モバイルクライアントはありません",
-  "c5edff105bb737bd": "Install S5 Code on your phone and sign in to S5 Connect to get push notifications and Live Activities.",
+  "c5edff105bb737bd": "プッシュ通知とライブアクティビティを受け取るには、スマートフォンに S5 Code をインストールして S5 Connect にサインインしてください。",
   "de111af2fe5653a6": "モバイルクライアントを読み込めませんでした",
   "5d138bbbce733537": "T3 Connect の設定",
   "ff2d5256c7b57d7f": "T3 Connect アカウントにはもう登録されていません。",
@@ -11390,7 +11384,7 @@
   "404f92786aa9a22f": "コードブロック、差分、ファイルのプレビュー、ターミナル。",
   "5897f301f96f8abe": "タイポグラフィ",
   "eb72dbf46620a039": "{title} のファミリー",
-  "e6f5ec60986ef92b": "Could not find the latest {label} release. Try again later.",
+  "e6f5ec60986ef92b": "{label} の最新リリースが見つかりませんでした。後でもう一度お試しください。",
   "ddc1bd4973399c8d": "リリースを確認しています…",
   "9ddd2f9f1c9367bc": "{label} に切り替えられませんでした",
   "3d71fc8318449b6c": "このアプリは何もダウンロードしていません。{version} 以降が必要です。",
@@ -12162,29 +12156,29 @@
       }
     }
   ],
-  "be4aa84cb2b3cb39": "Tag {model}",
-  "3c904edb70864f02": "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
-  "010266eddc214efc": "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
-  "474b857fbe56ad48": "Pick the model this really is, and its rates apply to this usage everywhere.",
-  "a172f1734dab143c": "Search models…",
-  "36472b6d1faf065b": "No models match that search.",
-  "520fcdb3cc6b751b": "Search the models.dev catalog by model or provider name.",
+  "be4aa84cb2b3cb39": "{model} にタグを付ける",
+  "3c904edb70864f02": "現在は {model} として集計されています。別のモデルを選ぶか、タグを削除してこの使用量を料金の対象外にしてください。",
+  "010266eddc214efc": "{provider} 経由で提供されています。実際のモデルを選択すると、すべての環境でその料金がこの使用量に適用されます。",
+  "474b857fbe56ad48": "実際のモデルを選択すると、すべての環境でその料金がこの使用量に適用されます。",
+  "a172f1734dab143c": "モデルを検索…",
+  "36472b6d1faf065b": "検索条件に一致するモデルはありません。",
+  "520fcdb3cc6b751b": "models.dev のカタログをモデル名またはプロバイダー名で検索してください。",
   "07a968019432d2ea": [
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " in /",
+    " 入力 /",
     " ",
     {
       "i": 2,
       "k": "_gt_value_2",
       "v": "v"
     },
-    " out per 1M"
+    " 出力（100万トークンあたり）"
   ],
-  "dc88cf91928fbec4": "Remove tag",
+  "dc88cf91928fbec4": "タグを削除",
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "{start}〜{end}",
   "77100b4211d5cf8c": "使用量のパンくずリスト",
@@ -12215,8 +12209,8 @@
   "0886cdaa4f5357cf": "使用量の内訳",
   "d89ad31bf0aebe92": "時間",
   "5e2236ccf9b5ffba": "日",
-  "9e5c8f14d8b62252": "Tagged",
-  "e5da95eff95b75d3": "Tag",
+  "9e5c8f14d8b62252": "タグ付き",
+  "e5da95eff95b75d3": "タグを付ける",
   "c400ae5f6f27b81d": "時間別の使用量の内訳",
   "8d2a69e65d453cce": "文字起こしディレクトリを共有する環境間では 1 回だけカウントされます: {sources}",
   "0f3b14055f7bba6f": "{count, plural, other {{count} 個の環境}}",

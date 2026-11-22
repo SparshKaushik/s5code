@@ -210,9 +210,9 @@ const openOwnershipLock = (stateDir: string) =>
 
 /** Whether a running server holds the ownership lock. Read-only, so it never creates the lock file. */
 export const isServerOwnershipHeld = (statePath: string): boolean => {
-  let db: NodeSqlite.DatabaseSync | undefined;
+  let db: import("node:sqlite").DatabaseSync | undefined;
   try {
-    db = new NodeSqlite.DatabaseSync(ownershipLockPath(NodePath.dirname(statePath)), {
+    db = new DatabaseSync(ownershipLockPath(NodePath.dirname(statePath)), {
       readOnly: true,
       timeout: 0,
     });

@@ -1787,7 +1787,7 @@
   "4b4b64cc95acb8da": "Nova thread em...",
   "3f581e98c86df72a": "Nova thread sem projeto",
   "e510d9a7b684fbfe": "Fazer a triagem de um problema",
-  "9639cada460837e2": "An agent investigates an S5 Code problem and helps file an issue",
+  "9639cada460837e2": "Um agente investiga um problema do S5 Code e ajuda a abrir uma issue",
   "44e13c9deb30e03c": "Localizar na thread atual",
   "2a5cc71a171eca12": "Localizar na página do navegador",
   "f496ce44f0581269": "Copiar link do prompt",
@@ -2684,9 +2684,9 @@
   "78a04e0e625c0990": "Falha na atualização",
   "c24de5eb69373a55": "Esta build {build} ignora as versões {track}. Revise o canal de atualização em Configurações para concluir a troca.",
   "b02ae45a6109c93b": "Atualizado",
-  "1c5117f64b245c69": "Install update {version} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "dff6c4bf3715f401": "Install update and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "0e2589ce9acae8c5": "On Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes.",
+  "1c5117f64b245c69": "Instalar a atualização {version} e reiniciar o S5 Code?\n\nAs tarefas em execução serão interrompidas. Verifique se está tudo pronto antes de continuar.",
+  "dff6c4bf3715f401": "Instalar a atualização e reiniciar o S5 Code?\n\nAs tarefas em execução serão interrompidas. Verifique se está tudo pronto antes de continuar.",
+  "0e2589ce9acae8c5": "No Windows, o S5 Code pode ficar fechado por alguns minutos durante a instalação sem exibir uma janela do instalador. O S5 Code será reaberto automaticamente quando a instalação terminar.",
   "9ed4d8a1531b9631": "Atualizações automáticas não estão disponíveis nesta versão.",
   "c8c23435e780a60c": "Atualizações indisponíveis",
   "1af5f9767371ffd7": "Verificar atualizações",
@@ -3050,8 +3050,8 @@
   "7a4b3f3b83e121d7": "{organization} desativou os dados de uso anônimos.",
   "d85822b18e9475df": "Gerenciado por {organization}.",
   "a6dd531d58080010": "Conecte-se a este servidor para verificar as versões.",
-  "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
-  "24aa7437d51814a3": "Could not check S5 Code releases from this environment. Check its internet connection.",
+  "9c1471a7fba9ae4a": "Este servidor não pode consultar versões. Atualize-o antes de trocar de canal.",
+  "24aa7437d51814a3": "Não foi possível consultar as versões do S5 Code neste ambiente. Verifique a conexão com a internet.",
   "2fc0f7a698c95c90": "Conecte-se a um servidor para verificar as versões.",
   "922269f8691aa3ba": "Não foi possível saber se este ambiente roda neste computador.",
   "35cade9cc8a01363": "O encaminhamento de portas precisa do app para desktop.",
@@ -3154,10 +3154,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "no computador que abriu esta página"
-      ]
+      "c": [" ", "no computador que abriu esta página"]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3169,10 +3166,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "· quem executar recebe este acesso"
-      ]
+      "c": [" ", "· quem executar recebe este acesso"]
     }
   ],
   "c54cc9c75db9dc58": "Aprove apenas um login que você acabou de iniciar.",
@@ -4959,7 +4953,7 @@
   "3647d568e852c86d": "Clientes móveis",
   "943d150a9045394c": "Dispositivos móveis que recebem notificações dos seus ambientes.",
   "fe4e834cd36123fe": "Nenhum cliente móvel",
-  "c5edff105bb737bd": "Install S5 Code on your phone and sign in to S5 Connect to get push notifications and Live Activities.",
+  "c5edff105bb737bd": "Instale o S5 Code no seu celular e entre no S5 Connect para receber notificações push e Live Activities.",
   "de111af2fe5653a6": "Não foi possível carregar os clientes móveis",
   "5d138bbbce733537": "Configurações do T3 Connect",
   "ff2d5256c7b57d7f": "Ele não está mais na sua conta do T3 Connect.",
@@ -11439,7 +11433,7 @@
   "404f92786aa9a22f": "Blocos de código, diffs, pré-visualizações de arquivos e o terminal.",
   "5897f301f96f8abe": "Tipografia",
   "eb72dbf46620a039": "Família de {title}",
-  "e6f5ec60986ef92b": "Could not find the latest {label} release. Try again later.",
+  "e6f5ec60986ef92b": "Não foi possível encontrar a versão mais recente de {label}. Tente novamente mais tarde.",
   "ddc1bd4973399c8d": "Verificando versões…",
   "9ddd2f9f1c9367bc": "Não foi possível mudar para {label}",
   "3d71fc8318449b6c": "Este app não baixou nada, nem {version} nem mais recente.",
@@ -12211,29 +12205,29 @@
       }
     }
   ],
-  "be4aa84cb2b3cb39": "Tag {model}",
-  "3c904edb70864f02": "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
-  "010266eddc214efc": "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
-  "474b857fbe56ad48": "Pick the model this really is, and its rates apply to this usage everywhere.",
-  "a172f1734dab143c": "Search models…",
-  "36472b6d1faf065b": "No models match that search.",
-  "520fcdb3cc6b751b": "Search the models.dev catalog by model or provider name.",
+  "be4aa84cb2b3cb39": "Etiquetar {model}",
+  "3c904edb70864f02": "No momento, este uso é contabilizado como {model}. Escolha outro modelo ou remova a etiqueta para deixar esse uso sem preço.",
+  "010266eddc214efc": "Fornecido por {provider}. Escolha o modelo real para aplicar suas tarifas a esse uso em todos os ambientes.",
+  "474b857fbe56ad48": "Escolha o modelo real para aplicar suas tarifas a esse uso em todos os ambientes.",
+  "a172f1734dab143c": "Pesquisar modelos…",
+  "36472b6d1faf065b": "Nenhum modelo corresponde à pesquisa.",
+  "520fcdb3cc6b751b": "Pesquise no catálogo do models.dev pelo nome do modelo ou do provedor.",
   "07a968019432d2ea": [
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " in /",
+    " entrada /",
     " ",
     {
       "i": 2,
       "k": "_gt_value_2",
       "v": "v"
     },
-    " out per 1M"
+    " saída por milhão"
   ],
-  "dc88cf91928fbec4": "Remove tag",
+  "dc88cf91928fbec4": "Remover etiqueta",
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "{start} a {end}",
   "77100b4211d5cf8c": "Trilha de navegação do uso",
@@ -12264,8 +12258,8 @@
   "0886cdaa4f5357cf": "Detalhamento do uso",
   "d89ad31bf0aebe92": "Hora",
   "5e2236ccf9b5ffba": "Dia",
-  "9e5c8f14d8b62252": "Tagged",
-  "e5da95eff95b75d3": "Tag",
+  "9e5c8f14d8b62252": "Etiquetado",
+  "e5da95eff95b75d3": "Etiquetar",
   "c400ae5f6f27b81d": "Detalhamento do uso por tempo",
   "8d2a69e65d453cce": "Contado uma vez entre ambientes que compartilham um diretório de transcrições: {sources}",
   "0f3b14055f7bba6f": "{count, plural, one {{count} ambiente} other {{count} ambientes}}",

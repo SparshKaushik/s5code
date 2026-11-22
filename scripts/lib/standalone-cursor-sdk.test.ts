@@ -41,6 +41,7 @@ it("resolves the pinned SDK's native helpers from the standalone cache", async (
       Sc1: NodePath.parse,
       kn8: () => undefined,
       En8: () => false,
+      Rn8: undefined,
     }) as (input: {
       relativePath: string;
       excludedWorkspaceDirs: string[];

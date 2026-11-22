@@ -1786,7 +1786,7 @@
   "4b4b64cc95acb8da": "다음에서 새 스레드...",
   "3f581e98c86df72a": "프로젝트 없이 새 스레드",
   "e510d9a7b684fbfe": "이슈 분류",
-  "9639cada460837e2": "An agent investigates an S5 Code problem and helps file an issue",
+  "9639cada460837e2": "에이전트가 S5 Code 문제를 조사하고 이슈 작성을 돕습니다",
   "44e13c9deb30e03c": "현재 스레드에서 찾기",
   "2a5cc71a171eca12": "브라우저 페이지에서 찾기",
   "f496ce44f0581269": "프롬프트 링크 복사",
@@ -2683,9 +2683,9 @@
   "78a04e0e625c0990": "업데이트 실패",
   "c24de5eb69373a55": "이 {build} 빌드는 {track} 릴리스를 무시합니다. 전환을 완료하려면 설정에서 업데이트 트랙을 확인하세요.",
   "b02ae45a6109c93b": "최신 상태",
-  "1c5117f64b245c69": "Install update {version} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "dff6c4bf3715f401": "Install update and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "0e2589ce9acae8c5": "On Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes.",
+  "1c5117f64b245c69": "업데이트 {version}을(를) 설치하고 S5 Code를 다시 시작할까요?\n\n실행 중인 작업은 모두 중단됩니다. 계속하기 전에 준비가 되었는지 확인하세요.",
+  "dff6c4bf3715f401": "업데이트를 설치하고 S5 Code를 다시 시작할까요?\n\n실행 중인 작업은 모두 중단됩니다. 계속하기 전에 준비가 되었는지 확인하세요.",
+  "0e2589ce9acae8c5": "Windows에서 설치하는 동안 S5 Code가 몇 분간 종료된 상태로 유지되고 설치 창이 표시되지 않을 수 있습니다. 설치가 끝나면 S5 Code가 자동으로 다시 열립니다.",
   "9ed4d8a1531b9631": "이 빌드에서는 자동 업데이트를 사용할 수 없습니다.",
   "c8c23435e780a60c": "업데이트를 사용할 수 없음",
   "1af5f9767371ffd7": "업데이트 확인",
@@ -3049,8 +3049,8 @@
   "7a4b3f3b83e121d7": "{organization}에서 익명 사용 데이터를 껐습니다.",
   "d85822b18e9475df": "{organization}에서 관리합니다.",
   "a6dd531d58080010": "릴리스를 확인하려면 이 서버에 연결하세요.",
-  "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
-  "24aa7437d51814a3": "Could not check S5 Code releases from this environment. Check its internet connection.",
+  "9c1471a7fba9ae4a": "이 서버는 릴리스 조회를 지원하지 않습니다. 업데이트 채널을 전환하기 전에 서버를 업데이트하세요.",
+  "24aa7437d51814a3": "이 환경에서 S5 Code 릴리스를 확인할 수 없습니다. 인터넷 연결을 확인하세요.",
   "2fc0f7a698c95c90": "릴리스를 확인하려면 서버에 연결하세요.",
   "922269f8691aa3ba": "이 환경이 이 컴퓨터에서 실행 중인지 확인할 수 없습니다.",
   "35cade9cc8a01363": "포트 포워딩은 데스크톱 앱이 필요합니다.",
@@ -3153,10 +3153,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "(이 페이지를 연 컴퓨터)"
-      ]
+      "c": [" ", "(이 페이지를 연 컴퓨터)"]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3168,10 +3165,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "· 실행하는 사람이 이 액세스 권한을 얻습니다"
-      ]
+      "c": [" ", "· 실행하는 사람이 이 액세스 권한을 얻습니다"]
     }
   ],
   "c54cc9c75db9dc58": "방금 시작한 로그인만 승인하세요.",
@@ -4946,7 +4940,7 @@
   "3647d568e852c86d": "모바일 클라이언트",
   "943d150a9045394c": "환경에서 알림을 받는 모바일 기기입니다.",
   "fe4e834cd36123fe": "모바일 클라이언트 없음",
-  "c5edff105bb737bd": "Install S5 Code on your phone and sign in to S5 Connect to get push notifications and Live Activities.",
+  "c5edff105bb737bd": "휴대폰에 S5 Code를 설치하고 S5 Connect에 로그인하면 푸시 알림과 실시간 현황을 받을 수 있습니다.",
   "de111af2fe5653a6": "모바일 클라이언트를 불러올 수 없습니다",
   "5d138bbbce733537": "T3 Connect 설정",
   "ff2d5256c7b57d7f": "더 이상 T3 Connect 계정에 없습니다.",
@@ -11386,7 +11380,7 @@
   "404f92786aa9a22f": "코드 블록, 변경 사항, 파일 미리 보기, 터미널입니다.",
   "5897f301f96f8abe": "타이포그래피",
   "eb72dbf46620a039": "{title} 글꼴 패밀리",
-  "e6f5ec60986ef92b": "Could not find the latest {label} release. Try again later.",
+  "e6f5ec60986ef92b": "최신 {label} 릴리스를 찾을 수 없습니다. 나중에 다시 시도하세요.",
   "ddc1bd4973399c8d": "릴리스 확인 중…",
   "9ddd2f9f1c9367bc": "{label}(으)로 전환할 수 없습니다",
   "3d71fc8318449b6c": "이 앱은 {version} 이상을 다운로드하지 않았습니다. 다운로드된 항목이 없습니다.",
@@ -12158,29 +12152,29 @@
       }
     }
   ],
-  "be4aa84cb2b3cb39": "Tag {model}",
-  "3c904edb70864f02": "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
-  "010266eddc214efc": "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
-  "474b857fbe56ad48": "Pick the model this really is, and its rates apply to this usage everywhere.",
-  "a172f1734dab143c": "Search models…",
-  "36472b6d1faf065b": "No models match that search.",
-  "520fcdb3cc6b751b": "Search the models.dev catalog by model or provider name.",
+  "be4aa84cb2b3cb39": "{model}에 태그 지정",
+  "3c904edb70864f02": "현재 {model}로 집계됩니다. 다른 모델을 선택하거나 태그를 제거하여 이 사용량에 요금을 적용하지 않을 수 있습니다.",
+  "010266eddc214efc": "{provider}를 통해 제공됩니다. 실제 모델을 선택하면 모든 환경에서 이 사용량에 해당 요금이 적용됩니다.",
+  "474b857fbe56ad48": "실제 모델을 선택하면 모든 환경에서 이 사용량에 해당 요금이 적용됩니다.",
+  "a172f1734dab143c": "모델 검색…",
+  "36472b6d1faf065b": "검색 조건에 맞는 모델이 없습니다.",
+  "520fcdb3cc6b751b": "models.dev 카탈로그에서 모델 또는 제공자 이름으로 검색하세요.",
   "07a968019432d2ea": [
     {
       "i": 1,
       "k": "_gt_value_1",
       "v": "v"
     },
-    " in /",
+    " 입력 /",
     " ",
     {
       "i": 2,
       "k": "_gt_value_2",
       "v": "v"
     },
-    " out per 1M"
+    " 출력 (토큰 100만 개당)"
   ],
-  "dc88cf91928fbec4": "Remove tag",
+  "dc88cf91928fbec4": "태그 제거",
   "b93dc3faeb8d9b2e": "{label}({shortcut})",
   "71efdf870da332e8": "{start}~{end}",
   "77100b4211d5cf8c": "사용량 이동 경로",
@@ -12211,8 +12205,8 @@
   "0886cdaa4f5357cf": "사용량 분석",
   "d89ad31bf0aebe92": "시간",
   "5e2236ccf9b5ffba": "일",
-  "9e5c8f14d8b62252": "Tagged",
-  "e5da95eff95b75d3": "Tag",
+  "9e5c8f14d8b62252": "태그 지정됨",
+  "e5da95eff95b75d3": "태그 지정",
   "c400ae5f6f27b81d": "시간별 사용량 분석",
   "8d2a69e65d453cce": "같은 대화 기록 디렉터리를 공유하는 환경 간에는 한 번만 집계됨: {sources}",
   "0f3b14055f7bba6f": "{count, plural, other {환경 {count}개}}",

@@ -1787,7 +1787,7 @@
   "4b4b64cc95acb8da": "Ny tråd i...",
   "3f581e98c86df72a": "Ny tråd utan projekt",
   "e510d9a7b684fbfe": "Triagera ett ärende",
-  "9639cada460837e2": "An agent investigates an S5 Code problem and helps file an issue",
+  "9639cada460837e2": "En agent undersöker ett problem i S5 Code och hjälper till att skapa ett ärende",
   "44e13c9deb30e03c": "Sök i aktuell tråd",
   "2a5cc71a171eca12": "Sök på sidan i webbläsaren",
   "f496ce44f0581269": "Kopiera promptlänk",
@@ -2684,9 +2684,9 @@
   "78a04e0e625c0990": "Uppdateringen misslyckades",
   "c24de5eb69373a55": "Den här {build}-versionen ignorerar {track}-versioner. Granska uppdateringsspåret i Inställningar för att slutföra bytet.",
   "b02ae45a6109c93b": "Uppdaterad",
-  "1c5117f64b245c69": "Install update {version} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "dff6c4bf3715f401": "Install update and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
-  "0e2589ce9acae8c5": "On Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes.",
+  "1c5117f64b245c69": "Installera uppdateringen {version} och starta om S5 Code?\n\nPågående uppgifter avbryts. Se till att du är redo innan du fortsätter.",
+  "dff6c4bf3715f401": "Installera uppdateringen och starta om S5 Code?\n\nPågående uppgifter avbryts. Se till att du är redo innan du fortsätter.",
+  "0e2589ce9acae8c5": "I Windows kan S5 Code vara stängt i flera minuter under installationen utan att något installationsfönster visas. S5 Code öppnas automatiskt när installationen är klar.",
   "9ed4d8a1531b9631": "Automatiska uppdateringar är inte tillgängliga i den här versionen.",
   "c8c23435e780a60c": "Uppdateringar är inte tillgängliga",
   "1af5f9767371ffd7": "Sök efter uppdateringar",
@@ -3050,8 +3050,8 @@
   "7a4b3f3b83e121d7": "{organization} har stängt av anonym användningsdata.",
   "d85822b18e9475df": "Hanteras av {organization}.",
   "a6dd531d58080010": "Anslut till den här servern för att söka efter versioner.",
-  "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
-  "24aa7437d51814a3": "Could not check S5 Code releases from this environment. Check its internet connection.",
+  "9c1471a7fba9ae4a": "Den här servern kan inte söka efter utgåvor. Uppdatera den innan du byter kanal.",
+  "24aa7437d51814a3": "Det gick inte att kontrollera S5 Code-utgåvor från den här miljön. Kontrollera internetanslutningen.",
   "2fc0f7a698c95c90": "Anslut till en server för att söka efter versioner.",
   "922269f8691aa3ba": "Det gick inte att avgöra om den här miljön körs på den här datorn.",
   "35cade9cc8a01363": "Portvidarebefordring kräver skrivbordsappen.",
@@ -3154,10 +3154,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "på datorn som öppnade den här sidan"
-      ]
+      "c": [" ", "på datorn som öppnade den här sidan"]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3169,10 +3166,7 @@
     {
       "t": "span",
       "i": 2,
-      "c": [
-        " ",
-        "· den som kör den får den här åtkomsten"
-      ]
+      "c": [" ", "· den som kör den får den här åtkomsten"]
     }
   ],
   "c54cc9c75db9dc58": "Godkänn bara en inloggning som du själv precis har startat.",
@@ -4960,7 +4954,7 @@
   "3647d568e852c86d": "Mobilklienter",
   "943d150a9045394c": "Mobila enheter som får aviseringar från dina miljöer.",
   "fe4e834cd36123fe": "Inga mobilklienter",
-  "c5edff105bb737bd": "Install S5 Code on your phone and sign in to S5 Connect to get push notifications and Live Activities.",
+  "c5edff105bb737bd": "Installera S5 Code på telefonen och logga in på S5 Connect för att få push-aviseringar och liveaktiviteter.",
   "de111af2fe5653a6": "Kunde inte läsa in mobilklienter",
   "5d138bbbce733537": "T3 Connect-inställningar",
   "ff2d5256c7b57d7f": "Den finns inte längre på ditt T3 Connect-konto.",
@@ -11447,7 +11441,7 @@
   "404f92786aa9a22f": "Kodblock, diffar, förhandsvisningar av filer och terminalen.",
   "5897f301f96f8abe": "Typografi",
   "eb72dbf46620a039": "Teckensnittsfamilj för {title}",
-  "e6f5ec60986ef92b": "Could not find the latest {label} release. Try again later.",
+  "e6f5ec60986ef92b": "Det gick inte att hitta den senaste utgåvan för {label}. Försök igen senare.",
   "ddc1bd4973399c8d": "Kontrollerar versioner…",
   "9ddd2f9f1c9367bc": "Kunde inte byta till {label}",
   "3d71fc8318449b6c": "Appen laddade inte ned något, varken {version} eller nyare.",
@@ -12219,13 +12213,13 @@
       }
     }
   ],
-  "be4aa84cb2b3cb39": "Tag {model}",
-  "3c904edb70864f02": "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
-  "010266eddc214efc": "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
-  "474b857fbe56ad48": "Pick the model this really is, and its rates apply to this usage everywhere.",
-  "a172f1734dab143c": "Search models…",
-  "36472b6d1faf065b": "No models match that search.",
-  "520fcdb3cc6b751b": "Search the models.dev catalog by model or provider name.",
+  "be4aa84cb2b3cb39": "Tagga {model}",
+  "3c904edb70864f02": "Räknas för närvarande som {model}. Välj en annan modell eller ta bort taggen för att lämna användningen utan pris.",
+  "010266eddc214efc": "Tillhandahålls via {provider}. Välj den faktiska modellen så tillämpas dess priser på användningen i alla miljöer.",
+  "474b857fbe56ad48": "Välj den faktiska modellen så tillämpas dess priser på användningen i alla miljöer.",
+  "a172f1734dab143c": "Sök efter modeller…",
+  "36472b6d1faf065b": "Inga modeller matchar sökningen.",
+  "520fcdb3cc6b751b": "Sök i models.dev-katalogen efter modellens eller leverantörens namn.",
   "07a968019432d2ea": [
     {
       "i": 1,
@@ -12239,9 +12233,9 @@
       "k": "_gt_value_2",
       "v": "v"
     },
-    " out per 1M"
+    " ut per miljon"
   ],
-  "dc88cf91928fbec4": "Remove tag",
+  "dc88cf91928fbec4": "Ta bort taggen",
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "{start} till {end}",
   "77100b4211d5cf8c": "Sökväg i användning",
@@ -12272,8 +12266,8 @@
   "0886cdaa4f5357cf": "Användningsfördelning",
   "d89ad31bf0aebe92": "Timme",
   "5e2236ccf9b5ffba": "Dag",
-  "9e5c8f14d8b62252": "Tagged",
-  "e5da95eff95b75d3": "Tag",
+  "9e5c8f14d8b62252": "Taggad",
+  "e5da95eff95b75d3": "Tagga",
   "c400ae5f6f27b81d": "Användningsfördelning över tid",
   "8d2a69e65d453cce": "Räknas en gång för miljöer som delar en transkriptkatalog: {sources}",
   "0f3b14055f7bba6f": "{count, plural, one {{count} miljö} other {{count} miljöer}}",

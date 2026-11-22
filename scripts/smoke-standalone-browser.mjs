@@ -10,6 +10,13 @@ import { isExternalCliDependency, shouldBundleCliDependency } from "./lib/cli-ex
 
 const require = NodeModule.createRequire(new URL("../apps/server/package.json", import.meta.url));
 const packageDirectory = NodePath.dirname(require.resolve("playwright-core/package.json"));
+const browsers = JSON.parse(
+  await NodeFSP.readFile(NodePath.join(packageDirectory, "browsers.json"), "utf8"),
+).browsers;
+const chromeVersion = browsers.find(
+  ({ name }) => name === "chromium-headless-shell",
+)?.browserVersion;
+NodeAssert.ok(chromeVersion, "Missing Chromium Headless Shell version");
 const executable = require("playwright-core/lib/coreBundle")
   .registry.registry.findExecutable("chromium-headless-shell")
   .executablePath();
@@ -39,6 +46,7 @@ try {
       import { ServerBrowserContexts } from ${JSON.stringify(contextsModule)};
       const pool = new ServerBrowserContexts({
         profilesDir: process.env.SMOKE_PROFILES_DIR,
+        chrome: { version: ${JSON.stringify(chromeVersion)}, platform: process.platform },
         executable: async () => process.env.SMOKE_CHROMIUM_EXECUTABLE,
         env: { ...process.env, T3CODE_SERVER_BROWSER_SANDBOX: "0" },
       });
