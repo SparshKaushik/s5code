@@ -715,7 +715,7 @@ pub(crate) fn checks_state(t: &T, state: &str) -> Option<(&'static rune::Icon, C
 }
 
 /// An `action-required` check whose link is a workflow run waiting for approval.
-fn workflow_approval(c: &Value) -> bool {
+pub(crate) fn workflow_approval(c: &Value) -> bool {
     const RUNS: &str = "/actions/runs/";
     field(c, "status") == "action-required"
         && c["url"].as_str().is_some_and(|url| {

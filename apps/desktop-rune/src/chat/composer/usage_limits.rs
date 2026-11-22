@@ -539,8 +539,12 @@ fn reset_credits(s: &App, t: &T, account: &Account, now: i64) -> Option<El> {
 /// ResetCreditDialog for the panel's Use reset.
 pub(super) fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some((key, input)) = s.ui.chat.composer.usage.confirm.clone() else { return };
-    let allowed = crate::pages::usage_limits::can_redeem(s, &s.ui.env.active);
-    crate::pages::usage_limits::reset_credit_dialog(t, layers, allowed, |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
+    crate::pages::usage_limits::reset_credit_dialog(t, layers, may_redeem(s), |s: &mut App| s.ui.chat.composer.usage.confirm = None, move |s: &mut App| redeem(s, &key, &input));
+}
+
+/// useResetCredit's `providers:manage` gate, on the environment the composer reads.
+fn may_redeem(s: &App) -> bool {
+    crate::pages::usage_limits::can_redeem(s, &s.ui.env.active)
 }
 
 /// useResetCredit's `canManageProviders`, on the environment the composer reads.
@@ -551,10 +555,10 @@ fn can_redeem(s: &App) -> bool {
 /// useResetCredit's redeem, on the environment the composer reads.
 fn redeem(s: &mut App, key: &str, input: &Value) {
     s.ui.chat.composer.usage.confirm = None;
-    let environment = s.ui.env.active.clone();
-    if !crate::pages::usage_limits::can_redeem(s, &environment) {
+    if !may_redeem(s) {
         return;
     }
+    let environment = s.ui.env.active.clone();
     let Some(net) = s.src.net() else { return };
     let id = net.request("provider.consumeResetCredit", input.clone());
     let usage = &mut s.ui.chat.composer.usage;
@@ -607,6 +611,22 @@ mod tests {
             "auth": {"status": "authenticated", "email": email},
             "usageLimits": {"checkedAt": checked, "windows": windows},
         })
+    }
+
+    #[test]
+    fn use_credit_waits_for_providers_manage_on_the_composers_environment() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::offline());
+        let active = s.ui.env.active.clone();
+        crate::settings::permissions::set_session(&mut s, &active, json!({"authenticated": true, "permissions": ["orchestration:operate"]}));
+        assert!(!may_redeem(&s), "the dialog's Use credit is disabled");
+        s.ui.chat.composer.usage.confirm = Some(("claudeAgent".into(), json!({"instanceId": "claudeAgent"})));
+        redeem(&mut s, "claudeAgent", &json!({"instanceId": "claudeAgent"}));
+        assert!(s.ui.chat.composer.usage.redeeming.is_none() && s.ui.chat.composer.usage.confirm.is_none(), "a press sends nothing and closes the dialog");
+        crate::settings::permissions::set_session(&mut s, &active, json!({"authenticated": true, "permissions": ["providers:manage"]}));
+        assert!(may_redeem(&s));
+        redeem(&mut s, "claudeAgent", &json!({"instanceId": "claudeAgent"}));
+        assert!(s.ui.chat.composer.usage.redeeming.is_some());
     }
 
     #[test]

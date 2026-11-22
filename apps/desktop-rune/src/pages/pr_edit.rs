@@ -672,6 +672,29 @@ fn markdown_editor(s: &App, t: &T, target: Target, draft: &Draft, key: String, l
     col().w_full().gap(8.0).child(row().child(mode)).child(body).child(buttons)
 }
 
+/// The markdown editor's keys while it shows Preview, where no text box takes them: the web
+/// listens on the whole editor.
+pub(super) fn preview_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    let ed = edit(s);
+    let target = match (&ed.body, &ed.comment) {
+        _ if ed.title.as_ref().is_some_and(|t| t.focused) => return false,
+        (Some(d), _) if d.preview => Target::Body,
+        (_, Some(c)) if c.draft.preview => Target::Comment,
+        _ => return false,
+    };
+    if submits(e) {
+        if !tx.key_repeat() {
+            save(s, target);
+        }
+        return true;
+    }
+    if e.key != Key::Escape || is_saving(edit(s), target) {
+        return false;
+    }
+    cancel(s, target);
+    true
+}
+
 /// The Description section's body: the text with its pencil, or the editor changing it.
 pub fn description(s: &App, t: &T, d: &Value, shown: El) -> El {
     if let Some(draft) = &s.ui.pages.detail.edit.body {

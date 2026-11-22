@@ -28,7 +28,8 @@ pub struct Ui {
     pub query: TextEdit,
     /// The query the shown models answer, or are on their way for.
     asked: String,
-    pending: Option<u64>,
+    /// The search in flight and the environment asked.
+    pending: Option<(String, u64)>,
     pub models: Vec<Value>,
 }
 
@@ -52,11 +53,12 @@ fn close(s: &mut App) {
 }
 
 /// Searches `server.searchUsageModels` for the typed query, one request at a time so a burst of
-/// keystrokes collapses into the latest query.
+/// keystrokes collapses into the latest query. Every environment holds the same catalog, so the
+/// first one that can read usage answers (modelSearchAtom).
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
-    if let Some(id) = s.ui.pages.usage.tags.pending
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
+    if let Some((key, id)) = s.ui.pages.usage.tags.pending.clone()
+        && let Some(reply) = super::pull_requests::take(s, &key, id)
     {
         let u = ui(s);
         u.pending = None;
@@ -71,8 +73,9 @@ pub fn poll(s: &mut App) -> bool {
     let pending = if query.trim().is_empty() {
         None
     } else {
-        let Some(net) = s.src.net() else { return changed };
-        Some(net.request("server.searchUsageModels", json!({"query": query})))
+        let Some(key) = crate::env::keys(s).into_iter().find(|k| super::usage::can_read(s, k)) else { return changed };
+        let Some(net) = crate::env::net_of(s, &key) else { return changed };
+        Some((key, net.request("server.searchUsageModels", json!({"query": query}))))
     };
     let u = ui(s);
     u.pending = pending;
