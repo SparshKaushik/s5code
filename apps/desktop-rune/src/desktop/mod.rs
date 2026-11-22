@@ -90,17 +90,46 @@ pub struct Ui {
     saved: Option<Bounds>,
     due: Option<(i64, Bounds)>,
     prefs_loaded: bool,
-    /// The appearance last handed to AppKit.
-    #[cfg(target_os = "macos")]
+    /// The appearance last handed to the native chrome.
     appearance: Option<crate::Appearance>,
 }
 
-/// What a launch restores: the size in points, and off macOS and Wayland the outer position in
-/// desktop pixels. macOS saves its frame itself (`macos::autosave_frame`).
+/// What a launch restores: the size in points, off macOS and Wayland the outer position in
+/// desktop pixels, and whether it was maximized. macOS saves its frame itself
+/// (`macos::autosave_frame`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Bounds {
     size: [f32; 2],
     position: Option<[i32; 2]>,
+    maximized: bool,
+}
+
+/// Electron's `readPersistableBounds`: a maximized or full-screen window keeps the bounds it
+/// restores to, and the maximized flag records how it was left (full screen leaves it as it was).
+fn persisted(current: Bounds, saved: Option<Bounds>, fullscreen: bool) -> Bounds {
+    match saved {
+        Some(saved) if fullscreen => saved,
+        Some(saved) if current.maximized => Bounds { maximized: true, ..saved },
+        _ => current,
+    }
+}
+
+thread_local! {
+    /// The main window, once it has drawn: full screen and maximize go through it.
+    static WINDOW: std::cell::RefCell<Option<rune::WindowHandle>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_window<R>(f: impl FnOnce(&rune::WindowHandle) -> R) -> Option<R> {
+    WINDOW.with(|w| w.borrow().as_ref().map(f))
+}
+
+pub fn is_fullscreen() -> bool {
+    with_window(rune::WindowHandle::is_fullscreen).unwrap_or(false)
+}
+
+/// View › Toggle Full Screen off macOS (F11), where AppKit's menu item does it on macOS.
+pub fn toggle_fullscreen() {
+    let _ = with_window(|w| w.set_fullscreen(!w.is_fullscreen()));
 }
 
 impl Ui {
@@ -188,6 +217,14 @@ pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
     if let Some([x, y]) = saved_position(&prefs()) {
         app.handle().set_position((x, y));
     }
+    // Electron maximizes a window left maximized before revealing it; Rune's first frame is
+    // the earliest the native window takes it.
+    let app = app.on_ready(|window| {
+        WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+        if !cfg!(target_os = "macos") && prefs().get::<bool>("windowMaximized") == Some(true) {
+            let _ = window.set_maximized(true);
+        }
+    });
     #[cfg(target_os = "linux")]
     url_handler::register();
     #[cfg(target_os = "macos")]
@@ -310,6 +347,10 @@ fn wheel_zoom_step(travel: &mut f32, delta: f32) -> Option<f32> {
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
 /// reload and zoom first). Cmd/Ctrl+W nothing took is swallowed: it never closes the window.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if e.key == Key::Function(11) && !cfg!(target_os = "macos") && !e.mods.cmd && !e.mods.alt && !e.mods.shift {
+        toggle_fullscreen();
+        return true;
+    }
     let Key::Command(c) = e.key else { return false };
     if e.mods.alt || (cfg!(target_os = "macos") && e.mods.ctrl) {
         return false;
@@ -337,7 +378,8 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         ui.set_zoom_level(if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 });
         ui.restored = saved_position(&prefs);
         ui.frame_offset = prefs.get("windowFrameOffset");
-        ui.saved = prefs.get("windowSize").map(|size| Bounds { size, position: ui.restored });
+        let maximized = prefs.get::<bool>("windowMaximized") == Some(true);
+        ui.saved = prefs.get("windowSize").map(|size| Bounds { size, position: ui.restored, maximized });
         ui.exposure.load();
         #[cfg(unix)]
         ui.cli.load();
@@ -357,14 +399,24 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         changed |= activation::poll(s);
     }
     let ui = &mut s.ui.desktop;
-    #[cfg(target_os = "macos")]
+    // Electron's `nativeTheme.themeSource`: AppKit's chrome on macOS, the window frame elsewhere
+    // once the window exists.
     if ui.appearance != Some(s.appearance) && !rune::is_headless() {
-        ui.appearance = Some(s.appearance);
-        macos::set_appearance(match s.appearance {
+        let dark = match s.appearance {
             crate::Appearance::System => None,
             crate::Appearance::Light => Some(false),
             crate::Appearance::Dark => Some(true),
-        });
+        };
+        #[cfg(target_os = "macos")]
+        let applied = {
+            macos::set_appearance(dark);
+            true
+        };
+        #[cfg(not(target_os = "macos"))]
+        let applied = with_window(|w| w.set_theme(dark).is_ok()).unwrap_or(false);
+        if applied {
+            ui.appearance = Some(s.appearance);
+        }
     }
     if let Some(origin) = ui.origin.filter(|o| *o != [0, 0])
         && let Some(restored) = ui.restored.take()
@@ -384,7 +436,8 @@ fn save_bounds(ui: &mut Ui, now: i64, tx: &mut Tx) {
     let Some([w, h]) = ui.window.get() else { return };
     // Until the restored window reports in, its offset is unknown: keep the saved position.
     let position = if ui.restored.is_some() { ui.saved.and_then(|b| b.position) } else { outer_position(ui.origin, ui.frame_offset) };
-    let bounds = Bounds { size: [w.round(), h.round()], position };
+    let (maximized, fullscreen) = with_window(|w| (w.is_maximized(), w.is_fullscreen())).unwrap_or_default();
+    let bounds = persisted(Bounds { size: [w.round(), h.round()], position, maximized }, ui.saved, fullscreen);
     if ui.saved == Some(bounds) {
         ui.due = None;
         return;
@@ -394,7 +447,9 @@ fn save_bounds(ui: &mut Ui, now: i64, tx: &mut Tx) {
             if now >= due {
                 ui.due = None;
                 let mut prefs = prefs();
-                let saved = prefs.set("windowSize", &bounds.size).is_ok() && bounds.position.is_none_or(|p| prefs.set("windowPosition", &p).is_ok());
+                let saved = prefs.set("windowSize", &bounds.size).is_ok()
+                    && bounds.position.is_none_or(|p| prefs.set("windowPosition", &p).is_ok())
+                    && prefs.set("windowMaximized", &bounds.maximized).is_ok();
                 if saved {
                     ui.saved = Some(bounds);
                 }
@@ -480,6 +535,18 @@ mod tests {
         assert_eq!(restore_size(Some([1200.0, 800.0])), (1200.0, 800.0));
         assert_eq!(restore_size(Some([300.0, 20000.0])), (MIN_SIZE.0, MAX_SIZE));
         assert_eq!(restore_size(Some([f32::NAN, 800.0])), DEFAULT_SIZE);
+    }
+
+    #[test]
+    fn a_maximized_or_full_screen_window_keeps_the_bounds_it_restores_to() {
+        let normal = Bounds { size: [1100.0, 780.0], position: Some([100, 50]), maximized: false };
+        let filled = Bounds { size: [1920.0, 1050.0], position: Some([0, 30]), maximized: true };
+        assert_eq!(persisted(filled, Some(normal), false), Bounds { maximized: true, ..normal });
+        assert_eq!(persisted(Bounds { maximized: false, ..filled }, Some(normal), true), normal, "full screen leaves the flag as it was");
+        assert_eq!(persisted(Bounds { maximized: true, ..filled }, Some(Bounds { maximized: true, ..normal }), true), Bounds { maximized: true, ..normal });
+        assert_eq!(persisted(filled, None, false), filled, "nothing saved yet: the maximized size stands in");
+        let moved = Bounds { size: [1200.0, 800.0], position: Some([300, 200]), maximized: false };
+        assert_eq!(persisted(moved, Some(Bounds { maximized: true, ..normal }), false), moved, "unmaximized: the window's own bounds");
     }
 
     #[test]

@@ -147,6 +147,11 @@ pub fn set_window(handle: rune::AppHandle<App>) {
     });
 }
 
+/// Electron's `windows.reveal`: show, restore and focus the main window.
+pub fn reveal_window() {
+    WINDOW.with(|w| w.get().map(|h| h.open()));
+}
+
 /// Threads whose desktop notification was clicked, from the helper processes' threads.
 static CLICKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -154,7 +159,7 @@ static CLICKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 fn open_clicked(s: &mut App) -> bool {
     let Some(id) = CLICKED.lock().map(|mut c| c.pop()).ok().flatten() else { return false };
     CLICKED.lock().map(|mut c| c.clear()).ok();
-    WINDOW.with(|w| w.get().map(|h| h.open()));
+    reveal_window();
     match id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
         Some(url) => crate::pages::pr_guide::open_guide(s, url),
         None => crate::shell::sidebar::open_thread(s, &id),

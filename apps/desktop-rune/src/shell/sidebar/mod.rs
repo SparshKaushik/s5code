@@ -1643,7 +1643,8 @@ pub fn open_header_menu(s: &mut App, thread: String, at: Option<(f32, f32)>) {
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let ui = &s.ui.shell.sidebar;
-    let inset = cx.titlebar_inset();
+    // AppSidebarLayout drops the traffic-light inset in full screen, where the lights hide.
+    let inset = if crate::desktop::is_fullscreen() { 0.0 } else { cx.titlebar_inset() };
     if ui.collapsed {
         overlays.push(chrome::floating_toggle(t, inset));
         // The header's thread menu and its delete confirmation work with the sidebar hidden.
