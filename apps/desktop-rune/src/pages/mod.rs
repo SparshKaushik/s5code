@@ -664,6 +664,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("pull-requests-detail-checkout-menu", |s| open_detail(s, 0, |u| u.checkout_menu = true)),
     ("pull-requests-detail-checkout-menu-environments", scene_checkout_environments),
+    ("pull-requests-detail-condensed", |s| open_detail(s, 0, |u| u.condense.set(0, true))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
         open_detail(s, 0, |u| u.checks_popover = true);

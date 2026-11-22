@@ -2031,7 +2031,7 @@ fn diff_view(s: &App, t: &T) -> El {
             let changed = s.ui.pages.code.diff.set_visible_rows(rows);
             (near_end && load_more(s)) || changed
         });
-    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
+    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
     let footer = s.ui.pages.code.next.is_some().then(|| page_footer(s, t));
     let mut root = col().key("pr-code-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));

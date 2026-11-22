@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, icon, row, spacer, text};
 use rune_kit::diff::{FileDiff, LineKind};
@@ -88,6 +90,75 @@ pub struct Ui {
     pub number_menu: Option<(f32, f32)>,
     pub(super) live: super::pull_requests::Live,
     pub meta: super::pr_meta::Ui,
+    /// The header's condensed state per tab, which the scrollers set (condensedByTab).
+    pub(super) condense: Arc<Condense>,
+}
+
+/// Bits by tab, and the offset that keeps the content still once a header condenses.
+#[derive(Default)]
+pub(super) struct Condense {
+    tabs: AtomicU8,
+    anchor: Mutex<Option<(usize, f32)>>,
+}
+
+impl Condense {
+    pub(super) fn on(&self, tab: usize) -> bool {
+        self.tabs.load(Ordering::Relaxed) & (1 << tab) != 0
+    }
+    pub(super) fn set(&self, tab: usize, on: bool) {
+        if on {
+            self.tabs.fetch_or(1 << tab, Ordering::Relaxed);
+        } else {
+            self.tabs.fetch_and(!(1 << tab), Ordering::Relaxed);
+        }
+    }
+}
+
+/// The header body that folds away, and the one-line header that replaces it.
+const FOLD: &str = "pr-detail-fold";
+const CONDENSED_H: f32 = 28.0;
+
+/// The web's onScrollCapture: the header condenses once its fold has scrolled past with 32px to
+/// spare and opens again near the top. Condensing names the offset that keeps the content where
+/// it was, since the scroller grows by the height the header gave up.
+pub(super) fn next_condensed(condensed: bool, top: f32, fold: f32) -> (bool, Option<f32>) {
+    if condensed {
+        return (top >= 4.0, None);
+    }
+    if fold > 0.0 && top > fold + 32.0 {
+        return (true, Some((top - (fold - CONDENSED_H)).max(0.0)));
+    }
+    (false, None)
+}
+
+/// A tab scroller's offsets drive its header; a change wakes the window.
+pub(super) fn condense_reporter(s: &App, tab: usize) -> impl Fn(rune::ScrollPos) + 'static {
+    let (condense, waker) = (s.ui.pages.detail.condense.clone(), s.ui.panel.waker.clone());
+    move |at: rune::ScrollPos| {
+        let was = condense.on(tab);
+        let fold = rune::memo::layout_with(FOLD, |r| r[3]).unwrap_or(0.0);
+        let (now, anchor) = next_condensed(was, at.offset[1], fold);
+        if now == was {
+            return;
+        }
+        condense.set(tab, now);
+        if let (Some(y), Ok(mut held)) = (anchor, condense.anchor.lock()) {
+            *held = Some((tab, y));
+        }
+        if let Some(waker) = &waker {
+            waker();
+        }
+    }
+}
+
+/// Restores the condensed tab's scroll offset before the next paint.
+pub fn anchor_header(s: &mut App, tx: &mut Tx) -> bool {
+    let u = &s.ui.pages.detail;
+    let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return false };
+    if tab == u.tab && u.condense.on(tab) {
+        tx.scroll_to_y(if tab == 2 { "pr-code-view/scroll".to_string() } else { format!("pr-detail-scroll-{tab}") }, y);
+    }
+    true
 }
 
 /// A checkout being prepared: the thread opens in `project` on it, its composer holding `task`
@@ -1040,7 +1111,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         _ => {}
     }
     let d = u.detail.as_ref().unwrap_or(entry);
-    panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
+    let header = if u.condense.on(u.tab) { condensed_header(s, t, d, overlays) } else { header_body(s, t, d, overlays).key(FOLD) };
+    panel = panel.child(header).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
     if u.tab == 2 {
         let panel = panel.child(code(s, t, overlays)).children(super::pr_edit::composer(s, t, d, overlays));
         confirm_catcher(s, overlays);
@@ -1053,7 +1125,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     };
     let key = format!("pr-detail-scroll-{}", u.tab);
     super::pr_edit::reaction_picker(s, t, overlays);
-    let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
+    let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(condense_reporter(s, u.tab)).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
     confirm_catcher(s, overlays);
     panel
 }
@@ -1511,6 +1583,47 @@ fn header_body(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         .child(super::pr_edit::title(s, t, d))
         .child(meta)
         .child(branches)
+}
+
+/// The condensed row: the author and when it moved, the branches, and the change counts.
+fn condensed_header(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
+    let muted = t.c.muted_foreground;
+    let mono = theme::mono(theme::TEXT_2XS);
+    let ink = muted.alpha_mul(0.65);
+    let mut who = row().gap(6.0).center_y().shrink().child(avatar(&s.ui.pages.avatars, &d["author"], 16.0, t));
+    if let Some(at) = ts(d, "updatedAt") {
+        who = who.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
+    }
+    let head = field(d, "headBranch").to_string();
+    let branches = row()
+        .gap(6.0)
+        .center_y()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .child(super::pr_meta::base_branch(s, t, d, mono, ink, overlays))
+        .child(icon(&i::ARROW_LEFT, 12.0).color(ink.alpha_mul(0.6)).role("img").label("receives changes from"))
+        .child(text(head.clone()).font(mono).color(ink).shrink().help(head));
+    let files = d["changedFiles"].as_i64().unwrap_or(0);
+    let counts = row()
+        .gap(8.0)
+        .center_y()
+        .child(row().gap(4.0).center_y().label(format!("{files} changed {}", if files == 1 { "file" } else { "files" })).child(icon(&i::FILE_DIFF, 12.0).color(muted)).child(text(files.to_string()).font(theme::TEXT_2XS.features("'tnum' 1")).color(muted)))
+        .child(text(format!("+{}", d["additions"].as_i64().unwrap_or(0))).font(mono.features("'tnum' 1")).color(t.c.diff_addition_foreground))
+        .child(text(format!("-{}", d["deletions"].as_i64().unwrap_or(0))).font(mono.features("'tnum' 1")).color(t.c.diff_deletion_foreground));
+    row()
+        .key("pr-detail-condensed")
+        .w_full()
+        .h(CONDENSED_H)
+        .px(16.0)
+        .pt(4.0)
+        .pb(8.0)
+        .gap(8.0)
+        .center_y()
+        .child(who)
+        .child(el().w(1.0).h(12.0).shrink().fill(t.c.border.alpha_mul(0.7)))
+        .child(branches)
+        .child(counts)
 }
 
 /// PullRequestCopyableCode: the value reads "Copied" for 1.6 s after a press copies it.
@@ -2850,6 +2963,20 @@ mod tests {
         assert!(poll_checkout(&mut s));
         assert_eq!(s.ui.chat.home.workspace.as_ref().map(|w| w.0.as_str()), Some("pb"), "the draft opens in the picked environment's project");
         assert_eq!(s.ui.env.active, "box", "and the window switches to that environment");
+    }
+
+    #[test]
+    fn the_header_condenses_past_its_fold_and_keeps_the_content_still() {
+        assert_eq!(next_condensed(false, 140.0, 120.0), (false, None), "within 32px of the fold it stays open");
+        assert_eq!(next_condensed(false, 160.0, 120.0), (true, Some(160.0 - (120.0 - CONDENSED_H))));
+        assert_eq!(next_condensed(false, 500.0, 0.0), (false, None), "no fold measured yet");
+        assert_eq!(next_condensed(true, 40.0, 0.0), (true, None));
+        assert_eq!(next_condensed(true, 3.0, 0.0), (false, None), "near the top it opens again");
+        let c = Condense::default();
+        c.set(2, true);
+        assert!(c.on(2) && !c.on(0), "each tab keeps its own");
+        c.set(2, false);
+        assert!(!c.on(2));
     }
 
     #[test]
