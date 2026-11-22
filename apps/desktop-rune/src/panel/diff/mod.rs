@@ -1297,6 +1297,25 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
         .build(&kit::theme(t), layer)
 }
 
+/// A file header's counts, each with whether it is the additions. Pierre writes `-d +a`, leaving
+/// out a zero side unless both are zero; web swaps in DiffStatLabel's compact `+a -d` while a git
+/// source's patches load file by file (`lazySource`).
+pub(crate) fn header_counts(ui: &Ui, adds: usize, dels: usize) -> Vec<(bool, String)> {
+    let lazy = ui.source.kind.is_some() && (ui.source.truncated || ui.source.incomplete);
+    if lazy {
+        return vec![(true, format!("+{}", compact(adds))), (false, format!("-{}", compact(dels)))];
+    }
+    let n = |v: usize| crate::chat::details::thousands(v as u64);
+    let mut out = vec![];
+    if dels > 0 || adds == 0 {
+        out.push((false, format!("-{}", n(dels))));
+    }
+    if adds > 0 || dels == 0 {
+        out.push((true, format!("+{}", n(adds))));
+    }
+    out
+}
+
 /// A file's line counts: the server's when it gave them, else the patch's.
 fn counts(ui: &Ui, f: &FileDiff) -> (usize, usize) {
     ui.counts.get(f.path()).copied().unwrap_or((f.additions(), f.deletions()))
@@ -1758,6 +1777,10 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
     let turns = turns(app);
     let current = turn_of(&ui.scope, &turns);
     let latest = matches!(ui.scope, Scope::Turn(_)) && current == turns.first().map(|t| t.count);
+    let measure = |label: &str, font| rune::text::measure(label, &[], font, None).0.ceil();
+    // The submenu sizes to its widest row, as web's does: the menu's padding and border, the
+    // item's padding, label, gap-2, time, and the radio's check.
+    let turns_w = turns.iter().map(|turn| measure(&format!("Turn {}", turn.count), theme::TEXT_SM) + 8.0 + measure(&clock(app, turn.at), theme::TEXT_XS)).fold(0.0, f32::max) + 60.0;
     let turn_entries: Vec<MenuEntry> = turns
         .iter()
         .map(|turn| {
@@ -1765,7 +1788,8 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
             MenuEntry::item(
                 MenuItem::new(format!("Turn {n}"))
                     .radio(matches!(ui.scope, Scope::Turn(_)) && current == Some(n))
-                    .shortcut(clock(app, turn.at))
+                    // `ml-auto text-xs tabular-nums text-muted-foreground`, not a shortcut's style.
+                    .trailing(text(clock(app, turn.at)).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground))
                     .on_select(move |s: &mut App| {
                         open_turn(s, n);
                         load(s);
@@ -1813,7 +1837,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         .item(MenuItem::new("Changes").radio(ui.scope == Scope::Branch).on_select(|s: &mut App| select(s, Scope::Branch)))
         .item(MenuItem::new("Uncommitted").radio(ui.scope == Scope::Unstaged).on_select(|s: &mut App| select(s, Scope::Unstaged)))
         .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, latest_turn(s))))
-        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
+        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).submenu_min_width(turns_w.max(160.0)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
         .item(MenuItem::new("Commits").submenu(commit_entries, sub == Some(Sub::Commits)).submenu_min_width(320.0).on_submenu_change(|s: &mut App, on| {
@@ -1868,6 +1892,34 @@ pub fn tree_fixture(app: &mut App) {
     ui.tree_open = true;
     apply(app);
     app.ui.panel.diff.state.set_all_collapsed(false);
+}
+
+/// The tree fixture with a binary image, a partial file, a sent review comment and an open
+/// draft, for headless scenes.
+pub fn review_fixture(app: &mut App) {
+    tree_fixture(app);
+    let ui = &mut app.ui.panel.diff;
+    ui.files.extend(rune_kit::diff::parse("diff --git a/assets/logo.png b/assets/logo.png\nindex 1234567..abcdef0 100644\nBinary files a/assets/logo.png and b/assets/logo.png differ\n"));
+    ui.files.sort_by(|a, b| a.path().cmp(b.path()));
+    ui.partial.insert("src/greet.ts".into());
+    ui.tree_open = false;
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+    comments::fixture(app);
+}
+
+/// The scope menu open on its Turn submenu over three checkpointed turns, for headless scenes.
+pub fn turns_fixture(app: &mut App) {
+    fixture(app);
+    if let Some((thread, _)) = super::diff_context(app)
+        && let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(view) = state.thread_views.get_mut(&thread)
+    {
+        let at = ["2026-03-10T09:12:00Z", "2026-03-10T10:40:00Z", "2026-03-10T11:58:00Z"];
+        view.projection["checkpoints"] = at.iter().enumerate().map(|(i, at)| serde_json::json!({"checkpointTurnCount": i + 1, "capturedAt": at})).collect();
+    }
+    let ui = &mut app.ui.panel.diff;
+    (ui.menu_open, ui.sub) = (true, Some(Sub::Turns));
 }
 
 /// The fixture as a cut preview still listing untracked files, for headless scenes.
@@ -2087,6 +2139,18 @@ mod tests {
         assert_eq!(commit_url(&json!({"canonicalKey": "github.com/a/b", "locator": {"remoteUrl": ""}}), sha), None, "no provider, no link");
         assert_eq!(commit_url(&json!({"provider": "github", "canonicalKey": "github.com/a/b/c"}), sha), None);
         assert_eq!(commit_url(&Value::Null, sha), None);
+    }
+
+    #[test]
+    fn file_headers_count_like_pierre_unless_patches_load_per_file() {
+        let mut ui = Ui::default();
+        let shown = |ui: &Ui, a, d| header_counts(ui, a, d).into_iter().map(|(_, s)| s).collect::<Vec<_>>();
+        assert_eq!(shown(&ui, 1200, 3), ["-3", "+1,200"], "FAILED: deletions first");
+        assert_eq!(shown(&ui, 4, 0), ["+4"]);
+        assert_eq!(shown(&ui, 0, 0), ["-0", "+0"], "FAILED: a pure rename shows both zeros");
+        ui.source.kind = Some("working-tree".into());
+        ui.source.incomplete = true;
+        assert_eq!(shown(&ui, 1200, 0), ["+1.2k", "-0"]);
     }
 
     #[test]

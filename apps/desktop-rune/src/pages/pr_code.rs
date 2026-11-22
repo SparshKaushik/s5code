@@ -2064,7 +2064,6 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
     let vw = st.view_width().to_bits();
     match st.rows[i] {
         Row::File(f) => file_header(s, l, f as usize, false),
-        Row::Note(f) => memo(key, (l.version, st.rev, vw), || view::note(st, l, f as usize)),
         Row::Sep { f, h } => memo(key, (l.version, st.rev, vw), || view::separator(st, l, f as usize, h as usize)),
         Row::Comment { n, .. } => {
             let inner = annotation(s, l, n as usize).key("inner");

@@ -600,16 +600,21 @@ impl Menu {
     /// On macOS an open `native(true)` menu opens as an `NSMenu` through rune's pop-up menu: a
     /// zero-size probe asks once its first layout runs. Menus it can't express stay drawn.
     fn native_popup(&self, trigger: &str) -> Option<El> {
-        if !self.native || !rune::popup_menu_supported() {
+        let (menu, anchor, probe, picks) = self.native_request(trigger)?;
+        let popup = self.popup.as_ref()?;
+        Some(popup(menu, anchor, Rc::new(picks)).key(probe))
+    }
+    /// The menu, where it opens and its probe's key; `None` where it stays drawn.
+    fn native_request(&self, trigger: &str) -> Option<(rune::PopupMenu, rune::PopupAnchor, String, Vec<(String, Pick)>)> {
+        if !self.native || !rune::popup_menu_supported() || self.popup.is_none() {
             return None;
         }
-        let popup = self.popup.as_ref()?;
         let (menu, picks) = native_menu(&self.entries)?;
         let (anchor, probe) = match self.at {
             Some((x, y)) => (rune::PopupAnchor::Point(x, y), format!("{}-native-{}-{}", self.key, x.round(), y.round())),
             None => (rune::PopupAnchor::Key(trigger.to_owned()), format!("{}-native", self.key)),
         };
-        Some(popup(menu, anchor, Rc::new(picks)).key(probe))
+        Some((menu, anchor, probe, picks))
     }
     pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {
         let key = self
@@ -830,6 +835,32 @@ mod tests {
         assert!(native_menu(&[MenuEntry::Row(el())]).is_none());
         assert!(native_menu(&[MenuEntry::item(MenuItem::new("Nothing"))]).is_none());
         assert!(native_menu(&[MenuEntry::item(MenuItem::new("Off").disabled(true))]).is_some());
+    }
+
+    fn menu(native: bool) -> Menu {
+        Menu::new("m").native(native).open(true).at(10.0, 20.0).on_close(|_: &mut App| {}).item(MenuItem::new("Open").on_select(|s: &mut App| s.0.push("open")))
+    }
+
+    #[test]
+    fn an_open_native_menu_asks_for_an_nsmenu_only_where_rune_has_one() {
+        assert_eq!(menu(true).native_popup("m-trigger").is_some(), rune::popup_menu_supported());
+        assert!(menu(false).native_popup("m-trigger").is_none(), "a dropdown stays drawn");
+        assert!(menu(true).row(el()).native_popup("m-trigger").is_none(), "custom rows stay drawn");
+        let unclosable = Menu::new("m").native(true).open(true).item(MenuItem::new("Open").on_select(|_: &mut App| {}));
+        assert!(unclosable.native_popup("m-trigger").is_none(), "without on_close a dismissal has nowhere to go");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_opens_native_menus_at_the_press_point() {
+        assert!(rune::popup_menu_supported());
+        let (native, anchor, probe, picks) = menu(true).native_request("m-trigger").expect("an NSMenu request");
+        assert_eq!((anchor, probe.as_str()), (rune::PopupAnchor::Point(10.0, 20.0), "m-native-10-20"));
+        assert_eq!(native.find("item1").map(|i| i.title()), Some("Open"));
+        assert_eq!(picks.len(), 1);
+        let dropdown = Menu::new("d").native(true).open(true).on_close(|_: &mut App| {}).item(MenuItem::new("Open").on_select(|_: &mut App| {}));
+        let (_, anchor, ..) = dropdown.native_request("d-trigger").expect("an NSMenu request");
+        assert_eq!(anchor, rune::PopupAnchor::Key("d-trigger".into()), "a dropdown drops from its trigger");
     }
 
     #[test]
