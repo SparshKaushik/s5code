@@ -899,12 +899,13 @@ fn tool_section(title: &str, children: Vec<El>, t: &T) -> El {
 }
 
 fn tool_row(label: &str, control: El, t: &T) -> El {
-    row().w_full().gap(8.).center_y().child(text(label.to_owned()).font(theme::TEXT_XS).color(t.c.foreground).grow(1.).min_w(0.)).child(control)
+    // The label keeps its width; the control gives way.
+    row().w_full().gap(8.).center_y().child(text(label.to_owned()).font(theme::TEXT_XS).color(t.c.foreground).single_line()).child(el().grow(1.)).child(control.shrink())
 }
 
 /// Chips for one setting: the current value pressed, each sending `action(value)`.
 fn chips(options: &[(&'static str, &'static str)], current: Option<&str>, disabled: bool, t: &T, action: fn(&str) -> Value) -> El {
-    row().w_full().flex_wrap().gap(4.).children(options.iter().map(|&(value, label)| {
+    row().flex_wrap().gap(4.).children(options.iter().map(|&(value, label)| {
         kit::Button::new(label)
             .variant(if current == Some(value) { "secondary" } else { "outline" })
             .size("xs")
@@ -960,7 +961,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
             row()
                 .gap(4.)
                 .center_y()
-                .child(text(name).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().max_w(110.))
+                .child(text(name).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().max_w(110.).shrink())
                 .child(kit::Button::new("Terminate").variant("outline").size("xs").disabled(disabled).on_press(move |s: &mut App| act(s, json!({"type": "terminateApp", "appId": quit}))).build(t))
                 .child(kit::Button::new("Relaunch").variant("outline").size("xs").disabled(disabled).on_press(move |s: &mut App| act(s, json!({"type": "launchApp", "appId": relaunch}))).build(t)),
             t,
@@ -973,7 +974,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
     let mut device = vec![
         tool_row("Appearance", chips(&[("light", "Light"), ("dark", "Dark")], appearance, disabled, t, |v| json!({"type": "setAppearance", "value": v})), t),
         tool_row("Text size", el(), t),
-        chips(&[("small", "Small"), ("default", "Default"), ("large", "Large"), ("extra-large", "Extra large")], settings.and_then(|v| v["textSize"].as_str()), disabled, t, |v| json!({"type": "setTextSize", "value": v})),
+        chips(&[("small", "Small"), ("default", "Default"), ("large", "Large"), ("extra-large", "Extra large")], settings.and_then(|v| v["textSize"].as_str()), disabled, t, |v| json!({"type": "setTextSize", "value": v})).w_full(),
     ];
     if android {
         device.push(tool_row("Orientation", chips(&[("portrait", "Portrait"), ("landscape_left", "Landscape")], None, disabled, t, |v| json!({"type": "setOrientation", "value": v})), t));
@@ -991,7 +992,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
                 disabled,
                 t,
                 |v| json!({"type": "setColorFilter", "value": v}),
-            ));
+            ).w_full());
         }
         for (label, setting) in [("Reduce Motion", "reduceMotion"), ("Increase Contrast", "increaseContrast"), ("Reduce Transparency", "reduceTransparency"), ("Show Borders", "showBorders"), ("VoiceOver", "voiceOver")] {
             device.push(tool_switch(label, setting, settings, disabled, t));
@@ -1195,7 +1196,9 @@ pub fn open_tools(app: &mut App) {
 /// The device floating over the chat, for its scene.
 pub fn float_fixture(app: &mut App) {
     let Some(key) = app.ui.panel.device.stream.as_ref().map(|s| s.key.clone()) else { return };
-    app.ui.panel.device.float = Some(Float { key, frame: None, start: None, area: [0.; 4] });
+    // The chat area the first layout reports, so the scene's single frame draws the float.
+    let area = [0., theme::layout::TOPBAR_H, 1440., 900. - theme::layout::TOPBAR_H];
+    app.ui.panel.device.float = Some(Float { key, frame: None, start: None, area });
     app.ui.shell.panel_open = false;
 }
 
