@@ -19,7 +19,7 @@ pub mod automations;
 pub mod child_work;
 pub mod cleanup;
 pub mod editor_icons;
-mod git;
+pub(crate) mod git;
 pub mod html_render;
 pub mod items;
 pub mod pr;
@@ -981,7 +981,7 @@ fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .gap(8.0)
         .child(el().grow(1.0))
         .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
-        .child(crate::kit::Button::new("Switch branch").on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
+        .child(crate::kit::Button::new("Switch branch").disabled(!grants(s, "source-control:write")).on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
     crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
         .open(true)
         .alert()
@@ -1515,30 +1515,34 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
     let ui = &s.ui.chat.details;
     let muted = t.c.muted_foreground;
     let project_cwd = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
-    let search = row()
+    // ComboboxSearchInput: a borderless field over a divider that takes the ring colour on focus.
+    let field = text_input(&ui.branch_query, theme::TEXT_SM)
+        .key("details-branch-search")
         .w_full()
-        .h(32.0)
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .child(icon(&icons::SEARCH, 16.0).color(muted.alpha_mul(0.8)))
-        .child(
-            text_input(&ui.branch_query, theme::TEXT_SM)
-                .key("details-branch-search")
-                .grow(1.0)
-                .min_w(0.0)
-                .font(theme::TEXT_SM)
-                .color(t.c.foreground)
-                .placeholder("Search refs...", muted)
-                .on_input_key(on_branch_key)
-                .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query),
-        );
-    let mut list = list.child(search).child(el().w_full().h(1.0).my(4.0).fill(t.c.border));
-    let status = |label: &str| row().h(32.0).px(8.0).center_y().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+        .h(26.0)
+        .pl(20.0)
+        .py(3.0)
+        .font(theme::TEXT_SM)
+        .color(t.c.contrast_foreground)
+        .placeholder("Search refs...", t.c.contrast_placeholder)
+        .on_input_key(on_branch_key)
+        .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query);
+    let underline = if ui.branch_query.focused { t.c.ring } else { t.c.contrast_border.alpha_mul(0.7) };
+    let search = col()
+        .w_full()
+        .px(12.0)
+        .pt(9.0)
+        .child(row().w_full().pb(6.0).child(icon(&icons::SEARCH, 16.0).absolute(0.0, 6.0).color(t.c.contrast_muted_foreground.alpha_mul(0.55))).child(field))
+        .child(el().w_full().h(1.0).fill(underline));
+    let list = list.padding(0.0).child(search);
+    // ComboboxEmpty (centred, p-2) and ComboboxStatus (px-3 py-2, medium xs).
+    let empty = |label: &str| row().w_full().padding(8.0).justify_center().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+    let status = |label: &str| row().w_full().px(12.0).py(8.0).child(text(label.to_string()).font(theme::XS_MEDIUM).color(muted));
     let Some(refs) = ui.refs.as_deref() else { return list.child(status("Loading refs...")) };
     let items = visible_items(s);
+    let mut list = list;
     if items.is_empty() {
-        list = list.child(status("No refs found."));
+        list = list.child(empty("No refs found."));
     }
     let active = ui.branch_active.min(items.len().saturating_sub(1));
     let mut rows = col().w_full();
@@ -1559,10 +1563,10 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             .px(8.0)
             .gap(8.0)
             .center_y()
-            .radius(radius::MD)
+            .radius(4.0)
             .cursor(Cursor::Pointer)
             .label(label.clone())
-            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
+            .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
             .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i);
         if let Item::Ref(r) = &item {
             let name = refs[*r].name.clone();
@@ -1579,12 +1583,14 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
         if i == active {
-            line = line.fill(t.c.accent);
+            line = line.fill(t.c.contrast_foreground.alpha_mul(0.09));
         }
         rows = rows.child(line);
     }
     let (near_end, last) = (ui.near_end.clone(), ui.last_scroll.clone());
     let waker = s.ui.panel.waker.clone();
+    // The list: ps-1 py-2 inside ComboboxListVirtualized's px-1 py-1, at most 224 tall.
+    let rows = col().w_full().pl(8.0).pr(4.0).py(12.0).child(rows);
     let rows = rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
         if next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
             if let Some(w) = &waker {
@@ -1599,19 +1605,20 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
         _ => None,
     };
     if let Some(footer) = footer {
-        list = list.child(row().px(8.0).py(6.0).child(text(footer).font(theme::TEXT_XS).color(muted)));
+        list = list.child(status(&footer));
     }
     if selecting_base(s) {
         let on = draft_run(s).is_some_and(|r| r.from_origin);
-        list = list.child(el().w_full().h(1.0).my(4.0).fill(t.c.border)).child(
+        // A label row under a border-border/60 rule: px-3 py-2, medium xs muted, a 12px icon.
+        list = list.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(
             row()
                 .w_full()
-                .h(32.0)
-                .px(8.0)
-                .gap(8.0)
+                .px(12.0)
+                .py(8.0)
+                .gap(12.0)
                 .center_y()
-                .child(icon(&icons::REFRESH_CW, 14.0).color(muted))
-                .child(text("Start from remote").font(theme::TEXT_SM).color(t.c.foreground).grow(1.0))
+                .help("Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.")
+                .child(row().gap(6.0).center_y().grow(1.0).min_w(0.0).child(icon(&icons::REFRESH_CW, 12.0).color(muted)).child(text("Start from remote").font(theme::XS_MEDIUM).color(muted).truncate()))
                 .child(
                     crate::kit::Switch::new(on)
                         .size("sm")

@@ -12,6 +12,7 @@ mod menu;
 pub(crate) mod row;
 pub mod share;
 mod snooze;
+mod stage;
 mod updates;
 
 pub use self::row::monogram;
@@ -132,6 +133,14 @@ pub struct Ui {
     pub drafts: drafts::Ui,
     /// The server's message matches for a search: (query, thread ids).
     pub content: (String, Vec<String>),
+    /// Since when the thread-jump modifiers have been held alone (`useThreadJumpHintsVisible`).
+    jump_held: Option<i64>,
+    /// The width the rail set, read from the window prefs on first use.
+    width: std::cell::Cell<Option<f32>>,
+    /// The Dev or Nightly header artwork, rasterized for the current width.
+    stage: stage::Art,
+    /// Each matched thread's first message match (`threadId`, `snippet`, `source`), by `content`.
+    content_matches: Vec<serde_json::Value>,
     content_due: Option<(i64, String)>,
     /// One request per connected environment, and the query they answer.
     content_req: Option<(Vec<u64>, String)>,
@@ -143,10 +152,43 @@ impl Ui {
     pub fn content_hits(&self) -> &[String] {
         if self.content.0 == self.search.text.trim() { &self.content.1 } else { &[] }
     }
+
+    /// The message match a result row shows and opens find on, for the current query.
+    pub fn content_match(&self, thread: &str) -> Option<&serde_json::Value> {
+        (self.content.0 == self.search.text.trim()).then_some(())?;
+        self.content_matches.iter().find(|m| m["threadId"] == thread)
+    }
+
+    /// `threadSearch.isPending`: message search is debouncing or in flight for the query.
+    pub fn content_pending(&self) -> bool {
+        let query = self.search.text.trim();
+        self.content_due.as_ref().is_some_and(|d| d.1 == query) || self.content_req.as_ref().is_some_and(|r| r.1 == query)
+    }
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("sidebar-home", scene_home),
+    ("sidebar-stage-nightly", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("nightly-artwork"));
+    }),
+    ("sidebar-stage-dev", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("environmentIdentificationMode".into(), json!("dev-artwork"));
+    }),
+    // Search with message matches: a title hit with its excerpt, and a thread found only by one.
+    ("sidebar-search-excerpts", |s| {
+        scene_home(s);
+        let hit = |s: &App, title: &str| thread_titled(s, title).unwrap_or_default();
+        let (showcase, todo) = (hit(s, "Replay showcase"), hit(s, "New thread"));
+        let ui = &mut s.ui.shell.sidebar;
+        ui.search = TextEdit::new("replay turn");
+        ui.content = ("replay turn".into(), vec![showcase.clone(), todo.clone()]);
+        ui.content_matches = vec![
+            json!({"threadId": showcase, "source": "assistant", "snippet": "…the replay finished its last turn without errors"}),
+            json!({"threadId": todo, "source": "user", "snippet": "Can you replay the previous turn?"}),
+        ];
+    }),
     ("sidebar-selected", |s| {
         scene_home(s);
         if let Some(id) = thread_titled(s, "Replay showcase") {
@@ -1040,10 +1082,12 @@ fn poll_content(s: &mut App) -> bool {
     let changed = !answered.is_empty();
     if changed && ui.content.0 != q {
         ui.content = (q.clone(), vec![]);
+        ui.content_matches.clear();
     }
     for reply in answered {
         let matches = reply.ok().and_then(|v| v["matches"].as_array().cloned()).unwrap_or_default();
         ui.content.1.extend(matches.iter().filter_map(|m| m["threadId"].as_str().map(str::to_string)));
+        ui.content_matches.extend(matches);
     }
     if !waiting.is_empty() {
         ui.content_req = Some((waiting, q));
@@ -1297,6 +1341,166 @@ fn bound_key(s: &mut App, e: &KeyEvent, editable: bool) -> bool {
     true
 }
 
+/// Window prefs key for the dragged width (web's `chat_thread_sidebar_width`).
+const WIDTH_KEY: &str = "threadSidebarWidth";
+const MIN_W: f32 = 208.0;
+/// The main area keeps 40rem beside the sidebar.
+const MAIN_MIN_W: f32 = 640.0;
+
+/// `clampThreadSidebarWidth`: at least 13rem and the header's brand and history buttons
+/// (`resolveThreadSidebarMinimumWidth`), and no wider than leaves the main area 40rem.
+fn clamp_width(width: f32, viewport: Option<f32>, brand: f32) -> f32 {
+    let min = MIN_W.max(brand.ceil());
+    let max = viewport.map_or(f32::MAX, |v| (v.floor() - MAIN_MIN_W).max(min));
+    width.max(min).min(max).round()
+}
+
+/// The window's width and the header's natural width (`SidebarBrandWidthProbe`).
+fn bounds(cx: &mut Cx<App>) -> (Option<f32>, f32) {
+    (cx.layout_with("shell", |r| r[2]), chrome::brand_width(cx.titlebar_inset()))
+}
+
+/// The sidebar's content width.
+pub fn width(s: &App, cx: &mut Cx<App>) -> f32 {
+    let (viewport, brand) = bounds(cx);
+    let ui = &s.ui.shell.sidebar;
+    let stored = ui.width.get().unwrap_or_else(|| {
+        let saved = crate::desktop::prefs().get::<f32>(WIDTH_KEY).filter(|w| w.is_finite()).unwrap_or(layout::SIDEBAR_W);
+        ui.width.set(Some(saved));
+        saved
+    });
+    clamp_width(stored, viewport, brand)
+}
+
+fn save_width(width: Option<f32>) {
+    let mut prefs = crate::desktop::prefs();
+    if let Some(w) = width {
+        let _ = prefs.set(WIDTH_KEY, &w);
+    } else {
+        let _ = prefs.remove(WIDTH_KEY);
+    }
+}
+
+/// `SidebarRail`: drag to resize, double-click for the default width, both kept across launches.
+fn rail(width: f32, (viewport, brand): (Option<f32>, f32)) -> El {
+    el().key("sb-rail")
+        .role("separator")
+        .label("Resize Sidebar")
+        .help("Drag to resize sidebar")
+        .pin(None, Some(0.0), Some(0.0), Some(0.0))
+        .w(6.0)
+        .cursor(rune::Cursor::ResizeColumn)
+        .on_drag(move |s: &mut App, d, _| {
+            if d.phase == rune::Phase::Down {
+                d.data = width;
+                if d.clicks == 2 {
+                    s.ui.shell.sidebar.width.set(Some(layout::SIDEBAR_W));
+                    save_width(None);
+                }
+                return;
+            }
+            if d.cancelled() || d.clicks == 2 {
+                return;
+            }
+            let next = clamp_width(d.data + d.dx, viewport, brand);
+            s.ui.shell.sidebar.width.set(Some(next));
+            if d.phase == rune::Phase::Up {
+                save_width(Some(next));
+            }
+        })
+}
+
+/// Jump hints wait this long after the modifiers go down, so a quick shortcut never flashes them.
+const JUMP_HINT_DELAY_MS: i64 = 200;
+
+/// `shouldShowThreadJumpHintsForModifiers`: the held modifiers are exactly those of a
+/// `thread.jump.N` shortcut, and the terminal does not have focus.
+fn jump_modifiers(s: &App, mods: rune::Mods) -> bool {
+    if crate::panel::terminal_focused(s) {
+        return false;
+    }
+    let bindings = s.state().config.as_ref().and_then(|c| c["keybindings"].as_array().cloned());
+    let Some(bindings) = bindings else { return crate::panel::modifiers_match(&json!({"modKey": true}), mods) };
+    bindings
+        .iter()
+        .filter(|b| b["command"].as_str().is_some_and(|c| c.starts_with("thread.jump.")))
+        .any(|b| crate::panel::modifiers_match(&b["shortcut"], mods))
+}
+
+/// Tracks the jump modifiers held alone; true when the hints' state changes.
+pub fn on_modifier(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    let changed = hold_jump(s, e.mods);
+    if changed && s.ui.shell.sidebar.jump_held.is_some() {
+        tx.wake_after(std::time::Duration::from_millis(JUMP_HINT_DELAY_MS as u64));
+    }
+    changed
+}
+
+pub fn release_jump(s: &mut App) {
+    s.ui.shell.sidebar.jump_held = None;
+}
+
+fn hold_jump(s: &mut App, mods: rune::Mods) -> bool {
+    let held = jump_modifiers(s, mods);
+    let ui = &mut s.ui.shell.sidebar;
+    if held == ui.jump_held.is_some() {
+        return false;
+    }
+    ui.jump_held = held.then(crate::data::now_ms);
+    true
+}
+
+/// The shortcut each of the first nine visible threads jumps by, while the hints show.
+pub(crate) fn jump_labels(s: &App, model: &Model) -> HashMap<String, String> {
+    let ui = &s.ui.shell.sidebar;
+    let shown = ui.jump_held.is_some_and(|at| crate::data::now_ms() >= at + JUMP_HINT_DELAY_MS) && !s.ui.notify.background;
+    if !shown {
+        return HashMap::new();
+    }
+    let mac = cfg!(target_os = "macos");
+    let configured = s.state().config.as_ref().is_some_and(|c| c["keybindings"].is_array());
+    model
+        .visible_ids(ui)
+        .into_iter()
+        .take(9)
+        .enumerate()
+        .filter_map(|(i, id)| {
+            let label = if configured {
+                crate::shell::palette::shortcut_label(s, &format!("thread.jump.{}", i + 1))
+            } else if mac {
+                format!("⌘{}", i + 1)
+            } else {
+                format!("Ctrl+{}", i + 1)
+            };
+            (!label.is_empty()).then_some((id, label))
+        })
+        .collect()
+}
+
+/// `handleThreadFileDrop`: files dropped on a row open its thread with them attached; folders
+/// are left out, as web's row drop ignores them.
+pub fn drop_files(s: &mut App, id: &str, files: &[std::path::PathBuf]) {
+    let files: Vec<String> = files.iter().filter(|p| !p.is_dir()).map(|p| p.display().to_string()).collect();
+    if files.is_empty() {
+        return;
+    }
+    open_thread(s, id);
+    if matches!(&s.route, Route::Thread(open) if open == id) {
+        crate::chat::composer::add_files(s, files);
+    }
+}
+
+/// `selectThreadSearchResult`: opens the thread, and find on its message match as the palette does.
+pub(crate) fn open_result(s: &mut App, id: &str) {
+    let ui = &s.ui.shell.sidebar;
+    let find = ui.content_match(id).map(|m| crate::shell::palette::find_query(crate::data::s(m, "snippet"), ui.search.text.trim()));
+    clear_search(s);
+    open_thread(s, id);
+    if let Some(query) = find {
+        crate::shell::palette::open_find(s, query);
+    }
+}
+
 fn clear_search(s: &mut App) {
     let ui = &mut s.ui.shell.sidebar;
     ui.search = TextEdit::default();
@@ -1380,8 +1584,7 @@ fn search_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Up => ui.highlight = ui.highlight.saturating_sub(1),
         Key::Enter => {
             if let Some(id) = hits.get(ui.highlight).cloned() {
-                clear_search(s);
-                open_thread(s, &id);
+                open_result(s, &id);
             }
         }
         _ => return false,
@@ -1433,21 +1636,24 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     chrome::scope_menu(s, &model, t, overlays);
     folders::menu(s, t, overlays);
     drafts::menu(s, t, overlays);
-    // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
+    // The width plus 1pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
+    let w = width(s, cx);
+    let art = stage::variant(s).and_then(|v| stage::backdrop(s, t, v, w + 1.0, cx.env().scale));
     let content = col()
-        .w(layout::SIDEBAR_W + 1.0)
+        .w(w + 1.0)
         .h_full()
-        .child(chrome::header(s, t, inset))
+        .child(chrome::header(s, t, inset, art, stage::pill(s)))
         .child(chrome::search_bar(s, t))
         .child(list)
         .child(chrome::footer(s, &model, t));
     row()
         .key("sidebar")
-        .w(layout::SIDEBAR_W + 2.0)
+        .w(w + 2.0)
         .h_full()
         .fill(t.sb.sidebar)
         .child(content)
         .child(el().w(1.0).h_full().fill(t.sb.contrast_sidebar_border))
+        .child(rail(w, bounds(cx)))
 }
 
 impl Shelf {
@@ -1520,6 +1726,60 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn files_dropped_on_a_row_open_its_thread_and_folders_alone_do_nothing() {
+        let mut s = App::new();
+        s.route = Route::Home { project_id: None };
+        let id = crate::data::s(&s.state().threads[0], "id").to_string();
+        drop_files(&mut s, &id, &[std::env::temp_dir()]);
+        assert!(matches!(s.route, Route::Home { .. }), "a folder alone is ignored");
+        let file = std::env::temp_dir().join("s5code-rune-drop-test.txt");
+        std::fs::write(&file, "x").unwrap();
+        drop_files(&mut s, &id, &[file.clone()]);
+        assert!(matches!(&s.route, Route::Thread(open) if *open == id));
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn the_width_stays_between_13rem_and_what_leaves_the_main_area_40rem() {
+        assert_eq!(clamp_width(100.0, None, 0.0), MIN_W);
+        assert_eq!(clamp_width(300.4, Some(1400.0), 0.0), 300.0);
+        assert_eq!(clamp_width(900.0, Some(1200.0), 0.0), 560.0);
+        assert_eq!(clamp_width(300.0, Some(700.0), 0.0), MIN_W, "a narrow window still keeps the minimum");
+        assert_eq!(clamp_width(100.0, None, chrome::brand_width(28.0)), 245.0, "the macOS header's brand and history buttons stay whole");
+    }
+
+    #[test]
+    fn jump_hints_follow_the_jump_shortcuts_modifiers_after_a_moment() {
+        let mut s = App::new();
+        let mods = |cmd: bool, ctrl: bool, shift: bool| rune::Mods { cmd, ctrl, shift, ..Default::default() };
+        let (cmd, ctrl) = if cfg!(target_os = "macos") { (true, false) } else { (true, true) };
+        assert!(!hold_jump(&mut s, mods(false, false, true)), "Shift alone is not the jump modifier");
+        assert!(hold_jump(&mut s, mods(cmd, ctrl, false)));
+        let model = Model::build(&s);
+        assert!(jump_labels(&s, &model).is_empty(), "not before the delay");
+        s.ui.shell.sidebar.jump_held = Some(crate::data::now_ms() - JUMP_HINT_DELAY_MS);
+        let labels = jump_labels(&s, &model);
+        let first = model.visible_ids(&s.ui.shell.sidebar)[0].clone();
+        assert_eq!(labels.get(&first).map(String::as_str), Some(if cfg!(target_os = "macos") { "⌘1" } else { "Ctrl+1" }));
+        assert!(hold_jump(&mut s, mods(cmd, ctrl, true)), "adding Shift hides them");
+        assert!(jump_labels(&s, &model).is_empty());
+    }
+
+    #[test]
+    fn enter_on_a_message_match_opens_find_on_the_snippets_spelling() {
+        let mut s = App::new();
+        let id = crate::data::s(&s.state().threads[0], "id").to_string();
+        s.ui.shell.sidebar.search = TextEdit::new("needle");
+        s.ui.shell.sidebar.content = ("needle".into(), vec![id.clone()]);
+        s.ui.shell.sidebar.content_matches = vec![json!({"threadId": id, "snippet": "a Needle here", "source": "user"})];
+        assert!(!s.ui.shell.sidebar.content_pending());
+        open_result(&mut s, &id);
+        assert!(matches!(&s.route, Route::Thread(open) if *open == id));
+        assert!(s.ui.shell.sidebar.search.text.is_empty());
+        assert_eq!(s.ui.chat.timeline.find.edit.text, "Needle");
     }
 
     #[test]

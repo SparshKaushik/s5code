@@ -26,8 +26,22 @@ pub fn icon_button(t: &T, key: &str, glyph: &'static rune::Icon, size: f32, icon
 }
 
 /// The brand row under the traffic lights: collapse toggle, wordmark, back and forward.
-pub fn header(s: &App, t: &T, inset: f32) -> El {
+/// Where the history buttons start: just after the brand (`SidebarBrandMark` and `gap-1`).
+fn nav_left(inset: f32) -> f32 {
+    brand_left(inset) + 36.0 + 61.45
+}
+
+/// The header's natural width up to the history buttons' end.
+pub(super) fn brand_width(inset: f32) -> f32 {
+    nav_left(inset) + 56.0
+}
+
+pub fn header(s: &App, t: &T, inset: f32, art: Option<El>, pill: Option<&str>) -> El {
     let left = brand_left(inset);
+    // `media-navigation` on the artwork: white controls and wordmark.
+    let on_art = art.is_some();
+    let white = rune::Color::WHITE;
+    let control = if on_art { white.alpha_mul(0.9) } else { t.c.muted_foreground };
     let ui = &s.ui.shell.sidebar;
     // `SidebarHistoryButton`: "Go back" / "Go forward" with the shortcut, inert when there is
     // nowhere to go.
@@ -44,16 +58,17 @@ pub fn header(s: &App, t: &T, inset: f32) -> El {
             .size(28.0, 28.0)
             .radius(layout::CONTROL_RADIUS)
             .center()
-            .child(icon(glyph, 14.0).color(t.c.muted_foreground));
-        if enabled { b.hover(t.sb.sidebar_row_hover).press(t.sb.sidebar_row_active).cursor(Cursor::Pointer).on_press(go) } else { b.opacity(0.5) }
+            .child(icon(glyph, 14.0).color(control));
+        let (hover, press) = if on_art { (white.alpha_mul(0.1), white.alpha_mul(0.1)) } else { (t.sb.sidebar_row_hover, t.sb.sidebar_row_active) };
+        if enabled { b.hover(hover).press(press).cursor(Cursor::Pointer).on_press(go) } else { b.opacity(0.5) }
     };
-    el().key("sb-header")
-        .w_full()
-        .h(layout::TOPBAR_H)
-        .shrink()
-        .window_drag()
+    let mut header = el().key("sb-header").w_full().h(layout::TOPBAR_H).shrink().window_drag();
+    if let Some(art) = art {
+        header = header.child(art);
+    }
+    let header = header
         .child(
-            icon_button(t, "sb-toggle", &brand::PANEL_LEFT_CLOSE, layout::TITLEBAR_CONTROL, 16.0, t.c.muted_foreground, false)
+            icon_button(t, "sb-toggle", &brand::PANEL_LEFT_CLOSE, layout::TITLEBAR_CONTROL, 16.0, control, false)
                 .absolute(left, 12.0)
                 .role("button")
                 .label("Toggle main sidebar")
@@ -69,11 +84,16 @@ pub fn header(s: &App, t: &T, inset: f32) -> El {
                 .absolute(left + 36.0, 12.0)
                 .cursor(Cursor::Pointer)
                 .on_press(|s: &mut App| super::go(s, crate::Route::Home { project_id: None }))
-                .child(icon(&brand::T3_WORDMARK, 16.84).color(t.sb.sidebar_foreground).absolute(3.0, 8.92))
-                .child(text("Code").font(theme::SM_MEDIUM).color(t.sb.muted_foreground).absolute(23.84, 4.0)),
+                .child(icon(&brand::T3_WORDMARK, 16.84).color(if on_art { white } else { t.sb.sidebar_foreground }).absolute(3.0, 8.92))
+                .child(text("Code").font(theme::SM_MEDIUM).color(if on_art { white.alpha_mul(0.7) } else { t.sb.muted_foreground }).absolute(23.84, 4.0)),
         )
-        .child(nav("sb-back", &i::ARROW_LEFT, "Go back", "navigation.back", !ui.back.is_empty(), super::go_back).absolute(188.45, 12.0))
-        .child(nav("sb-forward", &i::ARROW_RIGHT, "Go forward", "navigation.forward", !ui.forward.is_empty(), super::go_forward).absolute(216.45, 12.0))
+        .child(nav("sb-back", &i::ARROW_LEFT, "Go back", "navigation.back", !ui.back.is_empty(), super::go_back).absolute(nav_left(inset), 12.0))
+        .child(nav("sb-forward", &i::ARROW_RIGHT, "Go forward", "navigation.forward", !ui.forward.is_empty(), super::go_forward).absolute(nav_left(inset) + 28.0, 12.0));
+    // The "Version pill" identification mode.
+    match pill {
+        Some(label) => header.child(crate::kit::badge(label, "secondary", "sm", t).key("sb-stage-pill").absolute(brand_width(inset) + 4.0, 16.0)),
+        None => header,
+    }
 }
 
 /// Shown in place of the header while the sidebar is collapsed.
@@ -466,7 +486,9 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
         menu.child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN).label("Usage").on_press(|s: &mut App| super::go(s, Route::Usage)))
     };
     let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(undo_notice(s, t));
-    if model.updates > 0 {
+    if let Some(pill) = crate::desktop::updates::pill(s, t, model.updates > 0) {
+        bar = bar.child(pill);
+    } else if model.updates > 0 {
         bar = bar.child(
             el().key("sb-update")
                 .size(32.0, 32.0)
@@ -588,11 +610,11 @@ pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Ton
 }
 
 /// `SidebarDragBoundary`: the "Pinned" / "Active" label a drag reveals over a section's top.
-pub fn boundary(t: &T, label: &str, target: bool) -> El {
+pub fn boundary(t: &T, label: &str, target: bool, width: f32) -> El {
     let (fg, line) = if target { (t.sb.primary, t.sb.primary.alpha_mul(0.5)) } else { (t.sb.sidebar_foreground.alpha_mul(0.8), t.sb.sidebar_foreground.alpha_mul(0.25)) };
     row()
         .absolute(8.0, 4.0)
-        .w(layout::SIDEBAR_W - 1.0 - 16.0 - 16.0 - 4.0)
+        .w(width - 1.0 - 16.0 - 16.0 - 4.0)
         .h(16.0)
         .gap(8.0)
         .center_y()
@@ -601,14 +623,14 @@ pub fn boundary(t: &T, label: &str, target: bool) -> El {
 }
 
 /// `SidebarSectionPlaceholder`: the dashed drop box for an empty section.
-pub fn placeholder(t: &T, label: &str, target: bool) -> El {
+pub fn placeholder(t: &T, label: &str, target: bool, width: f32) -> El {
     let (border, fill, fg) = if target {
         (t.sb.primary.alpha_mul(0.4), t.sb.primary.alpha_mul(0.05), t.sb.primary)
     } else {
         (t.sb.sidebar_foreground.alpha_mul(0.25), Color::TRANSPARENT, t.sb.sidebar_foreground.alpha_mul(0.8))
     };
     el().absolute(0.0, 0.0)
-        .w(layout::SIDEBAR_W - 1.0 - 16.0 - 4.0)
+        .w(width - 1.0 - 16.0 - 4.0)
         .h(36.0)
         .radius(radius::MD)
         .border(1.0, border)
@@ -618,13 +640,28 @@ pub fn placeholder(t: &T, label: &str, target: bool) -> El {
         .child(text(label).font(theme::TEXT_XS).color(fg))
 }
 
+/// `ThreadSearchMatchExcerpt`: who wrote the matched message, and the snippet with the query's
+/// words in semibold foreground.
+fn excerpt(t: &T, found: &serde_json::Value, query: &str) -> El {
+    let user = found["source"] == "user";
+    let snippet = crate::data::s(found, "snippet");
+    let muted = t.sb.muted_foreground.alpha_mul(0.85);
+    row()
+        .w_full()
+        .gap(4.0)
+        .pl(26.0)
+        .child(text(if user { "You:" } else { "Agent:" }).font(theme::TEXT_XS).color(if user { t.c.info_foreground } else { t.c.success_foreground }))
+        .child(crate::shell::palette::actions::highlighted(snippet, &logic::excerpt_ranges(snippet, query), theme::TEXT_XS, muted, t.sb.sidebar_foreground).grow(1.0).shrink().min_w(0.0))
+}
+
 /// Search results replace the list: one row per hit, the highlighted one filled.
 pub fn search_results(s: &App, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let hits = logic::search(&model.threads, &ui.search.text, ui.content_hits());
     let mut list = col().key("sb-results").w_full().px(8.0).py(8.0).gap(1.0);
     if hits.is_empty() {
-        list = list.child(el().w_full().px(8.0).py(24.0).center().child(text("No threads found").font(theme::TEXT_XS).color(t.sb.sidebar_muted_foreground)));
+        let empty = if ui.content_pending() { "Searching thread messages…" } else { "No threads found" };
+        list = list.child(el().w_full().px(8.0).py(24.0).center().role("status").child(text(empty).font(theme::TEXT_XS).color(t.sb.sidebar_muted_foreground)));
     }
     for (n, idx) in hits.iter().enumerate() {
         let th = &model.threads[*idx];
@@ -632,28 +669,33 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
         let settled = model.section_of(&th.id) == Some(Section::Settled);
         let title_color = if settled { t.sb.secondary_label.alpha_mul(0.7) } else { t.sb.sidebar_foreground };
         let id = th.id.clone();
-        let mut r = row()
+        let head = row()
+            .w_full()
+            .gap(10.0)
+            .center_y()
+            .child(super::favicon::mark(s, t, &th.project_id, model.project(th), settled && !on, 16.0))
+            .child(text(th.title.clone()).font(if settled { theme::TEXT_SM } else { theme::SM_MEDIUM }).color(title_color).truncate().grow(1.0).shrink())
+            .child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS).color(t.sb.muted_foreground.alpha_mul(0.55)).w(32.0).align(rune::Align::End));
+        let mut r = col()
             .key(format!("sb-result-{}", th.id))
             .w_full()
             .min_h(36.0)
             .px(10.0)
             .py(4.0)
-            .gap(10.0)
+            .gap(2.0)
+            .justify_center()
             .radius(radius::MD)
-            .center_y()
             .cursor(Cursor::Pointer)
-            .child(super::favicon::mark(s, t, &th.project_id, model.project(th), settled && !on, 16.0))
-            .child(text(th.title.clone()).font(if settled { theme::TEXT_SM } else { theme::SM_MEDIUM }).color(title_color).truncate().grow(1.0).shrink())
-            .child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS).color(t.sb.muted_foreground.alpha_mul(0.55)).w(32.0).align(rune::Align::End))
+            .child(head)
             .on_hover_change(move |s: &mut App, on, _: &mut Tx| {
                 if on {
                     s.ui.shell.sidebar.highlight = n;
                 }
             })
-            .on_press(move |s: &mut App| {
-                super::clear_search(s);
-                super::open_thread(s, &id);
-            });
+            .on_press(move |s: &mut App| super::open_result(s, &id));
+        if let Some(found) = ui.content_match(&th.id) {
+            r = r.child(excerpt(t, found, ui.search.text.trim()));
+        }
         r = if on { r.fill(t.sb.sidebar_row_active) } else { r.hover(t.sb.sidebar_row_hover) };
         list = list.child(r);
     }

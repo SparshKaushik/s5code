@@ -506,7 +506,7 @@ pub fn poll(s: &mut App) -> bool {
             request(s, "peerLinks.list", json!({}));
         }
         if page.as_deref() == Some("archived") {
-            request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+            projects::request_archives(s);
         }
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
@@ -605,8 +605,9 @@ pub fn poll(s: &mut App) -> bool {
                         source_control::scan(s);
                     }
                     if projects::failure_title(&method).is_some() {
-                        request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+                        projects::request_archives(s);
                     }
+                    projects::archive_fetched(s, &method, &result);
                     s.ui.settings.results.insert(method, result);
                 }
                 Err(error) if projects::failure_title(&method).is_some() => {
@@ -623,7 +624,7 @@ pub fn poll(s: &mut App) -> bool {
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
                     // Linked environments show their own failures, as web's section does.
-                    if matches!(method.as_str(), "peerLinks.list" | source_control::DISCOVERY | projects::ARCHIVED_SNAPSHOT) {
+                    if method == "peerLinks.list" || method == source_control::DISCOVERY || method.starts_with(projects::ARCHIVED_SNAPSHOT) {
                         let mut failed = json!({});
                         failed[LOAD_ERROR] = json!(message);
                         s.ui.settings.results.insert(method, failed);

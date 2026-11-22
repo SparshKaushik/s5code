@@ -893,8 +893,8 @@ fn confirm_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .center_y()
         .child(kit::Button::new("Abort").variant("outline").size("sm").on_press(|s: &mut App| s.ui.chat.details.git.confirm = None).build(t))
         .child(el().grow(1.0))
-        .child(kit::Button::new(continue_label).variant("outline").size("sm-multiline").on_press(resume(false)).build(t))
-        .child(kit::Button::new("Check out feature branch & continue").size("sm-multiline").disabled(unavailable.is_some()).on_press(resume(true)).build(t));
+        .child(kit::Button::new(continue_label).variant("outline").size("sm-multiline").disabled(!writable(s)).on_press(resume(false)).build(t))
+        .child(kit::Button::new("Check out feature branch & continue").size("sm-multiline").disabled(!super::can_change_branch(s) || unavailable.is_some()).on_press(resume(true)).build(t));
     kit::Dialog::new("git-default-branch", title)
         .open(true)
         .width(576.0)
@@ -1251,6 +1251,29 @@ fn publish_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .child(footer)
         .on_close(close)
         .build(t, out);
+}
+
+/// The commit dialog over a dirty feature branch, one file left out while its list is edited.
+pub fn commit_scene(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    let Some(cwd) = super::cwd(s) else { return };
+    let files = [
+        ("src/greet.ts", 2, 1),
+        ("src/components/Button.tsx", 41, 0),
+        ("apps/web/src/components/chat/very/deeply/nested/MessageComposer.tsx", 12, 7),
+        ("package.json", 1, 1),
+        ("Cargo.toml", 3, 0),
+        ("docs/old-guide.md", 0, 58),
+    ];
+    let files: Vec<Value> = files.iter().map(|(path, add, del)| json!({"path": path, "insertions": add, "deletions": del})).collect();
+    if let crate::data::Source::Fixture(state) = &mut s.src {
+        let local = json!({"isRepo": true, "refName": "feat/greeting", "isDefaultRef": false, "hasWorkingTreeChanges": true, "workingTree": {"rootPath": cwd, "files": files, "insertions": 59, "deletions": 67}});
+        state.vcs.insert(cwd, json!({"local": local, "remote": {"hasUpstream": true, "aheadCount": 0, "behindCount": 0, "pr": null}}));
+    }
+    let mut commit = Commit { editing: true, ..Commit::default() };
+    commit.excluded.insert("docs/old-guide.md".into());
+    commit.message.replace_text("Greet by name");
+    s.ui.chat.details.git.commit = Some(commit);
 }
 
 #[cfg(test)]

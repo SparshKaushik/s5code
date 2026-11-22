@@ -137,7 +137,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(timeline::plan::overlays(s, t))
         .children(timeline::chip::overlay(s, t))
         .children(timeline::chip::quote_toolbar(s, cx, t))
-        .children(timeline::attachments::lightbox(s));
+        .children(timeline::attachments::lightbox(s))
+        .children(topbar::overlays(s, t));
     if takes_files {
         stack = stack
             .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
