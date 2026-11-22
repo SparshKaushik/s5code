@@ -176,6 +176,8 @@ pub struct FileUpload {
     name: String,
     mime: &'static str,
     size: u64,
+    /// A snapshot's `SnapShotSource`, sent with the stored image.
+    source: Option<Value>,
 }
 
 pub enum Staged {
@@ -192,10 +194,14 @@ pub fn stage(path: &str) -> Result<Staged, String> {
     if let Some(mime) = image_type(&name).filter(|_| size <= MAX_IMAGE_BYTES) {
         let bytes = std::fs::read(path).map_err(|_| unreadable(&name))?;
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        return Ok(Staged::Image(json!({
+        let mut image = json!({
             "type": "image", "name": name, "mimeType": mime,
             "sizeBytes": bytes.len(), "dataUrl": format!("data:{mime};base64,{data}"),
-        })));
+        });
+        if let Some(source) = crate::desktop::capture::attached_source(path) {
+            image["source"] = source;
+        }
+        return Ok(Staged::Image(image));
     }
     Ok(Staged::File(upload(path, &name, size, false)))
 }
@@ -212,7 +218,8 @@ pub fn stage_upload(path: &str) -> Result<Staged, String> {
 fn upload(path: &str, name: &str, size: u64, image: bool) -> FileUpload {
     let short: String = name.trim().chars().take(MAX_NAME_CHARS).collect();
     let short = if short.trim().is_empty() { "file".to_owned() } else { short.trim().to_owned() };
-    FileUpload { path: path.to_owned(), image, mime: mime_type(name), name: short, size }
+    let source = image.then(|| crate::desktop::capture::attached_source(path)).flatten();
+    FileUpload { path: path.to_owned(), image, mime: mime_type(name), name: short, size, source }
 }
 
 enum Step {
@@ -298,7 +305,11 @@ pub(super) fn advance(net: &mut s5_net::Net, u: &mut Upload) -> Result<Option<Va
     for (file, step) in &u.files {
         let Step::Done(id) = step else { return Ok(None) };
         let kind = if file.image { "image" } else { "file" };
-        out.push(json!({"type": kind, "id": id, "name": file.name, "mimeType": file.mime, "sizeBytes": file.size}));
+        let mut record = json!({"type": kind, "id": id, "name": file.name, "mimeType": file.mime, "sizeBytes": file.size});
+        if let Some(source) = &file.source {
+            record["source"] = source.clone();
+        }
+        out.push(record);
     }
     Ok(Some(Value::Array(out)))
 }
@@ -344,6 +355,12 @@ mod tests {
         assert_eq!((shared.image, shared.mime), (true, "image/png"), "FAILED: an uploaded image keeps its kind");
         let Ok(Staged::File(shared)) = stage_upload(notes.to_str().unwrap()) else { panic!("text uploads") };
         assert!(!shared.image);
+        let source = json!({"kind": "snap-shot", "capturedAt": "2026-11-21T10:00:00.000Z", "appName": "Safari", "windowTitle": "Docs", "accessibleText": "Docs"});
+        std::fs::write(crate::desktop::capture::source_path(png.to_str().unwrap()), source.to_string()).unwrap();
+        let Ok(Staged::Image(v)) = stage(png.to_str().unwrap()) else { panic!("png inlines") };
+        assert_eq!(v["source"], source, "FAILED: a snapshot sends its source with the image");
+        let Ok(Staged::File(shared)) = stage_upload(png.to_str().unwrap()) else { panic!("uploads") };
+        assert_eq!(shared.source, Some(source), "FAILED: an uploaded snapshot keeps its source");
         assert_eq!(stage(empty.to_str().unwrap()).err().unwrap(), "'empty.txt' is empty or could not be read.");
         assert_eq!(stage(dir.join("gone.png").to_str().unwrap()).err().unwrap(), "'gone.png' is empty or could not be read.");
         assert!(stage(dir.to_str().unwrap()).is_err());

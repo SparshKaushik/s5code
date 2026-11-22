@@ -1081,12 +1081,13 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     .px(4.0)
                     .gap(6.0)
                     // A finished reply with no words says so (TimelineAssistantRows).
-                    .child(markdown::view_marked(
+                    .child(markdown::reply(
                         app,
                         if s(item, "text").is_empty() && item["streaming"] != true { "(empty response)" } else { s(item, "text") },
                         s(item, "id"),
                         t,
                         marks.as_ref(),
+                        item["streaming"] != true,
                     ))
                     .children(changes.get(s(item, "id")).map(|c| changed::card(app, c, t)))
                     .children((meta.contains(s(item, "id")) && !moved.contains(s(item, "id"))).then(|| row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0)))),
@@ -1153,7 +1154,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         for entry in work::group(&plain) {
                             body = body.child(match entry {
                                 work::Entry::One(item) if s(item, "type") == "assistant_message" => {
-                                    col().w_full().px(4.0).child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
+                                    col().w_full().px(4.0).child(markdown::reply(app, s(item, "text"), s(item, "id"), t, marks.as_ref(), item["streaming"] != true))
                                 }
                                 work::Entry::One(item) => item_view(app, item, t),
                                 work::Entry::Group(id, items) => work::group_view(app, &id, &items, t),
