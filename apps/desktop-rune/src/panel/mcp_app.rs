@@ -1441,7 +1441,8 @@ pub fn scene_live(app: &mut App, id: &str) {
         result: Some(json!({"content": [{"type": "text", "text": "Five days"}], "structuredContent": {"days": [
             {"day": "Mon", "high": 4}, {"day": "Tue", "high": 6}, {"day": "Wed", "high": 3}, {"day": "Thu", "high": 8}, {"day": "Fri", "high": 11}]}, "_meta": null})),
     };
-    *frame = Frame { live: None, still: false, width: 728., visible: true, dark: true, styles, conversation, tool_call: Some(call), ..std::mem::take(frame) };
+    // From the default height, so the app's own size report is what changes it.
+    *frame = Frame { live: None, still: false, width: 728., height: DEFAULT_HEIGHT, visible: true, dark: true, styles, conversation, tool_call: Some(call), ..std::mem::take(frame) };
     start(app, id, super::html_frame::data_url(SCENE_APP));
     let mut tx = Tx::default();
     let deadline = Instant::now() + Duration::from_secs(60);
