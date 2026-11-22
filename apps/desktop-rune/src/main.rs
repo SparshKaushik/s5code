@@ -191,6 +191,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
     changed |= pages::pr_code::answer_reveal(s, tx);
+    changed |= pages::pr_detail::anchor_header(s, tx);
     changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
