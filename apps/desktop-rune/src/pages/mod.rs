@@ -385,6 +385,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_tabs::scene(s, 1, Some(360.0));
         pr_code::scene(s, "options");
     }),
+    ("pull-requests-detail-code-find", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "find");
+    }),
+    ("pull-requests-detail-code-raw-patch", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "raw");
+    }),
     ("pull-requests-detail-code-tree-resized", |s| {
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "tree-resized");
@@ -392,6 +400,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-code-more-files", |s| {
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "more-files");
+    }),
+    ("pull-requests-detail-code-tests-hidden", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "tests-hidden");
     }),
     ("pull-requests-detail-code-file-order", |s| {
         open_detail(s, 2, |_| {});
@@ -486,6 +498,48 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             u.open_comments.insert("comments:c3".into());
         })
     }),
+    ("pull-requests-detail-timeline-approvals", |s| {
+        open_detail(s, 1, |u| {
+            if let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) {
+                list.push(json!({"id": "v3", "kind": "review", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": "Ship it.", "createdAt": "2026-11-06T09:52:00.000Z", "url": null, "path": null, "reviewState": "APPROVED"}));
+            }
+        })
+    }),
+    ("pull-requests-detail-timeline-loading", |s| open_detail(s, 1, |u| u.activity = None)),
+    ("pull-requests-detail-comments-loading", |s| {
+        open_detail(s, 0, |u| {
+            u.activity = None;
+            u.description_closed = true;
+        })
+    }),
+    ("pull-requests-detail-timeline-verdicts", |s| {
+        open_detail(s, 1, |u| {
+            if let Some(list) = u.activity.as_mut().and_then(|a| a["comments"].as_array_mut()) {
+                let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+                list.push(json!({"id": "v-stale", "kind": "review", "author": {"login": "theo", "name": "Theo", "avatarUrl": null}, "body": "", "createdAt": "2026-11-06T09:20:00.000Z", "url": null, "path": null, "reviewState": "APPROVED"}));
+                list.push(json!({"id": "v-fresh", "kind": "review", "author": julius, "body": "The clamp still drops the **last** row; see [the fixture](https://github.com/s5labs/s5code/pull/2481/files).", "createdAt": "2026-11-06T09:56:00.000Z", "url": "https://github.com/s5labs/s5code/pull/2481#pullrequestreview-1", "path": null, "reviewState": "CHANGES_REQUESTED"}));
+            }
+        })
+    }),
+    ("pull-requests-detail-collapsed-open", |s| {
+        open_detail(s, 0, |u| {
+            u.description_closed = true;
+            let julius = json!({"login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null});
+            let long = (1..=24).map(|n| format!("- Step {n}: re-read the [list](https://github.com/s5labs/s5code/pull/2481) before the clamp.")).collect::<Vec<_>>().join("\n");
+            if let Some(threads) = u.activity.as_mut().and_then(|a| a["reviewThreads"].as_array_mut()) {
+                threads.push(json!({"id": "t-open", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 40, "side": "RIGHT", "isResolved": true, "isOutdated": false, "comments": [
+                    {"id": "tro1", "author": julius, "body": "Nit: see [the naming guide](https://github.com/s5labs/s5code/blob/main/AGENTS.md) and rename this.", "createdAt": "2026-11-06T08:05:00.000Z", "url": "https://github.com/s5labs/s5code/pull/2481#discussion_r2"},
+                    {"id": "tro2", "author": {"login": "sparsh", "name": "Sparsh", "avatarUrl": null}, "body": long, "createdAt": "2026-11-06T08:15:00.000Z", "url": null},
+                ]}));
+                threads.push(json!({"id": "t-closed", "path": "apps/desktop-rune/src/pages/usage.rs", "line": 52, "side": "RIGHT", "isResolved": true, "isOutdated": false, "comments": [
+                    {"id": "trc1", "author": julius, "body": "Prefer [`thousands`](https://github.com/s5labs/s5code/blob/main/apps/desktop-rune/src/chat/details.rs) here.", "createdAt": "2026-11-06T08:25:00.000Z", "url": "https://github.com/s5labs/s5code/pull/2481#discussion_r3"},
+                ]}));
+            }
+            u.open_comments.insert("t-open".into());
+            u.comments_oldest_first = true;
+        });
+        s.client_settings.values.insert("pullRequestCommentFilter".into(), json!({"bots": false, "resolved": true}));
+    }),
     ("pull-requests-detail-commit-scope", |s| {
         open_detail(s, 1, |_| {});
         pr_detail::open_commit(s, "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b".into());
@@ -540,6 +594,24 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.error = Some("Pull request operation detail failed: Could not resolve to a PullRequest with the number of 2481.".into());
         u.not_found = true;
     }),
+    ("pull-requests-detail-error-retrying", |s| {
+        open_detail(s, 0, pr_detail::scene_refreshing);
+        let u = &mut s.ui.pages.detail;
+        u.detail = None;
+        u.error = Some("The environment request failed.".into());
+    }),
+    ("pull-requests-detail-refreshing", |s| open_detail(s, 0, pr_detail::scene_refreshing)),
+    ("pull-requests-detail-number-menu", |s| open_detail(s, 0, |u| u.number_menu = Some((850.0, 88.0)))),
+    ("pull-requests-detail-checks-awaiting-approval", |s| {
+        open_detail(s, 0, |u| {
+            u.checks_open = true;
+            u.description_closed = true;
+            if let Some(d) = &mut u.detail {
+                d["checks"][1]["status"] = json!("action-required");
+                d["checks"][1]["url"] = json!("https://github.com/s5labs/s5code/actions/runs/123");
+            }
+        })
+    }),
     ("pull-requests-detail-menu-merged", |s| {
         open_detail(s, 0, |u| {
             u.menu = true;
@@ -582,6 +654,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |u| {
             u.detail = None;
             u.activity = None;
+        });
+    }),
+    ("pull-requests-detail-loading-conflicting", |s| {
+        open_detail(s, 0, |u| {
+            u.detail = None;
+            u.activity = None;
+            if let Some(e) = &mut u.entry {
+                e["state"] = json!("open");
+                e["mergeability"] = json!("conflicting");
+            }
         });
     }),
     ("pull-requests-detail-delete-branch-confirm", |s| {
@@ -798,6 +880,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-offline", |s| {
         open_usage(s, "cost");
         usage::offline_scene(s);
+    }),
+    ("usage-read-only", |s| {
+        open_usage(s, "cost");
+        usage::read_only_scene(s);
+    }),
+    ("usage-read-only-menu", |s| {
+        open_usage(s, "cost");
+        usage::read_only_scene(s);
+        s.ui.pages.usage.menu = Some("environments");
     }),
     ("usage-no-environments", |s| {
         open_usage(s, "cost");

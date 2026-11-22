@@ -40,6 +40,8 @@ pub struct Ui {
     refresh_after: HashMap<String, i64>,
     /// The connected environments the last automatic refresh covered.
     connected: String,
+    /// limitsNow: the clock the limits read, set on entering Limits and when a refresh settles.
+    pub(super) now: Option<i64>,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -61,15 +63,20 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     let now = s.now_ms;
+    let mut settled = false;
     for (environment, id) in std::mem::take(&mut ui(s).refreshing) {
         if env_net(s, &environment).is_none() || super::pull_requests::take(s, &environment, id).is_some() {
             ui(s).refresh_after.insert(environment, now + 5 * 60_000);
+            settled = true;
             changed = true;
         } else {
             ui(s).refreshing.push((environment, id));
         }
     }
     if ui(s).refreshing.is_empty() {
+        if settled {
+            ui(s).now = Some(now);
+        }
         ui(s).manual = false;
     }
     // Like the page's effect: entering Limits, or the connected set changing, refreshes them.
@@ -115,6 +122,7 @@ pub(super) fn refresh(s: &mut App, automatic: bool) {
 /// Leaving the page: coming back to Limits refreshes them again, as a remount does.
 pub(super) fn closed(u: &mut Ui) {
     u.connected.clear();
+    u.now = None;
 }
 
 /// The header's spinner: a refresh the user asked for is still out.
@@ -911,7 +919,7 @@ fn presentations(s: &App) -> Vec<Env> {
 /// UsageLimitsPooled for the selected environments' visible providers, with the Cursor keychain
 /// prompt after the Codex and Claude pools.
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
-    let now = s.now_ms;
+    let now = s.ui.pages.usage.limits.now.unwrap_or(s.now_ms);
     let envs = presentations(s);
     let pools = collect_pools(collect_accounts(&envs), now);
     let notices = collect_notices(&envs);
@@ -1501,6 +1509,17 @@ mod tests {
         poll(&mut s);
         assert_eq!(s.ui.pages.usage.limits.redeeming, None);
         assert!(s.ui.pages.usage.limits.status.contains_key("codex"));
+    }
+
+    #[test]
+    fn the_limits_clock_moves_when_a_refresh_settles_and_forgets_on_leaving() {
+        let mut s = App::new();
+        s.now_ms = 42;
+        ui(&mut s).refreshing.push(("gone".into(), 1));
+        poll(&mut s);
+        assert_eq!(s.ui.pages.usage.limits.now, Some(42), "limitsNow: a settled refresh stamps the clock");
+        closed(ui(&mut s));
+        assert_eq!(s.ui.pages.usage.limits.now, None);
     }
 
     #[test]
