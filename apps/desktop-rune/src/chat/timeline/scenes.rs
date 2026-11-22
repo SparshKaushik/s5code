@@ -298,15 +298,26 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-guest-share", guest_share),
     ("timeline-lightbox-zoom", lightbox_zoom),
     ("timeline-minimap-in-view", minimap_in_view),
+    ("chat-width-normal", |app| chat_width(app, "normal")),
+    ("composer-context-strip", context_strip),
     ("chat-width-wide", |app| chat_width(app, "wide")),
     ("chat-width-full", |app| chat_width(app, "full")),
     ("timeline-math", math),
+    ("timeline-math-typeset", math_typeset),
 ];
 
 /// The showcase under a Chat width other than Comfortable: the timeline and composer widen.
+/// The chat column at each width with the details card closed; render wider than 1440 to tell
+/// wide from full.
 fn chat_width(app: &mut App, width: &str) {
     showcase(app);
     app.client_settings.values.insert("chatWidth".into(), serde_json::json!(width));
+    crate::chat::details::toggle(app, true);
+}
+/// "Keep composer context visible" on a started thread: the strip stays under the composer.
+fn context_strip(app: &mut App) {
+    showcase(app);
+    app.client_settings.values.insert("persistComposerContextStrip".into(), serde_json::json!(true));
 }
 /// Render math on: each formula reads as its TeX source; prices stay prose.
 fn math(app: &mut App) {
@@ -314,6 +325,20 @@ fn math(app: &mut App) {
     app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
     let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size. It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+}
+
+/// The same formulas once KaTeX typeset them: striped stand-ins of their size, since the render
+/// host has no Chrome; the inline paragraph lays out a word at a time.
+fn math_typeset(app: &mut App) {
+    math(app);
+    for (tex, display, size) in [
+        ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false, (118.0, 26.0)),
+        ("n", false, (10.0, 18.0)),
+        ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true, (210.0, 40.0)),
+        ("e^{i\\pi} + 1 = 0", true, (96.0, 22.0)),
+    ] {
+        super::katex::scene_seed(app, tex, display, size);
+    }
 }
 
 /// The lightbox's middle picture zoomed 2x and panned right and down.

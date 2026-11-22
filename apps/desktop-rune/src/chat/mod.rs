@@ -123,6 +123,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(body)
         .children(timeline::scroll_to_end(s, cx, t, &lane))
         .children(timeline::minimap(s, cx, t, &lane))
+        .child(timeline::announcer(s))
         .children(timeline::banners::lane(s, t, &lane))
         .children(timeline::banners::stack(s, cx, t, &lane))
         .child(bar.unwrap_or_else(|| composer::view(s, cx, t, &lane)))

@@ -26,6 +26,8 @@ pub mod pr;
 pub mod run_on;
 pub mod scripts;
 pub mod servers;
+pub(crate) mod strip;
+pub(crate) mod usage;
 
 #[derive(Default)]
 pub struct Ui {
@@ -34,6 +36,8 @@ pub struct Ui {
     /// The thread whose card is open as a popover, when the lane is too narrow for it inline.
     popover: Option<String>,
     pub menu: Option<Menu>,
+    /// The context strip control the open run context or branch menu opened from.
+    strip: Option<&'static str>,
     /// Refs from `vcs.listRefs` for `refs_query`, page after page; `None` while the first loads.
     refs: Option<Vec<Ref>>,
     refs_query: String,
@@ -474,6 +478,7 @@ fn menu_row(t: &T, glyph: Option<El>, label: &str, on_press: Option<impl Fn(&mut
 
 fn toggle_menu(s: &mut App, menu: Menu) {
     let ui = &mut s.ui.chat.details;
+    ui.strip = None;
     ui.menu = if ui.menu == Some(menu) { None } else { Some(menu) };
     if ui.menu == Some(Menu::Git) {
         git::refresh(s);
@@ -1238,22 +1243,43 @@ fn frame(t: &T, body: El, cap: f32) -> El {
         .child(body.key("thread-details-scroll").w_full().max_h((cap - 2.0).max(0.0)).scroll(rune::ScrollSpec { stick_bottom: false }))
 }
 
-fn card(s: &App, t: &T, cap: f32) -> Option<El> {
-    let muted = t.c.muted_foreground;
-    let fg = t.c.foreground.alpha_mul(0.8);
-    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
-    let thread = composer::ctx(s).thread;
-    let run = draft_run(s);
-    let fanout = composer::fanout::forces_worktree(s);
-    let new_worktree = fanout || run.as_ref().is_some_and(|r| r.worktree);
+/// The workspace label (`resolveEnvModeLabel` and the locked labels), whether the run makes a
+/// new worktree, and whether it is in an existing one.
+fn workspace_mode(s: &App) -> (&'static str, bool, bool) {
+    let new_worktree = composer::fanout::forces_worktree(s) || draft_run(s).is_some_and(|r| r.worktree);
     let worktree = worktree_here(s).is_some();
-    let mode = match (new_worktree, worktree, thread.is_some()) {
+    let mode = match (new_worktree, worktree, composer::ctx(s).thread.is_some()) {
         (true, ..) => "New worktree",
         (_, true, true) => "Worktree",
         (_, true, false) => "Current worktree",
         (_, false, true) => "Local checkout",
         _ => "Current checkout",
     };
+    (mode, new_worktree, worktree)
+}
+
+/// resolveBranchTriggerLabel over the checkout's local status `v`: a new worktree names the
+/// branch it starts from.
+fn branch_label(s: &App, v: &Value) -> String {
+    let current = data::s(v, "refName").to_string();
+    match draft_run(s).filter(|r| r.worktree) {
+        Some(r) => match worktree_base(s, &r) {
+            Some(base) if r.from_origin => format!("From {base} (remote)"),
+            Some(base) => format!("From {base}"),
+            None => "Select ref".into(),
+        },
+        None if current.is_empty() => "Select ref".into(),
+        None => current,
+    }
+}
+
+fn card(s: &App, t: &T, cap: f32) -> Option<El> {
+    let muted = t.c.muted_foreground;
+    let fg = t.c.foreground.alpha_mul(0.8);
+    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
+    let thread = composer::ctx(s).thread;
+    let fanout = composer::fanout::forces_worktree(s);
+    let (mode, new_worktree, worktree) = workspace_mode(s);
     // A draft can still choose where it runs, so its row is the env mode picker.
     let draft = thread.is_none();
     let mut run_context = row()
@@ -1313,17 +1339,7 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
     if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true) {
         let mut rows: Vec<El> = vec![];
         if on("branch") {
-            let current = data::s(v, "refName").to_string();
-            // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
-            let branch = match run.as_ref().filter(|r| r.worktree) {
-                Some(r) => match worktree_base(s, r) {
-                    Some(base) if r.from_origin => format!("From {base} (remote)"),
-                    Some(base) => format!("From {base}"),
-                    None => "Select ref".into(),
-                },
-                None if current.is_empty() => "Select ref".into(),
-                None => current,
-            };
+            let branch = branch_label(s, v);
             rows.push(
                 branch_row(t, &branch, fg, muted)
                     .help(with_shortcut(s, &branch, "composer.branch"))
@@ -1379,6 +1395,19 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             body = body.child(panel);
             divided = true;
         }
+    }
+    // ThreadDetailsUsage and ThreadDetailsContext, off unless chosen.
+    if on("usage")
+        && let Some(panel) = usage::limits(s, t, divided)
+    {
+        body = body.child(panel);
+        divided = true;
+    }
+    if on("context")
+        && let Some(panel) = usage::context(s, t, divided)
+    {
+        body = body.child(panel);
+        divided = true;
     }
     // Shown only when no section has content, so an emptied card can be refilled.
     if !divided {
@@ -1456,7 +1485,12 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             ("details-editor-menu", list)
         }
     };
-    Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, close))
+    // From the context strip the run context and branch menus open upward, as BranchToolbar's do.
+    let list = match s.ui.chat.details.strip.filter(|_| matches!(which, Menu::Branch | Menu::RunContext)) {
+        Some(at) => list.anchored(at, Side::Top, if at == strip::BRANCH { Align::End } else { Align::Start }, 4.0),
+        None => list.anchored(anchor, Side::Bottom, Align::End, 4.0),
+    };
+    Some(list.modal(true, close))
 }
 
 fn group_label(t: &T, label: &str) -> El {
