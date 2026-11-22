@@ -259,12 +259,17 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some(text.to_owned())
     });
     let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
-    let mut heading = row().gap(6.0).center_y().child(
-        text(title.to_owned())
-            .key(super::title_key(spec["searchTitle"].as_str().unwrap_or(title)))
-            .font(theme::SM_MEDIUM)
-            .color(t.c.foreground),
-    );
+    let search_title = spec["searchTitle"].as_str().unwrap_or(title);
+    let mut heading = row()
+        .gap(6.0)
+        .center_y()
+        .child(
+            text(title.to_owned())
+                .key(super::title_key(search_title))
+                .font(theme::SM_MEDIUM)
+                .color(t.c.foreground),
+        )
+        .children(super::scope::marker(s, t, key));
     // Web resets the auto-settle day count from its switch row only, and has no reset for the
     // Separate fonts switch or a dedicated model, whose own switch turns it off; a font row
     // resets its family and size together.
@@ -407,23 +412,13 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         })
     });
     let ctrl = super::permissions::gate(key, ctrl, lock);
-    if s.ui.settings.project.is_some() && super::scope::project_key(key) {
-        copy = copy.child(
-            text(if super::scope::customized(s, key) {
-                "Overridden for this project"
-            } else {
-                "Inherited from environment"
-            })
-            .font(theme::TEXT_XS)
-            .color(t.c.muted_foreground),
-        );
-    }
     let line = row().w_full().gap(32.0).center_y().child(copy).child(ctrl);
     // `SettingsRow` children sit under the copy and control: `pt-3 pb-1` instead of `py-3`.
-    match children {
+    let row = match children {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
-    }
+    };
+    super::pulsed(s, t, search_title, row)
 }
 
 /// Web `FontFamilySettingsRow`'s control: the family field (`w-44`, placeholder the default
