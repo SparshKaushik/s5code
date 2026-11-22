@@ -401,14 +401,19 @@ fn layers(s: &App, key: &str) -> Vec<(String, String, bool, bool)> {
     out
 }
 
-/// The layers marker beside a row's title. Values set right where they're shown explain nothing
-/// new, so web shows their marker on hover only; here they have none.
+/// Whether the marker shows without hover: values set right where they're shown explain
+/// nothing new, so web reveals theirs on hover or while their popover is open.
+fn marker_shown(state: Inheritance, overrides: usize, hovered: bool, open: bool) -> bool {
+    !matches!(state, Inheritance::Default | Inheritance::Environment) || overrides > 0 || hovered || open
+}
+
+/// The layers marker beside a row's title.
 pub fn marker(s: &App, t: &T, key: &str) -> Option<El> {
     let (state, summary) = inheritance(s, key)?;
     let overrides = server_key(key).map(|k| overriding(s, k).len()).unwrap_or(0);
-    if matches!(state, Inheritance::Default | Inheritance::Environment) && overrides == 0 {
-        return None;
-    }
+    let hovered = s.ui.settings.hover_row.as_deref() == Some(key);
+    let open = s.ui.settings.inheritance.as_deref() == Some(key);
+    let shown = marker_shown(state, overrides, hovered, open);
     let summary = match overrides {
         0 => summary,
         1 => format!("{summary} · 1 project override"),
@@ -430,6 +435,7 @@ pub fn marker(s: &App, t: &T, key: &str) -> Option<El> {
                 .role("button")
                 .label(format!("{summary}. Show where this value comes from"))
                 .help(summary)
+                .opacity(if shown { 1.0 } else { 0.0 })
                 .child(rune::icon(&crate::icons::LAYERS, 12.0).color(color))
                 .on_press(move |s: &mut App| {
                     let open = s.ui.settings.inheritance.as_deref() == Some(owned.as_str());
@@ -517,6 +523,17 @@ fn clear_overrides(s: &mut App, projects: &[String], key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plain_values_reveal_their_marker_on_hover_only() {
+        assert!(!marker_shown(Inheritance::Default, 0, false, false));
+        assert!(!marker_shown(Inheritance::Environment, 0, false, false));
+        assert!(marker_shown(Inheritance::Environment, 0, true, false), "FAILED: hover reveals it");
+        assert!(marker_shown(Inheritance::Default, 0, false, true), "FAILED: an open popover keeps it");
+        assert!(marker_shown(Inheritance::Default, 2, false, false), "FAILED: project overrides always show");
+        assert!(marker_shown(Inheritance::Overridden, 0, false, false));
+        assert!(marker_shown(Inheritance::Mixed, 0, false, false));
+    }
+
     #[test]
     fn inheritance_values_read_like_web() {
         assert_eq!(format_value("pullRequestMergeMethod", &Value::Null), "Last selected");

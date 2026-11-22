@@ -7,10 +7,10 @@ use serde_json::{Value, json};
 use std::sync::OnceLock;
 
 mod editor;
-mod open_vsx;
+pub(crate) mod open_vsx;
 mod vscode;
 
-pub use editor::{edit, editor};
+pub use editor::{edit, editor, escape as editor_escape};
 pub use open_vsx::{Search, poll};
 
 pub fn builtins() -> &'static Vec<Value> {

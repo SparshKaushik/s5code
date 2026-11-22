@@ -520,6 +520,14 @@ fn device_rows(s: &App, t: &T, state: Option<&Value>) -> Vec<El> {
     let marker = super::scope::marker(s, t, key);
     let agent = row()
         .key("row-agent-device-access")
+        .on_hover_change(move |s: &mut App, on, _: &mut rune::Tx| {
+            let hovered = &mut s.ui.settings.hover_row;
+            if on {
+                *hovered = Some(key.to_owned());
+            } else if hovered.as_deref() == Some(key) {
+                *hovered = None;
+            }
+        })
         .w_full()
         .px(16.0)
         .py(12.0)
