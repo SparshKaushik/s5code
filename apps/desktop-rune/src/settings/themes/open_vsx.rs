@@ -1,6 +1,6 @@
-//! Web's `openVsxThemes.ts` and `ThemeSearchSection`: open-source color themes from Open VSX.
-//! Rune has no ZIP reader, so a theme is read file by file from Open VSX's package endpoint
-//! rather than from the checksummed VSIX the web client unpacks.
+//! Web's `openVsxThemes.ts` and `ThemeSearchSection`: open-source color themes from Open VSX,
+//! read from the checksummed VSIX with web's ZIP-safety limits.
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,10 @@ use rune::{El, TextEdit, col, el, row, text};
 use serde_json::{Value, json};
 
 const API: &str = "https://open-vsx.org/api";
-const PACKAGE: &str = "https://open-vsx.org/vscode/unpkg";
+const MAX_VSIX_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_ZIP_ENTRIES: usize = 5_000;
+const MAX_UNCOMPRESSED_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_COMPRESSION_RATIO: u64 = 200;
 const MAX_SEARCH_BYTES: u64 = 512 * 1024;
 const MAX_DETAIL_BYTES: u64 = 256 * 1024;
 const MAX_THEME_BYTES: u64 = 256 * 1024;
@@ -52,6 +55,8 @@ pub struct Extension {
     downloads: f64,
     source_url: Option<String>,
     manifest_url: String,
+    sha256_url: String,
+    vsix_url: String,
     version: String,
     license: String,
 }
@@ -160,8 +165,8 @@ fn extension_from_detail(value: &Value) -> Result<Option<Extension>, ()> {
     let files = &value["files"];
     let field = |key: &str| value[key].as_str().map(str::trim).unwrap_or("").to_owned();
     let (namespace, extension, version, license) = (field("namespace"), field("name"), field("version"), field("license"));
-    let manifest_url = trusted(&files["manifest"]);
-    if !files.is_object() || namespace.is_empty() || extension.is_empty() || version.is_empty() || manifest_url.is_none() || trusted(&files["download"]).is_none() {
+    let (Some(manifest_url), Some(sha256_url), Some(vsix_url)) = (trusted(&files["manifest"]), trusted(&files["sha256"]), trusted(&files["download"])) else { return Err(()) };
+    if namespace.is_empty() || extension.is_empty() || version.is_empty() {
         return Err(());
     }
     if !LICENSES.contains(&license.as_str()) {
@@ -176,7 +181,9 @@ fn extension_from_detail(value: &Value) -> Result<Option<Extension>, ()> {
         description: value["description"].as_str().unwrap_or("").to_owned(),
         downloads: value["downloadCount"].as_f64().filter(|n| n.is_finite()).unwrap_or(0.0),
         source_url: public_source(&value["repository"]).or_else(|| public_source(&value["homepage"])).or_else(|| public_source(&value["url"])),
-        manifest_url: manifest_url.unwrap_or_default(),
+        manifest_url,
+        sha256_url,
+        vsix_url,
         namespace,
         extension,
         version,
@@ -300,14 +307,105 @@ fn load(read: Reader, path: &str, cache: &mut HashMap<String, Value>, budget: &m
     Ok(value)
 }
 
-/// `importOpenVsxThemeExtension`, minus the VSIX: the package's own manifest must still match
-/// the listing, and every contributed theme must convert.
+/// `inspectZipDirectory`: the end record and central directory, checked before anything is
+/// unpacked, with the archive comment stripped.
+fn inspect_directory(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let invalid = || "That extension package has an invalid ZIP directory.".to_owned();
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let minimum = bytes.len().saturating_sub(65_557);
+    let end = (minimum..=bytes.len().saturating_sub(22))
+        .rev()
+        .find(|&at| bytes.len() >= 22 && u32_at(at) == Some(0x0605_4b50) && u16_at(at + 20).is_some_and(|comment| at + 22 + comment == bytes.len()))
+        .ok_or("That extension package has no ZIP directory.")?;
+    let size = u32_at(end + 12).ok_or_else(invalid)? as usize;
+    let start = u32_at(end + 16).ok_or_else(invalid)? as usize;
+    if start.checked_add(size) != Some(end) {
+        return Err(invalid());
+    }
+    let (mut offset, mut entries, mut total) = (start, 0, 0u64);
+    while offset < end {
+        if offset + 46 > end || u32_at(offset) != Some(0x0201_4b50) {
+            return Err(invalid());
+        }
+        entries += 1;
+        if entries > MAX_ZIP_ENTRIES {
+            return Err("That extension package has too many files.".into());
+        }
+        let (compressed, uncompressed) = (u32_at(offset + 20).ok_or_else(invalid)?, u32_at(offset + 24).ok_or_else(invalid)?);
+        if compressed == u32::MAX || uncompressed == u32::MAX {
+            return Err("That extension package has unsupported ZIP64 metadata.".into());
+        }
+        total += u64::from(uncompressed);
+        if total > MAX_UNCOMPRESSED_BYTES {
+            return Err("That extension package expands beyond the safe import limit.".into());
+        }
+        if uncompressed > 0 && (compressed == 0 || u64::from(uncompressed) > u64::from(compressed) * MAX_COMPRESSION_RATIO) {
+            return Err("That extension package has an unsafe compression ratio.".into());
+        }
+        offset += 46 + u16_at(offset + 28).ok_or_else(invalid)? + u16_at(offset + 30).ok_or_else(invalid)? + u16_at(offset + 32).ok_or_else(invalid)?;
+    }
+    if offset != end {
+        return Err(invalid());
+    }
+    let mut out = bytes[..end + 22].to_vec();
+    out[end + 20] = 0;
+    out[end + 21] = 0;
+    Ok(out)
+}
+
+/// The package's SHA-256 against Open VSX's `sha256` file (its first word).
+fn checksum_matches(package: &[u8], published: &[u8]) -> Result<(), String> {
+    let text = String::from_utf8_lossy(published);
+    let expected = text.split_whitespace().next().filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).ok_or("That Open VSX theme has an invalid checksum.")?;
+    let actual: String = ring::digest::digest(&ring::digest::SHA256, package).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    if actual.eq_ignore_ascii_case(expected) { Ok(()) } else { Err("That Open VSX theme failed its integrity check.".into()) }
+}
+
+type Archive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
+
+/// `inspectZipDirectory`, then `JSZip.loadAsync` and `inspectZip`: no entry may name a path
+/// outside the package.
+fn open_package(bytes: &[u8]) -> Result<Archive, String> {
+    let inspected = inspect_directory(bytes)?;
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(inspected)).map_err(|_| "That Open VSX extension package could not be opened.")?;
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err("That extension package has too many files.".into());
+    }
+    for name in archive.file_names() {
+        normalize(name, "extension/")?;
+    }
+    Ok(archive)
+}
+
+/// `readZipText`: one file, refused above the theme size limit before and while reading.
+fn read_entry(archive: &mut Archive, path: &str, description: &str) -> Result<Vec<u8>, String> {
+    let file = archive.by_name(path).map_err(|_| format!("{description} is missing from the extension package."))?;
+    if file.size() > MAX_THEME_BYTES {
+        return Err(format!("{description} is too large."));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_THEME_BYTES + 1).read_to_end(&mut bytes).map_err(|_| "That Open VSX extension package could not be opened.".to_owned())?;
+    if bytes.len() as u64 > MAX_THEME_BYTES {
+        return Err(format!("{description} is too large."));
+    }
+    Ok(bytes)
+}
+
+/// `importOpenVsxThemeExtension`: the advertised manifest, the checksummed VSIX, then the
+/// package's own manifest must still match the listing, and every contributed theme convert.
 fn install(extension: &Extension) -> Result<Vec<Value>, String> {
-    let base = format!("{PACKAGE}/{}/{}/{}", encode(&extension.namespace), encode(&extension.extension), encode(&extension.version));
-    let fetch = |path: &str, description: &str| -> Result<Value, String> {
-        let url = format!("{base}/{}", path.split('/').map(encode).collect::<Vec<_>>().join("/"));
-        object(&get(&url, MAX_THEME_BYTES, "That Open VSX theme could not be downloaded.", "That theme extension is too large to import safely.")?, description)
-    };
+    let advertised = object(&get(&extension.manifest_url, MAX_DETAIL_BYTES, "That Open VSX extension has no readable manifest.", "That Open VSX extension manifest is too large.")?, "Extension manifest")?;
+    match contributions(&advertised).len() {
+        0 => return Err("That extension does not contain color themes.".into()),
+        n if n > MAX_THEMES => return Err("That extension contains too many color themes to import safely.".into()),
+        _ => {}
+    }
+    let package = get(&extension.vsix_url, MAX_VSIX_BYTES, "That Open VSX theme could not be downloaded.", "That theme extension is too large to import safely.")?;
+    let published = get(&extension.sha256_url, 256, "That Open VSX theme has no readable checksum.", "That Open VSX checksum response is invalid.")?;
+    checksum_matches(&package, &published)?;
+    let archive = RefCell::new(open_package(&package)?);
+    let fetch = |path: &str, description: &str| -> Result<Value, String> { object(&read_entry(&mut archive.borrow_mut(), path, description)?, description) };
     let manifest = fetch("extension/package.json", "Extension manifest")?;
     let (publisher, name) = (manifest["publisher"].as_str().unwrap_or(""), manifest["name"].as_str().unwrap_or(""));
     if !publisher.eq_ignore_ascii_case(&extension.namespace)
@@ -766,6 +864,8 @@ mod tests {
             downloads: 0.0,
             source_url: None,
             manifest_url: String::new(),
+            sha256_url: String::new(),
+            vsix_url: String::new(),
             version: "1.0.0".into(),
             license: "MIT".into(),
         }
@@ -775,7 +875,7 @@ mod tests {
     fn listings_keep_only_trusted_urls_and_supported_licenses() {
         let detail = |license: &str, download: &str| {
             json!({"namespace": "acme", "name": "solar", "displayName": " ", "version": "1.0.0", "license": license, "repository": "https://user:pw@github.com/acme/solar", "homepage": {"url": "https://acme.dev"},
-                "files": {"manifest": "https://open-vsx.org/api/acme/solar/1.0.0/file/package.json", "download": download}})
+                "files": {"manifest": "https://open-vsx.org/api/acme/solar/1.0.0/file/package.json", "sha256": "https://open-vsx.org/api/acme/solar/1.0.0/file/acme.solar-1.0.0.sha256", "download": download}})
         };
         let extension = extension_from_detail(&detail("MIT", "https://open-vsx.org/x.vsix")).unwrap().unwrap();
         assert_eq!((extension.id.as_str(), extension.name.as_str(), extension.collection_id.as_str()), ("acme.solar", "solar", "open-vsx:acme.solar"));
@@ -786,6 +886,74 @@ mod tests {
         assert_eq!(downloads(472_190.0), "472.2K");
         assert_eq!(downloads(2_000_000.0), "2M");
         assert_eq!(downloads(12.0), "12");
+    }
+
+    /// A stored (uncompressed) ZIP with one entry and an archive comment.
+    fn stored_zip(name: &str, data: &[u8], comment: &[u8]) -> Vec<u8> {
+        let crc = data.iter().fold(!0u32, |mut crc, &byte| {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+            crc
+        }) ^ !0;
+        let (n, len) = (name.len() as u16, data.len() as u32);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        for v in [crc, len, len] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        let directory = out.len() as u32;
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        for v in [crc, len, len] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&[0; 12]);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        let size = out.len() as u32 - directory;
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0]);
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&directory.to_le_bytes());
+        out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        out.extend_from_slice(comment);
+        out
+    }
+
+    #[test]
+    fn packages_pass_the_checksum_and_zip_limits_web_checks() {
+        let comment = b"PK\x05\x06 lookalike";
+        let package = stored_zip("extension/package.json", br#"{"name":"solar"}"#, comment);
+        let hash: String = ring::digest::digest(&ring::digest::SHA256, &package).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(checksum_matches(&package, format!("{} acme.solar-1.0.0.vsix\n", hash.to_uppercase()).as_bytes()), Ok(()));
+        assert_eq!(checksum_matches(b"other", hash.as_bytes()).unwrap_err(), "That Open VSX theme failed its integrity check.");
+        assert_eq!(checksum_matches(&package, b"not-a-hash").unwrap_err(), "That Open VSX theme has an invalid checksum.");
+
+        let inspected = inspect_directory(&package).unwrap();
+        assert_eq!((inspected.len(), &inspected[inspected.len() - 2..]), (package.len() - comment.len(), &[0u8, 0][..]), "the comment is stripped");
+        let mut archive = open_package(&package).unwrap();
+        assert_eq!(read_entry(&mut archive, "extension/package.json", "Extension manifest").unwrap(), br#"{"name":"solar"}"#);
+        assert_eq!(read_entry(&mut archive, "extension/missing.json", "Theme").unwrap_err(), "Theme is missing from the extension package.");
+
+        let directory = package.len() - comment.len() - 22 - "extension/package.json".len() - 46;
+        let patched = |at: usize, value: u32| {
+            let mut bytes = package.clone();
+            bytes[directory + at..directory + at + 4].copy_from_slice(&value.to_le_bytes());
+            inspect_directory(&bytes).unwrap_err()
+        };
+        assert_eq!(patched(24, 16 * 201), "That extension package has an unsafe compression ratio.");
+        assert_eq!(patched(24, u32::MAX), "That extension package has unsupported ZIP64 metadata.");
+        assert_eq!(patched(0, 0), "That extension package has an invalid ZIP directory.");
+        assert_eq!(inspect_directory(&package[..package.len() - 1]).unwrap_err(), "That extension package has no ZIP directory.");
+        assert!(open_package(&stored_zip("../escape.json", b"{}", b"")).is_err(), "no entry may leave the package");
     }
 
     #[test]
