@@ -435,7 +435,7 @@ mod socket_tests {
         let worker = std::thread::spawn(move || {
             run(
                 format!("http://{address}"),
-                "test-token".into(),
+                crate::Auth::Bearer("test-token".into()),
                 true,
                 rx,
                 events,
@@ -562,7 +562,7 @@ mod socket_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let (events, _incoming) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run(format!("http://{address}"), "test-token".into(), false, rx, events, || {})
+            run(format!("http://{address}"), crate::Auth::Bearer("test-token".into()), false, rx, events, || {})
         });
         let (tcp, _) = listener.accept().unwrap();
         tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -574,6 +574,42 @@ mod socket_tests {
             (first["id"].clone(), first["tag"].clone()),
             (json!(7), json!("server.updateServer")),
             "FAILED: an outdated server's socket must not subscribe to the shell or config"
+        );
+        tx.send(Command::Stop).unwrap();
+        worker.join().unwrap();
+    }
+    #[test]
+    fn a_minted_socket_asks_before_each_attempt_and_keeps_the_refusals_trace() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (events, incoming) = std::sync::mpsc::channel();
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        let mint = std::sync::Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(crate::cloud::Failure { message: "Could not connect relay environment: HTTP 502".into(), trace: Some("0af7651916cd43dd8448eb211c80319c".into()), status: Some(502) });
+            }
+            Ok(format!("ws://{address}/ws?wsTicket=t-1&dpop=proof"))
+        });
+        let worker = std::thread::spawn(move || run("http://unused.invalid".into(), crate::Auth::Socket(mint), false, rx, events, || {}));
+        let (tcp, _) = listener.accept().unwrap();
+        let mut seen = None;
+        let _ws = tungstenite::accept_hdr(tcp, |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+            seen = Some((request.uri().to_string(), request.headers().contains_key("authorization")));
+            Ok(response)
+        })
+        .unwrap();
+        let (uri, authorized) = seen.unwrap();
+        assert_eq!(uri, "/ws?wsTicket=t-1&dpop=proof&orchestrationProtocol=2&clientCapabilities=settingsSecretReferences");
+        assert!(!authorized, "a minted socket carries no bearer");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "each attempt mints a fresh ticket");
+        let events: Vec<Incoming> = incoming.try_iter().collect();
+        assert!(
+            matches!(events.as_slice(), [Incoming::Connection(Conn::Connecting), Incoming::Trace(Some(trace)), Incoming::Connection(Conn::Closed(reason)), ..] if trace == "0af7651916cd43dd8448eb211c80319c" && reason.ends_with("HTTP 502")),
+            "the refusal's trace arrives before its Closed"
         );
         tx.send(Command::Stop).unwrap();
         worker.join().unwrap();
