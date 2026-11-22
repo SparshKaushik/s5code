@@ -379,6 +379,59 @@ pub fn scene_seed(app: &mut App, id: &str, height: f32) {
     app.ui.panel.html_frames.frames.push(Frame { id: id.to_owned(), content: Some(height), shown: Some((shot, String::new())), still: true, ..Default::default() });
 }
 
+/// A page `scene_shoot` and the live scenes load in real Chrome: a revenue chart in the app's
+/// look, laid out by Chrome itself.
+pub(super) const SCENE_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><style>
+:root { color-scheme: light dark; --fg: #111; --muted: #666; --card: #f4f4f5; }
+@media (prefers-color-scheme: dark) { :root { --fg: #f4f4f5; --muted: #a1a1aa; --card: #18181b; } }
+body { margin: 0; padding: 24px; font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif; color: var(--fg); background: transparent; }
+h1 { font-size: 18px; margin: 0 0 4px; } p { margin: 0 0 20px; color: var(--muted); }
+.chart { display: flex; gap: 16px; align-items: flex-end; height: 200px; padding: 16px; border-radius: 10px; background: var(--card); }
+.bar { flex: 1; border-radius: 6px 6px 0 0; display: flex; align-items: flex-start; justify-content: center; color: #000; font-weight: 600; padding-top: 6px; }
+.labels { display: flex; gap: 16px; padding: 8px 16px 0; color: var(--muted); } .labels span { flex: 1; text-align: center; }
+</style></head><body><h1>Q3 revenue by region</h1><p>Rendered by Chrome: <span id="ua"></span></p>
+<div class="chart"><div class="bar" style="height:70%;background:#2dd4bf">$7.0M</div><div class="bar" style="height:100%;background:#fbbf24">$10.0M</div><div class="bar" style="height:45%;background:#c084fc">$4.5M</div><div class="bar" style="height:82%;background:#60a5fa">$8.2M</div></div>
+<div class="labels"><span>Americas</span><span>EMEA</span><span>APAC</span><span>LATAM</span></div>
+<script>document.getElementById("ua").textContent = navigator.userAgent.match(/(HeadlessChrome|Chrome)\/[\d.]+/)?.[0] ?? navigator.userAgent;</script>
+</body></html>"#;
+
+/// A page as a `data:` URL, which Chrome loads without a server.
+pub(super) fn data_url(html: &str) -> String {
+    use base64::Engine;
+    format!("data:text/html;base64,{}", base64::engine::general_purpose::STANDARD.encode(html))
+}
+
+/// Gives the panel a waker when a scene starts Chrome before the window would.
+pub(super) fn scene_waker(app: &mut App) {
+    if app.ui.panel.waker.is_none() {
+        app.ui.panel.waker = Some(std::sync::Arc::new(|| {}));
+    }
+}
+
+/// Scenes with Chrome (`S5_CHROME`): the row's picture shot from a real page, waiting for it
+/// here since a headless run's clock does not wait on Chrome. Without Chrome the seeded picture
+/// stays and the reason goes to stderr.
+pub fn scene_shoot(app: &mut App, id: &str) {
+    scene_waker(app);
+    let Some(shot) = super::preview::snapshot(app, data_url(SCENE_PAGE), 728, true) else { return eprintln!("scene: no Chrome command channel") };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let result = loop {
+        if let Some(result) = shot.result() {
+            break result;
+        }
+        if std::time::Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    super::browser::shutdown();
+    let Some(height) = result else { return eprintln!("scene: Chrome did not shoot the page") };
+    eprintln!("scene: Chrome shot the page at {height} CSS px");
+    let frames = &mut app.ui.panel.html_frames.frames;
+    frames.retain(|f| f.id != id);
+    frames.push(Frame { id: id.to_owned(), content: Some(height), shown: Some((shot, String::new())), still: true, ..Default::default() });
+}
+
 /// HtmlRenderFrame: the page's picture at its frame height, with the hover-revealed "Open full
 /// screen" button; "Unable to load" when the page could not be shot.
 pub fn view(app: &App, id: &str, title: &str, page: &Value, t: &T) -> El {
