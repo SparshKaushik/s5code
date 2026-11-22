@@ -601,7 +601,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.error = Some("The environment request failed.".into());
     }),
     ("pull-requests-detail-refreshing", |s| open_detail(s, 0, pr_detail::scene_refreshing)),
-    ("pull-requests-detail-number-menu", |s| open_detail(s, 0, |u| u.number_menu = Some((140.0, 40.0)))),
+    ("pull-requests-detail-number-menu", |s| open_detail(s, 0, |u| u.number_menu = Some((850.0, 88.0)))),
     ("pull-requests-detail-checks-awaiting-approval", |s| {
         open_detail(s, 0, |u| {
             u.checks_open = true;

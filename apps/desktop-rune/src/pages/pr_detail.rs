@@ -2054,7 +2054,7 @@ fn reply_thread(s: &App, t: &T, replies: &[Cow<Value>], surface: Surface<'_>) ->
         let shown = if matches!(surface, Surface::Summary(_)) { super::pr_code::clipped_comment(s, t, field(r, "id"), shown) } else { shown };
         thread = thread.child(col().w_full().gap(6.0).child(head_line(s, t, r, surface, None, None)).children(super::pr_edit::comment_body(s, t, r, Some(shown))));
     }
-    row().w_full().ml(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))
+    row().w_full().pl(16.0).child(el().w(2.0).self_stretch().fill(t.c.border)).child(thread.pl(12.0).grow(1.0).shrink().min_w(0.0))
 }
 
 fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surface<'_>) -> El {
