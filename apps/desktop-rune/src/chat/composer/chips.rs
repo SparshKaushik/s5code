@@ -539,8 +539,14 @@ pub fn pill_style(id: &str, contexts: &[Value]) -> PillStyle {
             let kind = rest.split('/').next().unwrap_or("");
             style(kind, contexts.iter().find(|r| pill_id(r) == id))
         }
-        None => style("mention", None),
+        None => mention_style(id),
     }
+}
+
+/// A path mention: the mention accent with the file type's glyph (a folder keeps the plain one).
+pub fn mention_style(path: &str) -> PillStyle {
+    let style = style("mention", None);
+    if path.ends_with('/') { style } else { style.icon(crate::panel::diff::file_glyph(path)) }
 }
 
 /// The composer pill for the quote link `href`.

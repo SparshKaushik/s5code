@@ -25,6 +25,8 @@ pub(crate) enum Command {
 }
 pub(crate) enum Incoming {
     Connection(Conn),
+    /// The trace ID of the failure behind the `Conn::Closed` that follows, when one was sent.
+    Trace(Option<String>),
     Item(Route, Value),
     Reply(u64, Reply),
     /// Items a streaming request (`git.runStackedAction`) emits before its `Exit`.
@@ -84,13 +86,25 @@ fn socket_url(base: &str) -> Result<String, String> {
     ));
     Ok(url.to_string())
 }
+/// A minted socket URL with the query this client always sends.
+fn with_protocol(socket: &str) -> Result<String, String> {
+    let mut url = url::Url::parse(socket).map_err(|e| e.to_string())?;
+    url.query_pairs_mut().append_pair("orchestrationProtocol", "2").append_pair("clientCapabilities", "settingsSecretReferences");
+    Ok(url.to_string())
+}
+fn handshake_trace(error: &tungstenite::Error) -> Option<String> {
+    match error {
+        tungstenite::Error::Http(response) => response.headers().get("traceparent").and_then(|v| v.to_str().ok()).and_then(crate::cloud::trace_id),
+        _ => None,
+    }
+}
 fn failure(message: &str) -> Reply {
     Err(json!({"_tag":"TransportError","message":message}))
 }
 
 pub(crate) fn run(
     base: String,
-    token: String,
+    auth: crate::Auth,
     subscribe_shell: bool,
     commands: Receiver<Command>,
     incoming: Sender<Incoming>,
@@ -116,17 +130,33 @@ pub(crate) fn run(
     let mut backoff = Duration::from_millis(250);
     loop {
         emit(Incoming::Connection(Conn::Connecting));
+        let mut trace = None;
         let result = (|| -> Result<(), String> {
-            let mut req = socket_url(&base)?
-                .into_client_request()
-                .map_err(|e| e.to_string())?;
-            req.headers_mut().insert(
-                "Authorization",
-                format!("Bearer {token}")
-                    .parse()
-                    .map_err(|_| "invalid bearer token")?,
-            );
-            let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+            let req = match &auth {
+                crate::Auth::Bearer(token) => {
+                    let mut req = socket_url(&base)?
+                        .into_client_request()
+                        .map_err(|e| e.to_string())?;
+                    req.headers_mut().insert(
+                        "Authorization",
+                        format!("Bearer {token}")
+                            .parse()
+                            .map_err(|_| "invalid bearer token")?,
+                    );
+                    req
+                }
+                crate::Auth::Socket(mint) => {
+                    let url = mint().map_err(|refused| {
+                        trace = refused.trace.clone();
+                        refused.message
+                    })?;
+                    with_protocol(&url)?.into_client_request().map_err(|e| e.to_string())?
+                }
+            };
+            let (mut socket, _) = tungstenite::connect(req).map_err(|e| {
+                trace = handshake_trace(&e);
+                e.to_string()
+            })?;
             let tcp = match socket.get_mut() {
                 MaybeTlsStream::Plain(tcp) => tcp,
                 MaybeTlsStream::Rustls(tls) => &mut tls.sock,
@@ -308,7 +338,10 @@ pub(crate) fn run(
         })();
         match result {
             Ok(()) => return,
-            Err(reason) => emit(Incoming::Connection(Conn::Closed(reason))),
+            Err(reason) => {
+                emit(Incoming::Trace(trace));
+                emit(Incoming::Connection(Conn::Closed(reason)));
+            }
         }
         let deadline = Instant::now() + backoff;
         loop {

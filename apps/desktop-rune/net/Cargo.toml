@@ -7,6 +7,8 @@ description = "The S5 Code server protocol for the Rune client: Effect-RPC over 
 publish = false
 
 [dependencies]
+base64 = "0.22"
+ring = "0.17"
 serde_json = "1"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }

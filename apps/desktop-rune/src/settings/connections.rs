@@ -290,6 +290,7 @@ pub fn view(s: &App, t: &T) -> El {
     };
     let actions = super::machines::update_all_button(s, t).into_iter().chain([add]).collect();
     page = page.child(c::section_with_actions("Environments", actions, rows, t));
+    page = page.children(crate::cloud::section(s, t));
     if offers_links(s) {
         page = page.child(linked(s, t));
     }
@@ -427,7 +428,11 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
         None => saved_status(off, env::source(s, &saved.id).map(|src| (&src.state().conn, src.state().shell_ready))),
     };
     // Web `environmentTransportLabel`: SSH and its target, else the address.
-    let transport = env::ssh::transport(s, &saved.id).unwrap_or_else(|| saved.base.clone());
+    let transport = match env::ssh::transport(s, &saved.id) {
+        Some(ssh) => ssh,
+        None if saved.bearer == env::T3_CONNECT => "T3 Connect".into(),
+        None => saved.base.clone(),
+    };
     let id = saved.id.clone();
     let route_count = env::routes(s, &saved.id).len();
     let fold = |name: &str, label: String, open: bool, toggle: fn(&mut App, &str)| {
@@ -665,6 +670,9 @@ const ROUTE_ROW: f32 = 48.0;
 
 /// Web `connectionRouteLabel` and `connectionRouteAddress` for a saved route.
 pub(super) fn route_presentation(s: &App, id: &str, route: &env::Alt) -> (String, String) {
+    if route.bearer == env::T3_CONNECT {
+        return ("T3 Connect".into(), route.base.clone());
+    }
     if !env::ssh::is_tunnel(s, id, &route.base) {
         return (route_label(&route.base), route.base.clone());
     }
@@ -933,6 +941,13 @@ fn env_menu(s: &App, t: &T, layers: &mut Vec<El>) {
             toast(s, "MCP URL copied", Some(&format!("Add it to an agent, e.g. claude mcp add --transport http t3 {url}")));
         }));
     }
+    if let Some(trace) = env::source(s, &saved.id).and_then(|src| src.state().conn_trace.clone()) {
+        menu = menu.item(MenuItem::new("Copy trace ID").on_select_tx(move |s: &mut App, tx| {
+            tx.copy(trace.clone());
+            close(s);
+            toast(s, "Trace ID copied", Some(&trace));
+        }));
+    }
     menu.separator()
         .item(MenuItem::new("Remove from this device…").variant("destructive").on_select(move |s: &mut App| {
             close(s);
@@ -1088,7 +1103,40 @@ fn field<'a>(t: &'a T) -> impl Fn(&str, El) -> El + 'a {
     }
 }
 
-/// Web `renderRemoteModeBody` without the T3 Connect route offer.
+/// Web `relayRouteOffer`: adding a route to a machine on the T3 Connect account that has no
+/// T3 Connect route yet.
+fn relay_route_offer(s: &App, t: &T) -> Option<El> {
+    let id = s.ui.settings.connections.route_target.as_ref()?;
+    let linked = crate::cloud::linked(s, id).filter(|_| !env::reached_by_relay(s, id))?;
+    let busy = env::pairing(s);
+    Some(
+        row()
+            .w_full()
+            .px(12.0)
+            .py(8.0)
+            .gap(12.0)
+            .center_y()
+            .radius(6.0)
+            .border(1.0, t.c.border)
+            .child(text("This machine is on your T3 Connect account. Use it as a fallback route.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.0).shrink().min_w(0.0))
+            .child(
+                kit::Button::new("Add T3 Connect")
+                    .variant("outline")
+                    .size("xs")
+                    .disabled(busy)
+                    .on_press(move |s: &mut App| {
+                        let label = if linked.label.is_empty() { linked.id.clone() } else { linked.label.clone() };
+                        if env::add_relay(s, &linked).is_some() {
+                            close_add(s);
+                            toast(s, "Route added", Some(&format!("{label} falls back to T3 Connect when its other routes are unreachable.")));
+                        }
+                    })
+                    .build(t),
+            ),
+    )
+}
+
+/// Web `renderRemoteModeBody`.
 fn remote_fields(s: &App, t: &T) -> El {
     let env = &s.ui.env;
     let pairing = env::pairing(s);
@@ -1107,7 +1155,11 @@ fn remote_fields(s: &App, t: &T) -> El {
         .on_submit(|s: &mut App, _| add_remote(s))
         .build(t)
         .single_line();
-    let mut body = col().w_full().gap(16.0).child(
+    let mut body = col().w_full().gap(16.0);
+    if let Some(offer) = relay_route_offer(s, t) {
+        body = body.child(offer);
+    }
+    body = body.child(
         col()
             .w_full()
             .gap(12.0)
@@ -1715,6 +1767,10 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     layers.extend(popup);
 }
 
+fn ui_of(s: &mut App) -> &mut Ui {
+    &mut s.ui.settings.connections
+}
+
 /// Scenes: a saved environment on a fixture, and the connections overlay that is open.
 pub(super) fn scene(s: &mut App, open: &str) {
     s.ui.env.saved.push(Saved {
@@ -1761,6 +1817,21 @@ pub(super) fn scene(s: &mut App, open: &str) {
             if let Some(crate::data::Source::Fixture(state)) = env::source_mut(s, "env-box") {
                 state.conn = s5_net::Conn::Open;
             }
+        }
+        "t3-connect" => crate::cloud::scene_signed_in(s),
+        "t3-connect-signing-in" => crate::cloud::scene_signing_in(s),
+        "t3-connect-route" => {
+            crate::cloud::scene_signed_in(s);
+            ui_of(s).adding = Some(before);
+            ui_of(s).route_target = Some("env-box".into());
+        }
+        // A relay refusal with its trace, and the menu that copies it.
+        "trace" => {
+            if let Some(crate::data::Source::Fixture(state)) = env::source_mut(s, "env-box") {
+                state.conn = s5_net::Conn::Closed("Could not connect relay environment: Relay authentication failed: token_expired".into());
+                state.conn_trace = Some("0af7651916cd43dd8448eb211c80319c".into());
+            }
+            ui_of(s).env_menu = Some("env-box".into());
         }
         "link" => {
             // A second machine with the same name, told apart by its address.

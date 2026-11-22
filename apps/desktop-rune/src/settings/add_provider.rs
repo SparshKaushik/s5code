@@ -1162,7 +1162,13 @@ fn add_chatgpt(s: &mut App) {
     request(s, "server.updateSettings", json!({"patch": {}, "providerInstanceMutation": {"operation": "create", "instanceId": id, "instance": instance}}));
 }
 
-fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
+/// Web `AddCodexAccountDialog` on its own, as the setup wizard opens it.
+pub(crate) fn open_chatgpt(s: &mut App) {
+    s.ui.settings.error = None;
+    wizard(s).chatgpt = Some(ChatGpt { name: TextEdit::new("Personal"), created: None, install_sent: false, auth_sent: false });
+}
+
+pub(crate) fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(chatgpt) = &s.ui.settings.add_provider.chatgpt else { return };
     let close = |s: &mut App| wizard(s).chatgpt = None;
     let live = chatgpt.created.as_deref().and_then(|id| crate::chat::composer::provider(s, id));

@@ -223,7 +223,7 @@ fn is_web_page_file(path: &str) -> bool {
 /// Prompt, pairing, ChatGPT handoff and sign-in return links: what a second launch hands to
 /// the running app.
 pub fn is_app_link(url: &str) -> bool {
-    parse(url).is_some() || thread_link(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || resume_route(url).is_some()
+    parse(url).is_some() || thread_link(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || s5_net::cloud::clerk::callback(url).is_some() || resume_route(url).is_some()
 }
 
 /// `resumeProviderAuth`: a sign-in page sending the person back to the app's settings.
@@ -341,6 +341,11 @@ fn link_model(s: &App, provider: &str, model: Option<&str>) -> Option<((String, 
 pub fn open(s: &mut App, url: &str) -> bool {
     if let Some(handoff) = codex_callback::read_handoff(url) {
         codex_callback::handoff(s, handoff);
+        return true;
+    }
+    // Before `resume_route`, which reads any `s5code://app/` link as the app's home.
+    if let Some(callback) = s5_net::cloud::clerk::callback(url) {
+        crate::cloud::returned(s, callback);
         return true;
     }
     if let Some(route) = resume_route(url) {
@@ -717,6 +722,12 @@ fn poll_web(s: &mut App) -> bool {
             false
         }
         Web::Pending(page) => {
+            // "Open pull requests in T3 Code" covers links the OS hands over too.
+            if let WebPage::Url(url) = &page
+                && crate::panel::pull_requests::open_in_app(s, url)
+            {
+                return true;
+            }
             if matches!(page, WebPage::File(_)) && (s.ui.env.active != crate::env::LOCAL || s.ui.desktop.local_off) {
                 web_failed(s, &page, Some("HTML files open on this machine's environment."));
             } else if crate::panel::showing_browser(s) {
@@ -1045,6 +1056,27 @@ mod tests {
         state.threads = threads;
         s.src = crate::data::Source::Fixture(state);
         s
+    }
+
+    #[test]
+    fn os_handed_pull_request_links_follow_the_open_in_t3_code_setting() {
+        use serde_json::json;
+        let projects = vec![json!({"id": "p1", "repositoryIdentity": {"canonicalKey": "github.com/acme/app"}})];
+        let mut s = ready(projects.clone(), vec![]);
+        assert!(open(&mut s, "https://github.com/acme/app/pull/12"));
+        assert_eq!(s.route, Route::PullRequests, "FAILED: a pull request the OS hands over skips the pull requests view");
+        assert!(matches!(s.ui.links.web, Web::Idle));
+        let mut off = ready(projects, vec![]);
+        off.client_settings.values.insert("pullRequestLinksOpenInApp".into(), json!(false));
+        open(&mut off, "https://github.com/acme/app/pull/12");
+        assert_ne!(off.route, Route::PullRequests, "off leaves it to the browser");
+
+        let sign_in = "s5code://app/?__clerk_oauth_attempt=a-1&rotating_token_nonce=n-1";
+        assert!(is_app_link(sign_in));
+        let mut s = ready(vec![], vec![]);
+        s.navigate(Route::Settings("connections".into()));
+        assert!(open(&mut s, sign_in));
+        assert_eq!(s.route, Route::Settings("connections".into()), "a T3 Connect sign-in return is not the app's home link");
     }
 
     #[test]

@@ -1459,6 +1459,12 @@ pub(crate) fn file_icon(path: &str, size: f32, dark: bool) -> El {
     })
 }
 
+/// The base glyph of [`file_icon`], for inline pills: a text run's pill draws one icon in one
+/// colour, so it takes the type's shape without its layered colours.
+pub(crate) fn file_glyph(path: &str) -> &'static Icon {
+    file_icons::for_path(path).first().map_or(&crate::icons::FILE, |layer| layer.0)
+}
+
 /// `--trees-fg-muted`: the chevron's ink.
 fn tree_muted() -> Color {
     rune::color::hex("#84848a").unwrap_or(Color::WHITE)
@@ -1948,6 +1954,12 @@ fn sync_settings(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_pills_take_the_file_types_base_glyph() {
+        assert_eq!(file_glyph("Dockerfile").name, "file-tree-builtin-docker-0");
+        assert_eq!(file_glyph("notes.xyz").name, "file-tree-builtin-default-0", "types keep their shapes");
+    }
 
     #[test]
     fn tree_icons_resolve_in_pierres_order_with_web_overrides_untinted() {
