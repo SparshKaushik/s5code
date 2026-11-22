@@ -1040,7 +1040,7 @@ fn run(s: &mut App, id: &str, live: u64, effects: Vec<Effect>) {
                     settle(s, id, live, &request, Err("Links open only from a click in the app.".to_owned()));
                     continue;
                 }
-                super::open_preview(s, url);
+                super::open_preview(s, &url);
                 settle(s, id, live, &request, Ok(json!({})));
             }
             Effect::SendMessage { id: request, text } => {
