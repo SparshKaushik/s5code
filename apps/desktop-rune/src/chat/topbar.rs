@@ -304,7 +304,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .help(format!("New thread in {project}"))
                     .on_press(crate::shell::sidebar::new_local)
                     .child(mark)
-                    .child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate().shrink()),
+                    .child(text(project.clone()).font(CRUMB).color(t.c.muted_foreground).truncate().shrink()),
             )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
