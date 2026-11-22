@@ -95,7 +95,10 @@ struct Checkout {
     request: u64,
     mode: &'static str,
     project: String,
-    task: Option<String>,
+    /// The prompt and its attached threads for the draft thread, once it opens.
+    task: Option<(String, Vec<Value>)>,
+    /// startHandoff's kind, so only its own control reads as preparing.
+    kind: &'static str,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -418,18 +421,29 @@ fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
 
 /// startCheckout: the checkout alone.
 fn start_checkout(s: &mut App, mode: &'static str) {
-    start_handoff(s, mode, None);
+    start_handoff(s, mode, "checkout", None);
 }
 
 /// startResolveConflicts: a worktree checkout whose thread then holds the resolve prompt.
 fn resolve_conflicts(s: &mut App) {
     let u = ui(s);
     let Some(d) = u.detail.clone().or_else(|| u.entry.clone()) else { return };
-    start_handoff(s, "worktree", Some(resolve_text(&d)));
+    start_handoff(s, "worktree", "conflicts", Some((resolve_text(&d), Vec::new())));
+}
+
+/// canFixFindings: a fix starts in its own worktree, so it needs what preparing one needs.
+fn can_fix(s: &App) -> bool {
+    s.ui.pages.detail.entry.as_ref().is_some_and(|entry| checkout_allowed(s, entry, "worktree"))
+}
+
+/// startFixFindings and startFixFinding: the task waits for its worktree, as Resolve does.
+pub(super) fn start_fix(s: &mut App, kind: &'static str, text: String, records: Vec<Value>) {
+    ui(s).menu = false;
+    start_handoff(s, "worktree", kind, Some((text, records)));
 }
 
 /// startHandoff: prepares the checkout for the project's draft thread, which then opens on it.
-fn start_handoff(s: &mut App, mode: &'static str, task: Option<String>) {
+fn start_handoff(s: &mut App, mode: &'static str, kind: &'static str, task: Option<(String, Vec<Value>)>) {
     let u = ui(s);
     u.checkout_menu = false;
     let Some(entry) = u.entry.clone().filter(|_| u.checkout.is_none()) else { return };
@@ -446,7 +460,7 @@ fn start_handoff(s: &mut App, mode: &'static str, task: Option<String>) {
     match super::pull_requests::net_for(s, &entry) {
         Some(net) => {
             let request = net.request("git.preparePullRequestThread", input);
-            ui(s).checkout = Some(Checkout { request, mode, project, task });
+            ui(s).checkout = Some(Checkout { request, mode, project, task, kind });
             crate::shell::palette::toast(s, &format!("Preparing the {term} checkout..."), None);
         }
         None => crate::shell::palette::toast_error_brief(s, &format!("Could not prepare the {term} checkout"), Some("Actions need a connected environment.")),
@@ -457,7 +471,7 @@ fn start_handoff(s: &mut App, mode: &'static str, task: Option<String>) {
 /// toast says why not.
 fn poll_checkout(s: &mut App) -> bool {
     let u = ui(s);
-    let (Some(Checkout { request, mode, project, task }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
+    let (Some(Checkout { request, mode, project, task, .. }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
     let Some(reply) = super::pull_requests::net_for(s, &entry).and_then(|net| net.take_reply(request)) else { return false };
     ui(s).checkout = None;
     let term = super::pr_row::term(&entry);
@@ -479,8 +493,8 @@ fn poll_checkout(s: &mut App) -> bool {
     crate::chat::details::reset_draft_run(s);
     let on_head = prepared["isOnPullRequestHead"] != false;
     let (title, description) = match task {
-        Some(task) => {
-            compose(s, Route::Home { project_id: Some(project) }, task, None);
+        Some((task, records)) => {
+            compose(s, Route::Home { project_id: Some(project) }, task, records);
             if on_head { ("Checkout ready".into(), "The task is in the composer. Read it over, then send.".into()) } else { super::pr_actions::checkout_toast(mode, term, false) }
         }
         None => super::pr_actions::checkout_toast(mode, term, on_head),
@@ -801,7 +815,7 @@ fn card_finding(c: &Value, thread: Option<&Value>) -> Option<Finding> {
 fn fix_finding(s: &mut App, finding: &Finding) {
     let Some(d) = ui(s).detail.clone() else { return };
     let (text, records) = finding_handoff(&d, finding);
-    handoff(s, text, records.into_iter().next());
+    start_fix(s, "finding", text, records);
 }
 
 /// pullRequestHandoffLabels(false): this page is never inside a thread.
@@ -853,21 +867,21 @@ pub(crate) fn resolve_text(d: &Value) -> String {
 pub(super) fn handoff(s: &mut App, text: String, chip: Option<Value>) {
     let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
     ui(s).menu = false;
-    compose(s, Route::Home { project_id: project }, text, chip);
+    compose(s, Route::Home { project_id: project }, text, chip.into_iter().collect());
 }
 
 /// Opens `route`'s draft holding `text`, and `chip` when there is one.
-fn compose(s: &mut App, route: Route, text: String, chip: Option<Value>) {
+fn compose(s: &mut App, route: Route, text: String, chips: Vec<Value>) {
     let key = crate::chat::composer::draft_key(s, &route);
     crate::shell::sidebar::go(s, route);
     let draft = s.ui.chat.composer.drafts.entry(key).or_default();
     draft.edit.replace_text(&text);
     draft.edit.set_caret(text.len());
     draft.edit.focused = true;
-    if let Some(chip) = chip {
-        if !text.is_empty() {
-            draft.edit.insert(" ");
-        }
+    if !chips.is_empty() && !text.is_empty() {
+        draft.edit.insert(" ");
+    }
+    for chip in chips {
         crate::chat::composer::add_context(s, chip);
     }
 }
@@ -1071,7 +1085,7 @@ const TOP: &str = "pr-detail-top";
 fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.detail;
     let entry = u.entry.as_ref().unwrap_or(d);
-    let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_none()) { "Checking out..." } else { "Check out" };
+    let label = if u.checkout.as_ref().is_some_and(|c| c.kind == "checkout") { "Checking out..." } else { "Check out" };
     let trigger = kit::Button::new(if compact { "" } else { label })
         .variant("outline")
         .size("xs")
@@ -1180,7 +1194,7 @@ fn primary_action(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr
 /// prompt; `narrow` drops its label.
 fn resolve_button(s: &App, t: &T, d: &Value, narrow: bool) -> El {
     let u = &s.ui.pages.detail;
-    let label = if u.checkout.as_ref().is_some_and(|c| c.task.is_some()) { "Preparing..." } else { "Resolve conflicts" };
+    let label = if u.checkout.as_ref().is_some_and(|c| c.kind == "conflicts") { "Preparing..." } else { "Resolve conflicts" };
     let unavailable = checkout_root(s, d).is_none() || !checkout_allowed(s, u.entry.as_ref().unwrap_or(d), "worktree");
     kit::Button::new(if narrow { "" } else { label })
         .variant("destructive-outline")
@@ -1238,7 +1252,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
         }))
         .row(super::pr_meta::ask_row(t, d, move |s: &mut App| self::ask(s, ask.0.clone(), vec![ask.1.clone()])))
         .row(super::pr_meta::explain_row(t, d, move |s: &mut App| self::ask(s, explain.0.clone(), vec![explain.1.clone()])))
-        .item(super::pr_meta::fix_findings_item());
+        .item(super::pr_meta::fix_findings_item(s.ui.pages.detail.checkout.as_ref().is_some_and(|c| c.kind == "findings"), s.ui.pages.detail.checkout.is_some() || !can_fix(s)));
     if let Some(item) = super::pr_guide::menu_item(s) {
         menu = menu.item(item);
     }
@@ -1699,7 +1713,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
                     let _ = tx.open_url(&url);
                 });
             }
-            list = list.child(match fix_check_button(t, c) {
+            list = list.child(match fix_check_button(t, c).filter(|_| can_fix(s)) {
                 Some(fix) => row().w_full().gap(4.0).center_y().child(r.shrink().min_w(0.0)).child(fix),
                 None => r,
             });
@@ -1995,7 +2009,7 @@ fn head_line(s: &App, t: &T, c: &Value, surface: Surface<'_>, path: Option<Strin
         h = h.child(text(path).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().shrink().min_w(0.0));
     }
     h = h.child(spacer());
-    if let Some(finding) = fix {
+    if let Some(finding) = fix.filter(|_| can_fix(s)) {
         h = h.child(kit::Button::new(FIX_FINDING).variant("ghost").size("xs").icon(&i::HAMMER).on_press(move |s: &mut App| fix_finding(s, &finding)).build(t));
     }
     h = h.children(super::pr_edit::reaction_bar(s, t, c));
@@ -2332,7 +2346,7 @@ pub(super) fn scene_resolving(u: &mut Ui) {
     if let Some(d) = &mut u.detail {
         d["mergeability"] = json!("conflicting");
     }
-    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), task: Some(String::new()) });
+    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), task: Some((String::new(), Vec::new())), kind: "conflicts" });
 }
 
 #[cfg(test)]
@@ -2656,7 +2670,7 @@ mod tests {
         resolve_conflicts(&mut s);
         let Some(Checkout { request, mode, task, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the list's conflict starts the checkout before the detail is read") };
         s.ui.pages.detail.detail = Some(d.clone());
-        assert_eq!((mode, task.as_deref()), ("worktree", Some(resolve_text(&d).as_str())));
+        assert_eq!((mode, task.as_ref().map(|t| t.0.as_str())), ("worktree", Some(resolve_text(&d).as_str())));
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Preparing the pull request checkout..."));
         resolve_conflicts(&mut s);
         assert_eq!(s.ui.pages.detail.checkout.as_ref().map(|c| c.request), Some(request), "one handoff at a time");
@@ -2676,6 +2690,34 @@ mod tests {
         crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(json!({"branch": "x", "worktreePath": null, "isOnPullRequestHead": false})));
         poll_checkout(&mut s);
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Checked out, but not confirmed on the latest commit"));
+    }
+
+    #[test]
+    fn fixing_findings_waits_for_its_worktree_and_lands_with_its_threads() {
+        let mut s = App::new();
+        crate::env::park(&mut s, "box", crate::data::Source::Live(s5_net::Net::offline()));
+        let mut d = recorded()["detail"].clone();
+        d[crate::env::TAG] = json!("box");
+        s.ui.pages.detail.entry = Some(d.clone());
+        s.ui.pages.detail.detail = Some(d.clone());
+        let record = json!({"kind": "review-thread", "label": "app.rs L12"});
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "permissions": ["source-control:write"]}));
+        assert!(!can_fix(&s), "canFixFindings: the worktree needs orchestration:operate too");
+        start_fix(&mut s, "findings", "Fix it.".into(), vec![record.clone()]);
+        assert!(s.ui.pages.detail.checkout.is_none());
+
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "permissions": ["source-control:write", "orchestration:operate"]}));
+        assert!(can_fix(&s));
+        start_fix(&mut s, "findings", "Fix it.".into(), vec![record]);
+        let Some(Checkout { request, mode, kind, task, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the fix prepares a worktree first") };
+        assert_eq!((mode, kind, task.as_ref().map(|t| t.1.len())), ("worktree", "findings", Some(1)));
+        let prepared = json!({"branch": "feat/rune-pull-requests-usage-pages", "worktreePath": "/w/pr-2481", "isOnPullRequestHead": true});
+        crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(prepared));
+        assert!(poll_checkout(&mut s));
+        let project = field(&d, "projectId").to_string();
+        let draft = &s.ui.chat.composer.drafts[&crate::chat::composer::home_key(&project)];
+        assert!(draft.edit.text.starts_with("Fix it.") && draft.contexts.len() == 1, "the task and its thread land in the draft");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Checkout ready"));
     }
 
     #[test]

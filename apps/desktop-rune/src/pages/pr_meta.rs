@@ -1007,8 +1007,9 @@ pub fn explain_row(t: &T, d: &Value, on_press: impl Fn(&mut App) + 'static) -> E
 }
 
 /// pullRequestHandoffLabels' fixFindings: this page has no thread of its own to fix in.
-pub fn fix_findings_item() -> MenuItem {
-    MenuItem::new("Fix findings in a thread").icon(&i::HAMMER).on_select(fix_findings)
+/// The actions menu's Fix findings: "Preparing..." while its worktree is made.
+pub fn fix_findings_item(preparing: bool, disabled: bool) -> MenuItem {
+    MenuItem::new(if preparing { "Preparing..." } else { "Fix findings in a thread" }).icon(&i::HAMMER).disabled(disabled).on_select(fix_findings)
 }
 
 /// canEditPullRequestMaintainerEdits.
@@ -1189,26 +1190,12 @@ pub fn findings_handoff(d: &Value, activity: &Value) -> (String, Vec<Value>) {
     (lines.join("\n"), threads_in.iter().map(|th| thread_record(th, number)).collect())
 }
 
-/// startFixFindings: the project's new-thread draft holding the task and its threads.
+/// startFixFindings: a worktree checkout whose draft thread then holds the task and its threads.
 fn fix_findings(s: &mut App) {
     let u = &s.ui.pages.detail;
     let Some(d) = u.detail.clone() else { return };
     let (text, threads) = findings_handoff(&d, u.activity.as_ref().unwrap_or(&Value::Null));
-    s.ui.pages.detail.menu = false;
-    let project = Some(field(&d, "projectId").to_string()).filter(|p| !p.is_empty());
-    let route = Route::Home { project_id: project };
-    let key = crate::chat::composer::draft_key(s, &route);
-    crate::shell::sidebar::go(s, route);
-    let draft = s.ui.chat.composer.drafts.entry(key).or_default();
-    draft.edit.replace_text(&text);
-    draft.edit.set_caret(text.len());
-    draft.edit.focused = true;
-    if !threads.is_empty() {
-        draft.edit.insert(" ");
-    }
-    for record in threads {
-        crate::chat::composer::add_context(s, record);
-    }
+    super::pr_detail::start_fix(s, "findings", text, threads);
 }
 
 // ---- scenes -----------------------------------------------------------------------------
