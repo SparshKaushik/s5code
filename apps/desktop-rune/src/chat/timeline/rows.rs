@@ -162,7 +162,8 @@ fn superseded<'a>(p: &'a Value, items: &[&'a Value]) -> (HashMap<&'a str, &'a st
         let kind = s(item, "type");
         let kept = matches!(kind, "user_message" | "handoff" | "system_notice" | "fork" | "secret_request" | "link_request" | "checkpoint")
             || LIFECYCLE.contains(&kind)
-            || (kind == "subagent" && item_active(item));
+            || (kind == "subagent" && item_active(item))
+            || crate::chat::details::html_render::reference(item).is_some();
         if !kept && !finished.contains(s(attempt, "id")) && !failed.contains(s(attempt, "runId")) {
             fold.insert(s(item, "id"), s(attempt, "id"));
         }
@@ -364,9 +365,15 @@ pub fn derive_with_meta(p: &Value, now: i64) -> (Vec<Row<'_>>, HashSet<&str>) {
     let mut attempts: HashMap<&str, usize> = HashMap::new();
     let mut spans: HashMap<&str, (Option<i64>, Option<i64>)> = HashMap::new();
     let mut latest: HashMap<&str, &Value> = HashMap::new();
+    // Turns past their terminal reply: a page rendered after it stays in view (deriveTurnFolds).
+    let mut replied: HashSet<&str> = HashSet::new();
     for (item, key) in items.drain(..).zip(&keys) {
         let kind = s(item, "type");
         let run_id = s(item, "runId");
+        let after_reply = replied.contains(key.as_str());
+        if kind == "assistant_message" && terminal.get(key.as_str()) == Some(&s(item, "id")) {
+            replied.insert(key.as_str());
+        }
         let live = !run_id.is_empty() && active(run_id);
         let unfolded = live || interrupted.contains(run_id);
         if live && kind != "user_message" {
@@ -407,7 +414,7 @@ pub fn derive_with_meta(p: &Value, now: i64) -> (Vec<Row<'_>>, HashSet<&str>) {
             && (live || terminal.get(key.as_str()) == Some(&s(item, "id")) || replies.contains(s(item, "id")))
         {
             rows.push(Row::Assistant(item));
-        } else if unfolded || escapes_fold(kind) {
+        } else if unfolded || escapes_fold(kind) || (after_reply && crate::chat::details::html_render::reference(item).is_some()) {
             rows.push(if kind == "assistant_message" { Row::Assistant(item) } else { Row::Item(item) });
         } else {
             let span = spans.entry(key.as_str()).or_default();
@@ -843,6 +850,23 @@ mod tests {
         );
         assert!(matches!(&rows[2],Row::Assistant(v) if s(v,"id")=="final"));
     }
+    #[test]
+    fn a_page_rendered_after_the_final_reply_stays_out_of_the_fold() {
+        let render = |id: &str, ordinal: i64| {
+            let page = json!({"htmlRender": {"attachmentId": id, "title": "Chart", "height": 300}});
+            json!({"id": id, "type": "dynamic_tool", "toolName": "mcp__t3-code__html_render", "status": "completed", "runId": "r", "ordinal": ordinal, "output": {"structuredContent": page}})
+        };
+        let p = json!({"runs":[{"id":"r","status":"completed"}],"turnItems":[
+            {"id":"u","type":"user_message","runId":"r","ordinal":1},
+            render("early", 2),
+            {"id":"final","type":"assistant_message","runId":"r","ordinal":3},
+            render("late", 4)]});
+        let rows = derive(&p, 0);
+        assert!(matches!(&rows[1], Row::Work { items, .. } if items.len() == 1 && s(items[0], "id") == "early"));
+        assert!(matches!(&rows[2], Row::Assistant(v) if s(v, "id") == "final"));
+        assert!(matches!(rows.last(), Some(Row::Item(v)) if s(v, "id") == "late"));
+    }
+
     #[test]
     fn pending_approval_and_errors_escape_collapsed_work() {
         let p = json!({"runtimeRequests":[{"id":"q","status":"pending"}],"turnItems":[
