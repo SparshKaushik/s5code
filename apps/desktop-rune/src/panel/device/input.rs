@@ -1,5 +1,6 @@
-//! The iOS simulator's input socket behind the device hub: serve-sim's `/helper/ws`, as web's
-//! `createDeviceStreamClient`. Every message is a tag byte and then JSON.
+//! Device input as web's `createDeviceStreamClient`: an iOS simulator's own socket behind the
+//! device hub (serve-sim's `/helper/ws`, a tag byte and then JSON), or an Android emulator's
+//! serve-emu socket, shared with its video (JSON text).
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,8 @@ const SCREEN_CONFIG: u8 = 0x82;
 const ADMITTED: u8 = 0x83;
 const SHIFT: u8 = 0xe1;
 const ORIENTATIONS: [&str; 4] = ["portrait", "landscape_left", "portrait_upside_down", "landscape_right"];
+/// serve-emu's `MAX_TEXT_BYTES` (expo-device-hub 0.15.3 input.js).
+const ANDROID_TEXT_BYTES: usize = 300;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Screen {
@@ -40,49 +43,118 @@ impl State {
     }
 }
 
-/// One device's input socket; dropping it closes the socket.
+/// One device's input; dropping it closes an iOS socket (Android's closes with its video).
 pub struct Input {
-    tx: Sender<Vec<u8>>,
+    tx: Sender<Message>,
     pub state: Arc<Mutex<State>>,
+    android: bool,
 }
 
 impl Input {
     pub fn open(base: String, bearer: String, host: &str, device: &str, wake: impl Fn() + Send + 'static) -> Input {
-        let (tx, rx) = channel();
-        let state = Arc::new(Mutex::new(State::default()));
+        let (input, rx) = Input::channel(false);
         let query = format!("device={}&hostId={}", super::encode(device), super::encode(host));
-        let shared = state.clone();
+        let shared = input.state.clone();
         std::thread::spawn(move || run(&base, &bearer, &query, &rx, &shared, &wake));
-        Input { tx, state }
+        input
     }
 
-    fn send(&self, message: Vec<u8>) {
+    /// Input whose messages another socket's loop sends: Android's serve-emu video socket.
+    pub fn channel(android: bool) -> (Input, Receiver<Message>) {
+        let (tx, rx) = channel();
+        (Input { tx, state: Arc::default(), android }, rx)
+    }
+
+    fn send(&self, message: Message) {
         let _ = self.tx.send(message);
+    }
+
+    fn send_json(&self, value: Value) {
+        self.send(Message::Text(value.to_string()));
     }
 
     /// A touch at `(x, y)` on the shown screen, each 0 to 1.
     pub fn touch(&self, phase: &str, x: f64, y: f64) {
+        let (x, y) = (x.clamp(0., 1.), y.clamp(0., 1.));
+        if self.android {
+            let action = match phase {
+                "begin" => "down",
+                "end" => "up",
+                _ => "move",
+            };
+            return self.send_json(json!({"type": "touch", "action": action, "x": x, "y": y}));
+        }
         let screen = self.state.lock().unwrap_or_else(|e| e.into_inner()).screen.clone();
-        let (x, y) = raw_point(screen.as_ref(), x.clamp(0., 1.), y.clamp(0., 1.));
-        self.send(tagged(TOUCH, &json!({"type": phase, "x": x, "y": y})));
+        let (x, y) = raw_point(screen.as_ref(), x, y);
+        self.send(Message::Binary(tagged(TOUCH, &json!({"type": phase, "x": x, "y": y}))));
     }
 
+    /// Web's `pressButton`: `home`, `back`, `recents` or `power`.
     pub fn button(&self, button: &str) {
-        self.send(tagged(BUTTON, &json!({"button": button})));
+        if self.android {
+            return self.send_json(json!({"type": button}));
+        }
+        let name = match button {
+            "home" => "home",
+            "recents" => "app_switcher",
+            "power" => "lock",
+            _ => return,
+        };
+        self.send(Message::Binary(tagged(BUTTON, &json!({"button": name}))));
     }
 
     pub fn rotate(&self) {
+        if self.android {
+            return;
+        }
         let current = self.state.lock().unwrap_or_else(|e| e.into_inner()).screen.as_ref().map(|s| s.orientation.clone());
-        self.send(tagged(ORIENTATION, &json!({"orientation": next_orientation(current.as_deref())})));
+        self.send(Message::Binary(tagged(ORIENTATION, &json!({"orientation": next_orientation(current.as_deref())}))));
     }
 
-    /// Presses for `key`; false when the simulator has no key for it.
+    /// Presses for `key`; false when the device has no key for it.
     pub fn key(&self, key: &Key) -> bool {
+        if self.android {
+            let messages = android_key(key);
+            let any = !messages.is_empty();
+            for message in messages {
+                self.send_json(message);
+            }
+            return any;
+        }
         let presses = presses(key);
         for message in presses.iter().flat_map(|&(usage, shift)| press(usage, shift)) {
-            self.send(message);
+            self.send(Message::Binary(message));
         }
         !presses.is_empty()
+    }
+}
+
+/// serve-emu's messages for a key: Escape is Back, named keys are Android keycodes, and text
+/// goes as text in chunks it accepts.
+fn android_key(key: &Key) -> Vec<Value> {
+    let code = |keycode: u32| vec![json!({"type": "key", "keycode": keycode})];
+    match key {
+        Key::Escape => vec![json!({"type": "back"})],
+        Key::Up => code(19),
+        Key::Down => code(20),
+        Key::Left => code(21),
+        Key::Right => code(22),
+        Key::Tab => code(61),
+        Key::Enter => code(66),
+        Key::Backspace => code(67),
+        Key::PageUp => code(92),
+        Key::PageDown => code(93),
+        Key::Text(text) => {
+            let mut chunks = vec![String::new()];
+            for c in text.chars() {
+                if chunks.last().is_some_and(|last| last.len() + c.len_utf8() > ANDROID_TEXT_BYTES) {
+                    chunks.push(String::new());
+                }
+                chunks.last_mut().expect("never empty").push(c);
+            }
+            chunks.into_iter().filter(|c| !c.is_empty()).map(|text| json!({"type": "text", "text": text})).collect()
+        }
+        _ => vec![],
     }
 }
 
@@ -188,7 +260,7 @@ fn press(usage: u8, shift: bool) -> Vec<Vec<u8>> {
 }
 
 /// Keeps the socket open until `Input` drops, reconnecting after a second when it is lost.
-fn run(base: &str, bearer: &str, query: &str, rx: &Receiver<Vec<u8>>, state: &Mutex<State>, wake: &dyn Fn()) {
+fn run(base: &str, bearer: &str, query: &str, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) {
     loop {
         if let Ok(mut socket) = s5_net::api_socket(base, bearer, PATH, query, Duration::from_millis(15))
             && pump(&mut socket, rx, state, wake)
@@ -204,13 +276,13 @@ fn run(base: &str, bearer: &str, query: &str, rx: &Receiver<Vec<u8>>, state: &Mu
 }
 
 /// True once the panel let go; false when the socket was lost.
-fn pump<S: std::io::Read + std::io::Write>(socket: &mut tungstenite::WebSocket<S>, rx: &Receiver<Vec<u8>>, state: &Mutex<State>, wake: &dyn Fn()) -> bool {
+fn pump<S: std::io::Read + std::io::Write>(socket: &mut tungstenite::WebSocket<S>, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) -> bool {
     loop {
         loop {
             match rx.try_recv() {
                 // Web's `send` drops input until the simulator admits this client.
                 Ok(message) if state.lock().unwrap_or_else(|e| e.into_inner()).ready() => {
-                    if socket.send(Message::Binary(message)).is_err() {
+                    if socket.send(message).is_err() {
                         return false;
                     }
                 }
@@ -301,5 +373,36 @@ mod tests {
             ]
         );
         assert_eq!(decoded(&tagged(BUTTON, &json!({"button": "home"}))), (0x04, json!({"button": "home"})));
+    }
+
+    #[test]
+    fn android_input_is_serve_emu_json() {
+        let (input, rx) = Input::channel(true);
+        input.touch("begin", 0.25, 1.5);
+        input.button("recents");
+        input.rotate();
+        assert!(input.key(&Key::Escape));
+        assert!(!input.key(&Key::Function(1)));
+        let sent: Vec<Value> = rx.try_iter().map(|m| serde_json::from_str(m.to_text().unwrap()).unwrap()).collect();
+        assert_eq!(
+            sent,
+            vec![
+                json!({"type": "touch", "action": "down", "x": 0.25, "y": 1.0}),
+                json!({"type": "recents"}),
+                json!({"type": "back"}),
+            ],
+            "Android has no rotate message; touches clamp to the screen"
+        );
+        assert_eq!(android_key(&Key::Enter), vec![json!({"type": "key", "keycode": 66})]);
+        let long = "é".repeat(200);
+        let chunks = android_key(&Key::Text(long.clone()));
+        assert_eq!(chunks.len(), 2, "400 bytes go in two chunks of at most 300");
+        assert!(chunks.iter().all(|c| c["text"].as_str().unwrap().len() <= ANDROID_TEXT_BYTES));
+        assert_eq!(chunks.iter().map(|c| c["text"].as_str().unwrap()).collect::<String>(), long);
+        let (ios, rx) = Input::channel(false);
+        ios.button("back");
+        ios.button("power");
+        let sent: Vec<Message> = rx.try_iter().collect();
+        assert_eq!(sent, vec![Message::Binary(tagged(BUTTON, &json!({"button": "lock"})))], "iOS has no Back");
     }
 }

@@ -33,14 +33,20 @@ pub struct LineRange {
 
 pub const LINE_H: f32 = 20.0;
 pub const HEADER_H: f32 = 32.0;
-pub const SEP_H: f32 = 24.0;
-pub const NOTE_H: f32 = 32.0;
+/// `[data-separator=line-info]`'s height.
+pub const SEP_H: f32 = 32.0;
+/// Pierre's `--diffs-gap-block` around a line-info separator.
+const SEP_GAP: f32 = 8.0;
+
+/// The space above and below the separator before hunk `h` of `hunks`: none above the file's
+/// first (`data-separator-first`) or below its trailing one (`data-separator-last`).
+pub fn sep_margins(h: usize, hunks: usize) -> (f32, f32) {
+    (if h == 0 { 0.0 } else { SEP_GAP }, if h >= hunks { 0.0 } else { SEP_GAP })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
     File(u32),
-    /// A file with no lines to show: binary, a pure rename, a mode change, an empty file.
-    Note(u32),
     /// The unchanged lines folded away before hunk `h`.
     Sep { f: u32, h: u32 },
     /// Line `i` of hunk `h`; in split mode, one without a partner on the other side.
@@ -69,7 +75,7 @@ pub struct Note {
 impl Row {
     pub fn file(self) -> usize {
         match self {
-            Row::File(f) | Row::Note(f) | Row::Sep { f, .. } | Row::Line { f, .. } | Row::Pair { f, .. } | Row::Gap { f, .. } | Row::Comment { f, .. } => f as usize,
+            Row::File(f) | Row::Sep { f, .. } | Row::Line { f, .. } | Row::Pair { f, .. } | Row::Gap { f, .. } | Row::Comment { f, .. } => f as usize,
         }
     }
 }
@@ -642,8 +648,10 @@ impl DiffState {
     fn estimate(&self, r: usize) -> f32 {
         match self.rows[r] {
             Row::File(_) => HEADER_H,
-            Row::Note(_) => NOTE_H,
-            Row::Sep { .. } => SEP_H,
+            Row::Sep { f, h } => {
+                let (top, bottom) = sep_margins(h as usize, self.files().get(f as usize).map_or(0, |file| file.hunks.len()));
+                SEP_H + top + bottom
+            }
             Row::Comment { n, .. } if self.notes.get(n as usize).is_some_and(|n| n.draft) => 104.0,
             Row::Comment { .. } => 40.0,
             _ => LINE_H,
@@ -747,10 +755,8 @@ impl DiffState {
             if self.collapsed[f] {
                 continue;
             }
-            if file.hunks.is_empty() {
-                rows.push(Row::Note(fu));
-                continue;
-            }
+            // Pierre draws a file without hunks (binary, a pure rename, a mode change) as its
+            // header alone.
             for (h, hunk) in file.hunks.iter().enumerate() {
                 let hu = h as u32;
                 hunk_rows.push(rows.len() as u32);
@@ -842,7 +848,6 @@ impl DiffState {
     fn key_of(&self, r: Row) -> String {
         match r {
             Row::File(f) => format!("pd{f}"),
-            Row::Note(f) => format!("pd{f}.note"),
             Row::Sep { f, h } => format!("pd{f}.s{h}"),
             Row::Line { f, h, i } => {
                 let l = &self.files[f as usize].hunks[h as usize].lines[i as usize];
@@ -882,7 +887,6 @@ mod tests {
             .iter()
             .map(|&r| match r {
                 Row::File(f) => format!("file{f}"),
-                Row::Note(_) => "note".into(),
                 Row::Sep { f, h } => format!("sep{}", s.remaining(f as usize, h as usize)),
                 Row::Comment { n, .. } => format!("comment {}", s.notes()[n as usize].id),
                 _ => {
@@ -898,7 +902,7 @@ mod tests {
         let s = state();
         assert_eq!(
             shown(&s),
-            ["file0", "sep9", "10|10", "11|-", "12|-", "-|11", "-|12", "-|13", "13|14", "sep26", "40|41", "41|-", "-|42", "file1", "note"]
+            ["file0", "sep9", "10|10", "11|-", "12|-", "-|11", "-|12", "-|13", "13|14", "sep26", "40|41", "41|-", "-|42", "file1"]
         );
     }
 
@@ -909,7 +913,7 @@ mod tests {
         s.set_extras(vec![Some(lines)], vec![HashMap::from([(0, (0, 2)), (2, (3, 0))])]);
         let rows = shown(&s);
         assert_eq!(rows[..5], ["file0", "sep7", "8|8", "9|9", "10|10"]);
-        assert_eq!(rows[14..], ["-|42", "42|43", "43|44", "44|45", "sep5", "file1", "note"]);
+        assert_eq!(rows[14..], ["-|42", "42|43", "43|44", "44|45", "sep5", "file1"]);
         assert_eq!(s.gap_line(0, 2, 0), Some((42, 43, "l43")));
         assert_eq!(s.row_at(0, Side::Old, 9), Some(3));
         // Asking for more than the gap holds shows all of it, with no separator.
@@ -942,14 +946,14 @@ mod tests {
     fn collapsed_files_follow_their_path_across_a_reload() {
         let mut s = state();
         s.set_collapsed(0, true);
-        assert_eq!(shown(&s), ["file0", "file1", "note"]);
+        assert_eq!(shown(&s), ["file0", "file1"], "FAILED: the binary file is its header alone");
         let kept = s.collapsed_paths();
         assert_eq!(kept, ["a.rs"]);
         // The reload lists the files the other way round: the collapsed one is still a.rs.
         let mut files = rune_kit::diff::parse(PATCH);
         files.reverse();
         s.set_files(files, &kept);
-        assert_eq!(shown(&s), ["file0", "note", "file1"]);
+        assert_eq!(shown(&s), ["file0", "file1"]);
         assert!(!s.all_collapsed());
         s.set_all_collapsed(true);
         assert!(s.all_collapsed());

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rune::{El, col, icon, row, text};
+use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use super::rows::{array, duration};
@@ -30,6 +30,10 @@ pub struct State {
     cancelling: HashMap<String, u64>,
     /// Run id -> `prepared-run.retry` in flight.
     retrying: HashMap<String, u64>,
+    /// Threads whose cancel was Work locally: their prompt goes out again once it lands.
+    work_locally: HashSet<String>,
+    /// Cancelled for Work locally, until the run settles and the worktree is cleared.
+    resending: HashSet<String>,
 }
 
 fn stage_label(id: &str) -> &'static str {
@@ -65,6 +69,18 @@ fn visible(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
         "done" => !turn_started || stage_failed(snapshot),
         _ => true,
     }
+}
+
+/// setupHandedOff: the agent has started from the worktree, so the card is history and a finished
+/// one folds to a single summary row.
+fn handed_off(snapshot: &Value, turn_started: bool) -> bool {
+    turn_started && array(snapshot, "stages").iter().any(|st| s(st, "id") == "agent" && s(st, "status") == "done")
+}
+
+/// CollapsedSummaryRow's status: failed when the setup or its script did.
+fn summary_status(snapshot: &Value) -> &'static str {
+    let script_failed = array(snapshot, "stages").iter().any(|st| s(st, "id") == "setup-script" && s(st, "status") == "failed");
+    if matches!(s(snapshot, "phase"), "failed" | "cancelled") || script_failed { "failed" } else { "done" }
 }
 
 /// The setup script's server terminal, once its stage has started.
@@ -133,11 +149,17 @@ pub fn poll(app: &mut App) -> bool {
         ui.watched = Some(id);
     }
     let mut failures = Vec::new();
-    ui.cancelling.retain(|_, request| {
+    let (work_locally, resending) = (&mut ui.work_locally, &mut ui.resending);
+    ui.cancelling.retain(|thread, request| {
         let Some(reply) = net.take_reply(*request) else { return true };
         changed = true;
-        if let Err(error) = reply {
-            failures.push(("Could not cancel worktree setup", error));
+        let resend = work_locally.remove(thread);
+        match reply {
+            Ok(v) if resend && v["cancelled"] == true => {
+                resending.insert(thread.clone());
+            }
+            Ok(_) => {}
+            Err(error) => failures.push(("Could not cancel worktree setup", error)),
         }
         false
     });
@@ -153,7 +175,46 @@ pub fn poll(app: &mut App) -> bool {
         let description = crate::shell::palette::error_message(&error, "An error occurred.");
         crate::shell::palette::toast_error(app, title, Some(&description));
     }
+    let st = app.state();
+    let ready: Vec<(String, Value)> = app
+        .ui
+        .chat
+        .timeline
+        .worktree
+        .resending
+        .iter()
+        .filter_map(|thread| {
+            let projection = &st.thread_views.get(thread)?.projection;
+            let shell = st.threads.iter().find(|r| s(r, "id") == thread.as_str());
+            if !settled(projection, shell) {
+                return None;
+            }
+            Some((thread.clone(), prompt(projection)?.clone()))
+        })
+        .collect();
+    for (thread, message) in ready {
+        app.ui.chat.timeline.worktree.resending.remove(&thread);
+        super::actions::resend(app, &thread, &message);
+        changed = true;
+    }
     changed
+}
+
+/// The prompt a cancelled setup held back: the thread's latest message.
+fn prompt(projection: &Value) -> Option<&Value> {
+    array(projection, "turnItems").iter().rev().find(|i| s(i, "type") == "user_message")
+}
+
+/// The cancelled run has failed and the thread's worktree is gone, so a send starts locally.
+fn settled(projection: &Value, shell: Option<&Value>) -> bool {
+    let active = array(projection, "runs").iter().any(|r| matches!(s(r, "status"), "preparing" | "queued" | "starting" | "running" | "waiting"));
+    !active && shell.is_none_or(|r| s(r, "worktreePath").is_empty())
+}
+
+/// Work locally: cancel, and send the prompt again once [`poll`] sees the cancel settle.
+fn work_locally(app: &mut App, thread: &str) {
+    cancel(app, thread);
+    app.ui.chat.timeline.worktree.work_locally.insert(thread.to_owned());
 }
 
 fn cancel(app: &mut App, thread: &str) {
@@ -213,15 +274,15 @@ fn stage_icon(status: &str, t: &T) -> El {
         "skipped" => &icons::MINUS,
         _ => &icons::CIRCLE,
     };
-    icon(glyph, 14.0).color(t.c.icon_muted.alpha_mul(if status == "pending" { 0.4 } else { 1.0 }))
+    icon(glyph, 16.0).color(t.c.icon_muted.alpha_mul(if status == "pending" { 0.4 } else { 1.0 }))
 }
 
 fn stage_color(status: &str, t: &T) -> rune::Color {
     match status {
         "failed" => t.c.error_foreground,
         "warning" => t.c.warning_foreground,
-        "pending" => t.c.muted_foreground.alpha_mul(0.4),
-        _ => t.c.muted_foreground,
+        "pending" => t.c.contrast_secondary_label.alpha_mul(0.4),
+        _ => t.c.contrast_secondary_label,
     }
 }
 
@@ -234,25 +295,47 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         return None;
     }
     let running = s(snapshot, "phase") == "running";
+    let embedded = handed_off(snapshot, turn_started);
     let now = app.now_ms;
     let mut card = col().w_full().label("Worktree setup");
-    if !running && s(snapshot, "phase") != "done" {
+    if !embedded && !running && s(snapshot, "phase") != "done" {
         let tone = if s(snapshot, "phase") == "failed" { t.c.error_foreground } else { t.c.muted_foreground };
+        // SetupHeaderRow: a 24px row under a divider, then the stages 6px below.
         card = card.child(
-            row()
-                .w_full()
-                .h(24.0)
-                .px(4.0)
-                .mb(6.0)
-                .gap(8.0)
-                .center_y()
-                .child(text(header_label(snapshot)).font(theme::TEXT_SM).color(tone).truncate().shrink().min_w(0.0))
-                .child(rune::spacer())
-                .children(elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now).map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
+            col().w_full().pt(4.0).mb(6.0).child(
+                row()
+                    .w_full()
+                    .h(24.0)
+                    .px(4.0)
+                    .gap(8.0)
+                    .center_y()
+                    .child(text(header_label(snapshot)).font(theme::TEXT_SM).color(tone).truncate().shrink().min_w(0.0))
+                    .child(rune::spacer())
+                    .children(elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now).map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
+            )
+            .child(el().w_full().h(1.0).mt(8.0).fill(t.c.border.alpha_mul(0.6))),
         );
     }
     let script = &snapshot["setupScript"];
-    for stage in array(snapshot, "stages") {
+    let stage_row = |status: &str, label: &str, trailing: Option<String>, time: Option<String>| {
+        // WorkLogRow: py-0.5 around a 24px line, px-0.5, a 24px icon lane, gap-1.5.
+        row()
+            .w_full()
+            .h(28.0)
+            .px(2.0)
+            .gap(6.0)
+            .center_y()
+            .child(row().size(24.0, 24.0).center().child(stage_icon(status, t)))
+            .child(text(label.to_owned()).font(theme::TEXT_SM).color(stage_color(status, t)).truncate().shrink().min_w(0.0))
+            .child(rune::spacer())
+            .children(trailing.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0)))
+            .children(time.map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground)))
+    };
+    if embedded && !running {
+        let time = elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now);
+        card = card.child(stage_row(summary_status(snapshot), header_label(snapshot), None, time));
+    }
+    for stage in array(snapshot, "stages").iter().filter(|_| !embedded || running) {
         let status = s(stage, "status");
         let label = if s(stage, "id") == "setup-script" && !s(script, "name").is_empty() { s(script, "name") } else { stage_label(s(stage, "id")) };
         let trailing = match status {
@@ -263,26 +346,14 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         };
         let ended = if s(stage, "endedAt").is_empty() { s(snapshot, "endedAt") } else { s(stage, "endedAt") };
         let time = (!matches!(status, "pending" | "skipped")).then(|| elapsed(s(stage, "startedAt"), ended, running, now)).flatten();
-        card = card.child(
-            row()
-                .w_full()
-                .h(28.0)
-                .px(4.0)
-                .gap(12.0)
-                .center_y()
-                .child(row().w(16.0).center().child(stage_icon(status, t)))
-                .child(text(label).font(theme::TEXT_SM).color(stage_color(status, t)).truncate().shrink().min_w(0.0))
-                .child(rune::spacer())
-                .children(trailing.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0)))
-                .children(time.map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
-        );
+        card = card.child(stage_row(status, label, trailing, time));
         if s(stage, "id") == "setup-script"
             && let Some((lines, failed)) = tail(snapshot)
         {
             let (border, fill, fg) = if failed {
-                (t.c.destructive.alpha_mul(0.2), t.c.destructive.alpha_mul(0.06), t.c.error_foreground)
+                (t.c.destructive.alpha_mul(0.2), t.c.error_surface, t.c.error_foreground)
             } else {
-                (t.c.border, t.c.secondary, t.c.muted_foreground)
+                (t.c.border, t.c.code_background, t.c.muted_foreground)
             };
             card = card.child(
                 col()
@@ -302,7 +373,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     }
     let open = app.ui.chat.timeline.worktree.details.contains(thread);
     let details_thread = thread.to_owned();
-    let mut actions = row().ml(18.0).mt(2.0).gap(2.0).center_y().flex_wrap().child(
+    let mut actions = row().ml(19.0).mt(2.0).gap(2.0).center_y().flex_wrap().child(
         Button::new("Details")
             .variant("ghost-muted")
             .size("xs")
@@ -326,7 +397,17 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .build(t),
         );
     }
-    if running {
+    if running && !embedded {
+        let local_thread = thread.to_owned();
+        actions = actions.child(
+            Button::new("Work locally")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::LAPTOP)
+                .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
+                .on_press(move |app: &mut App| work_locally(app, &local_thread))
+                .build(t),
+        );
         let cancel_thread = thread.to_owned();
         actions = actions.child(
             Button::new("Cancel")
@@ -340,16 +421,19 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     }
     card = card.child(actions);
     if open {
+        let rows: Vec<(&str, &str)> = [("Branch", s(snapshot, "branch")), ("Base", s(snapshot, "baseRef")), ("Path", s(snapshot, "worktreePath")), ("Setup", s(script, "command"))]
+            .into_iter()
+            .filter(|(_, value)| !value.is_empty())
+            .collect();
+        // The dl's `auto` column: as wide as its widest term.
+        let term_w = rows.iter().map(|(term, _)| rune::text::measure(term, &[], theme::TEXT_XS, None).0.ceil()).fold(0.0, f32::max);
         let mut list = col().ml(32.0).mt(4.0).mb(6.0).gap(2.0);
-        for (term, value) in [("Branch", s(snapshot, "branch")), ("Base", s(snapshot, "baseRef")), ("Path", s(snapshot, "worktreePath")), ("Setup", s(script, "command"))] {
-            if value.is_empty() {
-                continue;
-            }
+        for (term, value) in rows {
             list = list.child(
                 row()
                     .w_full()
                     .gap(12.0)
-                    .child(text(term).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.8)).w(48.0))
+                    .child(text(term).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.8)).w(term_w))
                     .child(text(value.to_owned()).font(theme::MONO_XS).color(t.c.muted_foreground).truncate_middle().shrink().min_w(0.0).selectable(true)),
             );
         }
@@ -379,6 +463,18 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_setup_folds_to_one_summary_row_once_the_agent_takes_over() {
+        let with = |phase: &str, script: &str, agent: &str| snapshot(phase, json!([{"id": "setup-script", "status": script}, {"id": "agent", "status": agent}]));
+        let ok = with("done", "done", "done");
+        assert!(handed_off(&ok, true));
+        assert!(!handed_off(&ok, false), "FAILED: the turn has not started yet");
+        assert!(!handed_off(&with("running", "running", "pending"), true), "FAILED: the agent has not started from the worktree");
+        assert_eq!(summary_status(&ok), "done");
+        assert_eq!(summary_status(&with("done", "failed", "done")), "failed");
+        assert_eq!(summary_status(&with("cancelled", "skipped", "pending")), "failed");
+    }
+
+    #[test]
     fn the_output_tail_keeps_the_last_four_lines() {
         let running = snapshot("running", json!([{"id": "setup-script", "status": "running", "tail": ["a", "b", "c", "d", "e"]}]));
         assert_eq!(tail(&running), Some((vec!["b".into(), "c".into(), "d".into(), "e".into()], false)));
@@ -398,6 +494,81 @@ mod tests {
         assert_eq!(setup_terminal(&with("running")), Some("setup-1"));
         assert_eq!(setup_terminal(&with("failed")), Some("setup-1"));
         assert_eq!(setup_terminal(&snapshot("running", json!([{"id": "setup-script", "status": "running"}]))), None);
+    }
+
+    #[test]
+    fn work_locally_resends_the_latest_prompt_once_the_cancel_settles() {
+        let item = |kind: &str, text: &str| json!({"type": kind, "text": text});
+        let p = |run: &str| json!({"runs": [{"status": run}], "turnItems": [item("user_message", "first"), item("assistant_message", "a"), item("user_message", "build it")]});
+        assert_eq!(prompt(&p("failed")).map(|m| s(m, "text")), Some("build it"));
+        let worktree = json!({"worktreePath": "/wt"});
+        let local = json!({"worktreePath": null});
+        assert!(!settled(&p("preparing"), Some(&local)), "FAILED: waits for the cancelled run to fail");
+        assert!(!settled(&p("failed"), Some(&worktree)), "FAILED: waits for the worktree to be cleared");
+        assert!(settled(&p("failed"), Some(&local)));
+    }
+
+    /// The whole Work locally sequence against a recording connection: the cancel goes out, the
+    /// server says it cancelled, nothing is resent while the run is still preparing, and once the
+    /// run fails with its worktree cleared the prompt is dispatched to the thread again.
+    #[test]
+    fn work_locally_resends_through_the_connection_once_the_cancelled_run_settles() {
+        let mut app = App::new();
+        let thread = app
+            .state()
+            .thread_views
+            .iter()
+            .find(|(_, v)| s(&v.projection["thread"], "title") == "Replay showcase")
+            .map(|(id, _)| id.clone())
+            .expect("the showcase fixture thread");
+        let mut state = app.state().clone();
+        if let Some(shell) = state.threads.iter_mut().find(|r| s(r, "id") == thread) {
+            shell["worktreePath"] = json!("/home/dev/.t3/worktrees/app/billing-schema");
+        }
+        let p = &mut state.thread_views.get_mut(&thread).expect("its projection").projection;
+        let run = json!({"id": "wl-run", "ordinal": 999, "status": "preparing", "rootNodeId": "wl-root", "startedAt": "2026-12-01T00:00:00.000Z"});
+        let prompt = json!({"id": "wl-prompt", "type": "user_message", "runId": "wl-run", "nodeId": "wl-root", "ordinal": 1, "status": "completed",
+            "text": "add a billing schema", "attachments": [], "createdAt": "2026-12-01T00:00:00.000Z"});
+        for (key, value) in [("runs", run), ("turnItems", prompt)] {
+            match p[key].as_array_mut() {
+                Some(list) => list.push(value),
+                None => p[key] = json!([value]),
+            }
+        }
+        let (mut net, sent) = s5_net::Net::in_memory_sent("http://local.test");
+        *net.state_mut() = state;
+        app.src = crate::data::Source::Live(net);
+        app.navigate(Route::Thread(thread.clone()));
+
+        work_locally(&mut app, &thread);
+        let requests = sent.requests();
+        let (cancel, ..) = requests.iter().find(|(_, tag, _)| tag == "worktreeSetup.cancel").expect("FAILED: the cancel goes out");
+        assert_eq!(requests.iter().find(|(_, tag, _)| tag == "worktreeSetup.cancel").map(|r| &r.2["threadId"]), Some(&json!(thread)));
+        let Some(net) = app.src.net() else { panic!("live") };
+        net.put_reply(*cancel, Ok(json!({"cancelled": true})));
+
+        poll(&mut app);
+        assert!(app.ui.chat.timeline.worktree.resending.contains(&thread), "FAILED: the cancel is waiting to settle");
+        assert!(!sent.requests().iter().any(|(_, tag, _)| tag == "orchestration.dispatchCommand"), "FAILED: nothing is resent while the run is still preparing");
+
+        let Some(net) = app.src.net() else { panic!("live") };
+        let st = net.state_mut();
+        if let Some(shell) = st.threads.iter_mut().find(|r| s(r, "id") == thread) {
+            shell["worktreePath"] = Value::Null;
+        }
+        for run in st.thread_views.get_mut(&thread).and_then(|v| v.projection["runs"].as_array_mut()).into_iter().flatten() {
+            if run["id"] == "wl-run" {
+                run["status"] = json!("failed");
+            }
+        }
+        poll(&mut app);
+        assert!(app.ui.chat.timeline.worktree.resending.is_empty());
+        super::super::actions::poll(&mut app);
+        let dispatched: Vec<Value> = sent.requests().into_iter().filter(|(_, tag, _)| tag == "orchestration.dispatchCommand").map(|r| r.2).collect();
+        let resent = dispatched.iter().find(|c| c["type"] == "message.dispatch");
+        let resent = resent.unwrap_or_else(|| panic!("FAILED: the prompt is sent again; dispatched {dispatched:?}"));
+        assert_eq!(resent["threadId"], json!(thread));
+        assert_eq!(resent["text"], "add a billing schema");
     }
 
     #[test]

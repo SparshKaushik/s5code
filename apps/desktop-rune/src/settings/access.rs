@@ -1,6 +1,5 @@
 //! Web Settings › Sharing & access (`ConnectionsSettings` view "access").
 
-use super::about::about_row;
 use super::connections::{dot, machine_icon, machine_kind, reason, take, KINDS};
 use super::{controls as c, http, update};
 use crate::kit::{self, Menu, MenuEntry, MenuItem, Placement};
@@ -267,18 +266,11 @@ pub(super) fn view(s: &App, t: &T) -> El {
                     .build(t),
             ),
         );
-    let version = [config.and_then(|c| c["environment"]["serverVersion"].as_str()), display_url(s)]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let status = if config.is_some() {
-        text("Up to date").font(theme::TEXT_XS).color(t.c.muted_foreground)
-    } else {
-        el()
-    };
     let mut rows: Vec<El> = config.and_then(|c| managed_notice(&c["managedPolicy"], t)).into_iter().collect();
-    rows.push(about_row(t, "Version", if version.is_empty() { "Loading…" } else { version.as_str() }, status));
+    // Web shows the version only where this session may maintain the environment.
+    if super::permissions::can(s, "environment:maintain") {
+        rows.push(version_row(s, t));
+    }
     rows.extend(crate::desktop::exposure::rows(s, t));
     rows.push(permissions(s, t));
     col()
@@ -286,6 +278,62 @@ pub(super) fn view(s: &App, t: &T) -> El {
         .gap(32.0)
         .child(col().key(super::title_key("This machine")).w_full().gap(10.0).child(header).child(c::card(rows, t)))
         .child(clients(s, t))
+}
+
+/// Web's primary environment Version row: the version and address, the update's progress while
+/// one runs, and "Update to X" while this server is behind the one this app bundles.
+fn version_row(s: &App, t: &T) -> El {
+    use crate::chat::server_update::{self as update, Status};
+    let config = s.state().config.as_ref();
+    let status = update::status(s);
+    let description: El = match status {
+        Status::Idle => {
+            let version = [config.and_then(|c| c["environment"]["serverVersion"].as_str()), display_url(s)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            text(if version.is_empty() { "Loading…".to_owned() } else { version }).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()
+        }
+        // `ServerUpdateProgress`.
+        Status::Running { stage, .. } => row()
+            .gap(8.0)
+            .center_y()
+            .child(dot(t.c.foreground))
+            .child(text(stage.label()).font(theme::XS_MEDIUM).color(t.c.foreground)),
+        Status::Failed { message, .. } => row()
+            .gap(8.0)
+            .center_y()
+            .min_w(0.0)
+            .child(dot(t.c.destructive))
+            .child(text(message.clone()).font(theme::TEXT_XS).color(t.c.destructive).truncate().min_w(0.0))
+            .help(message.clone()),
+    };
+    let key = s.ui.env.active.clone();
+    let gap = super::machines::version_gap(s, &key);
+    let control = match (gap, status) {
+        (Some((_, client)), Status::Idle | Status::Failed { .. }) => {
+            let label = if matches!(status, Status::Failed { .. }) { "Retry update".to_owned() } else { format!("Update to {client}") };
+            kit::Button::new(label).variant("outline").size("sm").on_press(move |s: &mut App| update::start(s, &client)).build(t)
+        }
+        (_, Status::Idle) if config.is_some() => text("Up to date").font(theme::TEXT_XS).color(t.c.muted_foreground),
+        _ => el(),
+    };
+    row()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Version").key(super::title_key("Version")).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(description),
+        )
+        .child(control)
 }
 
 /// Web `ManagedByOrganization` in a `ManagedNotice`, above the machine's rows.

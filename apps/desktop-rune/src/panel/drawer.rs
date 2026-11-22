@@ -381,7 +381,7 @@ fn allocate(app: &App, thread: &str) -> String {
 
 fn start(app: &mut App, thread: &str, id: &str, focus: bool) {
     if let Some((_, cwd, worktree, root)) = launch_context(app).filter(|(t, ..)| t == thread) {
-        terminal::ensure(app, thread, id, &terminal::Launch { cwd: &cwd, worktree: worktree.as_deref(), root: root.as_deref() });
+        terminal::ensure(app, thread, id, &terminal::Launch { cwd: &cwd, worktree: worktree.as_deref(), root: root.as_deref(), size: None });
     }
     if focus {
         terminal::focus(app, thread, id);
@@ -447,17 +447,35 @@ pub fn new_terminal(app: &mut App, owner: Owner) {
 
 /// Types `input` into an idle drawer terminal, the active one first, else a new one
 /// (`findReusableProjectScriptTerminal`); panel-owned terminals are never reused.
+/// A new script terminal's size until the drawer measures it (`SCRIPT_TERMINAL_COLS`/`ROWS`).
+const SCRIPT_TERMINAL_SIZE: (u16, u16) = (120, 30);
+
+/// `findReusableProjectScriptTerminal`: the active drawer terminal when idle, else the first idle
+/// one; right-panel terminals and ones running a process are never reused.
+fn reusable_script_terminal(drawer: &[String], active: &str, panel: &[String], running: &[String]) -> Option<String> {
+    let idle: Vec<&String> = drawer.iter().filter(|id| !panel.contains(id) && !running.contains(id)).collect();
+    idle.iter().find(|id| id.as_str() == active).or(idle.first()).map(|id| id.to_string())
+}
+
 pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
     let Some(thread) = current_or_draft(app) else {
         return;
     };
     let ui = &app.ui.panel;
-    let panel: Vec<&String> = ui.drawer.panel.get(&thread).map(|g| g.ids().collect()).unwrap_or_default();
-    let idle = |id: &&String| !panel.contains(id) && !ui.terminal.get(&thread, id).is_some_and(|s| s.running);
-    let reusable = ui.drawer.threads.get(&thread).and_then(|t| {
-        let ids: Vec<&String> = t.groups.ids().filter(idle).collect();
-        ids.iter().find(|id| ***id == t.groups.active).or(ids.first()).map(|id| id.to_string())
-    });
+    let panel: Vec<String> = ui.drawer.panel.get(&thread).map(|g| g.ids().cloned().collect()).unwrap_or_default();
+    let known = terminal::known(app, &thread);
+    let mut drawer: Vec<String> = ui.drawer.threads.get(&thread).map(|t| t.groups.ids().cloned().collect()).unwrap_or_default();
+    // Server sessions cover drawer terminals this client has not opened yet, such as a worktree setup shell.
+    for (id, ..) in &known {
+        if !drawer.contains(id) {
+            drawer.push(id.clone());
+        }
+    }
+    let running: Vec<String> = known.iter().filter(|k| k.2).map(|k| k.0.clone()).chain(drawer.iter().filter(|id| ui.terminal.get(&thread, id).is_some_and(|s| s.running)).cloned()).collect();
+    let active = ui.drawer.threads.get(&thread).map(|t| t.groups.active.clone()).unwrap_or_default();
+    // Reading back a reused terminal's scrollback needs terminal:read.
+    let reusable = crate::chat::details::grants(app, "terminal:read").then(|| reusable_script_terminal(&drawer, &active, &panel, &running)).flatten();
+    let size = reusable.is_none().then_some(SCRIPT_TERMINAL_SIZE);
     let id = reusable.unwrap_or_else(|| allocate(app, &thread));
     let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
     state.open = true;
@@ -466,7 +484,7 @@ pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
     }
     state.groups.activate(&id);
     let root = project_root(app);
-    terminal::run(app, &thread, &id, &terminal::Launch { cwd, worktree, root: root.as_deref() }, input);
+    terminal::run(app, &thread, &id, &terminal::Launch { cwd, worktree, root: root.as_deref(), size }, input);
     terminal::focus(app, &thread, &id);
     sync_topbar(app);
 }
@@ -692,6 +710,7 @@ fn action(
         .center_y()
         .role("button")
         .label(label)
+        .help(label)
         .focusable(true)
         .disabled(disabled)
         .child(
@@ -709,35 +728,45 @@ fn action(
     b
 }
 
-fn actions(t: &T, owner: Owner, full: bool, sidebar: bool) -> El {
-    let suffix = |base: &str| {
+/// `label (shortcut)` when `command` has a shortcut, as web's terminal action labels.
+fn with_shortcut(app: &App, label: &str, command: &str) -> String {
+    match crate::shell::palette::shortcut_label(app, command) {
+        shortcut if shortcut.is_empty() => label.to_owned(),
+        shortcut => format!("{label} ({shortcut})"),
+    }
+}
+
+fn actions(app: &App, t: &T, owner: Owner, full: bool, sidebar: bool) -> El {
+    // Every action needs terminal:operate, as web's `canOperateTerminal`.
+    let operate = crate::chat::details::grants(app, "terminal:operate");
+    let split_label = |base: &str, command: &str| {
         if full {
             format!("{base} (max {MAX_PER_GROUP} per group)")
         } else {
-            base.to_string()
+            with_shortcut(app, base, command)
         }
     };
     let buttons = [
         action(
             t,
-            &suffix("Split Terminal Horizontally"),
+            &split_label("Split Terminal Horizontally", "terminal.split"),
             &icons::SQUARE_SPLIT_HORIZONTAL,
-            full,
+            full || !operate,
             sidebar,
             move |s| split(s, owner, false),
         ),
         action(
             t,
-            &suffix("Split Terminal Vertically"),
+            &split_label("Split Terminal Vertically", "terminal.splitVertical"),
             &icons::SQUARE_SPLIT_VERTICAL,
-            full,
+            full || !operate,
             sidebar,
             move |s| split(s, owner, true),
         ),
-        action(t, "New Terminal", &icons::PLUS, false, sidebar, move |s| {
+        action(t, &with_shortcut(app, "New Terminal", "terminal.new"), &icons::PLUS, !operate, sidebar, move |s| {
             new_terminal(s, owner)
         }),
-        action(t, "Close Terminal", &icons::TRASH_2, false, sidebar, move |s| {
+        action(t, &with_shortcut(app, "Close Terminal", "terminal.close"), &icons::TRASH_2, !operate, sidebar, move |s| {
             if let Some(thread) = current_thread(s)
                 && let Some(active) = s
                     .ui
@@ -855,6 +884,25 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 t.c.muted_foreground
             };
             let (close_id, select_id) = (id.clone(), id.clone());
+            let close_label = if active { with_shortcut(app, &format!("Close {label}"), "terminal.close") } else { format!("Close {label}") };
+            let operable = crate::chat::details::grants(app, "terminal:operate");
+            let mut close = row()
+                .size(16., 16.)
+                .center()
+                .role("button")
+                .label(close_label.clone())
+                .help(close_label)
+                .focusable(true)
+                .children(close_layers(operable).into_iter().map(|layer| match layer {
+                    CloseLayer::Backdrop => el().size(16., 16.).pin(Some(0.), Some(0.), None, None).radius(2.).hover(t.c.muted),
+                    CloseLayer::Glyph { glyph, rest, hovered } => {
+                        let color = if std::ptr::eq(glyph, &icons::X) { t.c.foreground } else { fg };
+                        icon(glyph, 12.).size(12., 12.).color(color).group_opacity(rest, hovered).pin(Some(2.), Some(2.), None, None)
+                    }
+                }));
+            if operable {
+                close = close.on_press(move |s: &mut App| request_close(s, owner, &close_id));
+            }
             let mut entry = row()
                 .w_full()
                 .h(24.)
@@ -863,14 +911,8 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 .pr(8.)
                 .center_y()
                 .radius(6.)
-                .child(
-                    el().size(12., 12.)
-                        .role("button")
-                        .label(format!("Close {label}"))
-                        .focusable(true)
-                        .child(icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg))
-                        .on_press(move |s: &mut App| request_close(s, owner, &close_id)),
-                )
+                .hover_group()
+                .child(close)
                 .child(
                     row()
                         .grow(1.)
@@ -903,7 +945,7 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 .h(22.)
                 .w_full()
                 .justify_end()
-                .child(actions(t, owner, groups.split_full(), true)),
+                .child(actions(app, t, owner, groups.split_full(), true)),
         )
         .child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
         .child(
@@ -915,6 +957,25 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
                 })
                 .child(list),
         )
+}
+
+/// A layer of web's PanelTabCloseButton, bottom first: a 16 box whose terminal glyph turns into an
+/// X while the row is hovered. Rune hands a group-opacity glyph to its nearest ancestor with a hover
+/// fill, so the button's own fill is a sibling backdrop and the glyphs follow the row's hover group.
+enum CloseLayer {
+    Backdrop,
+    Glyph { glyph: &'static rune::Icon, rest: f32, hovered: f32 },
+}
+
+fn close_layers(operable: bool) -> Vec<CloseLayer> {
+    let backdrop = operable.then_some(CloseLayer::Backdrop);
+    backdrop
+        .into_iter()
+        .chain([
+            CloseLayer::Glyph { glyph: &icons::SQUARE_TERMINAL, rest: 1., hovered: 0. },
+            CloseLayer::Glyph { glyph: &icons::X, rest: 0., hovered: 1. },
+        ])
+        .collect()
 }
 
 /// The drawer or panel body for one owner's terminals.
@@ -937,9 +998,10 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
                     .color(t.c.muted_foreground),
             )
             .child(
-                kit::Button::new("New Terminal")
+                kit::Button::new(with_shortcut(app, "New Terminal", "terminal.new"))
                     .variant("outline")
                     .size("xs")
+                    .disabled(!crate::chat::details::grants(app, "terminal:operate"))
                     .on_press(move |s: &mut App| new_terminal(s, owner))
                     .build(t),
             );
@@ -961,7 +1023,7 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
         // 4 buttons of 21 points, 3 dividers and the border.
         let floating_w = 4. * 21. + 3. + 2.;
         out = out.child(
-            actions(t, owner, groups.split_full(), false)
+            actions(app, t, owner, groups.split_full(), false)
                 .absolute((width - 8. - floating_w).max(0.), 8.)
                 .h(23.)
                 .radius(6.)
@@ -1098,6 +1160,39 @@ pub fn fixture(app: &mut App, owner: Owner, groups: &[(&[(&str, &str)], bool)], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hovered_tab_row_swaps_its_terminal_glyph_for_the_close_x() {
+        let shown = |layers: &[CloseLayer], row_hovered: bool| -> Vec<&'static str> {
+            layers
+                .iter()
+                .filter_map(|l| match l {
+                    CloseLayer::Glyph { glyph, rest, hovered } => {
+                        let opacity = if row_hovered { *hovered } else { *rest };
+                        (opacity > 0.).then_some(glyph.name)
+                    }
+                    CloseLayer::Backdrop => None,
+                })
+                .collect()
+        };
+        for operable in [true, false] {
+            let layers = close_layers(operable);
+            assert_eq!(shown(&layers, false), [icons::SQUARE_TERMINAL.name]);
+            assert_eq!(shown(&layers, true), [icons::X.name], "the row's hover reaches the glyphs");
+            let backdrops: Vec<usize> = layers.iter().enumerate().filter(|(_, l)| matches!(l, CloseLayer::Backdrop)).map(|(i, _)| i).collect();
+            assert_eq!(backdrops, if operable { vec![0] } else { vec![] }, "only a closable tab gets the fill, under the glyphs and not around them");
+        }
+    }
+
+    #[test]
+    fn a_script_reuses_the_idle_active_drawer_terminal_else_the_first_idle_one() {
+        let v = |ids: &[&str]| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        let drawer = v(&["term-1", "term-2", "term-3"]);
+        assert_eq!(reusable_script_terminal(&drawer, "term-2", &[], &[]).as_deref(), Some("term-2"));
+        assert_eq!(reusable_script_terminal(&drawer, "term-2", &[], &v(&["term-2"])).as_deref(), Some("term-1"), "a running terminal is skipped");
+        assert_eq!(reusable_script_terminal(&drawer, "term-1", &v(&["term-1"]), &v(&["term-2"])).as_deref(), Some("term-3"), "the right panel's terminal is skipped");
+        assert_eq!(reusable_script_terminal(&drawer, "term-1", &v(&["term-1"]), &v(&["term-2", "term-3"])), None);
+    }
 
     #[test]
     fn layouts_survive_a_restart_and_bad_state_is_normalized() {

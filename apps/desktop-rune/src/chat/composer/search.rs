@@ -97,6 +97,27 @@ pub fn rank(models: &[Searchable], query: &str) -> Vec<usize> {
     ranked.into_iter().map(|(_, _, i)| i).collect()
 }
 
+/// The composer's `@` thread search (matchComposerThreadItems, without the palette's typo and
+/// usage scoring): every query word matches the title exactly, at its start, at a word's start or
+/// anywhere; the best total first, then the most recent. Indices into `titles` (title, recency).
+pub fn rank_titles(titles: &[(&str, i64)], query: &str, limit: usize) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(i64, i64, usize)> = titles
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (title, at))| {
+            let title = collapsed(title);
+            let total = words.iter().map(|w| field_score(&title, w, 0).filter(|s| *s < 100)).sum::<Option<i64>>()?;
+            Some((total, -at, i))
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().take(limit).map(|(_, _, i)| i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +171,16 @@ mod tests {
         assert_eq!(search(&models, "Grok 4.6")[0], "Grok 4.6");
         assert_eq!(search(&models, "moonshot"), ["Kimi K3", "Kimi K2.5", "Kimi K2"]);
         assert!(search(&models, "zzz").is_empty());
+    }
+
+    #[test]
+    fn threads_rank_by_title_match_then_recency() {
+        let titles = [("Todo list replay", 30), ("Replay showcase", 10), ("Approval flow replay", 20), ("Idempotency key definition", 40), ("replay", 0)];
+        assert_eq!(rank_titles(&titles, "replay", 5), [4, 1, 0, 2], "exact, then prefix, then word start by recency");
+        assert_eq!(rank_titles(&titles, "flow REPLAY", 5), [2]);
+        assert_eq!(rank_titles(&titles, "replay", 2), [4, 1]);
+        assert!(rank_titles(&titles, "rply", 5).is_empty(), "no fuzzy matches");
+        assert!(rank_titles(&titles, "  ", 5).is_empty());
     }
 
     #[test]

@@ -20,6 +20,9 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
     let current = value(s, key);
     let on = if key == "sidebarProjectGroupingMode" {
         current.as_str() != Some("separate")
+    } else if key == "boringSidebarEnabled" {
+        // The sidebar treats the legacy flag as the boring sidebar too.
+        current == true || value(s, "legacySidebarEnabled") == true
     } else {
         current.as_bool().unwrap_or(false)
     };
@@ -35,7 +38,7 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
                 json!(!on)
             };
             update(s, key, v);
-            if key == "boringSidebarEnabled" && !on {
+            if key == "boringSidebarEnabled" {
                 update(s, "legacySidebarEnabled", json!(false));
             }
         })
@@ -80,6 +83,10 @@ pub fn select_width(key: &str) -> f32 {
 }
 
 fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
+    // `WorktreeSubmodulesRow` with no environment to resolve against.
+    if key == "worktreeSubmodules" && s.state().config.is_none() {
+        return "Unavailable".to_owned();
+    }
     let current = match value(s, key) {
         // Unset values resolve to their built-in defaults (`resolveProjectSettings`).
         Value::Null if key == "defaultThreadEnvMode" => json!("local"),
@@ -89,7 +96,8 @@ fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
     options
         .iter()
         .find(|(v, _)| *v == current)
-        .map(|(_, l)| l.clone())
+        // `CHAT_WIDTH_LABELS` and `EFFORT_DISPLAY_LABELS`: the closed select drops the menu's note.
+        .map(|(_, l)| if matches!(key, "chatWidth" | "effortDisplay") { l.trim_end_matches(" (default)").to_owned() } else { l.clone() })
         .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned())
 }
 
@@ -199,11 +207,25 @@ fn follow_up_description(send_shortcut: Option<&str>, modifier: &str) -> String 
     format!("Queue follow-ups while the agent runs or steer the current run. {flip}")
 }
 
+/// The project-scope wording web's project rows switch to.
+fn project_description(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "defaultRuntimeMode" => "Permissions for new threads in this project.",
+        "defaultAutoPull" => "Keeps this project's default branch current when the checkout has no local changes or commits.",
+        "pullRequestMergeMethod" => "Pull requests in this project start with this method.",
+        "enableAgentBrowserAccess" => "Allow agents in this project to use the shared browser. Applies when the agent session next starts.",
+        _ => return None,
+    })
+}
+
 /// Web `SettingsRow`'s reason a row's control is inert: an administrator's lock, then a
 /// connection that may not write settings, then a project scope over an environment-wide key.
 fn row_lock(s: &App, key: &str) -> Option<String> {
     let client = s.client_settings.values.contains_key(key) || key == "appearance";
-    if client || key.starts_with("project::") {
+    if key.starts_with("project::") {
+        return (!super::permissions::can(s, "orchestration:operate")).then(|| super::projects::CANNOT_CHANGE.to_owned());
+    }
+    if client {
         return None;
     }
     let environment_wide = s.ui.settings.project.is_some() && !super::scope::project_key(key);
@@ -218,6 +240,11 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         if key == "followUpBehavior" {
             let modifier = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
             return Some(follow_up_description(value(s, "sendShortcut").as_str(), modifier));
+        }
+        if s.ui.settings.project.is_some()
+            && let Some(text) = project_description(key)
+        {
+            return Some(text.to_owned());
         }
         let text = match (key, value(s, key).as_str()) {
             ("responseStreamingMode", Some("turn")) => "Text appears once the agent finishes its turn.",
@@ -235,13 +262,19 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         };
         Some(text.to_owned())
     });
-    let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
-    let mut heading = row().gap(6.0).center_y().child(
-        text(title.to_owned())
-            .key(super::title_key(spec["searchTitle"].as_str().unwrap_or(title)))
-            .font(theme::SM_MEDIUM)
-            .color(t.c.foreground),
-    );
+    let project_description = spec["projectDescription"].as_str().filter(|_| s.ui.settings.project.is_some());
+    let description = dynamic.as_deref().or(project_description).unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
+    let search_title = spec["searchTitle"].as_str().unwrap_or(title);
+    let mut heading = row()
+        .gap(6.0)
+        .center_y()
+        .child(
+            text(title.to_owned())
+                .key(super::title_key(search_title))
+                .font(theme::SM_MEDIUM)
+                .color(t.c.foreground),
+        )
+        .children(super::scope::marker(s, t, key));
     // Web resets the auto-settle day count from its switch row only, and has no reset for the
     // Separate fonts switch or a dedicated model, whose own switch turns it off; a font row
     // resets its family and size together.
@@ -254,12 +287,29 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let lock = row_lock(s, key);
     // Web's project-scoped Workspace row has no reset either.
     let project_workspace = key == "defaultThreadEnvMode" && s.ui.settings.project.is_some();
-    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced" | "sourceControlWriterModelSelection" | "reviewGuideModelSelection")
+    // Nor do Labs, Legacy and Notifications rows.
+    let no_reset = matches!(
+        key,
+        "sidebarAutoSettleAfterDays"
+            | "typographyAdvanced"
+            | "sourceControlWriterModelSelection"
+            | "reviewGuideModelSelection"
+            | "notificationMode"
+            | "inAppNotificationsEnabled"
+            | "boringSidebarEnabled"
+            | "boringSidebarMultilineRows"
+            | "guestSharingEnabled"
+            | "linkedEnvironmentsEnabled"
+            | "simlockDeviceHostsEnabled"
+            | "planModeEnabled"
+            | "contextWindowMeterEnabled"
+    );
+    if !no_reset
         && !project_workspace && customized && lock.is_none() {
         let owned = key.to_owned();
         let size_key = size_key.clone();
         heading = heading.child(
-            crate::kit::Button::new(format!("Reset {title}"))
+            crate::kit::Button::new(spec["resetLabel"].as_str().map_or_else(|| format!("Reset {title}"), |l| format!("Reset {l} to default")))
                 .variant("ghost-muted")
                 .size("icon-micro")
                 .icon(&icons::UNDO_2)
@@ -325,22 +375,26 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some("snooze") => super::snooze::parts(s, t),
         Some("profiles") => super::browser_profiles::parts(s, t),
         Some("textarea") => (el(), Some(textarea(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")))),
+        Some("font") => (font(s, t, key, title, spec), super::fonts::preview(s, t, key)),
         kind => (match kind {
         Some("switch") => row()
             .w(160.0)
             .child(el().grow(1.0))
             .child(switch(s, t, key, title)),
         Some("select") => {
-            let options: Vec<_> = spec["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
-                .collect();
-            select(s, t, key, title, &options, select_width(key))
+            let options: Vec<_> = if key == "browserDefaultViewport" {
+                super::browser_profiles::viewport_options(&value(s, key))
+            } else {
+                spec["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
+                    .collect()
+            };
+            select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
-        Some("font") => font(s, t, key, title, spec),
         Some("model") => super::models::control(s, t, key),
         Some("secret") => super::providers::secret_control(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")),
         _ => input(
@@ -367,23 +421,13 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         })
     });
     let ctrl = super::permissions::gate(key, ctrl, lock);
-    if s.ui.settings.project.is_some() && super::scope::project_key(key) {
-        copy = copy.child(
-            text(if super::scope::customized(s, key) {
-                "Overridden for this project"
-            } else {
-                "Inherited from environment"
-            })
-            .font(theme::TEXT_XS)
-            .color(t.c.muted_foreground),
-        );
-    }
     let line = row().w_full().gap(32.0).center_y().child(copy).child(ctrl);
     // `SettingsRow` children sit under the copy and control: `pt-3 pb-1` instead of `py-3`.
-    match children {
+    let row = match children {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
-    }
+    };
+    super::pulsed(s, t, search_title, row)
 }
 
 /// Web `FontFamilySettingsRow`'s control: the family field (`w-44`, placeholder the default
@@ -552,8 +596,9 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         "glassOpacity" => (40.0, 100.0, 5.0),
         _ => (0.0, 400.0, 25.0),
     };
+    let preview = (key == "panelAnimationDurationMs").then(|| panel_preview(s, t, n));
     let key = key.to_owned();
-    row()
+    let slider = row()
         .w(208.0)
         .center_y()
         .gap(12.0)
@@ -577,7 +622,56 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                 .label(title)
                 .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
                 .build(t),
+        );
+    match preview {
+        Some(preview) => row().gap(16.0).center_y().child(preview).child(slider),
+        None => slider,
+    }
+}
+
+const PANEL_PREVIEW: &str = "form.panelPreviewClosed";
+
+/// Web `PanelAnimationsPreview`: a press opens or closes its sketch's panels once, at the chosen
+/// duration with CSS `ease-out`.
+fn panel_preview(s: &App, t: &T, ms: f32) -> El {
+    let open = value(s, PANEL_PREVIEW) != true;
+    let bar = |w: f32, alpha: f32| el().h(2.0).w_frac(w).radius(1.0).fill(t.c.muted_foreground.alpha_mul(alpha));
+    let mut footer = row().key("panel-preview-footer").w_full().h(if open { 8.0 } else { 0.0 }).px(8.0).center_y().fill(t.c.foreground.alpha_mul(0.05));
+    if open {
+        footer = footer.child(el().h(1.0).w_frac(0.66).radius(1.0).fill(t.c.muted_foreground.alpha_mul(0.25)));
+    }
+    row()
+        .key("panel-animation-preview")
+        .w(112.0)
+        .h(40.0)
+        .padding(4.0)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .border(1.0, t.c.border)
+        .fill(t.c.background)
+        .focusable(true)
+        .role("button")
+        .label("Replay panel animation preview")
+        .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+            if ms > 0.0 {
+                tx.motion_curve(rune::Curve::tween(ms / 1000.0, rune::Easing::cubic(0.0, 0.0, 0.58, 1.0)));
+            } else {
+                tx.instant();
+            }
+            let closed = value(s, PANEL_PREVIEW) == true;
+            update(s, PANEL_PREVIEW, json!(!closed));
+        })
+        .child(el().key("panel-preview-sidebar").h_full().w(if open { 16.0 } else { 0.0 }).radius(6.0).fill(t.c.sidebar))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .px(4.0)
+                .child(col().w_full().grow(1.0).min_h(0.0).gap(4.0).pt(4.0).child(bar(1.0, 0.25)).child(bar(0.8, 0.2)).child(bar(0.6, 0.15)))
+                .child(footer),
         )
+        .child(el().key("panel-preview-side").h_full().w(if open { 20.0 } else { 0.0 }).radius(6.0).fill(t.c.muted))
 }
 
 /// Web `SettingsRow`'s `status` line under the description.
@@ -585,6 +679,9 @@ fn status(s: &App, key: &str) -> Option<&'static str> {
     match key {
         "browserCustomSearchUrl" if !valid_search_template(value(s, key).as_str().unwrap_or("")) => {
             Some("Enter an http or https URL containing %s. Searches use DuckDuckGo until then.")
+        }
+        "branchNamingMode" if value(s, key) == "semantic" => {
+            Some("The model chooses a prefix that describes the work, such as feat/add-search, fix/login-timeout, or refactor/auth.")
         }
         _ => None,
     }
@@ -626,6 +723,21 @@ fn authority(url: &str) -> Option<String> {
     Some(format!("{userinfo}@{}:{port}", host.to_ascii_lowercase()))
 }
 
+
+/// One keycap for a modifier: glyphs on macOS, names elsewhere ("Ctrl", "Shift", "Alt", "Super").
+pub(crate) fn modifier_cap(modifier: &str, mac: bool) -> &'static str {
+    match (modifier, mac) {
+        ("meta", true) => "⌘",
+        ("control", true) => "⌃",
+        ("alt", true) => "⌥",
+        (_, true) => "⇧",
+        ("meta", false) if cfg!(windows) => "⊞",
+        ("meta", false) => "Super",
+        ("control", false) => "Ctrl",
+        ("alt", false) => "Alt",
+        (_, false) => "Shift",
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +768,19 @@ mod tests {
         ] {
             assert!(!valid_search_template(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn worktree_submodules_read_recursive_when_unset_and_unavailable_without_an_environment() {
+        let mut s = App::new();
+        let options = [(json!("recursive"), "Recursive".to_owned()), (json!("top-level"), "Top level only".to_owned()), (json!("none"), "Skip".to_owned())];
+        if value(&s, "worktreeSubmodules").is_null() {
+            assert_eq!(current_label(&s, "worktreeSubmodules", &options), "Recursive", "FAILED: null inherits recursive");
+        }
+        if let crate::data::Source::Fixture(st) = &mut s.src {
+            st.config = None;
+        }
+        assert_eq!(current_label(&s, "worktreeSubmodules", &options), "Unavailable");
     }
 
     #[test]

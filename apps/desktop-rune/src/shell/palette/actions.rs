@@ -98,7 +98,7 @@ fn hosted_thread_link(environment: &str, thread: &str) -> String {
 pub fn thread_items(s: &App) -> Vec<Item> {
     let mut out = vec![];
     let capabilities = &config(s)["environment"]["capabilities"];
-    if capabilities["triage"] == true {
+    if triage_env(s).is_some() {
         let mut v = item("Triage an issue", "Actions", &icons::BUG, "", Action::Triage);
         v.description = Some("An agent investigates an S5 Code problem and helps file an issue".into());
         v.fields = keywords(&["triage", "bug", "issue", "report", "broken", "debug", "help", "support"]);
@@ -115,9 +115,9 @@ pub fn thread_items(s: &App) -> Vec<Item> {
     let Some(thread) = current else { return out };
     let pr = current_pull_request(thread);
     let mut copy = item(if pr.is_some() { "Copy PR link" } else { "Copy thread" }, "Actions", &icons::LINK, "", Action::CopyThread);
+    copy.fields = keywords(if pr.is_some() { &["copy", "pull request", "link", "reference"] } else { &["copy", "thread", "thread id", "reference"] });
     copy.description = Some(pr.unwrap_or_else(|| data::s(thread, "title").to_owned()));
     copy.shortcut = shortcut_label(s, "thread.copyReference");
-    copy.fields = keywords(&["copy", "link", "share", "thread", "pull request", "pr"]);
     out.push(copy);
     if capabilities.is_object() {
         let mut link = item("Link pull request to thread", "Actions", &icons::LINK_2, "", Action::LinkPr(data::s(thread, "id").to_owned()));
@@ -173,7 +173,7 @@ pub fn tail_items(s: &App) -> Vec<Item> {
     contents.shortcut = shortcut_label(s, "projectSearch.toggle");
     contents.fields = keywords(&["search project", "find in files", "grep", "content search", "text search"]);
     out.push(contents);
-    if super::add_project::new_projects_root(s).is_some() {
+    if !super::add_project::new_project_options(s).is_empty() {
         let mut new = item("New project", "Actions", &icons::FOLDER_GIT_2, "", Action::NewProject);
         new.fields = keywords(&["new project", "create project", "empty", "repository", "repo", "git init"]);
         out.push(new);
@@ -217,17 +217,35 @@ pub fn scratch_pending(s: &App) -> bool {
     s.ui.shell.palette.act.scratch.is_some()
 }
 
+/// `pickTriageEnvironment`, then `canTriage`: the machine on screen, else this device when it
+/// supports triage, else the first connected one that does; it must grant operate.
+pub(crate) fn triage_env(s: &App) -> Option<String> {
+    let config = |key: &str| crate::env::source(s, key).and_then(|src| src.state().config.clone()).unwrap_or_default();
+    let supports = |key: &str| config(key)["environment"]["capabilities"]["triage"] == true;
+    let on_screen = match &s.route {
+        Route::Thread(id) => Some(crate::env::owner(s, id)),
+        Route::Home { project_id: Some(project) } => Some(crate::env::owner(s, project)),
+        _ => None,
+    };
+    let key = on_screen
+        .or_else(|| supports(crate::env::LOCAL).then(|| crate::env::LOCAL.to_owned()))
+        .or_else(|| crate::env::keys(s).into_iter().find(|k| crate::env::connected(s, k) && supports(k)))?;
+    (supports(&key) && crate::shell::sidebar::grants_on(s, &key, "orchestration:operate")).then_some(key)
+}
+
 pub fn triage(s: &mut App) {
     if s.ui.shell.palette.act.triage.is_some() {
         return;
     }
-    if config(s)["scratchWorkspaceRoot"].as_str().is_none_or(str::is_empty) {
+    let Some(key) = triage_env(s) else { return };
+    let scratch = crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()).and_then(|c| c["scratchWorkspaceRoot"].as_str()).is_some_and(|v| !v.is_empty());
+    if !scratch {
         return triage_failed(s, "This machine cannot start threads without a project.");
     }
     let client = json!({"deviceType": "desktop", "surface": "desktop", "os": std::env::consts::OS});
-    if let Some(net) = s.src.net() {
+    if let Some(net) = crate::env::net_of(s, &key) {
         let id = net.request("server.prepareTriage", json!({"client": client}));
-        s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, s.ui.env.active.clone()));
+        s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, key));
     }
 }
 fn triage_failed(s: &mut App, message: &str) {
@@ -512,7 +530,7 @@ const INVALID_KEYBINDINGS: &str = "Invalid keybindings configuration";
 
 /// `KeybindingsConfigWarning`: the issue as a warning, with "Open keybindings.json" while this
 /// connection may operate, the server names the file and an editor is installed.
-fn keybindings_warning(s: &mut App, message: &str) {
+pub(super) fn keybindings_warning(s: &mut App, message: &str) {
     let path = config(s)["keybindingsConfigPath"].as_str().filter(|p| !p.is_empty()).map(str::to_owned);
     let editor = crate::chat::details::preferred_editor(s).map(|e| e.0);
     let usable = crate::chat::details::grants(s, "orchestration:operate") && path.is_some() && editor.is_some();
@@ -638,7 +656,7 @@ pub fn poll(s: &mut App) -> bool {
         pending => s.ui.shell.palette.act.scratch = pending,
     }
     match s.ui.shell.palette.act.triage.take() {
-        Some(Triage::Prepare(id, env)) => match s.src.net().and_then(|net| net.take_reply(id)) {
+        Some(Triage::Prepare(id, env)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
             None => s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, env)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
@@ -651,7 +669,7 @@ pub fn poll(s: &mut App) -> bool {
                 }
             }
         },
-        Some(Triage::Scratch(id, prompt, env)) => match s.src.net().and_then(|net| net.take_reply(id)) {
+        Some(Triage::Scratch(id, prompt, env)) => match crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) {
             None => s.ui.shell.palette.act.triage = Some(Triage::Scratch(id, prompt, env)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
@@ -692,15 +710,15 @@ mod tests {
 
         // `KeybindingsConfigWarning`: the open button greys out without a file or an editor.
         keybindings_warning(&mut app, "bad key");
-        let notice = app.ui.shell.palette.notice.as_ref().expect("a warning");
-        assert!(notice.warning && notice.title == INVALID_KEYBINDINGS);
+        let notice = crate::shell::toast::newest(&app).expect("a warning");
+        assert!(notice.kind == crate::shell::toast::Kind::Warning && notice.title == INVALID_KEYBINDINGS);
         assert_eq!(notice.actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["Open keybindings.json"]);
         assert_eq!(notice.disabled, vec!["Open keybindings.json".to_string()], "FAILED: no keybindingsConfigPath, so the button is disabled");
         if let crate::data::Source::Fixture(st) = &mut app.src {
             st.config = Some(json!({ "keybindingsConfigPath": "/home/me/.t3/keybindings.json", "availableEditors": ["vscode"] }));
         }
         keybindings_warning(&mut app, "bad key");
-        assert!(app.ui.shell.palette.notice.as_ref().unwrap().disabled.is_empty(), "FAILED: a file and an editor enable it");
+        assert!(crate::shell::toast::newest(&app).unwrap().disabled.is_empty(), "FAILED: a file and an editor enable it");
     }
     #[test]
     fn pull_request_urls_and_numbers_resolve() {

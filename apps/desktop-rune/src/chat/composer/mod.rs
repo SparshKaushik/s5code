@@ -3,11 +3,12 @@
 //! Drafts are kept per thread (and one for the home draft), as the web composer draft store does.
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
-mod attachments;
+pub(crate) mod attachments;
 pub mod banners;
 pub mod chips;
 mod context;
 pub mod fanout;
+mod lists;
 mod menu;
 mod picker;
 pub mod provider_icons;
@@ -15,7 +16,7 @@ mod search;
 mod stash;
 mod usage_limits;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rune::{Color, Cursor, Cx, El, Key, KeyEvent, TextEdit, Tx, auto_grow, col, el, icon, row, spacer, text, text_input};
 use serde_json::{Value, json};
@@ -132,6 +133,61 @@ pub struct Ui {
     /// The side chat whose composer was used last, so the picker and menus open beside it.
     owner: Option<String>,
     fanout: fanout::State,
+    typing: TypingGuard,
+    /// Threads whose next send keeps its full history instead of compacting first.
+    keep_full: HashSet<String>,
+    thumbs: attachments::Thumbs,
+}
+
+/// useComposerTypingGuard: a question or approval that arrives within `TYPING_IDLE_MS` of a
+/// keystroke in the focused composer is held until typing goes idle, so the keystrokes never
+/// land in its answer. One composer's keystrokes count at a time (`scope`, its draft key).
+#[derive(Default)]
+struct TypingGuard {
+    scope: String,
+    seen: HashSet<String>,
+    held: HashSet<String>,
+    last_typed: Option<i64>,
+}
+
+/// COMPOSER_TYPING_IDLE_MS.
+const TYPING_IDLE_MS: i64 = 1500;
+
+impl TypingGuard {
+    /// A keystroke in draft `scope` at `now`; the requests already `pending` were seen before it.
+    fn typed(&mut self, scope: &str, pending: Vec<String>, now: i64) {
+        if self.scope != scope || self.last_typed.is_none() {
+            *self = TypingGuard { scope: scope.to_owned(), seen: pending.into_iter().collect(), ..TypingGuard::default() };
+        }
+        self.last_typed = Some(now);
+    }
+
+    /// Holds requests new since the last look while the composer is focused and typed in.
+    fn requests(&mut self, pending: &[String], focused: bool, now: i64) -> bool {
+        let before = self.held.len();
+        self.held.retain(|id| pending.contains(id));
+        let mut changed = self.held.len() != before;
+        let typing = focused && self.last_typed.is_some_and(|at| now - at < TYPING_IDLE_MS);
+        for id in pending {
+            if self.seen.insert(id.clone()) && typing {
+                self.held.insert(id.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Typing went idle, the composer lost focus, or the message was sent.
+    fn release(&mut self) -> bool {
+        self.last_typed = None;
+        let had = !self.held.is_empty();
+        self.held.clear();
+        had
+    }
+
+    fn idle(&self, now: i64) -> bool {
+        self.last_typed.is_none_or(|at| now - at >= TYPING_IDLE_MS)
+    }
 }
 
 /// A dispatched command's draft key, and the draft it sent (`stored_draft`) to put back when it
@@ -165,18 +221,17 @@ pub fn route(s: &App) -> Route {
 }
 
 /// The side chat whose composer is being drawn or run.
-fn drawing(s: &App) -> Option<String> {
+pub(crate) fn drawing(s: &App) -> Option<String> {
     s.ui.chat.composer.target.borrow().clone()
 }
 
-/// A side chat's composer: route-bound parts that read the main thread (questions, plans,
-/// branch notices) stay with the main composer.
+/// A side chat's composer, which keys its elements apart.
 fn side(s: &App) -> bool {
     s.ui.chat.composer.target.borrow().is_some()
 }
 
 /// Draws (or reads) as the composer of side chat `target`; `None` is the route's composer.
-fn within<R>(s: &App, target: Option<String>, f: impl FnOnce() -> R) -> R {
+pub(crate) fn within<R>(s: &App, target: Option<String>, f: impl FnOnce() -> R) -> R {
     let previous = s.ui.chat.composer.target.replace(target);
     let out = f();
     s.ui.chat.composer.target.replace(previous);
@@ -193,24 +248,24 @@ pub fn acting<R>(s: &mut App, target: Option<String>, f: impl FnOnce(&mut App) -
 }
 
 /// A handler that runs for the composer being drawn, so a side chat's controls reach its draft.
-fn act(s: &App, f: impl Fn(&mut App) + 'static) -> impl Fn(&mut App) + 'static {
+pub(crate) fn act(s: &App, f: impl Fn(&mut App) + 'static) -> impl Fn(&mut App) + 'static {
     let at = drawing(s);
     move |s: &mut App| acting(s, at.clone(), |s| f(s))
 }
 
-fn act_tx(s: &App, f: impl Fn(&mut App, &mut Tx) + 'static) -> impl Fn(&mut App, &mut Tx) + 'static {
+pub(crate) fn act_tx(s: &App, f: impl Fn(&mut App, &mut Tx) + 'static) -> impl Fn(&mut App, &mut Tx) + 'static {
     let at = drawing(s);
     move |s: &mut App, tx: &mut Tx| acting(s, at.clone(), |s| f(s, tx))
 }
 
-fn act_key(s: &App, f: impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static) -> impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static {
+pub(crate) fn act_key(s: &App, f: impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static) -> impl Fn(&mut App, &KeyEvent, &mut Tx) -> bool + 'static {
     let at = drawing(s);
     move |s: &mut App, e: &KeyEvent, tx: &mut Tx| acting(s, at.clone(), |s| f(s, e, tx))
 }
 
 /// `base` for the composer being drawn: a side chat's composer keys its elements apart, so
 /// layout reads and anchors find its own.
-fn keyed(s: &App, base: &str) -> String {
+pub(crate) fn keyed(s: &App, base: &str) -> String {
     if side(s) { format!("side-{base}") } else { base.to_owned() }
 }
 
@@ -219,17 +274,17 @@ fn side_owner(s: &App) -> Option<&str> {
     s.ui.chat.composer.owner.as_deref().filter(|o| crate::chat::side::open_beside(s) == Some(*o))
 }
 
-/// The main thread's pending question holds the editor; a side chat's composer never shows it.
+/// The pending question of the thread this composer writes into holds its editor.
 fn asking(s: &App) -> bool {
-    !side(s) && question::active(s).is_some()
+    question::active(s).is_some()
 }
 
 fn question_editor(s: &App) -> Option<question::Editor> {
-    if side(s) { None } else { question::editor(s) }
+    question::editor(s)
 }
 
 fn plan_follow_up(s: &App) -> Option<(String, String)> {
-    if side(s) { None } else { plan::follow_up(s) }
+    plan::follow_up(s)
 }
 
 /// Whether the composer being drawn is the one used last, which shows the shared drawers.
@@ -321,11 +376,52 @@ fn mode_for(s: &App, alternate: bool) -> &'static str {
     dispatch_mode(running(s), can_steer, follow_up, alternate)
 }
 
-/// Approvals the open thread waits on; a message sent now declines them.
+/// Approvals the open thread waits on; a message sent now declines them. One the typing guard
+/// holds is not shown yet, so a send does not decline it.
 fn approvals(s: &App) -> Vec<Value> {
     let Some(id) = ctx(s).thread.map(|t| data::s(t, "id")) else { return Vec::new() };
     let Some(view) = s.state().thread_views.get(id) else { return Vec::new() };
-    crate::chat::timeline::requests::pending_approvals(&view.projection).into_iter().cloned().collect()
+    let pending = crate::chat::timeline::requests::pending_approvals(&view.projection);
+    pending.into_iter().filter(|r| !holds(s, data::s(r, "id"))).cloned().collect()
+}
+
+/// Whether the typing guard is holding request `id` back until typing goes idle.
+pub(crate) fn holds(s: &App, id: &str) -> bool {
+    s.ui.chat.composer.typing.held.contains(id)
+}
+
+/// The questions and approvals `thread` waits on (the typing guard's request ids).
+fn pending_requests(s: &App, thread: &str) -> Vec<String> {
+    let Some(view) = s.state().thread_views.get(thread) else { return Vec::new() };
+    let requests = view.projection["runtimeRequests"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    requests
+        .iter()
+        .filter(|r| data::s(r, "status") == "pending" && !matches!(data::s(r, "kind"), "auth_refresh" | "dynamic_tool_call"))
+        .map(|r| data::s(r, "id").to_owned())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+/// A keystroke in the composer being run.
+fn typed(s: &mut App) {
+    let key = active_key(s);
+    let pending = pending_requests(s, &key);
+    s.ui.chat.composer.typing.typed(&key, pending, data::now_ms());
+}
+
+/// Steps the typing guard (from `poll`): holds what arrives mid-typing, releases on idle or blur.
+fn guard_typing(s: &mut App, now: i64) -> bool {
+    let guard = &s.ui.chat.composer.typing;
+    if guard.last_typed.is_none() {
+        return false;
+    }
+    let scope = guard.scope.clone();
+    let focused = s.ui.chat.composer.drafts.get(&scope).is_some_and(|d| d.edit.focused);
+    if !focused || guard.idle(now) {
+        return s.ui.chat.composer.typing.release();
+    }
+    let pending = pending_requests(s, &scope);
+    s.ui.chat.composer.typing.requests(&pending, focused, now)
 }
 
 /// Prompts Up can recall (buildComposerPromptHistoryEntries): what the user typed themselves,
@@ -724,10 +820,40 @@ pub fn effective_runtime_mode(s: &App) -> String {
     }
 }
 
-/// Why Send is refused (sendDisabledReason): the thread's mode is above the policy's ceiling.
+/// Why a connection without `orchestration:operate` can't send, compact or stop.
+const READ_ONLY: &str = "This connection cannot change threads.";
+
+/// Why Send is refused (ChatView's and ChatComposer's sendDisabledReason), in web's order.
 fn send_block(s: &App) -> Option<String> {
+    let reason = if !crate::chat::can_operate(s) {
+        Some(READ_ONLY)
+    } else if rewinding(s) {
+        Some("Rewinding conversation")
+    } else if feedback_uploading(s) {
+        Some("Sending feedback")
+    } else if messages_loading(s) {
+        Some("Messages loading")
+    } else {
+        crate::add_to_machine::send_block(s).or_else(|| attachment_block(s))
+    };
+    if let Some(reason) = reason {
+        return Some(reason.to_owned());
+    }
     let mode = effective_runtime_mode(s);
     runtime_mode_options(s).into_iter().find(|o| o.mode == mode).and_then(|o| o.disabled)
+}
+
+/// A Codex `/feedback` upload for the open thread is still on its way.
+fn feedback_uploading(s: &App) -> bool {
+    let Route::Thread(id) = route(s) else { return false };
+    s.ui.chat.banners.feedback.get(&id).is_some_and(|entries| entries.iter().any(|(_, status)| *status == banners::FeedbackStatus::Uploading))
+}
+
+/// The open thread's messages have not loaded yet (resolveThreadSyncPhase's loading).
+fn messages_loading(s: &App) -> bool {
+    let Route::Thread(id) = route(s) else { return false };
+    let state = s.state();
+    !disconnected(s) && state.threads.iter().any(|t| data::s(t, "id") == id) && !state.thread_views.contains_key(&id)
 }
 
 /// No model can be picked: the catalog loaded with no provider to send to.
@@ -950,6 +1076,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     }
     let mode = mode_for(s, alternate);
     let key = active_key(s);
+    let resume_compaction = context::resume_compaction(s).filter(|_| !keeps_full_history(s));
     let Some(d) = draft(s) else { return };
     let snapshot = stored_draft(d);
     let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
@@ -969,6 +1096,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         draft_mut(s).edit.clear();
         return;
     }
+    let kept: Vec<String> = d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).cloned().collect();
     // A file that can no longer be sent keeps the draft as it is and says why.
     let uploads = match d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).map(|p| attachments::stage(p)).collect::<Result<Vec<_>, _>>() {
         Ok(uploads) => uploads,
@@ -1018,22 +1146,27 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     if text.is_empty() && uploads.is_empty() && contexts.is_empty() {
         return;
     }
+    let title = crate::chat::thread_title::seed(&text, &kept, &contexts);
     let model = model_selection(s);
     let (runtime, interaction) = (effective_runtime_mode(s), interaction_mode(s));
     let route = route(s);
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
+    // planComposerTurn: a cold Claude session compacts first, and the message queues behind it.
+    let compact_first = resume_compaction.is_some() && !compact_command(&text);
+    let compact = compact_first.then(|| compaction_command(model.clone()));
     let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
+            let queue = mode == "queue" || compact_first;
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
-                "threadId": id, "messageId": message_id, "text": text, "attachments": [],
-                "dispatchMode": {"type": if mode == "queue" { "queue_after_active" } else { "start_immediately" }},
+                "threadId": id, "messageId": message_id, "text": text, "attachments": [], "titleSeed": title,
+                "dispatchMode": {"type": if queue { "queue_after_active" } else { "start_immediately" }},
             });
             if !contexts.is_empty() {
                 cmd["context"] = json!({"version": 1, "records": contexts});
             }
-            if mode != "queue" {
+            if !queue {
                 cmd["deliveryIntent"] = json!(mode);
             }
             if let Some(m) = model {
@@ -1053,7 +1186,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
             let workspace = if preset == json!({"type": "root"}) { draft_run.unwrap_or(preset) } else { preset };
             let mut params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
-                "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
+                "title": title, "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
                 "interactionMode": interaction, "workspaceStrategy": workspace,
                 "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
             });
@@ -1074,25 +1207,69 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         s.ui.chat.composer.background.push(thread_id.clone());
     }
     let new_draft = background && launch.is_none();
+    // optimisticUserMessages: a message to a thread shows before the server echoes it.
+    let optimistic = (launch.is_none() && mode != "queue")
+        .then(|| crate::chat::timeline::pending::message(&message_id, &text, &contexts, pending_attachments(s, &contexts), mode == "steer"));
     s.ui.chat.composer.length_error = None;
     crate::chat::timeline::error_banner::set_local(s, &key, None);
     let outgoing = Outgoing { key, draft: snapshot };
     let Some(net) = s.src.net() else { return };
     let composer = &mut s.ui.chat.composer;
+    if let Some(mut compact) = compact {
+        compact["threadId"] = json!(thread_id);
+        let request = net.dispatch(compact);
+        composer.sends.push((request, Outgoing { key: thread_id.clone(), draft: Value::Null }));
+    }
     if uploads.is_empty() {
         deliver(net, composer, payload, launch, json!([]), outgoing);
     } else {
         composer.uploads.push(attachments::start(net, &thread_id, &message_id, uploads, payload, launch, outgoing));
     }
     sent(s);
+    if let Some(message) = optimistic {
+        crate::chat::timeline::pending::show(s, &thread_id, message);
+    }
     if new_draft {
         crate::shell::sidebar::new_local(s);
     }
 }
 
+/// COMPACT_COMMAND_PATTERN: the message is itself a `/compact`.
+fn compact_command(text: &str) -> bool {
+    let lower = text.get(..8).map(str::to_ascii_lowercase);
+    lower.as_deref() == Some("/compact") && text[8..].chars().next().is_none_or(char::is_whitespace)
+}
+
+/// The `/compact` T3 sends before a message to a cold session (`idleCompaction: "onReturn"`).
+fn compaction_command(model: Option<Value>) -> Value {
+    let mut cmd = json!({
+        "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
+        "messageId": s5_net::uuid(), "text": "/compact", "attachments": [], "idleCompaction": "onReturn",
+        "dispatchMode": {"type": "start_immediately"},
+    });
+    if let Some(m) = model {
+        cmd["modelSelection"] = m;
+    }
+    cmd
+}
+
+/// The open thread's next send keeps its full history (the Keep side of the toggle).
+fn keeps_full_history(s: &App) -> bool {
+    matches!(route(s), Route::Thread(id) if s.ui.chat.composer.keep_full.contains(&id))
+}
+
+fn toggle_full_history(s: &mut App) {
+    let Route::Thread(id) = route(s) else { return };
+    let keep = &mut s.ui.chat.composer.keep_full;
+    if !keep.remove(&id) {
+        keep.insert(id);
+    }
+}
+
 /// Pasted files join the draft's attachments (ChatComposer onPaste): copied files as they are,
-/// raw image data as a temporary PNG. Text, and a queued-message edit, paste as usual.
-fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
+/// raw image data as a temporary PNG, and long text as a text file. Short text, text pasted with
+/// Mod+Shift+V, and a queued-message edit paste as usual.
+fn on_paste(s: &mut App, content: &rune::ClipboardContent, tx: &mut Tx) -> bool {
     if editing_run(s).is_some() {
         return false;
     }
@@ -1100,6 +1277,11 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
     if !files.is_empty() {
         add_files(s, files);
         return true;
+    }
+    if content.image().is_none() || !content.text().trim().is_empty() {
+        // The key that pasted is still held: Shift is isPasteAsTextShortcut.
+        let mods = tx.mods();
+        return fold_paste(s, content.text(), mods.shift && !mods.alt);
     }
     let Some(image) = content.image().filter(|_| content.text().trim().is_empty()) else { return false };
     let path = std::env::temp_dir().join(format!("pasted-image-{}.png", s5_net::uuid()));
@@ -1110,9 +1292,38 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
     true
 }
 
+/// useComposerAttachmentIntake's foldPastedText: a long paste becomes `pasted-text.txt`. True
+/// when the paste was taken (folded, or refused with a toast).
+fn fold_paste(s: &mut App, text: &str, as_text: bool) -> bool {
+    let count = |t: &str| t.encode_utf16().count();
+    // What stays of the prompt around the selection the paste replaces (wouldTextPasteExceedLimit).
+    let (kept, names, queued) = match draft(s) {
+        Some(d) => {
+            let (start, end) = d.edit.range();
+            let names: Vec<String> = d.attachments.iter().map(|p| attachments::file_name(p)).collect();
+            (count(&d.edit.text[..start]) + count(&d.edit.text[end..]), names, d.attachments.len())
+        }
+        None => (0, Vec::new(), 0),
+    };
+    let exceeds = kept + count(text) > MAX_PROMPT_CHARS;
+    if !attachments::folds_paste(text, as_text, exceeds) {
+        return false;
+    }
+    let room = queued < attachments::MAX_ATTACHMENTS && !rewinding(s);
+    let fits = text.len() as u64 <= attachments::MAX_FILE_BYTES;
+    let path = (room && fits).then(|| attachments::write_pasted(&attachments::pasted_text_name(names.iter().map(String::as_str)), text)).flatten();
+    match path {
+        Some(path) => add_files(s, [path]),
+        None if !exceeds => return false,
+        None if !room => crate::shell::palette::toast_error_brief(s, "Pasted text is too large for this message", Some("Remove some text or an attachment, then paste again.")),
+        None => crate::shell::palette::toast_error_brief(s, "Pasted text is too large to attach", Some("Reduce the clipboard contents or save a smaller excerpt as a file.")),
+    }
+    true
+}
+
 /// Queues files in the open route's draft; the route's banner says why one was refused. A folder
 /// becomes an @ mention instead, relative to the workspace it sits in.
-fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
+pub(crate) fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
     if editing_run(s).is_some() {
         return;
     }
@@ -1152,6 +1363,10 @@ fn deliver(net: &mut s5_net::Net, composer: &mut Ui, mut payload: Value, launch:
 /// A sent home draft starts the next one fresh, so it picks up the new thread's model and the
 /// default modes (useHandleNewThread); a thread draft keeps its overrides.
 fn sent(s: &mut App) {
+    s.ui.chat.composer.typing.release();
+    if let Route::Thread(id) = route(s) {
+        s.ui.chat.composer.keep_full.remove(&id);
+    }
     let home = !matches!(route(s), Route::Thread(_));
     let d = draft_mut(s);
     if home {
@@ -1225,12 +1440,21 @@ fn stop(s: &mut App) {
     s.ui.chat.composer.sends.push((request, Outgoing { key: id, draft: Value::Null }));
 }
 
+/// Decodes the thumbnails views asked for; drops those of images no draft holds any more.
+fn poll_thumbs(s: &mut App) -> bool {
+    let waker = s.ui.panel.waker.clone();
+    let composer = &mut s.ui.chat.composer;
+    let drafts = &composer.drafts;
+    composer.thumbs.poll(waker, |path| drafts.values().any(|d| d.attachments.iter().any(|a| a == path)))
+}
+
 /// Folds server replies the composer waits on (launches, file searches). Called from `poll`.
 pub fn poll(s: &mut App) -> bool {
+    let local = guard_typing(s, data::now_ms()) | poll_thumbs(s);
     if s.src.net().is_none() {
-        return false;
+        return local;
     }
-    let mut changed = persist(s) | stash::persist(s) | usage_limits::poll(s);
+    let mut changed = local | persist(s) | stash::persist(s) | usage_limits::poll(s);
     let Some(net) = s.src.net() else { return false };
     let composer = &mut s.ui.chat.composer;
     let mut failed = Vec::new();
@@ -1288,6 +1512,7 @@ pub fn poll(s: &mut App) -> bool {
     changed |= fanout::finish(s);
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
+    changed |= menu::sync_snapshot(s, false);
     if let Some(id) = opened {
         crate::panel::adopt(s, &id);
         s.navigate(Route::Thread(id));
@@ -1359,6 +1584,7 @@ fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value, launch: Option<bo
     if outgoing.draft.is_null() {
         return;
     }
+    crate::chat::timeline::pending::drop_thread(s, &outgoing.key);
     let blank = s.ui.chat.composer.drafts.get(&outgoing.key).is_none_or(|d| d.edit.text.trim().is_empty() && d.attachments.is_empty());
     if blank && let Some(draft) = restored(&json!({"draft": outgoing.draft})).remove("draft") {
         s.ui.chat.composer.drafts.insert(outgoing.key, draft);
@@ -1533,25 +1759,45 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             let shortcut = shortcut.as_str().unwrap_or("enter");
             let needs_mod = shortcut == "mod-enter" || (shortcut == "mod-enter-multiline" && text.contains('\n'));
             if plain && needs_mod {
-                draft_mut(s).edit.insert("\n");
+                if !list_edit(s, lists::enter) {
+                    draft_mut(s).edit.insert("\n");
+                }
             } else {
                 send(s, false);
             }
             true
         }
+        // A newline that does not send continues a Markdown list (composerCommandKey).
+        Key::Enter if !answering && e.mods.shift && !e.mods.cmd && !e.mods.alt && !e.mods.ctrl => list_edit(s, lists::enter),
         Key::Up | Key::Down if plain && !answering => recall(s, e.key == Key::Up),
         Key::Escape if editing_run(s).is_some() => {
             cancel_queued_edit(s);
             true
         }
         Key::Tab if e.mods.shift => {
-            if supports_plan(s) {
+            let lifted = !answering && list_edit(s, lists::outdent);
+            if !lifted && supports_plan(s) {
                 toggle_plan(s);
             }
             true
         }
+        Key::Tab if plain && !answering => list_edit(s, lists::indent),
         _ => false,
     }
+}
+
+/// Applies a list edit (`lists`) at the draft's caret; false when the caret is not in a list.
+fn list_edit(s: &mut App, edit: fn(&str, usize, usize, &[std::ops::Range<usize>]) -> Option<lists::Edit>) -> bool {
+    let d = draft_mut(s);
+    let (start, end) = d.edit.range();
+    let pills: Vec<std::ops::Range<usize>> = d.edit.pills().map(|(range, _)| range).collect();
+    let Some(edit) = edit(&d.edit.text, start, end, &pills) else { return false };
+    for (from, to, with) in edit.changes.iter().rev() {
+        d.edit.set_selection(*from, *to);
+        d.edit.insert(with);
+    }
+    d.edit.set_caret(edit.caret);
+    true
 }
 
 const SEND_COMMANDS: [&str; 5] = ["thread.steerQueuedMessage", "thread.editQueuedMessage", "composer.sendAlternate", "composer.sendBackground", "composer.sendAndNewThread"];
@@ -1588,6 +1834,11 @@ fn chords(s: &mut App, e: &KeyEvent) -> bool {
         && crate::panel::shortcut(s, e, "thread.steerQueuedMessage")
     {
         crate::chat::timeline::queue::steer_next(s, &thread);
+        return true;
+    }
+    // thread.stop only while the thread can be interrupted, so the chord falls through otherwise.
+    if running(s) && crate::chat::can_operate(s) && crate::panel::shortcut(s, e, "thread.stop") {
+        stop(s);
         return true;
     }
     if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
@@ -1667,9 +1918,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .placeholder(q.placeholder, t.c.placeholder)
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(move |s: &mut App| question::editor_edit(s, &key))
-            .on_submit(|s: &mut App, _| question::advance(s))
-            .on_input_key(on_key)
-            .on_input_change(|s: &mut App, _| question::on_editor_change(s))
+            .on_submit(act_tx(s, |s: &mut App, _: &mut Tx| question::advance(s)))
+            .on_input_key(act_key(s, on_key))
+            .on_input_change(act_tx(s, |s: &mut App, _: &mut Tx| question::on_editor_change(s)))
     } else {
         text_input(&d.edit, theme::TEXT_SM.lh(22.75))
             .key("composer-editor")
@@ -1692,6 +1943,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
                 move |s: &mut App, content: &rune::ClipboardContent, tx: &mut Tx| acting(s, at.clone(), |s| on_paste(s, content, tx))
             })
             .on_input_change(act_tx(s, |s: &mut App, _: &mut Tx| {
+                typed(s);
                 s.ui.chat.composer.menu_active = 0;
                 s.ui.chat.composer.stash.open = false;
                 menu::refresh(s);
@@ -1705,11 +1957,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let dropped = drawing(s);
     // The capture fly-in lands on the main composer, not a side chat's.
     let main = !side(s);
+    let window = crate::desktop::capture::window_size(cx);
     let mut body = col()
         .key(keyed(s, "composer"))
         .on_screen_layout(move |s: &mut App, rect: [f32; 4]| {
             if main {
-                crate::desktop::capture::note_composer(s, rect);
+                crate::desktop::capture::note_composer(s, rect, window);
             }
         })
         .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
@@ -1735,18 +1988,17 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(stash));
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
-    // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let main = !side(s);
+    // on a wrapper: a full-width child with margins would shift rather than shrink. A side
+    // chat's composer docks its own thread's notices (SideChatPane's embedded ChatView).
     // On the draft hero web moves its notices below the composer (isDraftHeroState).
     let hero = matches!(s.frame_route(), Route::Home { .. });
     let detached = crate::add_to_machine::banner(s, t, true).filter(|_| hero);
     let docked = crate::chat::timeline::composer_requests(s, t)
-        .filter(|_| main)
-        .or_else(|| plan::banner(s, t).filter(|_| main))
+        .or_else(|| plan::banner(s, t))
         .or_else(|| crate::add_to_machine::banner(s, t, false).filter(|_| !hero))
-        .or_else(|| crate::chat::details::mismatch_banner(s, t).filter(|_| main));
+        .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
-    let docked = if main { usage_limits::banner(s, cx, t).or(docked) } else { docked };
+    let docked = usage_limits::banner(s, cx, t).or(docked);
     let docked = banners::dock(s, t, docked);
     // The stash tab rides the composer's right shoulder, beside anything docked there.
     let badge = stash::badge(s, t).filter(|_| !(s.ui.chat.composer.stash.open && owns(s)));
@@ -1776,12 +2028,14 @@ pub fn view_for(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane, side: &str) -> El
     within(s, Some(side.to_owned()), || view(s, cx, t, lane))
 }
 
-/// Side chat `side`'s composer overlays, while its composer was the one used last.
+/// Side chat `side`'s composer overlays, while its composer was the one used last, and its
+/// quote chip popovers.
 pub fn overlays_for(s: &App, cx: &mut Cx<App>, t: &T, side: &str) -> Vec<El> {
-    if side_owner(s) != Some(side) {
-        return Vec::new();
-    }
-    within(s, Some(side.to_owned()), || overlay_layers(s, cx, t))
+    within(s, Some(side.to_owned()), || {
+        let mut layers = if side_owner(s) == Some(side) { overlay_layers(s, cx, t) } else { Vec::new() };
+        layers.extend(chips::citation_popover(s, t));
+        layers
+    })
 }
 
 /// Composer chords pressed inside side chat `side`'s pane (useChatShortcuts' embedded composer).
@@ -2086,7 +2340,7 @@ fn primary_action(s: &App, t: &T) -> El {
     let typed = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty());
     let resume = show_resume(s);
     // With nothing typed, Resume wins over Implement (showPlanFollowUpPrompt && !canResume).
-    if (typed || !resume) && !side(s) {
+    if typed || !resume {
         if let Some(action) = plan::action(s, t, typed) {
             return action;
         }
@@ -2095,45 +2349,47 @@ fn primary_action(s: &App, t: &T) -> El {
     if running(s) && !sendable && editing_run(s).is_none() {
         return stop_button(s, t, 32.0);
     }
-    send_button(s, t, sendable, resume)
+    // A send to a cold Claude session compacts first; the toggle keeps the history instead.
+    let compaction = (!resume && editing_run(s).is_none()).then(|| context::resume_compaction(s)).flatten();
+    let button = send_button(s, t, sendable, resume, compaction.filter(|_| !keeps_full_history(s)));
+    match compaction {
+        Some(tokens) => row().gap(8.0).center_y().child(context::compact_toggle(s, t, tokens)).child(button),
+        None => button,
+    }
 }
 
 /// The red stop button; 28 points beside a pending question's actions.
 fn stop_button(s: &App, t: &T, size: f32) -> El {
-    el()
+    let b = el()
         .key("composer-stop")
         .size(size, size)
         .center()
         .radius(radius::FULL)
         .fill(t.c.destructive.alpha_mul(0.9))
-        .hover(t.c.destructive)
-        .cursor(Cursor::Pointer)
         .label("Stop generation")
         .help("Interrupt")
-        .child(el().size(8.0, 8.0).radius(1.5).fill(Color::WHITE))
-        .on_press(act(s, stop))
+        .child(el().size(8.0, 8.0).radius(1.5).fill(Color::WHITE));
+    if crate::chat::can_operate(s) { b.hover(t.c.destructive).cursor(Cursor::Pointer).on_press(act(s, stop)) } else { b.opacity(0.64) }
 }
 
 /// The send button (ComposerPrimaryActions): its glyph and tooltip follow what a click does.
-fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
+/// `compacting`: the tokens this send compacts first.
+fn send_button(s: &App, t: &T, sendable: bool, resume: bool, compacting: Option<f64>) -> El {
     let editing = editing_run(s).is_some();
     let (mode, alternate) = (mode_for(s, false), mode_for(s, true));
     let busy = send_busy(s);
     let label = match (resume, editing, mode) {
         (true, ..) => "Resume thread",
         (_, true, _) => "Update queued message",
+        _ if compacting.is_some() => "Compact and send",
         (.., "queue") => "Queue message",
         (.., "steer") => "Steer message",
         _ => "Submit message",
     };
     let status = if disconnected(s) || no_provider(s) || project_required(s) {
         Some("Environment disconnected".to_owned())
-    } else if let Some(reason) = send_block(s).or_else(|| crate::add_to_machine::send_block(s).map(str::to_owned)) {
+    } else if let Some(reason) = send_block(s) {
         Some(reason)
-    } else if let Some(reason) = attachment_block(s) {
-        Some(reason.to_owned())
-    } else if rewinding(s) {
-        Some("Rewinding conversation".to_owned())
     } else if busy {
         Some(if editing { "Updating queued message" } else { "Submitting message" }.to_owned())
     } else {
@@ -2141,7 +2397,9 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     };
     // Mod-click (or the sendAlternate shortcut) sends the other way while a turn runs.
     let help = status.clone().unwrap_or_else(|| {
-        if !resume && !editing && mode != alternate {
+        if let Some(tokens) = compacting {
+            format!("Summarize {} tokens of history, then send", context::tokens(tokens))
+        } else if !resume && !editing && mode != alternate {
             let key = if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" };
             let shortcut = crate::shell::palette::shortcut_label(s, "composer.sendAlternate");
             let or = if shortcut.is_empty() { String::new() } else { format!(" or {shortcut}") };
@@ -2176,9 +2434,40 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
 /// can no longer be sent.
 fn attachment_chips(s: &App, t: &T, paths: &[String]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
+    let remove = |i: usize| {
+        act(s, move |s: &mut App| {
+            let d = draft_mut(s);
+            if i < d.attachments.len() {
+                d.attachments.remove(i);
+            }
+        })
+    };
+    // Images first, as tiles (ComposerAttachmentMediaRow), then the file chips.
+    let mut tiles = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        let name = attachments::file_name(path);
+        if attachments::is_image(&name) && matches!(attachments::status(path), attachments::Status::Ready(_)) {
+            tiles.push(image_tile(s, t, i, path, &name).child(
+                el().pin(None, Some(4.0), Some(4.0), None)
+                    .size(20.0, 20.0)
+                    .center()
+                    .radius(radius::FULL)
+                    .fill(Color::BLACK.alpha(0.6))
+                    .hover(Color::BLACK.alpha(0.8))
+                    .cursor(Cursor::Pointer)
+                    .label(format!("Remove {name}"))
+                    .child(icon(&icons::X, 12.0).color(Color::WHITE))
+                    .on_press(remove(i)),
+            ));
+        }
+    }
+    chips = chips.children(tiles);
     for (i, path) in paths.iter().enumerate() {
         let name = attachments::file_name(path);
         let status = attachments::status(path);
+        if attachments::is_image(&name) && matches!(status, attachments::Status::Ready(_)) {
+            continue;
+        }
         let (ink, help) = match &status {
             attachments::Status::Ready(_) => (t.c.muted_foreground, path.clone()),
             attachments::Status::Reattach => (t.c.destructive, path.clone()),
@@ -2211,16 +2500,29 @@ fn attachment_chips(s: &App, t: &T, paths: &[String]) -> El {
                         .cursor(Cursor::Pointer)
                         .label(format!("Remove {name}"))
                         .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
-                        .on_press(act(s, move |s: &mut App| {
-                            let d = draft_mut(s);
-                            if i < d.attachments.len() {
-                                d.attachments.remove(i);
-                            }
-                        })),
+                        .on_press(remove(i)),
                 ),
         );
     }
     chips
+}
+
+/// A queued image's 64-point tile (ComposerImageThumbnail): its thumbnail cropped to fill, or its
+/// name while the thumbnail decodes or when it can't.
+fn image_tile(s: &App, t: &T, i: usize, path: &str, name: &str) -> El {
+    let tile = el()
+        .key(format!("composer-attachment-{i}"))
+        .size(64.0, 64.0)
+        .radius(radius::LG)
+        .border(1.0, t.c.border.alpha_mul(0.8))
+        .fill(t.c.background)
+        .clip_rounded(radius::LG)
+        .help(path.to_owned());
+    let thumb = s.ui.chat.composer.thumbs.get(path);
+    match thumb.filter(|th| !th.failed() && th.pixels.size().0 > 0) {
+        Some(th) => tile.label(name.to_owned()).child(el().w_full().h_full().pixels_fit(&th.pixels, rune::SurfaceFit::Fill)),
+        None => tile.center().px(4.0).child(text(name.to_owned()).font(theme::TEXT_2XS).color(t.c.secondary_label).truncate()),
+    }
 }
 
 /// Any file: a filter list would narrow the macOS picker to its types.
@@ -2308,6 +2610,38 @@ pub fn set_focus(s: &mut App, focused: bool) {
 /// Adds a file to the open route's draft, as a picked element's crop rides beside its chip.
 pub fn attach_path(s: &mut App, path: String) {
     draft_mut(s).attachments.push(path);
+}
+
+/// Files dropped anywhere on the chat join the route's draft (WorkspaceFileDropOverlay).
+pub fn drop_files(s: &mut App, files: &[std::path::PathBuf]) {
+    acting(s, None, |s| add_files(s, files.iter().map(|p| p.display().to_string())));
+}
+
+/// insertTextAtEnd: text typed or pasted while nothing had focus lands at the end of the
+/// route's prompt, which takes the caret. False when the prompt cannot take it.
+pub fn insert_at_end(s: &mut App, text: &str) -> bool {
+    acting(s, None, |s| {
+        if editing_run(s).is_some() || question_editor(s).is_some() || project_required(s) {
+            return false;
+        }
+        let d = draft_mut(s);
+        d.edit.set_caret(d.edit.text.len());
+        d.edit.insert(text);
+        d.edit.focused = true;
+        menu::refresh(s);
+        true
+    })
+}
+
+/// The draft's files as its optimistic message shows them while they upload.
+fn pending_attachments(s: &App, contexts: &[Value]) -> Value {
+    let Some(d) = draft(s) else { return json!([]) };
+    let files = d.attachments.iter().filter(|p| chips::keeps_attachment(p, contexts)).map(|path| {
+        let name = attachments::file_name(path);
+        let size = std::fs::metadata(path).map_or(0, |m| m.len());
+        json!({"id": format!("pending:{path}"), "name": name, "mimeType": attachments::mime_type(&name), "sizeBytes": size})
+    });
+    Value::Array(files.collect())
 }
 
 /// Puts `text` back into the open route's draft after what is already there.
@@ -2442,6 +2776,16 @@ fn seed_running(s: &mut App) {
     }
 }
 
+/// The showcase on Claude with a 240k-token session last reported three hours ago.
+fn cold_claude_scene(s: &mut App) {
+    on_replay_showcase(s);
+    s.now_ms = data::iso_ms("2026-12-01T03:00:00.000Z").unwrap_or(s.now_ms);
+    draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+    patch_projection(s, |p| {
+        p["providerTurns"] = json!([{"tokenUsage": {"usedTokens": 240_000, "maxTokens": 1_000_000, "updatedAt": "2026-12-01T00:00:00.000Z"}}]);
+    });
+}
+
 /// Scenes for the composer, topbar, home and details card.
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("home-empty", on_home),
@@ -2462,6 +2806,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         on_replay_showcase(s);
         picker::toggle(s);
     }),
+    ("composer-picker-chatgpt-sharing", picker::chatgpt_sharing_scene),
     ("composer-mention", |s| {
         on_replay_showcase(s);
         set_text(s, "@");
@@ -2494,6 +2839,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_text(s, "Review #");
         menu::refresh(s);
     }),
+    ("composer-mention-threads", menu::threads_scene),
+    ("composer-skill-pill", menu::skill_pill_scene),
     // The model picker opened from a side chat's composer opens over that composer.
     ("chat-side-pane-picker", |s| {
         if let Some((_, setup)) = crate::chat::timeline::SCENES.iter().find(|(name, _)| *name == "chat-side-pane") {
@@ -2657,6 +3004,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
         }
     }),
+    // `/usage-limits` sent from a side chat's composer opens the panel on that composer.
+    ("chat-side-composer-usage-limits", |s| {
+        if let Some((_, setup)) = crate::chat::timeline::SCENES.iter().find(|(name, _)| *name == "chat-side-pane") {
+            setup(s);
+        }
+        patch_config(s, usage_limits::scene_limits);
+        acting(s, Some("scene-side".into()), |s| {
+            draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+            set_text(s, "/usage-limits");
+            send(s, false);
+        });
+        if let Some(open) = s.ui.chat.composer.usage.open.as_mut() {
+            open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
+        }
+    }),
     ("composer-draft-hero-centred", on_home),
     ("composer-attachments-reattach", |s| {
         stash_scene(s);
@@ -2669,6 +3031,39 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
         d.runtime_mode = Some("approval-required".into());
         s.ui.chat.composer.more_open = true;
+    }),
+    // A connection without `orchestration:operate`: Send stays off and says why.
+    ("composer-send-disabled-readonly", |s| {
+        on_replay_showcase(s);
+        let env = s.ui.env.active.clone();
+        crate::settings::permissions::set_session(s, &env, json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        set_text(s, "Ship the reconnect fix");
+    }),
+    ("composer-compact-and-send", |s| {
+        cold_claude_scene(s);
+        set_text(s, "Pick up where we left off");
+    }),
+    ("composer-compact-keep", |s| {
+        cold_claude_scene(s);
+        set_text(s, "Pick up where we left off");
+        toggle_full_history(s);
+    }),
+    ("composer-image-thumbnails", |s| {
+        on_replay_showcase(s);
+        let dir = std::env::temp_dir().join("s5-scene-thumbnails");
+        let _ = std::fs::create_dir_all(&dir);
+        let shot = dir.join("screenshot.png");
+        let gradient = image::RgbaImage::from_fn(640, 400, |x, y| image::Rgba([(x * 255 / 640) as u8, (y * 255 / 400) as u8, 180, 255]));
+        let _ = image::DynamicImage::ImageRgba8(gradient).save(&shot);
+        let shot = shot.display().to_string();
+        set_text(s, "What's wrong with this layout?");
+        draft_mut(s).attachments = vec![shot.clone(), "/home/ubuntu/s5code/README.md".into()];
+        s.ui.chat.composer.thumbs.load_now(&shot);
+    }),
+    ("composer-list-continuation", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Plan:\n1. Reproduce the drop\n2. Add a retry");
+        list_edit(s, lists::enter);
     }),
     ("topbar-rename", |s| {
         on_replay_showcase(s);
@@ -2960,6 +3355,14 @@ mod tests {
         send(&mut s, false);
         assert!(draft(&s).unwrap().edit.text.is_empty());
         assert!(s.ui.chat.composer.usage.open.is_some());
+        // From a side chat's composer the panel opens under that composer's key, not the chat's.
+        let side = data::s(&s.state().threads[1], "id").to_string();
+        acting(&mut s, Some(side.clone()), |s| {
+            draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+            set_text(s, "/usage-limits");
+            send(s, false);
+        });
+        assert!(s.ui.chat.composer.usage.open.as_ref().is_some_and(|(key, _)| key.starts_with(&format!("{side}:"))));
     }
 
     #[test]
@@ -3091,5 +3494,100 @@ mod tests {
         send_failed(&mut s, draft, &error, Some(false));
         assert_eq!(toast(&s).as_deref(), Some("Could not start thread"), "FAILED: a launch failure after leaving its draft toasts");
         assert_eq!(s.ui.chat.composer.drafts.get(&home_key(&project)).map(|d| d.edit.text.as_str()), Some("ship it"), "FAILED: the draft comes back to open");
+    }
+
+    #[test]
+    fn send_and_compact_say_why_a_read_only_connection_or_a_loading_thread_cannot() {
+        let mut s = App::new();
+        on_replay_showcase(&mut s);
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        assert_eq!(send_block(&s), None);
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        assert_eq!(send_block(&s).as_deref(), Some(READ_ONLY), "FAILED: a read-only connection cannot send");
+        assert_eq!(context::compact_state(&s), Some(Some(READ_ONLY)));
+        set_text(&mut s, "hi");
+        send(&mut s, false);
+        assert_eq!(draft(&s).unwrap().edit.text, "hi", "FAILED: nothing was sent");
+        crate::chat::details::set_session(&mut s, None);
+        let Route::Thread(id) = s.route.clone() else { panic!("a thread") };
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.thread_views.remove(&id);
+        }
+        assert_eq!(send_block(&s).as_deref(), Some("Messages loading"));
+    }
+
+    #[test]
+    fn a_request_arriving_mid_typing_waits_until_typing_goes_idle() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut g = TypingGuard::default();
+        g.typed("t1", ids(&["old"]), 1_000);
+        assert!(g.requests(&ids(&["old", "q1"]), true, 1_400));
+        assert!(g.held.contains("q1") && !g.held.contains("old"), "FAILED: only what arrived mid-typing waits");
+        g.typed("t1", Vec::new(), 2_000);
+        assert!(g.held.contains("q1"), "FAILED: more typing keeps it held");
+        assert!(!g.idle(3_499) && g.idle(3_500));
+        assert!(g.release() && g.held.is_empty());
+        g.typed("t1", ids(&["old", "q1"]), 10_000);
+        assert!(!g.requests(&ids(&["old", "q1", "q2"]), false, 10_100), "FAILED: an unfocused composer holds nothing");
+        assert!(!g.requests(&ids(&["q3"]), true, 11_500), "FAILED: after 1.5s idle it shows at once");
+        g.typed("t1", ids(&[]), 20_000);
+        g.requests(&ids(&["q4"]), true, 20_100);
+        assert!(g.requests(&[], true, 20_200) && g.held.is_empty(), "FAILED: an answered request drops out");
+
+        // A held question neither shows nor takes the digits.
+        let mut s = App::new();
+        let thread = s.state().thread_views.iter().find(|(_, v)| data::s(&v.projection["thread"], "title") == "Timeline question fixture").map(|(id, _)| id.clone()).unwrap();
+        s.navigate(Route::Thread(thread));
+        let request = question::active(&s).map(|a| a.id().to_owned()).unwrap();
+        s.ui.chat.composer.typing.held.insert(request);
+        assert!(question::active(&s).is_none() && question::editor(&s).is_none());
+        assert!(!question::on_key(&mut s, &KeyEvent::from(Key::Text("1".into())), &mut Tx::default()));
+        s.ui.chat.composer.typing.release();
+        assert!(question::active(&s).is_some());
+    }
+
+    #[test]
+    fn thread_stop_interrupts_only_a_running_thread() {
+        let mut s = App::new();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([{"command": "thread.stop", "shortcut": {"key": "x", "modKey": true, "shiftKey": true}}]);
+        }
+        let mut e = KeyEvent::from(Key::Command('x'));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        on_replay_showcase(&mut s);
+        assert!(!shortcut(&mut s, &e), "FAILED: an idle thread lets the chord through");
+        seed_running(&mut s);
+        assert!(shortcut(&mut s, &e), "FAILED: the chord stops the run");
+    }
+
+    #[test]
+    fn a_cold_claude_session_compacts_before_the_next_send_unless_kept() {
+        let mut s = App::new();
+        cold_claude_scene(&mut s);
+        assert_eq!(context::resume_compaction(&s), Some(240_000.0));
+        assert!(!keeps_full_history(&s));
+        toggle_full_history(&mut s);
+        assert!(keeps_full_history(&s));
+        sent(&mut s);
+        assert!(!keeps_full_history(&s), "FAILED: Keep lasts one send");
+        seed_running(&mut s);
+        assert_eq!(context::resume_compaction(&s), None, "FAILED: a running turn is not cold");
+        assert!(compact_command("/compact") && compact_command("/COMPACT now") && !compact_command("/compactor"));
+        let cmd = compaction_command(None);
+        assert_eq!((cmd["text"].as_str(), cmd["idleCompaction"].as_str()), (Some("/compact"), Some("onReturn")));
+    }
+
+    #[test]
+    fn enter_and_tab_edit_a_markdown_list_in_the_draft() {
+        let mut s = App::new();
+        on_replay_showcase(&mut s);
+        set_text(&mut s, "- one");
+        assert!(list_edit(&mut s, lists::enter));
+        assert!(list_edit(&mut s, lists::indent));
+        assert_eq!(draft(&s).unwrap().edit.text, "- one\n  - ");
+        set_text(&mut s, "plain");
+        assert!(!list_edit(&mut s, lists::enter));
     }
 }

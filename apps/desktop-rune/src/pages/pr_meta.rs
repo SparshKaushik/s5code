@@ -621,11 +621,6 @@ pub fn linked_label(count: usize) -> String {
     }
 }
 
-fn open_thread(s: &mut App, id: &str) {
-    meta(s).linked_open = false;
-    crate::shell::sidebar::go(s, Route::Thread(id.to_string()));
-}
-
 /// `thread.pull-request.link`, a manual link of `thread`, keyed as the linked threads are read.
 pub fn link_command(entry: &Value, thread: &str) -> Value {
     let key = linked_input(entry);
@@ -744,26 +739,19 @@ pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
         .variant("ghost")
         .size("xs")
         .icon(&i::MESSAGE_SQUARE)
-        .on_press(|s: &mut App| {
-            let u = meta(s);
-            u.linked_open = !u.linked_open;
-        })
+        .on_press(open_linked_search)
         .build(t)
         .label(label.clone())
-        .help(label.clone());
-    let mut menu = Menu::new("pr-linked-threads").trigger(trigger).placement(Placement::BottomEnd).min_width(240.0).open(u.linked_open).on_close(|s: &mut App| meta(s).linked_open = false);
-    if u.linked_open {
-        menu = menu.group_label(label);
-        for thread in threads {
-            let id = field(thread, "id").to_string();
-            let title = thread["title"].as_str().filter(|v| !v.is_empty()).unwrap_or("Untitled thread");
-            menu = menu.item(MenuItem::new(title).icon(&i::MESSAGE_SQUARE).on_select(move |s: &mut App| open_thread(s, &id)));
-        }
-        if let (true, Some(error)) = (threads.is_empty(), &u.linked.error) {
-            menu = menu.group_label(error.clone());
-        }
-    }
-    Some(menu.build(&kit::theme(t), overlays))
+        .help(format!("{label}. Search in the command palette."));
+    Some(trigger)
+}
+
+/// Web opens the palette on the pull request's URL with these threads as its results.
+fn open_linked_search(s: &mut App) {
+    let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
+    let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
+    let threads = s.ui.pages.detail.meta.linked.data.as_ref().and_then(|v| v["threads"].as_array()).cloned();
+    crate::shell::palette::open_linked(s, field(&entry, "url"), &env, threads);
 }
 
 // ---- stack ------------------------------------------------------------------------------
@@ -1246,7 +1234,7 @@ pub fn scene(s: &mut App, which: &str) {
             let u = meta(s);
             u.linked.asked = true;
             u.linked.data = recorded;
-            u.linked_open = true;
+            open_linked_search(s);
         }
         "link-thread" => {
             let first = s.state().threads.first().cloned();

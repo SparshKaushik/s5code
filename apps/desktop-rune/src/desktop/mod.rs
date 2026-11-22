@@ -24,6 +24,7 @@ pub mod activation;
 #[cfg(unix)]
 pub mod signals;
 pub mod single;
+pub mod updates;
 #[cfg(target_os = "linux")]
 mod url_handler;
 
@@ -53,8 +54,8 @@ const SETTINGS_TITLE: &str = "Settings…";
 const QUIT_TITLE: &str = "Quit S5 Code";
 #[cfg(target_os = "macos")]
 const UPDATES_TITLE: &str = "Check for Updates...";
-const UPDATES_UNAVAILABLE: &str = "Automatic updates are not available right now.";
-/// Electron's reason for a build without `app-update.yml`, which every Rune build is.
+/// Electron's reason for a build without `app-update.yml`: here, one the release workflow didn't
+/// stamp with a version (`updates::version`).
 pub const NO_UPDATE_FEED: &str = "Automatic updates are not available because no update feed is configured.";
 /// Chromium's zoom: each step is half a level, a level is a factor of 1.2.
 const ZOOM_STEP: f32 = 0.5;
@@ -74,7 +75,10 @@ pub struct Ui {
     pub activation: activation::State,
     #[cfg(unix)]
     pub cli: cli::State,
+    pub updates: updates::Ui,
     zoom_level: f32,
+    /// Ctrl + wheel travel not yet turned into a zoom step.
+    wheel_zoom: f32,
     /// The window's size as the last view laid it out, for saving.
     window: Cell<Option<[f32; 2]>>,
     /// The content's desktop pixel origin as last reported; unknown on Wayland.
@@ -100,6 +104,11 @@ struct Bounds {
 }
 
 impl Ui {
+    /// The window's size as the last view laid it out.
+    pub(crate) fn window_size(&self) -> Option<[f32; 2]> {
+        self.window.get()
+    }
+
     pub(crate) fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }
@@ -215,17 +224,22 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first())
 }
 
-/// Check for Updates, as Electron's with no feed configured: its reason, in an alert on macOS
-/// (App and Help menus) and in the app's toast elsewhere (About and the command palette, since
-/// Rune has no menu bar there).
+/// Check for Updates (App and Help menus, About, the command palette): the outcome shows as
+/// Electron's menu check shows it.
 pub fn check_for_updates(s: &mut App) {
+    updates::check(s, true);
+}
+
+/// Electron's `showMessageBox` info box on macOS; the app's toast elsewhere, where Rune has no
+/// native dialogs.
+pub fn show_alert(s: &mut App, title: &str, detail: &str) {
     #[cfg(target_os = "macos")]
     {
         let _ = s;
-        macos::alert(UPDATES_UNAVAILABLE, NO_UPDATE_FEED);
+        macos::alert(title, detail);
     }
     #[cfg(not(target_os = "macos"))]
-    crate::shell::palette::toast(s, UPDATES_UNAVAILABLE, Some(NO_UPDATE_FEED));
+    crate::shell::palette::toast(s, title, Some(detail));
 }
 
 fn open_settings(s: &mut App) {
@@ -278,6 +292,21 @@ fn zoom(s: &mut App, tx: &mut Tx, step: Option<f32>) {
     let _ = prefs().set("zoomLevel", &level);
 }
 
+/// One wheel notch (40 points, a magnify of 0.2) is one zoom step. Rune hands Ctrl + wheel over as
+/// a magnify of `-dy / 200`, so a wheel turned up, which browsers zoom in on, arrives negative.
+fn wheel_zoom_step(travel: &mut f32, delta: f32) -> Option<f32> {
+    if travel.signum() != delta.signum() {
+        *travel = 0.0;
+    }
+    *travel += delta;
+    if travel.abs() < 0.19 {
+        return None;
+    }
+    let step = if *travel < 0.0 { ZOOM_STEP } else { -ZOOM_STEP };
+    *travel = 0.0;
+    Some(step)
+}
+
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
 /// reload and zoom first). Cmd/Ctrl+W nothing took is swallowed: it never closes the window.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
@@ -322,6 +351,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     changed |= exposure::poll(s);
+    changed |= updates::poll(s, tx);
     #[cfg(unix)]
     {
         changed |= activation::poll(s);
@@ -394,6 +424,13 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
     if cfg!(target_os = "macos") {
         return frame;
     }
+    // Electron's `zoom-changed`: Ctrl + wheel zooms the app off macOS (Chromium skips it there).
+    let frame = frame.on_magnify(|s: &mut App, e, tx: &mut Tx| {
+        if let Some(step) = wheel_zoom_step(&mut s.ui.desktop.wheel_zoom, e.delta) {
+            zoom(s, tx, Some(step));
+        }
+        true
+    });
     let scale = cx.env().scale;
     frame.on_screen_layout(move |s: &mut App, [x, y, _, _]| {
         s.ui.desktop.origin = Some([(x * scale).round() as i32, (y * scale).round() as i32]);
@@ -403,6 +440,18 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_ctrl_wheel_notch_is_one_zoom_step() {
+        let mut travel = 0.0;
+        assert_eq!(wheel_zoom_step(&mut travel, -0.2), Some(ZOOM_STEP), "a notch up zooms in");
+        assert_eq!(wheel_zoom_step(&mut travel, 0.2), Some(-ZOOM_STEP));
+        assert_eq!(wheel_zoom_step(&mut travel, 0.05), None, "a trackpad's small deltas add up");
+        assert_eq!(wheel_zoom_step(&mut travel, 0.05), None);
+        assert_eq!(wheel_zoom_step(&mut travel, -0.1), None, "turning back starts over");
+        assert_eq!(wheel_zoom_step(&mut travel, -0.1), Some(ZOOM_STEP));
+        assert_eq!(travel, 0.0);
+    }
 
     #[test]
     fn reload_reconnects_the_environment_on_screen() {

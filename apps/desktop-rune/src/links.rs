@@ -816,31 +816,30 @@ fn land_draft(s: &mut App, link: &NewThread, extra: Option<String>) {
 }
 
 /// `placeLinkedPrompt`: the prompt fills the draft the window shows, asking first before it
-/// replaces a different one. Hidden characters it dropped warn until dismissed, over the
-/// "Prompt added" note, since one toast shows at a time.
+/// replaces a different one. Hidden characters it dropped warn until dismissed.
 fn place_prompt(s: &mut App, prompt: &str, hidden: usize, note: Option<String>) {
     let key = crate::chat::composer::draft_key(s, s.frame_route());
     let existing = s.ui.chat.composer.drafts.get(&key).map(|d| d.edit.text.clone()).unwrap_or_default();
     let replaces = !existing.trim().is_empty() && existing != prompt;
     let text = prompt.to_owned();
+    if hidden > 0 {
+        let plural = if hidden == 1 { "" } else { "s" };
+        let description = format!("T3 Code removed {hidden} hidden character{plural}. Read the prompt before you send it.");
+        crate::shell::palette::toast_warning_sticky(s, "This prompt had hidden characters, it may be malicious", Some(&description));
+    }
     let place = std::rc::Rc::new(move |s: &mut App| {
+        crate::shell::toast::close_titled(s, "Linked prompt ready");
         let draft = s.ui.chat.composer.drafts.entry(key.clone()).or_default();
         draft.edit.replace_text(&text);
         draft.edit.set_caret(text.len());
         let description = ["Read it before you send.", note.as_deref().unwrap_or_default()].join(" ");
         crate::shell::palette::toast(s, "Prompt added from a link", Some(description.trim_end()));
-        if hidden > 0 {
-            let plural = if hidden == 1 { "" } else { "s" };
-            let description = format!("T3 Code removed {hidden} hidden character{plural}. Read the prompt before you send it.");
-            crate::shell::palette::toast_warning_sticky(s, "This prompt had hidden characters, it may be malicious", Some(&description));
-        }
     });
     if !replaces {
         return place(s);
     }
     let action: crate::shell::palette::ToastAction = ("Replace draft".into(), true, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| place(s)));
-    crate::shell::palette::toast_with(s, "Linked prompt ready", Some("This thread already has a draft. Replace it with the linked prompt?"), vec![action]);
-    crate::shell::palette::keep_toast(s);
+    crate::shell::palette::toast_sticky_with(s, "Linked prompt ready", Some("This thread already has a draft. Replace it with the linked prompt?"), vec![action]);
 }
 
 /// `PullRequestLinkCheckout`'s button: the handoff runs on the project's draft.
@@ -1113,10 +1112,12 @@ mod tests {
         // `placeLinkedPrompt`: a different draft is replaced only when asked, never appended to.
         assert!(open(&mut s, "s5code://threads/env/t1?prompt=Other%E2%80%8B"));
         assert_eq!((crate::shell::palette::toast_title(&s), text(&s).as_str()), (Some("Linked prompt ready"), "Fix it"), "FAILED: the draft changed before the person chose");
+        let warning = ("This prompt had hidden characters, it may be malicious".to_owned(), Some("T3 Code removed 1 hidden character. Read the prompt before you send it.".to_owned()));
+        assert!(crate::shell::toast::titles(&s).contains(&warning), "FAILED: no warning about the hidden character");
         crate::shell::palette::press_toast_action(&mut s, "Replace draft");
         assert_eq!(text(&s), "Other");
-        assert_eq!(crate::shell::palette::toast_title(&s), Some("This prompt had hidden characters, it may be malicious"), "FAILED: no warning about the hidden character");
-        assert_eq!(crate::shell::palette::toast_description(&s), Some("T3 Code removed 1 hidden character. Read the prompt before you send it."));
+        let titles: Vec<String> = crate::shell::toast::titles(&s).into_iter().map(|(title, _)| title).collect();
+        assert!(titles.contains(&"Prompt added from a link".to_owned()) && !titles.contains(&"Linked prompt ready".to_owned()), "{titles:?}");
         assert!(open(&mut s, "s5code://threads/env/t1?prompt=%E2%80%8B"));
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not open the linked prompt"));
     }

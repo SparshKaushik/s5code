@@ -1061,7 +1061,7 @@ fn tree(ui: &Ui, t: &T) -> El {
         let glyph = match (r.dir, r.open) {
             (true, true) => icon(&icons::FOLDER_OPEN, 14.).size(14., 14.).color(t.c.muted_foreground),
             (true, false) => icon(&icons::FOLDER, 14.).size(14., 14.).color(t.c.muted_foreground),
-            _ => crate::file_icons::view(&r.path, 14., t.dark),
+            _ => crate::panel::diff::file_icon(&r.path, 14., t.dark),
         };
         let mut line = row()
             .key(format!("files-row-{}", r.path))

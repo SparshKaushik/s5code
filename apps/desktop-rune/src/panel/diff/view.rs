@@ -11,7 +11,7 @@ use rune::{Color, Cursor, Drag, El, GrowthSpec, Icon, Phase, ScrollSpec, Span, T
 use rune_kit::diff::{FileDiff, FileStatus, LineKind, Side};
 use rune_kit::syntax::SyntaxTheme;
 
-use super::state::{DiffMode, DiffState, GAP, HEADER_H, LINE_H, LineRef, NOTE_H, Row, SEP_H};
+use super::state::{DiffMode, DiffState, GAP, HEADER_H, LINE_H, LineRef, Row, SEP_H};
 use crate::{App, icons, kit, theme, theme::T};
 
 /// The change-type marks pierre draws before a file's name.
@@ -34,6 +34,12 @@ static RENAMED: Icon = Icon {
     name: "diff-renamed",
     view: 24.0,
     body: r#"<rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" stroke-width="2" fill="none"/><path d="M8 12h8m-3.5-3.5L16 12l-3.5 3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+/// Pierre's `diffs-icon-arrow-right-short`, between a rename's old and new names.
+static RENAME_ARROW: Icon = Icon {
+    name: "diffs-arrow-right-short",
+    view: 16.0,
+    body: r#"<path d="M8.47 4.22a.75.75 0 0 0 0 1.06l1.97 1.97H3.75a.75.75 0 0 0 0 1.5h6.69l-1.97 1.97a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06L9.53 4.22a.75.75 0 0 0-1.06 0" fill="currentColor"/>"#,
 };
 
 /// Width of the bar marking an added, removed or selected line.
@@ -123,10 +129,12 @@ impl Look {
             bg,
             fg,
             muted: c.muted_foreground,
-            number: mix(fg, bg, 0.5),
+            // `--diffs-fg-number`: 65% of the text over the surface.
+            number: mix(fg, bg, 0.65),
             hover: mix(bg, fg, 0.94),
-            sep_bg: mix(bg, fg, 0.97),
-            sep_fg: mix(fg, bg, 0.5),
+            // DIFF_SURFACE_THEME_UNSAFE_CSS `--diffs-bg-separator-override`.
+            sep_bg: mix(bg, fg, 0.95),
+            sep_fg: mix(fg, bg, 0.65),
             buffer: mix(bg, fg, 0.9),
             border: c.border,
             button_hover: c.accent,
@@ -258,7 +266,6 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
     let vw = st.view_width().to_bits();
     match r {
         Row::File(f) => file_header(s, l, f as usize, false),
-        Row::Note(f) => memo(key, (l.version, st.rev, vw), || note(st, l, f as usize)),
         Row::Sep { f, h } => memo(key, (l.version, st.rev, vw), || separator(st, l, f as usize, h as usize)),
         Row::Comment { n, .. } => {
             let mut inner = super::comments::view(s, l, n as usize).key("inner");
@@ -509,15 +516,19 @@ fn segments(len: usize, syntax: &[(Range<usize>, Color)], hits: &[(Range<usize>,
         .collect()
 }
 
-fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
+pub(super) fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
     l.number_w(st.digits(f))
 }
+
+/// `[data-separator-content]`'s corners and the wrapper's `--diffs-gap-inline` inset.
+const SEP_RADIUS: f32 = 6.0;
+const SEP_INSET: f32 = 8.0;
 
 /// The unchanged lines folded away before a hunk: "N unmodified lines".
 pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
     let n = st.remaining(f, h);
     let label = if n == 1 { "1 unmodified line".to_owned() } else { format!("{n} unmodified lines") };
-    let mut cell = row().key("expand").w(gutter_w(st, l, f)).h(SEP_H).center().gap(2.0);
+    let mut cell = row().key("expand").h_full().px(6.0).center().gap(2.0).fill(l.sep_bg).corners([SEP_RADIUS, 0.0, 0.0, SEP_RADIUS]);
     if st.expandable {
         use super::Expand;
         let tail = h == st.files()[f].hunks.len();
@@ -533,42 +544,36 @@ pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
             }
             buttons.push(("all", "Expand all lines", &icons::CHEVRONS_UP_DOWN, Expand::All));
         }
-        cell = cell.min_w(buttons.len() as f32 * 22.0);
+        cell = cell.min_w(32.0);
         for (key, label, glyph, how) in buttons {
             cell = cell.child(micro(l, key, label, glyph, 14.0, l.sep_fg).on_press(move |s: &mut App| super::expand(s, f, h, how)));
         }
     }
-    let mut caption = text(label.clone()).font(l.small).color(l.sep_fg).pl(CODE_PAD.0);
+    // `[data-separator-content]`: rounded on its right, and on its left too with no expand buttons.
+    let left = if st.expandable { 0.0 } else { SEP_RADIUS };
+    let mut caption = row()
+        .key("caption")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .items_center()
+        .px(l.adv)
+        .fill(l.sep_bg)
+        .corners([left, SEP_RADIUS, SEP_RADIUS, left])
+        .child(text(label.clone()).font(l.small).color(l.sep_fg).single_line().truncate());
     if st.expandable {
         // The count expands the whole gap, as pierre's separator label does.
         caption = caption.cursor(Cursor::Pointer).on_press(move |s: &mut App| super::expand(s, f, h, super::Expand::All));
     }
-    let mut inner = row().key("inner").h(SEP_H).items_center().child(cell).child(caption);
-    if let Some(w) = view_w(st) {
-        inner = inner.w(w).sticky_left(0.0);
-    }
-    row().w_full().h(SEP_H).fill(l.sep_bg).role("separator").label(label).child(inner)
-}
-
-/// A file with no lines to show.
-pub(crate) fn note(st: &DiffState, l: &Look, f: usize) -> El {
-    let file = &st.files()[f];
-    let msg = if file.binary {
-        "Binary file not shown"
-    } else if matches!(file.status, FileStatus::Renamed | FileStatus::Copied) {
-        "File renamed without changes"
-    } else if file.old_mode != file.new_mode {
-        "File mode changed"
-    } else if matches!(file.status, FileStatus::Added | FileStatus::Deleted) {
-        "Empty file"
-    } else {
-        "No changes"
+    // Pierre's wrapper spans the viewport (`100cqi`), inset by `--diffs-gap-inline` on both sides,
+    // with a 2px code-background seam after the expand buttons.
+    let mut inner = row().key("inner").h(SEP_H).px(SEP_INSET).items_stretch().gap(2.0).children(st.expandable.then_some(cell)).child(caption);
+    inner = match view_w(st) {
+        Some(w) => inner.w(w).sticky_left(0.0),
+        None => inner.w_full(),
     };
-    let mut inner = row().key("inner").h(NOTE_H).items_center().pl(gutter_w(st, l, f) + CODE_PAD.0).child(text(msg).font(l.small).color(l.sep_fg));
-    if let Some(w) = view_w(st) {
-        inner = inner.w(w).sticky_left(0.0);
-    }
-    row().w_full().h(NOTE_H).fill(l.bg).role("note").label(msg).child(inner)
+    let (top, bottom) = super::state::sep_margins(h, st.files()[f].hunks.len());
+    col().w_full().pt(top).pb(bottom).child(row().w_full().h(SEP_H).fill(l.bg).role("separator").label(label).child(inner))
 }
 
 pub(crate) fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
@@ -645,8 +650,9 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     let mut name = row().key("name").items_center().gap(6.0).min_w(0.0).shrink();
     if let (FileStatus::Renamed | FileStatus::Copied, Some(old)) = (file.status, file.old_path.as_deref()) {
         name = name
-            .child(text(old.to_owned()).font(l.title).color(l.muted).truncate_head().min_w(0.0).shrink().key("prev"))
-            .child(icon(&icons::ARROW_RIGHT, 12.0).color(l.muted).key("arrow"));
+            // `[data-prev-name]` is the header's colour at 70%; the arrow keeps it whole.
+            .child(text(old.to_owned()).font(l.title).color(l.fg.alpha(l.fg.a * 0.7)).truncate_head().min_w(0.0).shrink().key("prev"))
+            .child(icon(&RENAME_ARROW, 16.0).color(l.fg).key("arrow"));
     }
     name = name.child(title);
     let done = s.ui.panel.diff.copied.as_ref().is_some_and(|(p, at)| *p == path && crate::data::now_ms() - at < COPIED_MS);
@@ -675,11 +681,9 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     }
     inner = inner.child(el().key("space").grow(1.0).a11y_hidden());
     let (adds, dels) = super::counts(ui, file);
-    if adds > 0 {
-        inner = inner.child(text(format!("+{adds}")).font(l.count).color(l.add.count).key("adds"));
-    }
-    if dels > 0 {
-        inner = inner.child(text(format!("-{dels}")).font(l.count).color(l.del.count).key("dels"));
+    for (add, count) in super::header_counts(ui, adds, dels) {
+        let (color, key) = if add { (l.add.count, "adds") } else { (l.del.count, "dels") };
+        inner = inner.child(text(count).font(l.count).color(color).key(key));
     }
     let edge = el().key("edge").absolute(0.0, 0.0).size(3.0, HEADER_H).fill(l.header_bar).group_opacity(0.0, 1.0).a11y_hidden();
     let mut label = file.path().to_owned();

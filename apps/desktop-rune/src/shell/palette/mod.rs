@@ -9,6 +9,7 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 pub(crate) mod actions;
 pub(crate) mod add_project;
 mod scenes;
+mod thread_row;
 pub use scenes::SCENES;
 
 #[derive(Default)]
@@ -28,28 +29,21 @@ pub struct Ui {
     search_due: Option<i64>,
     message_matches: Vec<serde_json::Value>,
     restart: Option<Restart>,
-    notice: Option<Notice>,
     /// Pages under the current one, so Escape and Backspace walk back.
     back: Vec<(String, String)>,
     /// Arrow keys picked a row; views without auto-highlight leave Enter to submit until then.
     picked: bool,
     add: add_project::State,
     act: actions::State,
-}
-struct Notice {
-    title: String,
-    description: Option<String>,
-    until: i64,
-    actions: Vec<ToastAction>,
-    error: bool,
-    warning: bool,
-    /// Actions shown disabled, by label.
-    disabled: Vec<String>,
-    /// Actions reading "Copied!" until their deadline, as web updates a toast after a copy.
-    copied: Vec<(String, i64)>,
+    /// `linkedThreadSearch`: a pull request's linked threads, shown while the query is still the
+    /// one the palette opened with: (query, environment, threads).
+    linked: Option<(String, String, Vec<serde_json::Value>)>,
+    /// `useOrderWhileOpen`: project group keys in the order the project and "New thread in"
+    /// lists had when the palette opened; emptied while it is closed.
+    order: std::cell::RefCell<[Vec<String>; 2]>,
 }
 /// A toast button: its label, whether it is the primary one, and what it does.
-pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
+pub(crate) type ToastAction = crate::shell::toast::Action;
 struct Restart {
     thread: String,
     remaining: Vec<String>,
@@ -62,7 +56,8 @@ enum Action {
     Navigate(Route),
     Page(&'static str),
     Appearance(&'static str),
-    Theme(String),
+    /// A theme for both appearances, or for the one it has (`setThemeHalf`).
+    Theme(String, Option<&'static str>),
     PinProject(String, bool),
     /// A project group's pin, set on every member (`toggleProjectGroupPin`).
     PinGroup(Vec<String>, bool),
@@ -72,6 +67,8 @@ enum Action {
     /// "Add project" on one environment, from the environment list.
     AddProjectIn(String),
     NewProject,
+    /// The New project page's environment switcher.
+    NewProjectIn(String),
     Source(add_project::Source),
     Browse(String),
     TogglePublish,
@@ -92,6 +89,8 @@ enum Action {
     OpenFile(String),
     ProjectSettings(String),
     FocusWorkspace(bool),
+    /// A linked thread, on the environment that reported it.
+    OpenLinked(String, String),
     /// A message match: open its thread with find on the matched words.
     FindMessage(String, String),
 }
@@ -101,8 +100,12 @@ enum Trailing {
     /// Not ready: a "Setup Required" button that explains why.
     Setup(String),
     Check(bool),
+    /// The picked row of a switcher: a check mark.
+    Picked,
     /// The theme or appearance in use: "Current" in muted text.
     Current,
+    /// A theme row: "Current" when in use, then a 12px preview per appearance it has.
+    Theme(bool, serde_json::Value, Vec<&'static str>),
     /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
     /// It writes every member of the project's group together.
     Pin(Vec<String>, bool),
@@ -158,6 +161,12 @@ struct Item {
     pick: (i64, bool),
     references: Vec<String>,
     usage: f32,
+    /// `shortcutCommand` for the jump keys: pressing it runs this row.
+    command: Option<String>,
+    /// Kept last in its group with no group weight: the thread already open.
+    secondary: bool,
+    /// The row's thread, as an index into `state().threads` for this frame.
+    thread: Option<usize>,
 }
 /// `pickableProjectGroups` over the sidebar's grouping: one row per project however many machines
 /// have it, archived groups out, pinned first. "New thread in…" (`new_thread`) leaves out the
@@ -183,6 +192,13 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         let preferred = groups.remove(at);
         let pinned = groups.iter().filter(|g| g.pinned).count();
         groups.insert(pinned, preferred);
+    }
+    // Rows keep the order they had when the palette opened, so a pin cannot move a row (or its
+    // jump number) under the pointer; rows that arrive later join at the end.
+    if s.ui.shell.palette.open {
+        let mut orders = s.ui.shell.palette.order.borrow_mut();
+        let order = &mut orders[new_thread as usize];
+        groups = keep_order(groups, order, |g| g.key.as_str());
     }
     let scratch_of = |g: &crate::shell::sidebar::folders::Group| by_id(&g.representative).is_some_and(|p| actions::is_scratch_project(s, p));
     let no_project_at = no_project_index(&groups.iter().map(|g| (scratch_of(g), g.pinned, is_preferred(g))).collect::<Vec<_>>());
@@ -216,6 +232,14 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         }
         out.push(row);
     }
+    // Jump keys follow the project rows as shown; "No project" keeps its own shortcut.
+    if new_thread {
+        for (n, row) in out.iter_mut().take(9).enumerate() {
+            let command = format!("thread.jump.{}", n + 1);
+            row.shortcut = shortcut_label(s, &command);
+            row.command = Some(command);
+        }
+    }
     if new_thread && actions::scratch_available(s) {
         let mut none = item("No project", "Projects", &icons::MESSAGE_SQUARE_DASHED, &shortcut_label(s, "chat.newWithoutProject"), Action::NewWithoutProject);
         none.fields = keywords(&["no project", "without project", "none"]);
@@ -225,6 +249,17 @@ fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
         out.push(item("Add project", "Projects", &icons::FOLDER_PLUS, "", Action::AddProject));
     }
     out
+}
+
+/// `keepOrder` then `withArrivedKeys`: `items` sorted into `order` by key, unknown ones after in
+/// their own order, and `order` extended with them.
+fn keep_order<T>(items: Vec<T>, order: &mut Vec<String>, key: impl Fn(&T) -> &str) -> Vec<T> {
+    let rank: std::collections::HashMap<&str, usize> = order.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+    let mut ranked: Vec<(usize, T)> = items.into_iter().enumerate().map(|(i, item)| (rank.get(key(&item)).copied().unwrap_or(order.len() + i), item)).collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let arrived: Vec<String> = ranked.iter().map(|(_, item)| key(item)).filter(|k| !rank.contains_key(k)).map(str::to_owned).collect();
+    order.extend(arrived);
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 /// `newThreadNoProjectIndex` over `(scratch, pinned, preferred)` picker entries: a pinned or
@@ -268,8 +303,11 @@ fn item(
         timestamp: None,
         pick: (0, false),
         references: vec![],
+        command: None,
+        secondary: false,
+        thread: None,
         fields: match &action {
-            Action::Theme(_) | Action::Appearance(_) => vec![],
+            Action::Theme(..) | Action::Appearance(_) => vec![],
             Action::Restart(_) => [
                 "restart", "reset", "reload", "agent", "session", "skills", "plugins", "mcp",
             ]
@@ -296,23 +334,32 @@ fn item(
     }
 }
 
-/// "Change theme": every theme in the library, the one the current mode uses marked Current.
+/// "Change theme": T3 Code, the built-ins, saved themes, then the environment's published ones;
+/// the theme the rendered appearance uses is Current.
 fn theme_items(s: &App) -> Vec<Item> {
-    // Under System the palette cannot see the OS mode; the halves normally agree.
-    let dark = s.appearance != Appearance::Light;
+    let dark = s.ui.shell.dark.get();
     let current = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(serde_json::Value::as_str).unwrap_or("t3-code").to_owned();
     crate::settings::themes::library(s)
-        .iter()
+        .into_iter()
         .map(|v| {
-            let id = data::s(v, "id").to_owned();
-            let mut row = item(data::s(v, "label"), "Change theme", &icons::PALETTE, "", Action::Theme(id.clone()));
-            row.fields = keywords(&[data::s(v, "label"), "theme", "appearance"]);
-            if id == current {
-                row.trailing = Trailing::Current;
-            }
+            let id = data::s(&v, "id").to_owned();
+            let modes = crate::settings::themes::modes(&v);
+            let half = (modes.len() == 1 && id != "t3-code").then(|| modes[0]);
+            let mut row = item(data::s(&v, "label"), "Change theme", &icons::PALETTE, "", Action::Theme(id.clone(), half));
+            row.description = half.map(|mode| format!("For {mode} mode"));
+            row.fields = keywords(&[data::s(&v, "label"), "theme", "appearance"]);
+            row.trailing = Trailing::Theme(id == current, v, modes);
             row
         })
         .collect()
+}
+/// `notifyThemeSaveFailure` when the client settings file could not take the choice.
+fn theme_saved(s: &mut App) -> bool {
+    if s.client_settings.error.is_none() {
+        return true;
+    }
+    toast_error(s, "Couldn't save theme selection", Some("Try again."));
+    false
 }
 /// "Change appearance": System, Light and Dark, the saved mode marked Current.
 fn appearance_items(s: &App) -> Vec<Item> {
@@ -381,99 +428,102 @@ fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     });
     label
 }
+use crate::shell::toast::{self as stack, Kind, TIMEOUT_MS};
+
+/// Web's `type` for a toast raised without one here, by its title: the success, info and loading
+/// toasts web raises with the same titles.
+fn kind_of(title: &str) -> Kind {
+    const SUCCESS: &[&str] = &[
+        "ACP provider configured", "ACP provider disabled", "ACP session deleted", "Added to the composer", "Agent session will restart",
+        "Asked in a thread", "Backend added", "Brought back", "Checkout ready", "Keybindings updated", "Logged out of ACP agent",
+        "Plan saved to workspace", "Project created", "Provider instance added", "Recording saved", "Revert pull request opened", "Route added",
+        "Screenshot saved", "Server deregistered", "Shortcut saved", "Started in background", "T3 Connect enabled", "Thanks for the star!",
+        "Update downloaded", "Branch deleted",
+    ];
+    const SUCCESS_PREFIX: &[&str] = &["Cloned ", "Created ", "Deleted action ", "Imported ", "Linked ", "Published to ", "Started ", "Updated ", "Cleared "];
+    const SUCCESS_SUFFIX: &[&str] = &[" copied", " added", " created", " saved", " updated"];
+    const INFO: &[&str] = &[
+        "Annotation attached to draft", "Linked prompt ready", "Preview is desktop-only", "Process already exited", "Prompt added from a link",
+        "Still bringing attached context into this message.", "Still compressing a pasted image.", "The page copied text",
+        "This commit is not in the thread's workspace", "This thread is no longer available", "Turn stopped; the agent is still shutting down",
+        "Turn stopped; the agent process kept running", "Usage limits are unavailable for this provider", "Your typed text was set aside",
+    ];
+    const INFO_PREFIX: &[&str] = &["Downloaded ", "Large paste attached as ", "Give "];
+    if SUCCESS.contains(&title) || SUCCESS_PREFIX.iter().any(|p| title.starts_with(p)) || SUCCESS_SUFFIX.iter().any(|p| title.ends_with(p)) {
+        Kind::Success
+    } else if INFO.contains(&title) || INFO_PREFIX.iter().any(|p| title.starts_with(p)) {
+        Kind::Info
+    } else if title.ends_with('…') || title.ends_with("...") {
+        Kind::Loading
+    } else {
+        Kind::Plain
+    }
+}
+fn raise(s: &mut App, title: &str, description: Option<&str>, kind: Kind, actions: Vec<ToastAction>, timeout: Option<i64>) {
+    let mut toast = stack::Toast::new(title, description, kind);
+    toast.actions = actions;
+    stack::add(s, toast, timeout);
+}
 pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
     toast_with(s, title, description, Vec::new());
 }
 pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
-    s.ui.shell.palette.notice = Some(Notice {
-        title: title.into(),
-        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
-        until: data::now_ms() + 4000,
-        actions,
-        error: false,
-        warning: false,
-        disabled: Vec::new(),
-        copied: Vec::new(),
-    });
+    raise(s, title, description, kind_of(title), actions, Some(TIMEOUT_MS));
 }
 /// A `type: "warning"` toast; `disabled` greys out its actions.
 pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>, disabled: bool) {
     let labels = if disabled { actions.iter().map(|a| a.0.clone()).collect() } else { Vec::new() };
-    toast_with(s, title, description, actions);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.warning = true;
-        notice.disabled = labels;
+    raise(s, title, description, Kind::Warning, actions, Some(TIMEOUT_MS));
+    if let Some(toast) = stack::newest_mut(s) {
+        toast.disabled = labels;
     }
 }
 #[cfg(test)]
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
-    s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
+    stack::newest(s).map(|n| n.title.as_str())
 }
 #[cfg(test)]
 pub(crate) fn toast_description(s: &App) -> Option<&str> {
-    s.ui.shell.palette.notice.as_ref().and_then(|n| n.description.as_deref())
+    stack::newest(s).and_then(|n| n.description.as_deref())
 }
 #[cfg(test)]
 pub(crate) fn press_toast_action(s: &mut App, label: &str) {
-    let action = s.ui.shell.palette.notice.as_ref().and_then(|n| n.actions.iter().find(|a| a.0 == label)).map(|a| a.2.clone()).expect("the toast offers that action");
+    let action = stack::newest(s).and_then(|n| n.actions.iter().find(|a| a.0 == label)).map(|a| a.2.clone()).expect("the toast offers that action");
     action(s, &mut Tx::default());
 }
-/// The open toast's `label` action reads "Copied!", disabled, for 2 s.
+/// The newest toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
-    let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
-    let until = data::now_ms() + 2000;
-    notice.copied.retain(|(l, _)| l != label);
-    notice.copied.push((label.to_string(), until));
-    notice.until = notice.until.max(until);
-    tx.wake_after(std::time::Duration::from_millis(2000));
+    if let Some(id) = stack::newest(s).map(|t| t.id) {
+        stack::copied_on(s, tx, id, label);
+    }
 }
 /// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
 /// be read.
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
-    s.ui.shell.palette.notice = Some(Notice {
-        title: title.into(),
-        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
-        until: i64::MAX,
-        actions: Vec::new(),
-        error: true,
-        warning: false,
-        disabled: Vec::new(),
-        copied: Vec::new(),
-    });
+    raise(s, title, description, Kind::Error, Vec::new(), None);
 }
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
-/// The open toast stays until it is dismissed (web `timeout: 0`).
-pub(crate) fn keep_toast(s: &mut App) {
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.until = i64::MAX;
-    }
-}
 pub(crate) fn toast_warning_sticky(s: &mut App, title: &str, description: Option<&str>) {
-    toast_warning(s, title, description, Vec::new(), false);
-    keep_toast(s);
+    raise(s, title, description, Kind::Warning, Vec::new(), None);
+}
+/// `toast_with` that stays until dismissed (`timeout: 0` on web).
+pub(crate) fn toast_sticky_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
+    raise(s, title, description, kind_of(title), actions, None);
 }
 pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
-    toast(s, title, description);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.until = i64::MAX;
-    }
+    raise(s, title, description, kind_of(title), Vec::new(), None);
 }
 /// An error toast that times out like a plain one (web's `type: "error"` without `timeout: 0`).
 pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&str>) {
-    toast_error(s, title, description);
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.until = data::now_ms() + 4000;
-    }
+    raise(s, title, description, Kind::Error, Vec::new(), Some(TIMEOUT_MS));
 }
-/// Closes the open toast when it is still the one titled `title`.
+/// Closes the toasts titled `title`.
 pub(crate) fn dismiss_toast(s: &mut App, title: &str) {
-    if s.ui.shell.palette.notice.as_ref().is_some_and(|n| n.title == title) {
-        s.ui.shell.palette.notice = None;
-    }
+    stack::close_titled(s, title);
 }
 pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        notice.actions = actions;
+    if let Some(toast) = stack::newest_mut(s) {
+        toast.actions = actions;
     }
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -536,7 +586,22 @@ fn reset(s: &mut App, open: bool) {
     ui.back.clear();
     ui.add.clone = None;
     ui.add.env = None;
+    ui.linked = None;
+    *ui.order.get_mut() = Default::default();
     set_query(s, "");
+}
+
+/// `openCommandPalette({query: url, linkedThreads})` from a pull request's linked-thread count.
+pub fn open_linked(s: &mut App, query: &str, env: &str, threads: Option<Vec<serde_json::Value>>) {
+    reset(s, true);
+    set_query(s, query);
+    s.ui.shell.palette.linked = threads.map(|threads| (query.to_owned(), env.to_owned(), threads));
+}
+
+/// The linked threads, while the query is the one they were opened with.
+fn linked_search(s: &App) -> Option<&(String, String, Vec<serde_json::Value>)> {
+    let ui = &s.ui.shell.palette;
+    ui.linked.as_ref().filter(|(query, ..)| ui.page.is_empty() && *query == ui.query.text)
 }
 
 fn items(s: &App) -> Vec<Item> {
@@ -586,8 +651,11 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
             .or_else(|| crate::chat::home::draft_project(s))
         {
+            // `activeProjectTitle`: the preferred entry's group name, as the sidebar shows it.
+            let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+            let name = by_project.get(data::s(p, "id")).map(|n| groups[*n].label.clone()).unwrap_or_else(|| data::s(p, "title").to_owned());
             let mut row = item(
-                format!("New thread in {}", data::s(p, "title")),
+                format!("New thread in {name}"),
                 "Actions",
                 &icons::SQUARE_PEN,
                 &shortcut_label(s, "chat.newLocal"),
@@ -682,21 +750,45 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
             Route::Thread(id) => Some(id.as_str()),
             _ => None,
         };
-        // RECENT_THREAD_LIMIT; the open thread is not a place to go back to.
+        // RECENT_THREAD_LIMIT; the open thread is not a place to go back to. Threads the tag
+        // filter hides in the sidebar stay out here too.
+        use crate::shell::sidebar::logic::{thread_key, visible_linked};
+        let (hidden, hiding) = crate::shell::sidebar::tag_hidden(s);
         let mut threads: Vec<_> = s
             .state()
             .threads
             .iter()
-            .filter(|v| v["archivedAt"].is_null() && listed(v) && !(browsing && open_thread == Some(data::s(v, "id"))))
+            .enumerate()
+            .filter(|(_, v)| v["archivedAt"].is_null() && listed(v) && !(browsing && open_thread == Some(data::s(v, "id"))))
+            .filter(|(_, v)| hidden.is_empty() || !hidden.contains(&thread_key(&crate::env::of(s, v), data::s(v, "id"))))
             .collect();
-        threads.sort_by_key(|v| std::cmp::Reverse(recent_use(v)));
+        threads.sort_by_key(|(_, v)| std::cmp::Reverse(recent_use(v)));
 
-        let limit = if browsing {
+        let linked = linked_search(s);
+        let limit = if linked.is_some() {
+            0
+        } else if browsing {
             12
         } else {
             threads.len()
         };
-        for v in threads.into_iter().take(limit) {
+        // `buildLinkedThreadActionItems`: they stand in for the thread search.
+        let linked_rows = linked
+            .map(|(_, env, rows)| {
+                let loaded: std::collections::HashSet<&str> = s.state().threads.iter().filter(|v| crate::env::of(s, v) == *env).map(|v| data::s(v, "id")).collect();
+                visible_linked(rows, env, &loaded, &hidden, hiding)
+            })
+            .unwrap_or_default();
+        for thread in &linked_rows {
+            let (query, env) = linked.map(|(q, e, _)| (q.as_str(), e.as_str())).unwrap_or_default();
+            let title = thread["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("Untitled thread");
+            let mut row = item(title, "Threads", &icons::MESSAGE_SQUARE, "", Action::OpenLinked(data::s(thread, "id").into(), env.into()));
+            row.description = Some(if thread["archivedAt"].is_null() { "Linked thread" } else { "Archived thread" }.into());
+            row.fields = vec![SearchTerm::weighted(query, 1.), SearchTerm::weighted(title, 1.)];
+            row.references.push(query.into());
+            out.push(row);
+        }
+        for (at, v) in threads.into_iter().take(limit) {
             out.push(item(
                 data::s(v, "title"),
                 if browsing {
@@ -709,6 +801,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 Action::Navigate(Route::Thread(data::s(v, "id").into())),
             ));
             if let Some(row) = out.last_mut() {
+                row.thread = Some(at);
                 let project = s
                     .state()
                     .projects
@@ -751,18 +844,10 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 }
                 row.pick = active_pick(v, &normalize_query(typed), s.now_ms);
                 row.usage = usage_boost(v, s.now_ms);
-
-                let minutes =
-                    ((s.now_ms - data::ts(v, "updatedAt").unwrap_or(s.now_ms)) / 60_000).max(0);
-                row.timestamp = Some(if minutes == 0 {
-                    "now".into()
-                } else if minutes < 60 {
-                    format!("{minutes}m ago")
-                } else if minutes < 1440 {
-                    format!("{}h ago", minutes / 60)
-                } else {
-                    format!("{}d ago", minutes / 1440)
-                });
+                // Last in its group: picking the thread already open does nothing.
+                row.secondary = open_thread == Some(data::s(v, "id"));
+                let at = ["latestUserMessageAt", "updatedAt", "createdAt"].into_iter().find_map(|key| data::ts(v, key));
+                row.timestamp = at.map(|at| relative_time(s.now_ms, at));
             }
         }
     }
@@ -851,7 +936,9 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 } else {
                     0.
                 };
-            let group_quality = if thread {
+            let group_quality = if v.secondary {
+                0.
+            } else if thread {
                 quality.min(1.49)
             } else if !primary_matches {
                 quality.min(0.65)
@@ -909,6 +996,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                         .then_with(|| b.pick.0.cmp(&a.pick.0))
                         .then_with(|| (qb * b.usage).total_cmp(&(qa * a.usage)))
                 });
+                rows.sort_by_key(|(v, _, _)| v.secondary);
                 let limit = if !page.is_empty() {
                     usize::MAX
                 } else if rows.first().is_some_and(|(v, _, _)| v.group == "Threads") {
@@ -921,7 +1009,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && page.is_empty() && !actions_only {
+        if ui.message_query == query && page.is_empty() && !actions_only && linked_search(s).is_none() {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -976,6 +1064,20 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
     }
     out
 }
+/// `formatRelativeTimeLabel`: "just now" under a minute, then "5m ago", "3h ago", "2d ago".
+fn relative_time(now: i64, at: i64) -> String {
+    let seconds = (now - at).max(0) / 1000;
+    let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
+    if seconds < 60 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if hours < 24 {
+        format!("{hours}h ago")
+    } else {
+        format!("{days}d ago")
+    }
+}
 /// The palette lists top-level threads and forks, not subagents or side chats.
 fn listed(thread: &serde_json::Value) -> bool {
     thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
@@ -983,7 +1085,7 @@ fn listed(thread: &serde_json::Value) -> bool {
 
 /// `findForMessageMatch`: the snippet's own spelling of the whole query when it appears there,
 /// else of its longest word, preferring a whole-word occurrence.
-fn find_query(snippet: &str, query: &str) -> String {
+pub(crate) fn find_query(snippet: &str, query: &str) -> String {
     use crate::chat::timeline::find::find_plain;
     let phrase = query.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Some(r) = find_plain(snippet, &phrase).into_iter().next().filter(|_| phrase.contains(' ')) {
@@ -994,6 +1096,14 @@ fn find_query(snippet: &str, query: &str) -> String {
     let ranges = find_plain(snippet, word);
     let whole = ranges.iter().find(|r| !snippet[r.end..].chars().next().is_some_and(char::is_alphanumeric)).or(ranges.first());
     whole.map_or_else(|| word.to_string(), |r| snippet[r.clone()].to_string())
+}
+
+/// `openThreadFindOnQuery` on the open thread.
+pub(crate) fn open_find(s: &mut App, query: String) {
+    let find = &mut s.ui.chat.timeline.find;
+    find.edit = rune::TextEdit::new(query);
+    find.active = 0;
+    crate::chat::timeline::find::open(s);
 }
 
 /// `isThreadSearchPending`: message search is debouncing or in flight for a root query.
@@ -1014,13 +1124,9 @@ fn suggestions(s: &App, top: &[Item], query: &str) -> Vec<Item> {
     let mut out = vec![];
     for parent in top {
         let Action::Page(page) = &parent.action else { continue };
-        let children = match *page {
-            "projects" => s
-                .state()
-                .projects
-                .iter()
-                .map(|p| item(data::s(p, "title"), "", &icons::FOLDER_GIT_2, "", Action::Navigate(Route::Home { project_id: Some(data::s(p, "id").into()) })))
-                .collect(),
+        let children: Vec<Item> = match *page {
+            // The submenu's own rows, so names, jump keys and pins carry over.
+            "projects" => project_items(s, true).into_iter().filter(|v| !matches!(v.action, Action::AddProject)).collect(),
             "themes" => theme_items(s),
             "appearance" => appearance_items(s),
             _ => continue,
@@ -1255,21 +1361,6 @@ pub fn poll(s: &mut App) -> bool {
         if s.src.net().and_then(|net| net.take_reply(id)).is_none() {
             s.ui.shell.palette.acknowledgements.push(id);
         }
-    }
-    if s.ui
-        .shell
-        .palette
-        .notice
-        .as_ref()
-        .is_some_and(|v| data::now_ms() >= v.until)
-    {
-        s.ui.shell.palette.notice = None;
-        changed = true;
-    }
-    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
-        let (now, before) = (data::now_ms(), notice.copied.len());
-        notice.copied.retain(|(_, until)| now < *until);
-        changed |= notice.copied.len() != before;
     }
     if let Some(mut restart) = s.ui.shell.palette.restart.take() {
         match s.src.net().and_then(|net| net.take_reply(restart.pending)) {
@@ -1540,7 +1631,8 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::AddProject if !add_project::any_connected(s) => crate::shell::sidebar::go(s, Route::Settings("connections".into())),
         Action::AddProject => return add_project::open(s),
         Action::AddProjectIn(key) => return add_project::open_in(s, &key),
-        Action::NewProject => return add_project::choose(s, add_project::Source::New),
+        Action::NewProject => return add_project::start_new(s),
+        Action::NewProjectIn(key) => return add_project::switch_new(s, &key),
         Action::Source(source) => return add_project::choose(s, source),
         Action::Browse(to) => {
             set_query(s, &to);
@@ -1596,21 +1688,32 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             }
             crate::shell::sidebar::go(s, route)
         }
+        Action::OpenLinked(thread, env) => {
+            crate::env::adopt(s, &thread, &env);
+            execute(s, Action::Navigate(Route::Thread(thread)), tx);
+        }
         Action::FindMessage(thread, query) => {
             execute(s, Action::Navigate(Route::Thread(thread)), tx);
-            let find = &mut s.ui.chat.timeline.find;
-            find.edit = rune::TextEdit::new(query);
-            find.active = 0;
-            crate::chat::timeline::find::open(s);
+            open_find(s, query);
         }
         Action::ProjectSettings(project) => {
             s.ui.settings.project = Some(project);
             crate::shell::sidebar::go(s, Route::Settings("projects".into()))
         }
-        Action::Appearance(mode) => crate::settings::update(s, "appearance", serde_json::json!(mode)),
-        Action::Theme(id) => {
-            crate::settings::update(s, "themeLight", serde_json::json!(id));
-            crate::settings::update(s, "themeDark", serde_json::json!(id));
+        Action::Appearance(mode) => {
+            crate::settings::update(s, "appearance", serde_json::json!(mode));
+            theme_saved(s);
+        }
+        Action::Theme(id, half) => {
+            let keys: &[&str] = match half {
+                Some("dark") => &["themeDark"],
+                Some(_) => &["themeLight"],
+                None => &["themeLight", "themeDark"],
+            };
+            for key in keys {
+                crate::settings::update(s, key, serde_json::json!(id));
+            }
+            theme_saved(s);
         }
         Action::PinProject(project, pinned) => actions::pin_project(s, &project, pinned),
         Action::PinGroup(members, pinned) => {
@@ -1746,7 +1849,9 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             Appearance::Dark => ("system", "System"),
         };
         crate::settings::update(s, "appearance", serde_json::json!(mode));
-        toast(s, &format!("Appearance: {label}"), None);
+        if theme_saved(s) {
+            toast(s, &format!("Appearance: {label}"), None);
+        }
         return true;
     }
     if crate::panel::shortcut(s, e, "thread.copyReference") && actions::copy_thread(s, tx) {
@@ -1769,6 +1874,22 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let rows = items(s);
     let raw = add_project::raw(s);
+    // A jump key runs the row showing it; `thread.pin` toggles the highlighted project's pin.
+    if let Some(command) = (1..=9).map(|n| format!("thread.jump.{n}")).find(|c| crate::panel::shortcut(s, e, c)) {
+        if let Some(row) = rows.iter().find(|v| v.command.as_deref() == Some(command.as_str()) && !v.disabled) {
+            execute(s, row.action.clone(), tx);
+            return true;
+        }
+    }
+    if crate::panel::shortcut(s, e, "thread.pin")
+        && let Some(Trailing::Pin(members, pinned)) = rows.get(s.ui.shell.palette.selected).map(|v| &v.trailing)
+    {
+        let pinned = *pinned;
+        for project in members {
+            actions::pin_project(s, project, !pinned);
+        }
+        return true;
+    }
     match &e.key {
         // Web closes from any submenu; only the file search returns to the commands.
         Key::Escape => {
@@ -1916,6 +2037,7 @@ fn summary(s: &App, t: &T) -> Option<El> {
         } else {
             (name.to_string(), format!("Creates {}", add_project::clone_destination(&root, &add_project::folder_name(name))))
         };
+        let description = description + &add_project::new_project_suffix(s);
         let glyph = icon(&icons::FOLDER_GIT_2, 16.).color(t.c.contrast_icon_muted);
         return Some(col().w_full().padding(8.).pb(0.).child(summary_row(glyph, title, description, t)));
     }
@@ -1956,6 +2078,8 @@ fn empty_text(s: &App) -> String {
         let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
         return if confirm {
             "Choose a destination path and press Enter to clone."
+        } else if add_project::view(s).needs_project {
+            "Relative paths require an active project."
         } else if add_project::will_create(s) {
             "Press Enter to create this folder and add it as a project."
         } else {
@@ -2057,8 +2181,29 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
             None => text(v.title.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate(),
         },
     };
+    let state = s.state();
+    let thread = v.thread.and_then(|at| state.threads.get(at)).map(|value| (value, crate::shell::sidebar::logic::Thread::from_shell(value)));
+    // `titleLeadingContent` / `titleTrailingContent` sit on the title line, beside the title.
+    let title = match (&v.trailing, &thread) {
+        (Trailing::Theme(current, theme, modes), _) => {
+            let mut line = row().gap(8.0).center_y().min_w(0.0).child(title.shrink());
+            if *current {
+                line = line.child(text("Current").font(theme::TEXT_XS).color(muted.alpha_mul(0.7)));
+            }
+            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
+            line.child(row().gap(4.0).center_y().children(circles))
+        }
+        (_, Some((_, th))) => match thread_row::leading(t, th) {
+            Some(leading) => row().gap(6.0).center_y().min_w(0.0).child(leading).child(title.shrink()),
+            None => title,
+        },
+        _ => title,
+    };
     let mut label = col().grow(1.).shrink().child(title);
-    if let Some(subtitle) = &v.subtitle {
+    let rich = thread.as_ref().and_then(|(value, th)| thread_row::subtitle(s, t, value, th, matches!(&s.route, Route::Thread(id) if *id == th.id)));
+    if let Some(rich) = rich {
+        label = label.child(rich);
+    } else if let Some(subtitle) = &v.subtitle {
         label = label.child(text(subtitle).font(theme::TEXT_XS).color(muted).truncate());
     } else if let Some(description) = &v.description {
         let color = muted.alpha_mul(0.7);
@@ -2071,8 +2216,14 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         Action::OpenProject(id) | Action::Navigate(Route::Home { project_id: Some(id) }) => s.state().projects.iter().find(|p| p["id"] == *id),
         _ => None,
     };
+    // Web `ProjectFilePicker` shows each file's type icon.
+    let file = match &v.action {
+        Action::OpenFile(path) => Some(crate::panel::diff::file_icon(path, 16., t.dark)),
+        _ => None,
+    };
     let glyph = project
         .map(|p| crate::shell::sidebar::favicon::view(s, t, p, 16.))
+        .or(file)
         .or_else(|| v.brand.and_then(|b| add_project::brand(b, 16., t.c.contrast_icon_muted)))
         .unwrap_or_else(|| icon(v.glyph, 16.).color(t.c.contrast_icon_muted));
     let selected = ui.selected == i && (!raw || ui.picked);
@@ -2101,6 +2252,9 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         let action = v.action.clone();
         entry = entry.hover(t.c.accent).on_press_tx(move |s: &mut App, tx| execute(s, action.clone(), tx));
     }
+    if let Some((value, th)) = &thread {
+        entry = entry.children(thread_row::trailing(s, t, value, th, &ui.query.text));
+    }
     if let Some(timestamp) = &v.timestamp {
         entry = entry.child(text(timestamp).font(theme::TEXT_XS).color(muted));
     }
@@ -2123,11 +2277,15 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     .help(hint.clone()),
             )
         }
+        Trailing::Picked => entry = entry.child(icon(&icons::CHECK, 14.).color(t.c.contrast_icon_muted)),
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
+        Trailing::Theme(..) => {}
         Trailing::Pin(members, pinned) if *pinned || selected => {
             let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
+            let shortcut = shortcut_label(s, "thread.pin");
+            let help = if shortcut.is_empty() { label.clone() } else { format!("{label} ({shortcut})") };
             entry = entry.child(
                 kit::Button::new(label.clone())
                     .icon(&icons::PIN)
@@ -2140,47 +2298,24 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     })
                     .build(t)
                     .key(format!("palette-pin-{i}"))
-                    .help(label),
+                    .help(help),
             );
         }
         Trailing::Pin(..) => {}
     }
     entry
 }
-pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
+pub fn overlay(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut out = vec![];
     if s.ui.shell.palette.open {
         out.extend(palette(s, t));
+    } else if let Ok(mut orders) = s.ui.shell.palette.order.try_borrow_mut()
+        && orders.iter().any(|o| !o.is_empty())
+    {
+        *orders = Default::default();
     }
     actions::link_dialog(s, t, &mut out);
-    if let Some(notice) = &s.ui.shell.palette.notice {
-        let mut toast = kit::Toast::new("palette-notice", notice.title.clone());
-        if let Some(description) = &notice.description {
-            toast = toast.description(description.clone());
-        }
-        for (label, primary, run) in &notice.actions {
-            let run = run.clone();
-            let copied = notice.copied.iter().any(|(l, _)| l == label);
-            let off = notice.disabled.contains(label);
-            let button = kit::Button::new(if copied { "Copied!".to_string() } else { label.clone() })
-                .variant(if *primary { "default" } else { "outline" })
-                .size("xs")
-                .disabled(copied || off)
-                .build(t);
-            toast = toast.button(*primary, if copied || off { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
-        }
-        if notice.warning {
-            toast = toast.lead(icon(&icons::TRIANGLE_ALERT, 16.).color(t.c.warning));
-        }
-        if notice.error {
-            toast = toast.lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive));
-        }
-        // A toast that never times out needs a way to go.
-        if notice.error || notice.until == i64::MAX {
-            toast = toast.on_close(|s: &mut App| s.ui.shell.palette.notice = None);
-        }
-        out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
-    }
+    out.extend(crate::shell::toast::view(s, cx, t));
     out
 }
 fn palette(s: &App, t: &T) -> Vec<El> {
@@ -2339,6 +2474,73 @@ mod tests {
         assert!(leave_emptied_page(&mut s));
         assert_eq!(s.ui.shell.palette.page, "add-project");
         assert!(!leave_emptied_page(&mut s), "only the browse page leaves on an empty field");
+    }
+
+    #[test]
+    fn a_one_appearance_theme_sets_only_its_half_and_a_failed_save_says_so() {
+        let mut s = App::new();
+        for key in ["themeLight", "themeDark"] {
+            s.client_settings.values.insert(key.into(), serde_json::json!("t3-code"));
+        }
+        let dusk = serde_json::json!({"id":"custom-dusk","label":"Dusk","appearance":"dark","colors":{"accent":"#123456"}});
+        s.client_settings.values.insert("customThemes".into(), serde_json::json!([dusk]));
+        let rows = theme_items(&s);
+        assert_eq!(rows[0].title, "T3 Code", "FAILED: the standard card leads");
+        assert!(matches!(&rows[0].trailing, Trailing::Theme(true, _, modes) if modes == &["light", "dark"]));
+        let dusk = rows.iter().find(|v| v.title == "Dusk").unwrap();
+        assert_eq!(dusk.description.as_deref(), Some("For dark mode"));
+        execute(&mut s, dusk.action.clone(), &mut Tx::default());
+        let value = |s: &App, key: &str| s.client_settings.values[key].as_str().unwrap().to_owned();
+        assert_eq!((value(&s, "themeLight"), value(&s, "themeDark")), ("t3-code".into(), "custom-dusk".into()));
+        let grove = rows.iter().find(|v| v.title == "Grove").unwrap().action.clone();
+        execute(&mut s, grove.clone(), &mut Tx::default());
+        assert_eq!((value(&s, "themeLight"), value(&s, "themeDark")), ("grove".into(), "grove".into()), "FAILED: a two-appearance theme is whole");
+        assert_eq!(toast_title(&s), None);
+        s.client_settings.error = Some("Could not save client settings: denied".into());
+        execute(&mut s, grove, &mut Tx::default());
+        assert_eq!(toast_title(&s), Some("Couldn't save theme selection"));
+    }
+
+    #[test]
+    fn thread_times_read_like_web_and_linked_threads_answer_their_own_query() {
+        let minute = 60_000;
+        let labels: Vec<_> = [0, 59_000, 5 * minute, 3 * 60 * minute, 2 * 1440 * minute].iter().map(|ago| relative_time(10_000_000_000, 10_000_000_000 - ago)).collect();
+        assert_eq!(labels, ["just now", "just now", "5m ago", "3h ago", "2d ago"]);
+
+        let mut s = App::new();
+        let url = "https://github.com/acme/api/pull/7";
+        let threads = vec![serde_json::json!({"id":"a","title":"","archivedAt":null}), serde_json::json!({"id":"b","title":"Fix","archivedAt":"2026-11-01T00:00:00Z"})];
+        open_linked(&mut s, url, "", Some(threads));
+        let rows: Vec<_> = items(&s).into_iter().filter(|v| v.group == "Threads").map(|v| (v.title, v.description.unwrap_or_default())).collect();
+        assert_eq!(rows, [("Untitled thread".to_owned(), "Linked thread".to_owned()), ("Fix".to_owned(), "Archived thread".to_owned())]);
+        set_query(&mut s, "fix");
+        assert!(items(&s).iter().all(|v| !matches!(v.action, Action::OpenLinked(..))), "FAILED: a new query drops the linked threads");
+    }
+
+    #[test]
+    fn rows_keep_their_opening_order_and_new_ones_join_at_the_end() {
+        let mut order = vec![];
+        assert_eq!(keep_order(vec!["a", "b", "c"], &mut order, |k| *k), ["a", "b", "c"]);
+        // Pinning "c" moved it first; the open palette keeps it (and its jump number) in place.
+        assert_eq!(keep_order(vec!["c", "a", "d", "b"], &mut order, |k| *k), ["a", "b", "c", "d"]);
+        assert_eq!(order, ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn project_rows_carry_jump_keys_into_new_thread_suggestions() {
+        let s = App::new();
+        let rows = project_items(&s, true);
+        let projects: Vec<_> = rows.iter().filter(|v| matches!(v.action, Action::Navigate(_))).collect();
+        assert!(!projects.is_empty());
+        for (n, row) in projects.iter().take(9).enumerate() {
+            assert_eq!(row.command.as_deref(), Some(format!("thread.jump.{}", n + 1).as_str()));
+        }
+        assert!(rows.iter().filter(|v| matches!(v.action, Action::NewWithoutProject)).all(|v| v.command.is_none()), "FAILED: No project keeps its own shortcut");
+        let top = vec![item("New thread in...", "Actions", &icons::SQUARE_PEN, "", Action::Page("projects"))];
+        let first = projects[0].title.clone();
+        let suggested = suggestions(&s, &top, &fold(&first));
+        let row = suggested.iter().find(|v| v.title == format!("New thread in {first}")).expect("FAILED: the submenu row is suggested");
+        assert_eq!((row.group, row.command.as_deref()), ("Suggestions", Some("thread.jump.1")));
     }
 
     #[test]

@@ -181,6 +181,15 @@ impl Net {
             wake: Arc::new(|| {}),
         }
     }
+    /// [`Net::in_memory`] that keeps the requests it is sent, so a client test can check what
+    /// went out and answer it with [`Net::put_reply`].
+    #[cfg(feature = "test-support")]
+    pub fn in_memory_sent(base_url: &str) -> (Net, Sent) {
+        let (tx, commands) = mpsc::channel::<Command>();
+        let mut net = Net::in_memory(base_url);
+        net.tx = tx;
+        (net, Sent(commands))
+    }
     /// Folds decoded messages without waiting for network I/O.
     pub fn drain(&mut self) -> bool {
         let mut changed = false;
@@ -486,6 +495,24 @@ impl Drop for Net {
 }
 /// A WebSocket to one of the server's `/api` routes as this client, such as the preview frame
 /// stream. Reads time out after `read_timeout`, so the caller's loop can also write.
+/// What an [`Net::in_memory_sent`] connection was sent.
+#[cfg(feature = "test-support")]
+pub struct Sent(Receiver<Command>);
+
+#[cfg(feature = "test-support")]
+impl Sent {
+    /// Requests sent since the last call, in order: id, method, payload.
+    pub fn requests(&self) -> Vec<(u64, String, Value)> {
+        self.0
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::Request(id, tag, payload) => Some((id, tag, payload)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 pub fn api_socket(
     base: &str,
     bearer: &str,

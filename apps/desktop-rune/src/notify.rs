@@ -6,15 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rune::{Color, Cursor, El, Tx, col, el, icon, row, text};
+use rune::Tx;
 
-use crate::data;
 use crate::shell::sidebar::logic::{self, Status, Thread};
-use crate::theme::{self, AlphaMul, T, layout};
-use crate::{App, Route, icons, kit};
-
-/// Base UI's default toast timeout.
-const TOAST_MS: i64 = 5000;
+use crate::{App, Route, icons};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -84,16 +79,6 @@ pub fn observe_row(row: &serde_json::Value) -> (Thread, Status, Observation) {
     (thread, status, Observation { attention, settled, completed_at })
 }
 
-struct ThreadToast {
-    id: u64,
-    thread: String,
-    title: &'static str,
-    description: String,
-    kind: Kind,
-    status: Status,
-    until: i64,
-}
-
 /// One environment's watch (`WatchedEnvironment`): each keeps its own gate, so an environment that
 /// drops leaves the others notifying.
 #[derive(Default)]
@@ -108,8 +93,6 @@ pub struct Ui {
     watched: HashMap<String, Watched>,
     /// The native window is in the background (`document.hasFocus()` is false).
     pub background: bool,
-    toasts: Vec<ThreadToast>,
-    next_toast: u64,
     /// Threads with a desktop notification the user has not come back for: the badge count.
     pending: Vec<String>,
     badge: usize,
@@ -132,12 +115,15 @@ fn has_desktop(mode: &str) -> bool {
 
 pub fn window_focus(s: &mut App, focused: bool) {
     s.ui.notify.background = !focused;
+    // A modifier released in another app never reaches this window.
+    crate::shell::sidebar::release_jump(s);
     if focused {
         clear_pending(s);
     }
 }
 
 fn clear_pending(s: &mut App) {
+    os::withdraw(&s.ui.notify.pending);
     s.ui.notify.pending.clear();
     sync_badge(s);
 }
@@ -194,18 +180,11 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     if let Some(waker) = &s.ui.panel.waker {
         os::listen(waker.clone());
     }
-    let now = data::now_ms();
-    let changed = open_clicked(s) | observe(s, now);
-    let before = s.ui.notify.toasts.len();
-    s.ui.notify.toasts.retain(|t| t.until > now);
-    // Nothing else may wake the loop while a toast is up, so its timeout schedules its own poll.
-    if let Some(until) = s.ui.notify.toasts.iter().map(|t| t.until).min() {
-        tx.wake_after(std::time::Duration::from_millis((until - now).max(1) as u64));
-    }
-    changed || before != s.ui.notify.toasts.len()
+    let _ = tx;
+    open_clicked(s) | observe(s)
 }
 
-fn observe(s: &mut App, now: i64) -> bool {
+fn observe(s: &mut App) -> bool {
     let mode = mode(s).to_string();
     if s.ui.notify.applied_mode.as_deref() != Some(mode.as_str()) {
         s.ui.notify.applied_mode = Some(mode.clone());
@@ -248,7 +227,7 @@ fn observe(s: &mut App, now: i64) -> bool {
     }
     let changed = !presented.is_empty();
     for (id, title, status, kind) in presented {
-        present(s, &id, title, status, kind, now);
+        present(s, &id, title, status, kind);
     }
     changed
 }
@@ -264,7 +243,7 @@ fn title_for(kind: Kind, status: Status) -> &'static str {
     }
 }
 
-fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kind, now: i64) {
+fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kind) {
     let title = title_for(kind, status);
     let mode = mode(s).to_string();
     if has_sound(&mode) {
@@ -273,9 +252,7 @@ fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kin
     let active = matches!(&s.route, Route::Thread(open) if open == id);
     let focused = !s.ui.notify.background;
     if in_app(s) && focused && !active {
-        let ui = &mut s.ui.notify;
-        ui.next_toast += 1;
-        ui.toasts.push(ThreadToast { id: ui.next_toast, thread: id.to_string(), title, description, kind, status, until: now + TOAST_MS });
+        toast(s, id, title, description, kind, status);
         return;
     }
     if !has_desktop(&mode) || focused {
@@ -311,66 +288,34 @@ fn play_sound(s: &mut App, kind: Kind) {
     }
 }
 
-/// The in-app toasts, top-right under the topbar, newest first.
-pub fn overlays(s: &App, t: &T) -> Option<El> {
-    let toasts = &s.ui.notify.toasts;
-    if toasts.is_empty() {
-        return None;
-    }
-    let k = kit::theme(t);
-    // The region only positions; each toast plays the popup fade (rune's default would add 300 ms).
-    let mut region = col().key("thread-toasts").transition(rune::Transition::none()).role("region").label("Notifications").pin(None, Some(32.0 + layout::TOPBAR_H), Some(32.0), None).w(360.0).gap(12.0);
-    for toast in toasts.iter().rev().take(3) {
-        region = region.child(toast_view(toast, t, &k));
-    }
-    Some(region)
-}
-
-fn toast_view(toast: &ThreadToast, t: &T, k: &rune_kit::Kit) -> El {
-    let (glyph, color): (&'static rune::Icon, Color) = match (toast.kind, toast.status) {
-        (Kind::Completion, _) => (&icons::CIRCLE_CHECK, t.c.success_foreground),
-        (_, Status::Approval) => (&icons::SHIELD_QUESTION_MARK, t.c.warning_foreground),
-        (_, Status::Limited) => (&icons::CIRCLE_ALERT, t.c.warning_foreground),
-        (_, Status::Failed) => (&icons::CIRCLE_ALERT, t.c.destructive_foreground),
-        _ => (&icons::MESSAGE_CIRCLE_QUESTION_MARK, t.c.info_foreground),
+/// The in-app notification, a toast in the app's stack as web's coordinator raises it.
+fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: Kind, status: Status) {
+    use crate::shell::toast::{self as stack, Tone};
+    let (glyph, tone): (&'static rune::Icon, Tone) = match (kind, status) {
+        (Kind::Completion, _) => (&icons::CIRCLE_CHECK, Tone::Success),
+        (_, Status::Approval) => (&icons::SHIELD_QUESTION_MARK, Tone::Warning),
+        (_, Status::Limited) => (&icons::CIRCLE_ALERT, Tone::Warning),
+        (_, Status::Failed) => (&icons::CIRCLE_ALERT, Tone::Destructive),
+        _ => (&icons::MESSAGE_CIRCLE_QUESTION_MARK, Tone::Info),
     };
-    let id = toast.id;
-    let thread = toast.thread.clone();
-    let open = kit::Button::new("Open thread")
-        .size("xs")
-        .on_press(move |s: &mut App| {
-            s.ui.notify.toasts.retain(|t| t.id != id);
+    let level = match (kind, status) {
+        (Kind::Completion, _) => stack::Kind::Success,
+        (_, Status::Failed) => stack::Kind::Error,
+        _ => stack::Kind::Warning,
+    };
+    let mut toast = stack::Toast::new(title, Some(&description), level);
+    toast.lead = Some((glyph, tone));
+    toast.hide_copy = true;
+    let (thread, at) = (id.to_owned(), stack::next_id(s));
+    toast.actions = vec![(
+        "Open thread".into(),
+        true,
+        std::rc::Rc::new(move |s: &mut App, _: &mut Tx| {
+            stack::close(s, at);
             crate::shell::sidebar::open_thread(s, &thread);
-        })
-        .build(t);
-    let body = col()
-        .grow(1.0)
-        .shrink()
-        .min_w(0.0)
-        .gap(2.0)
-        .child(
-            row()
-                .gap(8.0)
-                .min_w(0.0)
-                .child(el().w(16.0).h(20.0).center().child(icon(glyph, 16.0).color(color)))
-                .child(text(toast.title).font(theme::SM_MEDIUM).color(t.c.popover_foreground).wrap().shrink().min_w(0.0)),
-        )
-        .child(text(toast.description.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().max_lines(3));
-    let dismiss = el()
-        .key("toast-dismiss")
-        .role("button")
-        .label("Dismiss notification")
-        .pin(None, Some(-6.0), Some(-6.0), None)
-        .size(24.0, 24.0)
-        .center()
-        .radius(theme::radius::FULL)
-        .fill(t.c.popover.alpha_mul(0.92))
-        .border(1.0, t.c.border.alpha_mul(0.6))
-        .cursor(Cursor::Pointer)
-        .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
-        .on_press(move |s: &mut App| s.ui.notify.toasts.retain(|t| t.id != id));
-    let content = row().w_full().pl(14.0).pr(24.0).py(12.0).gap(6.0).center_y().child(body).child(open);
-    kit::motion::popup(kit::menu::glass(col().key(format!("thread-toast-{id}")).role("status").w_full().child(content).child(dismiss), k, false))
+        }),
+    )];
+    stack::add(s, toast, Some(stack::TIMEOUT_MS));
 }
 
 /// Desktop notifications and the unread badge. macOS posts through Notification Center when the
@@ -390,29 +335,104 @@ mod os {
         });
     }
 
-    /// On Linux, `notify-send --wait` prints the action the user clicked; older libnotify
-    /// without `--action` fails, and the plain notification shows instead.
+    /// Linux notifications on screen, by the thread they're for: a newer one for the same thread
+    /// replaces it, as web's notification `tag` does, and focusing the window closes them all.
+    #[derive(Default)]
+    pub struct Shown(Vec<(String, u32)>);
+
+    impl Shown {
+        pub fn id(&self, thread: &str) -> Option<u32> {
+            self.0.iter().find(|(t, _)| t == thread).map(|&(_, id)| id)
+        }
+
+        pub fn record(&mut self, thread: &str, id: u32) {
+            self.0.retain(|(t, _)| t != thread);
+            self.0.push((thread.to_owned(), id));
+        }
+
+        /// The notification closed (its helper exited); a replacement keeps its id.
+        pub fn forget(&mut self, thread: &str, id: u32) {
+            self.0.retain(|(t, i)| !(t == thread && *i == id));
+        }
+
+        pub fn take(&mut self, threads: &[String]) -> Vec<u32> {
+            let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|(t, _)| threads.contains(t));
+            self.0 = kept;
+            gone.into_iter().map(|(_, id)| id).collect()
+        }
+    }
+
+    static SHOWN: std::sync::Mutex<Shown> = std::sync::Mutex::new(Shown(Vec::new()));
+
+    pub fn notify_send_args(title: &str, body: &str, replace: Option<u32>) -> Vec<String> {
+        let mut args = vec!["--app-name".to_owned(), "S5 Code".to_owned(), "--action=default=Open".to_owned(), "--wait".to_owned(), "--print-id".to_owned()];
+        args.extend(replace.map(|id| format!("--replace-id={id}")));
+        args.extend([title.to_owned(), body.to_owned()]);
+        args
+    }
+
+    /// Closes the desktop notifications still showing for these threads.
+    pub fn withdraw(threads: &[String]) {
+        if cfg!(target_os = "linux") {
+            let ids = SHOWN.lock().map(|mut s| s.take(threads)).unwrap_or_default();
+            if ids.is_empty() {
+                return;
+            }
+            std::thread::spawn(move || {
+                for id in ids {
+                    let _ = std::process::Command::new("gdbus")
+                        .args(["call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.CloseNotification", &id.to_string()])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            });
+            return;
+        }
+        let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
+        rune_mac::notify::remove(&ids);
+    }
+
+    /// On Linux, `notify-send --wait --print-id` prints the notification's id, then the action
+    /// the user clicked; older libnotify without `--action` fails, and the plain notification
+    /// shows instead.
     pub fn notify(title: &str, body: &str, thread: &str, wake: Option<rune::Waker>) {
         if cfg!(target_os = "linux") {
+            use std::io::BufRead;
             let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
+            let replace = SHOWN.lock().ok().and_then(|s| s.id(&thread));
             std::thread::spawn(move || {
-                let out = std::process::Command::new("notify-send")
-                    .args(["--app-name", "S5 Code", "--action=default=Open", "--wait", &title, &body])
+                let child = std::process::Command::new("notify-send")
+                    .args(notify_send_args(&title, &body, replace))
                     .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
-                    .output();
-                match out {
-                    Ok(out) if out.status.success() => {
-                        if String::from_utf8_lossy(&out.stdout).trim() == "default" {
-                            super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
-                            if let Some(wake) = wake {
-                                wake();
+                    .spawn();
+                let Ok(mut child) = child else { return };
+                let (mut id, mut clicked) = (None, false);
+                if let Some(out) = child.stdout.take() {
+                    for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                        match (id, line.trim().parse::<u32>()) {
+                            (None, Ok(n)) => {
+                                id = Some(n);
+                                SHOWN.lock().map(|mut s| s.record(&thread, n)).ok();
                             }
+                            _ => clicked |= line.trim() == "default",
                         }
                     }
-                    _ => {
-                        let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
+                }
+                let ok = child.wait().is_ok_and(|s| s.success());
+                if let Some(n) = id {
+                    SHOWN.lock().map(|mut s| s.forget(&thread, n)).ok();
+                }
+                if clicked {
+                    super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
+                    if let Some(wake) = wake {
+                        wake();
                     }
+                } else if !ok && id.is_none() {
+                    let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
                 }
             });
             return;
@@ -521,6 +541,7 @@ mod os {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data;
     use serde_json::json;
 
     #[test]
@@ -529,6 +550,26 @@ mod tests {
         assert_eq!(args[6], format!("application://{}.desktop", crate::APP_ID));
         assert_eq!(args[7], "{'count': <int64 3>, 'count-visible': <true>}");
         assert_eq!(os::launcher_entry(0)[7], "{'count': <int64 0>, 'count-visible': <false>}");
+    }
+
+    #[test]
+    fn a_threads_linux_notification_replaces_its_last_until_focus_closes_them() {
+        let mut shown = os::Shown::default();
+        assert!(!os::notify_send_args("Thread completed", "Fix tests", None).iter().any(|a| a.starts_with("--replace-id")));
+        shown.record("t1", 7);
+        shown.record("t2", 9);
+        let args = os::notify_send_args("Input needed", "Fix tests", shown.id("t1"));
+        assert!(args.contains(&"--replace-id=7".to_owned()) && args.contains(&"--print-id".to_owned()), "{args:?}");
+        assert_eq!(args[args.len() - 2..], ["Input needed".to_owned(), "Fix tests".to_owned()]);
+
+        // The replaced helper exits with the id the replacement now holds: the newer one stays.
+        shown.record("t1", 7);
+        shown.forget("t1", 6);
+        assert_eq!(shown.id("t1"), Some(7));
+        assert_eq!(shown.take(&["t1".to_owned()]), vec![7]);
+        assert_eq!((shown.id("t1"), shown.id("t2")), (None, Some(9)));
+        shown.forget("t2", 9);
+        assert_eq!(shown.take(&["t2".to_owned()]), Vec::<u32>::new());
     }
 
     fn obs(attention: Option<&str>, completed_at: Option<i64>) -> Observation {
@@ -605,22 +646,22 @@ mod tests {
         let mut local = data::empty_state();
         local.shell_ready = true;
         s.src = data::Source::Fixture(local);
-        let titles = |s: &App| s.ui.notify.toasts.iter().map(|t| (t.title, t.description.clone())).collect::<Vec<_>>();
+        let titles = |s: &App| crate::shell::toast::titles(s).into_iter().map(|(t, d)| (t, d.unwrap_or_default())).collect::<Vec<_>>();
         let here = |s: &mut App, row: &serde_json::Value| {
             if let data::Source::Fixture(st) = &mut s.src {
                 st.threads.retain(|t| t["id"] != row["id"]);
                 st.threads.push(row.clone());
                 st.shell_revision += 1;
             }
-            observe(s, 0);
+            observe(s);
         };
 
         for row in turn("t1", "run:1", "2026-11-11T17:56:04.759Z") {
             here(&mut s, &row);
         }
-        assert_eq!(titles(&s), [("Thread completed", "Title t1".to_string())]);
+        assert_eq!(titles(&s), [("Thread completed".to_string(), "Title t1".to_string())]);
         here(&mut s, &turn("t1", "run:1", "2026-11-11T17:56:04.759Z")[3]);
-        assert_eq!(s.ui.notify.toasts.len(), 1, "each completion notifies once");
+        assert_eq!(titles(&s).len(), 1, "each completion notifies once");
 
         // A thread on a parked environment finishing while this machine is focused.
         s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example".into(), bearer: String::new() });
@@ -632,16 +673,16 @@ mod tests {
             st.threads = vec![row];
             st.shell_revision += 1;
             crate::env::drain(&mut s);
-            observe(&mut s, 0);
+            observe(&mut s);
         }
-        assert_eq!(titles(&s)[1], ("Thread completed", "Title t2".to_string()));
+        assert_eq!(titles(&s)[1], ("Thread completed".to_string(), "Title t2".to_string()));
 
         // The thread on screen never toasts (`present`'s active-thread check).
         s.route = Route::Thread("t1".into());
         for row in turn("t1", "run:3", "2026-11-11T17:58:00.000Z") {
             here(&mut s, &row);
         }
-        assert_eq!(s.ui.notify.toasts.len(), 2);
+        assert_eq!(titles(&s).len(), 2);
 
         // In the background, toasts give way to desktop notifications, which this mode leaves off.
         s.route = Route::Home { project_id: None };
@@ -649,7 +690,7 @@ mod tests {
         for row in turn("t1", "run:4", "2026-11-11T17:59:00.000Z") {
             here(&mut s, &row);
         }
-        assert_eq!(s.ui.notify.toasts.len(), 2);
+        assert_eq!(titles(&s).len(), 2);
         assert!(s.ui.notify.pending.is_empty());
 
         // The focused remote drops; this machine's threads still notify.
@@ -664,8 +705,8 @@ mod tests {
             st.threads.retain(|t| t["id"] != row["id"]);
             st.threads.push(row);
             st.shell_revision += 1;
-            observe(&mut s, 0);
+            observe(&mut s);
         }
-        assert_eq!(titles(&s)[2], ("Thread completed", "Title t5".to_string()));
+        assert_eq!(titles(&s)[2], ("Thread completed".to_string(), "Title t5".to_string()));
     }
 }

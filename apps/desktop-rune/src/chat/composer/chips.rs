@@ -7,7 +7,7 @@
 
 use std::ops::Range;
 
-use rune::{Align, Color, El, Icon, Key, KeyEvent, PillStyle, Side, TextEdit, Tx, auto_grow, col, row, text, text_input};
+use rune::{Align, Color, El, Icon, Key, KeyEvent, Link, LinkPaint, PillStyle, Side, TextEdit, Tx, auto_grow, col, row, text, text_input};
 use serde_json::{Value, json};
 
 use crate::App;
@@ -21,6 +21,10 @@ const HREF: &str = "t3-context://v1/";
 pub const PILL: &str = "ctx:";
 /// Pill ids for quote chips: the prefix, then the quote's link as it was written.
 pub const CITE: &str = "cite:";
+/// Pill ids for skill chips: the prefix, then the skill's name. They send as `$name`.
+pub const SKILL: &str = "skill:";
+/// A bubble's skill chip link: the prefix, then the skill's name.
+const SKILL_LINK: &str = "skill/";
 const QUOTE_LINK: &str = "[Assistant quote](t3-citation://v1/";
 const LABEL_MAX: usize = 200;
 const TERMINAL_TEXT_MAX: usize = 64_000;
@@ -35,6 +39,35 @@ pub fn sanitize_label(label: &str, kind: &str) -> String {
 
 pub fn pill_id(record: &Value) -> String {
     format!("{PILL}{}/{}", s(record, "kind"), s(record, "contextId"))
+}
+
+pub fn skill_pill(name: &str) -> String {
+    format!("{SKILL}{name}")
+}
+
+/// formatProviderSkillDisplayName.
+pub fn skill_label(skill: &Value) -> String {
+    match s(skill, "displayName").trim() {
+        "" => s(skill, "name").to_owned(),
+        display => display.to_owned(),
+    }
+}
+
+/// threadContextRecord: a thread `@` mention as a context chip.
+pub fn thread(environment_id: &str, thread_id: &str, title: &str) -> Value {
+    let label = sanitize_label(title, "thread");
+    json!({
+        "version": 1, "kind": "thread", "contextId": context_id("thread", thread_id),
+        "label": label, "environmentId": environment_id, "threadId": thread_id, "title": label,
+    })
+}
+
+/// environmentContextRecord: a machine `@` mention as a context chip.
+pub fn environment(environment_id: &str, label: &str) -> Value {
+    json!({
+        "version": 1, "kind": "environment", "contextId": context_id("environment", environment_id),
+        "label": sanitize_label(label, "environment"), "environmentId": environment_id,
+    })
 }
 
 /// A terminal selection (ThreadTerminalDrawer's "Add to chat").
@@ -163,6 +196,11 @@ pub fn outgoing(edit: &TextEdit, contexts: &[Value]) -> (String, Vec<Value>) {
             out.push_str(&format!("[Assistant quote]({href})"));
             continue;
         }
+        if let Some(name) = id.strip_prefix(SKILL) {
+            out.push('$');
+            out.push_str(name);
+            continue;
+        }
         if !id.starts_with(PILL) {
             out.push_str(&file_link(id));
             continue;
@@ -244,16 +282,122 @@ fn citation_links(text: &str) -> (String, Vec<(Shown, Range<usize>)>) {
     (out, found)
 }
 
-/// Chip ranges moved past the links a later pass folded before them.
+/// Chip ranges moved past the tokens a later pass folded before them (a label may be longer).
 fn remap(chips: Vec<Shown>, mentions: &[(Shown, Range<usize>)]) -> Vec<Shown> {
     chips
         .into_iter()
         .map(|mut c| {
-            let delta: usize = mentions.iter().filter(|(_, before)| before.end <= c.range.start).map(|(m, before)| before.len() - m.range.len()).sum();
-            c.range = c.range.start - delta..c.range.end - delta;
+            let delta: isize = mentions.iter().filter(|(_, before)| before.end <= c.range.start).map(|(m, before)| m.range.len() as isize - before.len() as isize).sum();
+            c.range = c.range.start.saturating_add_signed(delta)..c.range.end.saturating_add_signed(delta);
             c
         })
         .collect()
+}
+
+/// `\p{Sc}` for the signs a skill token can start with.
+fn currency(c: char) -> bool {
+    c == '$' || ('\u{a2}'..='\u{a5}').contains(&c) || ('\u{20a0}'..='\u{20c0}').contains(&c)
+}
+
+/// An amount such as `$100`, `$5k` or `$1e6`, which never reads as a skill.
+fn amount(name: &str) -> bool {
+    let b = name.as_bytes();
+    if !b.first().is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    let digits = b.iter().position(|c| !(c.is_ascii_digit() || *c == b'_')).unwrap_or(b.len());
+    match &b[digits..] {
+        [] => true,
+        [c] => b"kKmMbBtT".contains(c),
+        [b'e' | b'E', exponent @ ..] => !exponent.is_empty() && exponent.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+/// SKILL_TOKEN_REGEX: a currency sign starting a word, then a whole word of letters, digits, `:`,
+/// `_` or `-` that starts with a letter or digit, holds a letter and is not an amount. Each
+/// token's range covers the sign, with the name.
+fn skill_tokens(text: &str) -> Vec<(Range<usize>, &str)> {
+    let (mut out, mut boundary) = (Vec::new(), true);
+    for (i, c) in text.char_indices() {
+        let starts_word = boundary;
+        boundary = c.is_whitespace();
+        if !starts_word || !currency(c) {
+            continue;
+        }
+        let start = i + c.len_utf8();
+        let end = text[start..].find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-'))).map_or(text.len(), |k| start + k);
+        let name = &text[start..end];
+        let ends_word = text[end..].chars().next().is_none_or(char::is_whitespace);
+        let leads = name.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric);
+        if ends_word && leads && name.bytes().any(|b| b.is_ascii_alphabetic()) && !amount(name) {
+            out.push((i..end, name));
+        }
+    }
+    out
+}
+
+/// matchInlineSkills over display text (SkillInlineText): each `$name` of a known skill becomes
+/// its display name, outside the chips already found. Returns the text, those chips moved to
+/// match, and the skill chips (kind "skill", id the name).
+pub fn with_skills(text: String, chips: Vec<Shown>, skills: &[&Value]) -> (String, Vec<Shown>, Vec<Shown>) {
+    if skills.is_empty() || !text.contains(currency) {
+        return (text, chips, Vec::new());
+    }
+    let tokens: Vec<(Range<usize>, &Value)> = skill_tokens(&text)
+        .into_iter()
+        .filter(|(r, _)| !chips.iter().any(|c| c.range.start < r.end && r.start < c.range.end))
+        .filter_map(|(r, name)| Some((r, *skills.iter().find(|k| s(k, "name") == name)?)))
+        .collect();
+    if tokens.is_empty() {
+        return (text, chips, Vec::new());
+    }
+    let (mut out, mut found, mut at) = (String::new(), Vec::new(), 0);
+    for (r, skill) in tokens {
+        out.push_str(&text[at..r.start]);
+        let label = skill_label(skill);
+        found.push((Shown { range: out.len()..out.len() + label.len(), kind: "skill".into(), id: s(skill, "name").to_owned() }, r.clone()));
+        out.push_str(&label);
+        at = r.end;
+    }
+    out.push_str(&text[at..]);
+    let chips = remap(chips, &found);
+    (out, chips, found.into_iter().map(|(c, _)| c).collect())
+}
+
+/// skillPopoverDescription, or the popover's fallback.
+fn skill_help(skill: Option<&Value>) -> String {
+    let description = skill.map(|k| [s(k, "description").trim(), s(k, "shortDescription").trim()]).and_then(|d| d.into_iter().find(|d| !d.is_empty()));
+    description.unwrap_or("No description is available for this skill.").to_owned()
+}
+
+/// A bubble's skill chips as links: the description on hover; a press opens the instructions.
+pub fn skill_links(shown: &[Shown], skills: &[&Value]) -> Vec<Link> {
+    let accent = look("skill", None).map_or(Color::TRANSPARENT, |(a, _)| a);
+    shown
+        .iter()
+        .map(|c| {
+            let skill = skills.iter().find(|k| s(k, "name") == c.id).copied();
+            Link::new(c.range.clone(), format!("{SKILL_LINK}{}", c.id)).role("button").hover(LinkPaint::new().underline(accent)).help(skill_help(skill))
+        })
+        .collect()
+}
+
+/// "View instructions": a skill chip's press opens its SKILL.md in the Files panel. False for
+/// any other link.
+pub fn open_skill(app: &mut App, link: &str) -> bool {
+    let Some(name) = link.strip_prefix(SKILL_LINK) else { return false };
+    let path = timeline_skills(app).into_iter().find(|k| s(k, "name") == name).map(|k| s(k, "path").to_owned());
+    // Built-in skills name no file (`<built-in>`).
+    if let Some(path) = path.filter(|p| !p.is_empty() && !p.starts_with('<')) {
+        crate::panel::open_file(app, path);
+    }
+    true
+}
+
+/// The skills a sent `$name` can name: the selected provider's, for the thread's cwd.
+pub fn timeline_skills(s: &App) -> Vec<&Value> {
+    super::menu::skills(s)
 }
 
 /// `[basename](path)` tokens bounded by whitespace whose label is the path's basename, each with
@@ -361,6 +505,7 @@ pub fn look(kind: &str, record: Option<&Value>) -> Option<(Color, &'static Icon)
         "thread" => (accent(0.12, 190.0), &icons::MESSAGES_SQUARE),
         "environment" => (accent(0.11, 145.0), &icons::SERVER),
         "citation" => (accent(0.16, 259.0), &icons::QUOTE),
+        "skill" => (accent(0.16, 322.0), &icons::BOX),
         "review-comment" => match record.map(|r| &r["pullRequest"]).filter(|p| p.is_object()) {
             Some(pr) if pr["state"] == "merged" => (accent(0.16, 292.0), &icons::GIT_MERGE),
             Some(pr) if pr["state"] == "closed" => (accent(0.16, 16.0), &icons::GIT_PULL_REQUEST_CLOSED),
@@ -386,6 +531,9 @@ pub fn pill_style(id: &str, contexts: &[Value]) -> PillStyle {
     if id.starts_with(CITE) {
         return style("citation", None);
     }
+    if id.starts_with(SKILL) {
+        return style("skill", None);
+    }
     match id.strip_prefix(PILL) {
         Some(rest) => {
             let kind = rest.split('/').next().unwrap_or("");
@@ -401,15 +549,17 @@ pub fn citation_pill(href: &str) -> String {
 }
 
 /// The quote chip whose comment is being edited (AssistantCitationCommentEditor): its draft,
-/// where its pill started, the pill id, and the comment as typed.
+/// where its pill started, the pill id, and the comment as typed. A chip just cited from a reply
+/// keeps the spaces inserted before and after it, as cancelling takes them out with it.
 pub struct CommentEditor {
     target: Option<(String, usize, String)>,
     edit: TextEdit,
+    remove_on_cancel: Option<(bool, bool)>,
 }
 
 impl Default for CommentEditor {
     fn default() -> CommentEditor {
-        CommentEditor { target: None, edit: TextEdit::new("") }
+        CommentEditor { target: None, edit: TextEdit::new(""), remove_on_cancel: None }
     }
 }
 
@@ -462,13 +612,55 @@ fn open_comment(s: &mut App, start: usize, pill: &str) {
     }
     let mut edit = TextEdit::new(saved);
     edit.focused = true;
-    s.ui.chat.composer.citation = CommentEditor { target: Some((key, start, pill.to_owned())), edit };
+    s.ui.chat.composer.citation = CommentEditor { target: Some((key, start, pill.to_owned())), edit, remove_on_cancel: None };
+}
+
+/// citeAssistantText: the quote goes in at the caret as a chip, a space before it unless one is
+/// there and one after, and its comment editor opens.
+pub fn cite(s: &mut App, quote: &Citation) {
+    let d = super::draft_mut(s);
+    d.edit.set_caret(d.edit.focus);
+    let at = d.edit.range().1;
+    let before = at > 0 && !d.edit.text[..at].ends_with(char::is_whitespace);
+    let after = !d.edit.text[at..].starts_with(char::is_whitespace);
+    if before {
+        d.edit.insert(" ");
+    }
+    let start = d.edit.range().1;
+    let pill = citation_pill(&citation_href(quote));
+    d.edit.insert_pill(pill.clone(), &citation_label(quote));
+    if after {
+        d.edit.insert(" ");
+    }
+    open_comment(s, start, &pill);
+    s.ui.chat.composer.citation.remove_on_cancel = Some((before, after));
+}
+
+/// The chip at `pill` taken back out with the spaces its citing inserted.
+fn uncite(edit: &mut TextEdit, pill: &str, start: usize, (before, after): (bool, bool)) {
+    let Some(r) = find_pill(edit, pill, start) else { return };
+    let a = if before && edit.text[..r.start].ends_with(' ') { r.start - 1 } else { r.start };
+    let b = if after && edit.text[r.end..].starts_with(' ') { r.end + 1 } else { r.end };
+    edit.set_selection(a, b);
+    edit.insert("");
+}
+
+/// Escape and Cancel: a chip just cited goes again (onRemove), any other keeps its comment.
+fn cancel_comment(s: &mut App) {
+    let ui = &mut s.ui.chat.composer;
+    if let (Some((key, start, pill)), Some(spaces)) = (&ui.citation.target, ui.citation.remove_on_cancel)
+        && let Some(d) = ui.drafts.get_mut(key)
+    {
+        uncite(&mut d.edit, pill, *start, spaces);
+    }
+    close_comment(s, true);
 }
 
 /// Closes the editor; `refocus` puts the caret back in the prompt (the chip's onRestoreFocus).
 fn close_comment(s: &mut App, refocus: bool) {
     let ui = &mut s.ui.chat.composer;
     ui.citation.edit.focused = false;
+    ui.citation.remove_on_cancel = None;
     if let Some((key, ..)) = ui.citation.target.take()
         && refocus
         && let Some(d) = ui.drafts.get_mut(&key)
@@ -507,7 +699,7 @@ fn dismiss_comment(s: &mut App) {
 fn comment_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
     match e.key {
         Key::Escape => {
-            close_comment(s, true);
+            cancel_comment(s);
             true
         }
         Key::Enter if !e.mods.shift && (e.mods.cmd || e.mods.ctrl) => {
@@ -528,12 +720,14 @@ pub fn citation_popover(s: &App, t: &T) -> Option<El> {
         return None;
     }
     let ui = &s.ui.chat.composer.citation;
-    let editing = ui.target.as_ref().and_then(|(key, start, pill)| {
+    // Each composer (the chat's, a side chat's) shows only the editor it opened.
+    let mine = super::active_key(s);
+    let editing = ui.target.as_ref().filter(|(key, ..)| *key == mine).and_then(|(key, start, pill)| {
         find_pill(&s.ui.chat.composer.drafts.get(key)?.edit, pill, *start)?;
         parse_citation(pill.strip_prefix(CITE)?)
     });
     if let Some(quote) = editing {
-        return Some(comment_editor(t, &quote, &ui.edit));
+        return Some(comment_editor(s, t, &quote, &ui.edit));
     }
     let d = super::draft(s)?;
     if !d.edit.focused || d.edit.anchor != d.edit.focus {
@@ -549,11 +743,11 @@ pub fn citation_popover(s: &App, t: &T) -> Option<El> {
     let quote = parse_citation(&pill[CITE.len()..])?;
     let label = if quote.comment.is_some() { "Edit citation comment" } else { "Add comment to citation" };
     let (start, pill) = (range.start, pill.to_owned());
-    let pencil = crate::kit::icon_button(&icons::PENCIL, label).variant("outline").size("icon-sm").on_press(move |s: &mut App| open_comment(s, start, &pill)).build(t);
-    Some(citation_card(t, &quote, Some(pencil)).key("composer-citation-card").preserve_focus_on_press(true).anchored("composer", Side::Top, Align::Start, 8.0))
+    let pencil = crate::kit::icon_button(&icons::PENCIL, label).variant("outline").size("icon-sm").on_press(super::act(s, move |s: &mut App| open_comment(s, start, &pill))).build(t);
+    Some(citation_card(t, &quote, Some(pencil)).key("composer-citation-card").preserve_focus_on_press(true).anchored(super::keyed(s, "composer"), Side::Top, Align::Start, 8.0))
 }
 
-fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
+fn comment_editor(s: &App, t: &T, quote: &Citation, edit: &TextEdit) -> El {
     let long = too_long(&edit.text);
     let input = text_input(edit, theme::TEXT_SM.lh(20.0))
         .key("citation-comment-input")
@@ -567,13 +761,13 @@ fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
         .on_submit(|s: &mut App, _| {
             save_comment(s);
         })
-        .on_input_key(comment_key);
+        .on_input_key(super::act_key(s, comment_key));
     let mut body = col().w_full().gap(8.0).child(auto_grow(input, 2, 6));
     if long {
         let limit = super::context::thousands(MAX_COMMENT as u64);
         body = body.child(text(format!("Comments can contain up to {limit} characters.")).font(theme::TEXT_XS).color(t.c.destructive).role("status").wrap().w_full());
     }
-    let cancel = crate::kit::Button::new("Cancel").variant("outline").size("xs").on_press(|s: &mut App| close_comment(s, true)).build(t);
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").size("xs").on_press(cancel_comment).build(t);
     let save = crate::kit::Button::new(if long { "Shorten comment" } else { "Save" }).size("xs").disabled(long).on_press(|s: &mut App| {
         save_comment(s);
     });
@@ -589,7 +783,7 @@ fn comment_editor(t: &T, quote: &Citation, edit: &TextEdit) -> El {
         .role("dialog")
         .label(format!("Edit citation comment: {}", citation_label(quote)))
         .child(body.child(buttons))
-        .anchored("composer", Side::Top, Align::End, 8.0)
+        .anchored(super::keyed(s, "composer"), Side::Top, Align::End, 8.0)
         .modal(true, dismiss_comment)
 }
 
@@ -696,6 +890,44 @@ mod tests {
     }
 
     #[test]
+    fn skill_tokens_read_as_chips_only_for_known_skills_outside_other_chips() {
+        let names = |text: &str| skill_tokens(text).into_iter().map(|(r, n)| (r, n.to_owned())).collect::<Vec<_>>();
+        assert_eq!(names("$a-b run €fix:it"), [(0..4, "a-b".to_owned()), (9..18, "fix:it".to_owned())]);
+        for amount in ["$100", "$5k", "$1e6", "$1_000", "x$skill", "$skill.", "$-x", "$"] {
+            assert!(names(amount).is_empty(), "{amount}");
+        }
+        assert_eq!(names("$5kb $v2")[..], [(0..4, "5kb".to_owned()), (5..8, "v2".to_owned())]);
+
+        let review = json!({"name": "review", "displayName": "Review PR", "description": " Reviews it ", "path": "/r/SKILL.md"});
+        let other = json!({"name": "other"});
+        let skills = [&review, &other];
+        let term = terminal("t1", "T", 1, 1, "ls");
+        let (shown, chips) = display(&format!("{} then $review and $nope, [a.rs](a.rs) $other", link(&term)));
+        let (shown, chips, skilled) = with_skills(shown, chips, &skills);
+        assert_eq!(shown, "T line 1 then Review PR and $nope, a.rs other");
+        let labels = |list: &[Shown]| list.iter().map(|c| &shown[c.range.clone()]).collect::<Vec<_>>();
+        assert_eq!(labels(&chips), ["T line 1", "a.rs"], "FAILED: the other chips move past a longer label");
+        assert_eq!(labels(&skilled), ["Review PR", "other"]);
+        assert_eq!(skilled[0].id, "review");
+        let links = skill_links(&skilled, &skills);
+        assert_eq!(links.len(), 2);
+        assert_eq!(skill_help(Some(&review)), "Reviews it");
+        assert_eq!(skill_help(Some(&other)), "No description is available for this skill.");
+
+        let (plain, none, empty) = with_skills("$review".into(), Vec::new(), &[]);
+        assert_eq!((plain.as_str(), none.len(), empty.len()), ("$review", 0, 0));
+    }
+
+    #[test]
+    fn skill_pills_send_as_their_token() {
+        let mut edit = TextEdit::new("");
+        edit.insert_pill(skill_pill("review"), "Review PR");
+        edit.insert(" this");
+        assert_eq!(outgoing(&edit, &[]), ("$review this".to_owned(), Vec::new()));
+        assert_eq!(skill_label(&json!({"name": "x", "displayName": "  "})), "x");
+    }
+
+    #[test]
     fn a_picked_elements_crop_goes_only_with_its_chip() {
         let pick = json!({"kind": "preview-annotation", "contextId": "preview-annotation_a1", "annotationId": "a1", "label": "Demo"});
         assert!(keeps_attachment("/x/preview-annotation-a1.png", &[pick.clone()]));
@@ -768,5 +1000,31 @@ mod tests {
         assert_eq!(dismissal("new", Some("old")), Dismissal::Commit);
         assert_eq!(dismissal("", Some("old")), Dismissal::Commit);
         assert_eq!(dismissal(&"x".repeat(MAX_COMMENT + 1), None), Dismissal::KeepOpen);
+    }
+
+    #[test]
+    fn escape_closes_only_the_comment_editor_and_takes_back_a_fresh_cite() {
+        let mut s = App::new();
+        let href = citation_href(&quote(None));
+        super::super::append_with_chips(&mut s, &format!("see [Assistant quote]({href}) ok"), &[], "");
+        let prompt = super::super::draft(&s).unwrap().edit.text.clone();
+        open_comment(&mut s, 4, &citation_pill(&href));
+        s.ui.chat.composer.permissions_open = true;
+        s.ui.chat.timeline.chip = Some(("message".into(), "context".into()));
+        let escape = KeyEvent { key: Key::Escape, mods: rune::Mods::default() };
+        assert!(comment_key(&mut s, &escape, &mut Tx::default()), "FAILED: the editor takes Escape, so no modal behind it hears it");
+        assert!(s.ui.chat.composer.citation.target.is_none(), "FAILED: Escape closes the editor");
+        assert!(s.ui.chat.composer.permissions_open, "FAILED: the menu behind the editor stays open");
+        assert!(s.ui.chat.timeline.chip.is_some(), "FAILED: the timeline popover stays open");
+        let d = super::super::draft(&s).unwrap();
+        assert!(d.edit.focused, "FAILED: the caret goes back to the prompt");
+        assert_eq!((d.edit.text.as_str(), d.edit.pills().count()), (prompt.as_str(), 1), "FAILED: a chip already there keeps its place");
+
+        cite(&mut s, &quote(Some("Why?")));
+        assert!(s.ui.chat.composer.citation.target.is_some(), "FAILED: citing opens the comment editor");
+        assert_eq!(super::super::draft(&s).unwrap().edit.text, format!("{prompt} Why? "));
+        assert!(comment_key(&mut s, &escape, &mut Tx::default()));
+        assert!(s.ui.chat.composer.citation.target.is_none());
+        assert_eq!(super::super::draft(&s).unwrap().edit.text, prompt, "FAILED: cancelling a fresh cite takes the chip and its spaces back out");
     }
 }

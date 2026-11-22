@@ -643,7 +643,7 @@ fn recheck_outdated(s: &mut App) -> bool {
                 continue;
             }
         };
-        match s.ui.env.recheck.get(&key) {
+        match s.ui.env.recheck.get(&key).map(Option::is_some) {
             None if !rune::is_headless() => {
                 let (tx, rx) = channel();
                 let waker = s.ui.panel.waker.clone();
@@ -655,8 +655,8 @@ fn recheck_outdated(s: &mut App) -> bool {
                 });
                 s.ui.env.recheck.insert(key, Some(rx));
             }
-            Some(Some(rx)) => {
-                let Ok(result) = rx.try_recv() else { continue };
+            Some(true) => {
+                let Some(result) = s.ui.env.recheck.get(&key).and_then(Option::as_ref).and_then(|rx| rx.try_recv().ok()) else { continue };
                 s.ui.env.recheck.insert(key.clone(), None);
                 changed |= recheck_landed(s, &key, result);
             }
@@ -667,8 +667,8 @@ fn recheck_outdated(s: &mut App) -> bool {
 }
 
 fn recheck_landed(s: &mut App, key: &str, result: Result<Value, String>) -> bool {
-    let Ok(descriptor) = result.filter(|d| d["environmentId"] == key) else { return false };
-    if protocol(&descriptor) == PROTOCOL {
+    let Ok(descriptor) = result else { return false };
+    if descriptor["environmentId"] == key && protocol(&descriptor) == PROTOCOL {
         server_updated(s, key);
         return true;
     }

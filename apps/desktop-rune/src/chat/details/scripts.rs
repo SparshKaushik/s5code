@@ -21,11 +21,13 @@ pub struct State {
     /// The last script run per project (`lastInvokedScriptByProjectId`).
     last: HashMap<String, String>,
     pending: Option<Pending>,
-    /// `t3.json` scripts by checkout (`useT3ProjectFileScripts`); empty when missing or invalid.
-    files: HashMap<String, Vec<Value>>,
+    /// `t3.json` scripts by checkout (`useT3ProjectFileState`): empty when missing, None when invalid.
+    files: HashMap<String, Option<Vec<Value>>>,
     reading: Option<(u64, String)>,
     /// The project Settings opened the editor for, in place of the open thread's.
     target: Option<String>,
+    /// Settings > Projects > Actions' "Import scripts" menu, open for this project.
+    import_menu: Option<String>,
 }
 
 #[derive(Default)]
@@ -52,6 +54,8 @@ struct Pending {
     queue: Vec<(&'static str, Value)>,
     /// A delete's script name, for its toast.
     deleted: Option<String>,
+    /// A Settings import's script, reopened in the editor when the save fails.
+    imported: Option<Value>,
 }
 
 pub fn icon_for(name: &str) -> &'static Icon {
@@ -201,11 +205,31 @@ fn release(mut script: Value, setup: bool, settle: bool) -> Value {
     script
 }
 
-/// `parseT3ProjectFile`'s scripts: an unparseable file offers none.
-fn parse_file(contents: &str) -> Vec<Value> {
-    let Ok(file) = serde_json::from_str::<Value>(contents) else { return vec![] };
-    let named = |v: &Value| !data::s(v, "name").trim().is_empty() && !data::s(v, "command").trim().is_empty();
-    file["scripts"].as_array().into_iter().flatten().filter(|v| named(v)).cloned().collect()
+/// `parseT3ProjectFile`'s scripts, read as leniently as web (comments, trailing commas). None when
+/// any field fails the `T3ProjectFile` schema, which makes web ignore the whole file.
+fn parse_file(contents: &str) -> Option<Vec<Value>> {
+    let file = crate::settings::client::lenient_json(contents)?;
+    let file = file.as_object()?;
+    let text = |v: &Value| v.as_str().is_some_and(|v| !v.trim().is_empty());
+    let one_of = |key: &str, allowed: &[&str]| file.get(key).is_none_or(|v| v.as_str().is_some_and(|v| allowed.contains(&v)));
+    let valid = file.get("$schema").is_none_or(Value::is_string)
+        && file.get("iconPath").is_none_or(|v| text(v) && v.as_str().is_some_and(|p| p.trim().chars().count() <= 512))
+        && one_of("defaultThreadEnvMode", &["local", "worktree"])
+        && one_of("worktreeSubmodules", &["recursive", "top-level", "none"]);
+    if !valid {
+        return None;
+    }
+    let Some(scripts) = file.get("scripts") else { return Some(vec![]) };
+    let scripts = scripts.as_array().filter(|list| list.len() <= 50)?;
+    let script = |v: &Value| {
+        v.is_object()
+            && text(&v["name"])
+            && text(&v["command"])
+            && v.get("icon").is_none_or(|i| ICONS.iter().any(|(id, _)| i.as_str() == Some(*id)))
+            && v.get("previewUrl").is_none_or(text)
+            && ["runOnWorktreeCreate", "runOnSettle", "async", "autoOpenPreview"].iter().all(|k| v.get(*k).is_none_or(Value::is_boolean))
+    };
+    scripts.iter().all(script).then(|| scripts.clone())
 }
 
 /// `importableScripts`: file scripts whose command and name (any case) no script already has.
@@ -245,11 +269,50 @@ pub fn load_file(s: &mut App, force: bool) {
 }
 
 fn file_scripts(s: &App) -> Vec<Value> {
-    super::cwd(s).and_then(|cwd| s.ui.chat.details.scripts.files.get(&cwd).cloned()).unwrap_or_default()
+    super::cwd(s).and_then(|cwd| s.ui.chat.details.scripts.files.get(&cwd).cloned().flatten()).unwrap_or_default()
+}
+
+/// Settings > Projects reads the picked project's `t3.json` from its root while the page is open.
+fn load_settings_file(s: &mut App) {
+    if !matches!(&s.route, crate::Route::Settings(p) if p == "projects") {
+        s.ui.chat.details.scripts.import_menu = None;
+        return;
+    }
+    let Some(id) = s.ui.settings.project.clone() else { return };
+    let root = s.state().projects.iter().find(|p| p["id"] == id.as_str()).map(|p| data::s(p, "workspaceRoot").to_string());
+    let Some(root) = root.filter(|r| !r.is_empty()) else { return };
+    let ui = &s.ui.chat.details.scripts;
+    if ui.reading.is_some() || ui.files.contains_key(&root) {
+        return;
+    }
+    // Parked environments hand their replies to `App::src`, where `poll_file` takes them.
+    let Some(net) = crate::env::net_for(s, &id) else { return };
+    let request = net.request("projects.readFile", json!({"cwd": root, "relativePath": "t3.json", "allowMissing": true}));
+    s.ui.chat.details.scripts.reading = Some((request, root));
+}
+
+/// Settings > Projects > Actions: the picked project's `t3.json` scripts it doesn't have yet, or
+/// None while that file is invalid.
+pub fn project_imports(s: &App, project: &Value) -> Option<Vec<Value>> {
+    match s.ui.chat.details.scripts.files.get(data::s(project, "workspaceRoot")) {
+        Some(None) => None,
+        Some(Some(file)) => Some(importable(&resolve(crate::settings::server_settings(s), project), file)),
+        None => Some(vec![]),
+    }
+}
+
+pub fn imports_open(s: &App, project: &str) -> bool {
+    s.ui.chat.details.scripts.import_menu.as_deref() == Some(project)
+}
+
+pub fn toggle_imports(s: &mut App, project: &str) {
+    let menu = &mut s.ui.chat.details.scripts.import_menu;
+    *menu = if menu.as_deref() == Some(project) { None } else { Some(project.to_string()) };
 }
 
 fn import(s: &mut App, file: &Value) {
     s.ui.chat.details.menu = None;
+    s.ui.chat.details.scripts.import_menu = None;
     if s.ui.chat.details.scripts.pending.is_some() {
         return;
     }
@@ -259,8 +322,26 @@ fn import(s: &mut App, file: &Value) {
     let saved = imported(&id, file);
     let (setup, settle) = (saved["runOnWorktreeCreate"] == true, saved["runOnSettle"] == true);
     let mut next: Vec<Value> = scripts.into_iter().map(|v| release(v, setup, settle)).collect();
-    next.push(saved);
+    next.push(saved.clone());
     persist(s, next, command_for(&id), None, None);
+    let ui = &mut s.ui.chat.details.scripts;
+    if ui.target.is_some()
+        && let Some(pending) = ui.pending.as_mut()
+    {
+        pending.imported = Some(saved);
+    }
+}
+
+/// The Import scripts menu's pick: added to the Settings project without opening the editor.
+fn import_for_project(s: &mut App, project: &str, file: &Value) {
+    if s.ui.chat.details.scripts.pending.is_some() || s.ui.chat.details.scripts.editor.is_some() {
+        return;
+    }
+    s.ui.chat.details.scripts.target = Some(project.to_string());
+    import(s, file);
+    if s.ui.chat.details.scripts.pending.is_none() {
+        s.ui.chat.details.scripts.target = None;
+    }
 }
 
 fn project(s: &App) -> Option<Value> {
@@ -276,15 +357,19 @@ pub fn open_for_project(s: &mut App, project: &str, script: Option<&Value>) {
     open_editor(s, script);
 }
 
-/// Whether the editor is open for a project Settings picked (Settings draws it then).
+/// Whether the editor or the Import scripts menu is open for a project Settings picked (Settings
+/// draws them then).
 pub fn settings_editor_open(s: &App) -> bool {
     let ui = &s.ui.chat.details.scripts;
-    ui.editor.is_some() && ui.target.is_some()
+    (ui.editor.is_some() && ui.target.is_some()) || ui.import_menu.is_some()
 }
 
-/// Escape closes the delete confirm, then the editor.
+/// Escape closes the import menu, the delete confirm, then the editor.
 pub fn escape(s: &mut App) -> bool {
     let ui = &mut s.ui.chat.details.scripts;
+    if ui.import_menu.take().is_some() {
+        return true;
+    }
     if ui.confirm_delete {
         ui.confirm_delete = false;
         return true;
@@ -321,6 +406,17 @@ fn edit_denied(s: &App, changes_keybinding: bool) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A chat code block's "Run in terminal" (runShellCommand): the project-script terminal, the
+/// command kept in shell history and not remembered as the last action.
+pub fn run_command(s: &mut App, command: &str) {
+    if !can_run(s) {
+        return;
+    }
+    let worktree = composer::ctx(s).thread.map(|t| data::s(t, "worktreePath").to_string()).filter(|p| !p.is_empty());
+    let Some(cwd) = super::cwd(s) else { return };
+    crate::panel::drawer::run(s, &cwd, worktree.as_deref(), format!("{command}\r"));
 }
 
 pub fn run(s: &mut App, script: &Value) {
@@ -401,7 +497,7 @@ fn persist(s: &mut App, next: Vec<Value>, command: String, keybinding: Option<Op
     };
     let Some(net) = s.src.net() else { return };
     let waiting = net.request("server.updateSettings", json!({"patch": patch}));
-    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted });
+    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted, imported: None });
 }
 
 fn save(s: &mut App) {
@@ -456,6 +552,7 @@ fn delete(s: &mut App) {
 }
 
 pub fn poll(s: &mut App) -> bool {
+    load_settings_file(s);
     poll_file(s) | poll_save(s)
 }
 
@@ -463,7 +560,11 @@ fn poll_file(s: &mut App) -> bool {
     let Some(id) = s.ui.chat.details.scripts.reading.as_ref().map(|r| r.0) else { return false };
     let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
     let Some((_, cwd)) = s.ui.chat.details.scripts.reading.take() else { return false };
-    let list = reply.ok().filter(|v| v["truncated"] != true).map(|v| parse_file(data::s(&v, "contents"))).unwrap_or_default();
+    // Missing, truncated or unreadable reads as no file, as web's query does.
+    let list = match reply {
+        Ok(v) if v["exists"] != false && v["truncated"] != true => parse_file(data::s(&v, "contents")),
+        _ => Some(vec![]),
+    };
     s.ui.chat.details.scripts.files.insert(cwd, list);
     true
 }
@@ -478,6 +579,13 @@ fn poll_save(s: &mut App) -> bool {
             palette::toast(s, "Could not delete action", Some(&message));
         } else if let Some(editor) = s.ui.chat.details.scripts.editor.as_mut() {
             editor.error = Some(message);
+        } else if let Some(script) = pending.imported {
+            // Web's Settings import reopens the failed action as a new one in the editor.
+            open_editor(s, Some(&script));
+            if let Some(e) = s.ui.chat.details.scripts.editor.as_mut() {
+                (e.id, e.initial_keybinding, e.error) = (None, None, Some(message));
+                e.keybinding.clear();
+            }
         } else {
             palette::toast(s, "Failed to import action.", Some(&message));
         }
@@ -545,7 +653,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
         }
         return false;
     }
-    if composer::ctx(s).thread.is_none() {
+    if composer::ctx(s).thread.is_none() || s.ui.chat.details.scripts.import_menu.is_some() {
         return false;
     }
     let scripts = scripts(s);
@@ -560,20 +668,25 @@ pub fn view(s: &App, t: &T) -> El {
     let scripts = scripts(s);
     let Some(script) = preferred(s, &scripts) else {
         if !importable(&scripts, &file_scripts(s)).is_empty() {
-            let main = super::action(t, "details-script-actions", icon(&icons::WRENCH, 16.0).color(muted), "Actions", fg).on_press(|s: &mut App| super::toggle_menu(s, super::Menu::Scripts));
-            return super::split(t, "details-scripts-menu", main, "Choose project action", super::Menu::Scripts);
+            let main = super::action(t, "details-script-actions", icon(&icons::WRENCH, 16.0).color(muted), "Actions", fg).label("Project actions").on_press(|s: &mut App| super::toggle_menu(s, super::Menu::Scripts));
+            return super::split(t, "details-scripts-menu", main, "Choose project action", super::Menu::Scripts).role("group").label("Project actions");
         }
         return super::action(t, "details-script", icon(&icons::PLUS, 14.0).color(fg), "Add project script", fg).gap(12.0).w_full().on_press(|s: &mut App| open_editor(s, None));
     };
     let name = data::s(script, "name");
     let owned = script.clone();
     let can_run = can_run(s);
-    let main = super::action(t, "details-script-run", icon(icon_for(data::s(script, "icon")), 16.0).color(muted), name, fg).help(format!("Run {name}"));
+    let main = super::action(t, "details-script-run", icon(icon_for(data::s(script, "icon")), 16.0).color(muted), name, fg).label(format!("Run {name}")).help(run_help(s, name));
     let main = if can_run { main.on_press(move |s: &mut App| run(s, &owned)) } else { main.opacity(0.64) };
-    super::split(t, "details-scripts-menu", main, "Project scripts", super::Menu::Scripts)
+    super::split(t, "details-scripts-menu", main, "Script actions", super::Menu::Scripts).role("group").label("Project scripts")
 }
 
 /// The scripts menu's rows: each script with its shortcut and edit button, then "Add".
+/// The run button's tooltip: a connection that can't type into terminals is told to pair again.
+fn run_help(s: &App, name: &str) -> String {
+    if super::grants(s, "terminal:operate") { format!("Run {name}") } else { "Pair this client again with permission to run terminal commands.".into() }
+}
+
 pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
     let can_run = can_run(s);
     let mut rows = vec![];
@@ -638,7 +751,36 @@ fn switch_row(t: &T, label: &str, on: bool, disabled: bool, toggle: fn(&mut Edit
         .child(kit::Switch::new(on).label(label).hide_label().disabled(disabled).on_toggle(move |s: &mut App| toggle(editor_mut(s))).build(&k))
 }
 
+/// The key Settings gives the Import scripts trigger, which the menu hangs from.
+pub const IMPORT_ANCHOR: &str = "project-import-scripts";
+
+/// Settings' Import scripts menu (`ProjectActionsSettings`): each `t3.json` action not yet added.
+fn import_menu(s: &App, t: &T, out: &mut Vec<El>) {
+    let Some(id) = s.ui.chat.details.scripts.import_menu.clone() else { return };
+    let Some(project) = s.state().projects.iter().find(|p| p["id"] == id.as_str()) else { return };
+    if !matches!(&s.route, crate::Route::Settings(_)) {
+        return;
+    }
+    let note = text("Add actions declared by this checkout without editing them first.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w(240.0).px(8.0).pb(8.0);
+    let mut menu = kit::Menu::new("project-import-scripts-menu")
+        .anchor(IMPORT_ANCHOR)
+        .placement(kit::Placement::BottomEnd)
+        .min_width(256.0)
+        .open(true)
+        .on_close(|s: &mut App| s.ui.chat.details.scripts.import_menu = None)
+        .group_label("Import from t3.json")
+        .row(note)
+        .separator();
+    for file in project_imports(s, project).unwrap_or_default() {
+        let item = kit::MenuItem::new(data::s(&file, "name")).icon(icon_for(data::s(&file, "icon"))).description(data::s(&file, "command"));
+        let project = id.clone();
+        menu = menu.item(item.on_select(move |s: &mut App| import_for_project(s, &project, &file)));
+    }
+    menu.overlay(&kit::theme(t), out);
+}
+
 pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
+    import_menu(s, t, out);
     let ui = &s.ui.chat.details.scripts;
     let Some(e) = &ui.editor else { return };
     let k = kit::theme(t);
@@ -833,9 +975,26 @@ mod tests {
 
     #[test]
     fn t3_json_offers_only_new_scripts_for_import() {
-        let file = parse_file(r#"{"scripts": [{"name": "Dev", "command": "bun dev"}, {"name": "test", "command": "bun test"}, {"name": "Lint", "command": "bun lint"}, {"name": " ", "command": "x"}]}"#);
-        assert_eq!(file.len(), 3, "a blank name is not a script");
-        assert!(parse_file("{not json").is_empty());
+        let file = parse_file(
+            r#"{
+                // Comments and trailing commas parse, as web's lenient JSON does.
+                "scripts": [{"name": "Dev", "command": "bun dev"}, {"name": "test", "command": "bun test"}, {"name": "Lint", "command": "bun lint",},],
+            }"#,
+        )
+        .expect("valid file");
+        assert_eq!(file.len(), 3);
+        assert_eq!(parse_file("{not json"), None);
+        assert_eq!(parse_file(r#"{"iconPath": "logo.svg"}"#), Some(vec![]), "no scripts is valid");
+        for invalid in [
+            r#"{"scripts": [{"name": "Dev", "command": "bun dev"}, {"name": " ", "command": "x"}]}"#,
+            r#"{"scripts": [{"name": "Dev", "command": "bun dev", "icon": "rocket"}]}"#,
+            r#"{"scripts": [{"name": "Dev", "command": "bun dev", "async": "no"}]}"#,
+            r#"{"scripts": {"name": "Dev"}}"#,
+            r#"{"defaultThreadEnvMode": "cloud"}"#,
+            r#"[]"#,
+        ] {
+            assert_eq!(parse_file(invalid), None, "one bad field ignores the whole file: {invalid}");
+        }
         let scripts = vec![json!({"id": "t", "name": "Test", "command": "vitest"}), json!({"id": "l", "name": "Check", "command": "bun lint"})];
         let offered = importable(&scripts, &file);
         let names: Vec<&str> = offered.iter().map(|v| data::s(v, "name")).collect();
@@ -859,6 +1018,7 @@ mod tests {
 
         super::super::set_session(&mut s, session(&["orchestration:read"]));
         assert!(!can_run(&s), "FAILED: running needs terminal:operate");
+        assert_eq!(run_help(&s, "Test"), "Pair this client again with permission to run terminal commands.");
         save(&mut s);
         assert_eq!(s.ui.chat.details.scripts.editor.as_ref().and_then(|e| e.error.as_deref()), Some("This connection cannot change project actions."));
 

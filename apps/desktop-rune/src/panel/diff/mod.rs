@@ -2,6 +2,7 @@
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 pub(crate) mod comments;
 pub(crate) mod file_menu;
+mod file_icons;
 mod find;
 pub(crate) mod state;
 pub(crate) mod view;
@@ -1296,6 +1297,25 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
         .build(&kit::theme(t), layer)
 }
 
+/// A file header's counts, each with whether it is the additions. Pierre writes `-d +a`, leaving
+/// out a zero side unless both are zero; web swaps in DiffStatLabel's compact `+a -d` while a git
+/// source's patches load file by file (`lazySource`).
+pub(crate) fn header_counts(ui: &Ui, adds: usize, dels: usize) -> Vec<(bool, String)> {
+    let lazy = ui.source.kind.is_some() && (ui.source.truncated || ui.source.incomplete);
+    if lazy {
+        return vec![(true, format!("+{}", compact(adds))), (false, format!("-{}", compact(dels)))];
+    }
+    let n = |v: usize| crate::chat::details::thousands(v as u64);
+    let mut out = vec![];
+    if dels > 0 || adds == 0 {
+        out.push((false, format!("-{}", n(dels))));
+    }
+    if adds > 0 || dels == 0 {
+        out.push((true, format!("+{}", n(adds))));
+    }
+    out
+}
+
 /// A file's line counts: the server's when it gave them, else the patch's.
 fn counts(ui: &Ui, f: &FileDiff) -> (usize, usize) {
     ui.counts.get(f.path()).copied().unwrap_or((f.additions(), f.deletions()))
@@ -1431,6 +1451,30 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
 
 const TREE_FRACTION: f32 = 0.4;
 
+/// Web `PierreEntryIcon` for a file, on every surface that names one: its type's layered icon
+/// in web's colours.
+pub(crate) fn file_icon(path: &str, size: f32, dark: bool) -> El {
+    file_icons::for_path(path).iter().fold(el().size(size, size), |mark, &(glyph, light, night)| {
+        mark.child(icon(glyph, size).color(rune::color::hex(if dark { night } else { light }).unwrap_or(tree_muted())).absolute(0.0, 0.0))
+    })
+}
+
+/// `--trees-fg-muted`: the chevron's ink.
+fn tree_muted() -> Color {
+    rune::color::hex("#84848a").unwrap_or(Color::WHITE)
+}
+
+/// Pierre's git lane: the letter, its `--trees-status-*` colour, and its title.
+fn git_status(status: FileStatus, dark: bool) -> (&'static str, Color, &'static str) {
+    let (letter, light, night, title) = match status {
+        FileStatus::Added | FileStatus::Copied => ("A", "#16a994", "#00cab1", "Git status: added"),
+        FileStatus::Deleted => ("D", "#ff2e3f", "#ff6762", "Git status: deleted"),
+        FileStatus::Renamed => ("R", "#d5a910", "#ffd452", "Git status: renamed"),
+        FileStatus::Modified => ("M", "#1ca1c7", "#08c0ef", "Git status: modified"),
+    };
+    (letter, rune::color::hex(if dark { night } else { light }).unwrap_or(tree_muted()), title)
+}
+
 /// `FileExplorerPane`'s bounds: 160 to 560 wide, leaving the diff at least 256.
 fn tree_width(w: f32, row: f32) -> f32 {
     let max = (row - 256.0).min(560.0).max(160.0);
@@ -1447,10 +1491,10 @@ fn tree_pane(app: &App, t: &T) -> El {
     let mut head = row()
         .h(40.0)
         .px(8.0)
-        .gap(8.0)
+        .gap(4.0)
         .center_y()
         .w_full()
-        .child(text("Files").font(theme::XS_MEDIUM).color(t.c.foreground))
+        .child(text("Files").font(theme::XS_MEDIUM).color(t.c.foreground).px(4.0))
         .child(el().grow(1.0))
         .child(text(paths.len().to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground));
     if !dirs.is_empty() {
@@ -1472,18 +1516,21 @@ fn tree_pane(app: &App, t: &T) -> El {
                 .build(t),
         );
     }
-    let mut list = col().key("panel-diff-tree-rows").w_full().padding(4.0).gap(1.0).role("tree").label("Changed files");
+    // Pierre's compact tree (density 0.8): rows inset 16 left and 10 right, 6.4 padding, 4.8 gaps,
+    // 16 icon and 12 git lanes, and 18.7 per level of indent guides.
+    let mut list = col().key("panel-diff-tree-rows").w_full().pl(16.0).pr(10.0).py(4.0).role("tree").label("Changed files");
+    let lane = |glyph: El, w: f32| row().size(w, 24.0).center().child(glyph);
     for (i, r) in rows.into_iter().enumerate() {
-        let pad = 8.0 + r.depth as f32 * 12.0;
-        let base = row().key(format!("t{i}")).h(24.0).pl(pad).pr(8.0).gap(6.0).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem");
+        let base = row().key(format!("t{i}")).h(24.0).pl(6.4 + r.depth as f32 * 18.7).pr(6.4).gap(4.8).radius(6.0).center_y().w_full().cursor(Cursor::Pointer).focusable(true).role("treeitem");
         let line = if let Some(dir) = r.dir {
             let open = !ui.folded_dirs.contains(&dir);
             base.hover(t.c.foreground.alpha(0.07))
                 .label(r.label.clone())
                 .expanded(open)
-                .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground))
-                .child(icon(if open { &icons::FOLDER_OPEN } else { &icons::FOLDER }, 14.0).color(t.c.muted_foreground))
-                .child(text(r.label).font(theme::TEXT_XS).color(t.c.foreground).single_line().truncate().min_w(0.0).shrink())
+                .child(lane(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(tree_muted()), 16.0))
+                .child(text(r.label).font(theme::TEXT_XS).color(t.c.foreground).single_line().truncate().min_w(0.0).shrink().grow(1.0))
+                // Every folder in a diff holds a change: Pierre's half-strength descendant dot.
+                .child(lane(el().size(4.0, 4.0).radius(2.0).fill(git_status(FileStatus::Modified, t.dark).1.alpha_mul(0.5)), 12.0).help("Contains git status items"))
                 .on_press(move |s: &mut App| {
                     let folded = &mut s.ui.panel.diff.folded_dirs;
                     if !folded.remove(&dir) {
@@ -1493,19 +1540,15 @@ fn tree_pane(app: &App, t: &T) -> El {
         } else {
             let f = r.file.unwrap_or(0);
             let file = &st.files()[f];
-            let color = match file.status {
-                FileStatus::Added | FileStatus::Copied => t.c.diff_addition_foreground,
-                FileStatus::Deleted => t.c.diff_deletion_foreground,
-                FileStatus::Renamed => t.c.diff_modified_icon.alpha(1.0),
-                FileStatus::Modified => t.c.foreground,
-            };
             let selected = f == current;
-            base.pl(pad + 18.0)
-                .fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
+            let (letter, color, title) = git_status(file.status, t.dark);
+            let glyph = file_icon(file.path(), 16.0, t.dark);
+            base.fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(file.path().to_string())
-                .child(crate::file_icons::view(file.path(), 14.0, t.dark))
-                .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
+                .child(lane(glyph, 16.0))
+                .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink().grow(1.0))
+                .child(lane(text(letter).font(theme::weight(theme::TEXT_XS, 600.0)).color(color), 12.0).help(title))
                 .on_press_tx(move |s: &mut App, tx| {
                     let ui = &mut s.ui.panel.diff;
                     ui.touched = true;
@@ -1740,6 +1783,10 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
     let turns = turns(app);
     let current = turn_of(&ui.scope, &turns);
     let latest = matches!(ui.scope, Scope::Turn(_)) && current == turns.first().map(|t| t.count);
+    let measure = |label: &str, font| rune::text::measure(label, &[], font, None).0.ceil();
+    // The submenu sizes to its widest row, as web's does: the menu's padding and border, the
+    // item's padding, label, gap-2, time, and the radio's check.
+    let turns_w = turns.iter().map(|turn| measure(&format!("Turn {}", turn.count), theme::TEXT_SM) + 8.0 + measure(&clock(app, turn.at), theme::TEXT_XS)).fold(0.0, f32::max) + 60.0;
     let turn_entries: Vec<MenuEntry> = turns
         .iter()
         .map(|turn| {
@@ -1747,7 +1794,8 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
             MenuEntry::item(
                 MenuItem::new(format!("Turn {n}"))
                     .radio(matches!(ui.scope, Scope::Turn(_)) && current == Some(n))
-                    .shortcut(clock(app, turn.at))
+                    // `ml-auto text-xs tabular-nums text-muted-foreground`, not a shortcut's style.
+                    .trailing(text(clock(app, turn.at)).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground))
                     .on_select(move |s: &mut App| {
                         open_turn(s, n);
                         load(s);
@@ -1795,7 +1843,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         .item(MenuItem::new("Changes").radio(ui.scope == Scope::Branch).on_select(|s: &mut App| select(s, Scope::Branch)))
         .item(MenuItem::new("Uncommitted").radio(ui.scope == Scope::Unstaged).on_select(|s: &mut App| select(s, Scope::Unstaged)))
         .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, latest_turn(s))))
-        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
+        .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).submenu_min_width(turns_w.max(160.0)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
         .item(MenuItem::new("Commits").submenu(commit_entries, sub == Some(Sub::Commits)).submenu_min_width(320.0).on_submenu_change(|s: &mut App, on| {
@@ -1830,6 +1878,56 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
+/// Several files across folders, every one expanded and the file tree open, for headless scenes.
+pub fn tree_fixture(app: &mut App) {
+    let mut diff = String::from("diff --git a/src/greet.ts b/src/greet.ts\nindex 1234567..abcdef0 100644\n--- a/src/greet.ts\n+++ b/src/greet.ts\n");
+    diff += "@@ -3,4 +3,5 @@\n export function greet(name: string) {\n-  return \"Hello \" + name;\n+  const message = `Hello, ${name}!`;\n+  return message;\n }\n \n";
+    diff += "@@ -40,3 +41,3 @@\n export function farewell(name: string) {\n-  return \"Bye \" + name;\n+  return `Goodbye, ${name}.`;\n }\n";
+    diff += "diff --git a/src/components/Button.tsx b/src/components/Button.tsx\nnew file mode 100644\n--- /dev/null\n+++ b/src/components/Button.tsx\n@@ -0,0 +1,3 @@\n+export function Button() {\n+  return <button type=\"button\" />;\n+}\n";
+    diff += "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -2,3 +2,3 @@\n   \"name\": \"greeter\",\n-  \"version\": \"1.0.0\",\n+  \"version\": \"1.1.0\",\n   \"type\": \"module\"\n";
+    diff += "diff --git a/Cargo.toml b/Cargo.toml\n--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1,2 +1,3 @@\n [package]\n name = \"greeter\"\n+edition = \"2024\"\n";
+    diff += "diff --git a/.github/workflows/ci.yaml b/.github/workflows/ci.yaml\nnew file mode 100644\n--- /dev/null\n+++ b/.github/workflows/ci.yaml\n@@ -0,0 +1,2 @@\n+name: ci\n+on: push\n";
+    diff += "diff --git a/docs/old-guide.md b/docs/old-guide.md\ndeleted file mode 100644\n--- a/docs/old-guide.md\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-# Guide\n-Old.\n";
+    diff += "diff --git a/docs/intro.md b/docs/guide.md\nsimilarity index 100%\nrename from docs/intro.md\nrename to docs/guide.md\n";
+    let mut files = rune_kit::diff::parse(&diff);
+    files.sort_by(|a, b| a.path().cmp(b.path()));
+    let ui = &mut app.ui.panel.diff;
+    ui.files = files;
+    ui.touched = true;
+    ui.shown = Some(ui.scope.clone());
+    ui.tree_open = true;
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+}
+
+/// The tree fixture with a binary image, a partial file, a sent review comment and an open
+/// draft, for headless scenes.
+pub fn review_fixture(app: &mut App) {
+    tree_fixture(app);
+    let ui = &mut app.ui.panel.diff;
+    ui.files.extend(rune_kit::diff::parse("diff --git a/assets/logo.png b/assets/logo.png\nindex 1234567..abcdef0 100644\nBinary files a/assets/logo.png and b/assets/logo.png differ\n"));
+    ui.files.sort_by(|a, b| a.path().cmp(b.path()));
+    ui.partial.insert("src/greet.ts".into());
+    ui.tree_open = false;
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+    comments::fixture(app);
+}
+
+/// The scope menu open on its Turn submenu over three checkpointed turns, for headless scenes.
+pub fn turns_fixture(app: &mut App) {
+    fixture(app);
+    if let Some((thread, _)) = super::diff_context(app)
+        && let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(view) = state.thread_views.get_mut(&thread)
+    {
+        let at = ["2026-03-10T09:12:00Z", "2026-03-10T10:40:00Z", "2026-03-10T11:58:00Z"];
+        view.projection["checkpoints"] = at.iter().enumerate().map(|(i, at)| serde_json::json!({"checkpointTurnCount": i + 1, "capturedAt": at})).collect();
+    }
+    let ui = &mut app.ui.panel.diff;
+    (ui.menu_open, ui.sub) = (true, Some(Sub::Turns));
+}
+
 /// The fixture as a cut preview still listing untracked files, for headless scenes.
 pub fn banners_fixture(app: &mut App) {
     fixture(app);
@@ -1850,6 +1948,22 @@ fn sync_settings(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_icons_resolve_in_pierres_order_with_web_overrides_untinted() {
+        let mark = |path: &str| file_icons::for_path(path).iter().map(|(glyph, light, dark)| (glyph.name, *light, *dark)).collect::<Vec<_>>();
+        // T3's own file names win and carry no token, so they keep the muted icon colour.
+        assert_eq!(mark("package.json"), [("file-tree-builtin-npm-0", "#84848a", "#84848a")]);
+        assert_eq!(mark("apps/web/tsconfig.json"), [("file-tree-builtin-typescript-0", "#84848a", "#84848a")]);
+        assert_eq!(mark("pnpm-lock.yaml").len(), 2);
+        // T3's extensions, then Pierre's names, the complete set's overrides and extensions.
+        assert_eq!(mark("Cargo.toml")[0].0, "t3-file-icon-toml-0");
+        assert_eq!(mark("Dockerfile"), [("file-tree-builtin-docker-0", "#1a85d4", "#69b1ff")]);
+        assert_eq!(mark("src/App.tsx")[0].0, "file-tree-builtin-react-0");
+        assert_eq!(mark("types/index.d.ts"), [("file-tree-builtin-typescript-0", "#1a85d4", "#69b1ff")]);
+        assert_eq!(mark(".github/ci.yaml"), [("file-tree-builtin-yml-0", "#d52c36", "#ff6762")]);
+        assert_eq!(mark("notes.xyz"), [("file-tree-builtin-default-0", "#84848a", "#adadb1")]);
+    }
 
     #[test]
     fn tool_call_patches_gain_headers_and_wrap_raw_contents() {
@@ -2031,6 +2145,18 @@ mod tests {
         assert_eq!(commit_url(&json!({"canonicalKey": "github.com/a/b", "locator": {"remoteUrl": ""}}), sha), None, "no provider, no link");
         assert_eq!(commit_url(&json!({"provider": "github", "canonicalKey": "github.com/a/b/c"}), sha), None);
         assert_eq!(commit_url(&Value::Null, sha), None);
+    }
+
+    #[test]
+    fn file_headers_count_like_pierre_unless_patches_load_per_file() {
+        let mut ui = Ui::default();
+        let shown = |ui: &Ui, a, d| header_counts(ui, a, d).into_iter().map(|(_, s)| s).collect::<Vec<_>>();
+        assert_eq!(shown(&ui, 1200, 3), ["-3", "+1,200"], "FAILED: deletions first");
+        assert_eq!(shown(&ui, 4, 0), ["+4"]);
+        assert_eq!(shown(&ui, 0, 0), ["-0", "+0"], "FAILED: a pure rename shows both zeros");
+        ui.source.kind = Some("working-tree".into());
+        ui.source.incomplete = true;
+        assert_eq!(shown(&ui, 1200, 0), ["+1.2k", "-0"]);
     }
 
     #[test]

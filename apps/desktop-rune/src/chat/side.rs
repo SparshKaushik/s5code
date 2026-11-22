@@ -4,16 +4,17 @@
 //! comes back through `view.reopenClosed` or by opening it from its parent (openSideChatTab);
 //! Bring back merges its latest reply into the parent's next message.
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
-use rune::{Cx, El, KeyEvent, Tx, col, el, row, text};
+use rune::{Color, Cursor, Cx, El, KeyEvent, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use crate::chat::details::Lane;
 use crate::data;
 use crate::icons;
 use crate::kit::button::{Button, icon_button};
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route};
 
 /// The right panel's default width.
@@ -21,15 +22,18 @@ const WIDTH: f32 = 540.0;
 const MIN_WIDTH: f32 = 320.0;
 /// waitForThreadShell's timeout.
 const SHELL_WAIT_MS: i64 = 5_000;
+/// ThreadLineageGroup's first rows, and how many each "Show N more" adds.
+const LIST_FIRST: usize = 6;
+const LIST_PAGE: usize = 12;
 
 #[derive(Default)]
 pub struct State {
     /// Each parent thread's open side chat (rightPanelStore's `side-chat:` surface).
     pub open: HashMap<String, String>,
     pending: Option<Pending>,
-    /// The side chat whose delete waits for confirmation (`confirmThreadDelete`).
-    confirm_delete: Option<String>,
     requests: Vec<(u64, Request)>,
+    /// The thread whose details card lists more side chats than the first page, and how many.
+    listed: Option<(String, usize)>,
 }
 
 /// A side chat being started from `parent`: the draft it came from and the text sent, so a
@@ -63,14 +67,6 @@ pub fn parse(text: &str) -> Option<&str> {
     (head.eq_ignore_ascii_case("/side") || head.eq_ignore_ascii_case("/btw")).then(|| rest.trim())
 }
 
-/// deriveThreadTitleSeed for plain text: whitespace collapsed, cut at 50 characters.
-fn title_seed(text: &str) -> String {
-    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match words.char_indices().nth(50) {
-        Some((at, _)) => format!("{}...", &words[..at]),
-        None => words,
-    }
-}
 
 fn thread<'a>(s: &'a App, id: &str) -> Option<&'a Value> {
     s.state().threads.iter().find(|t| data::s(t, "id") == id)
@@ -196,7 +192,7 @@ pub fn poll(s: &mut App) -> bool {
             let rpc = net.dispatch(json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
                 "threadId": p.target, "messageId": s5_net::uuid(), "text": p.prompt, "attachments": [],
-                "titleSeed": title_seed(&p.prompt), "deliveryIntent": "auto", "dispatchMode": {"type": "start_immediately"},
+                "titleSeed": crate::chat::thread_title::seed(&p.prompt, &[], &[]), "deliveryIntent": "auto", "dispatchMode": {"type": "start_immediately"},
             }));
             p.stage = Stage::Turn(rpc);
             changed = true;
@@ -242,7 +238,6 @@ fn show(s: &mut App, parent: &str, side: &str) {
         net.watch_thread(side);
     }
     s.ui.chat.side.open.insert(parent.to_owned(), side.to_owned());
-    s.ui.chat.side.confirm_delete = None;
     focus(s, side, true);
 }
 
@@ -302,7 +297,6 @@ fn poll_requests(s: &mut App) -> bool {
 fn close(s: &mut App, side: &str) {
     let parent = s.ui.chat.side.open.iter().find(|(_, open)| *open == side).map(|(parent, _)| parent.clone());
     s.ui.chat.side.open.retain(|_, open| open != side);
-    s.ui.chat.side.confirm_delete = None;
     if let Some(parent) = &parent {
         crate::panel::record_closed_side_chat(s, parent, side);
     }
@@ -317,25 +311,25 @@ fn close(s: &mut App, side: &str) {
     focus(s, side, false);
 }
 
-fn can_operate(s: &App) -> bool {
-    crate::chat::details::grants(s, "orchestration:operate")
-}
+use super::can_operate;
 
 fn confirm_delete(s: &App) -> bool {
     let key = "confirmThreadDelete";
     s.client_settings.values.get(key).or_else(|| crate::settings::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// `deleteSideChat`: web's destructive `dialogs.confirm` while `confirmThreadDelete` is on.
 fn request_delete(s: &mut App, side: &str) {
-    if confirm_delete(s) && s.ui.chat.side.confirm_delete.as_deref() != Some(side) {
-        s.ui.chat.side.confirm_delete = Some(side.to_owned());
-    } else {
-        delete(s, side);
+    if !confirm_delete(s) {
+        return delete(s, side);
     }
+    let title = thread(s, side).map(|r| data::s(r, "title")).filter(|r| !r.is_empty()).unwrap_or("Side chat");
+    let question = format!("Delete side chat \"{title}\"?\nThis permanently clears its conversation history.");
+    let side = side.to_owned();
+    crate::shell::confirm::request(s, question, true, move |s: &mut App| delete(s, &side));
 }
 
 fn delete(s: &mut App, side: &str) {
-    s.ui.chat.side.confirm_delete = None;
     let Some(net) = s.src.net() else { return };
     let rpc = net.dispatch(json!({"type": "thread.delete", "commandId": s5_net::uuid(), "threadId": side}));
     s.ui.chat.side.requests.push((rpc, Request::Delete(side.to_owned())));
@@ -415,9 +409,6 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
         .child(delete_button.build(t))
         .child(icon_button(&icons::X, "Close side chat").size("icon-xs").on_press(move |s: &mut App| close(s, &close_id)).build(t));
     let mut content = col().grow(1.0).min_w(0.0).h_full().child(header).child(el().h(1.0).w_full().fill(t.c.border));
-    if s.ui.chat.side.confirm_delete.as_deref() == Some(side) {
-        content = content.child(confirm(t, side, title));
-    }
     content = match shell {
         None if s.state().shell_ready => {
             content.child(text("This side chat was deleted.").font(theme::TEXT_XS).color(t.c.muted_foreground).padding(12.0))
@@ -433,6 +424,7 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
                     .min_h(0.0)
                     .w_full()
                     .child(crate::chat::timeline::view(s, cx, t, side, &lane))
+                    .children(crate::chat::timeline::side_scroll_to_end(s, cx, t, &lane, side))
                     .child(crate::chat::composer::view_for(s, cx, t, &lane, side))
                     .children(crate::chat::composer::overlays_for(s, cx, t, side)),
             )
@@ -445,30 +437,151 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
         .min_w(MIN_WIDTH)
         .h_full()
         .fill(t.c.background)
-        // Composer chords pressed in the pane are its composer's (useChatShortcuts' embedded mode).
-        .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| crate::chat::composer::side_shortcut(s, &key_id, e))
+        // Composer chords pressed in the pane are its composer's (useChatShortcuts' embedded mode),
+        // and digits pick its own pending question's options.
+        .on_key(move |s: &mut App, e: &KeyEvent, tx: &mut Tx| {
+            crate::chat::composer::side_shortcut(s, &key_id, e)
+                || crate::chat::composer::acting(s, Some(key_id.clone()), |s| crate::chat::timeline::question::on_key(s, e, tx))
+        })
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content)
 }
 
-/// The destructive confirm web asks through `dialogs.confirm`.
-fn confirm(t: &T, side: &str, title: &str) -> El {
-    let id = side.to_owned();
-    col()
-        .w_full()
-        .padding(12.0)
-        .gap(8.0)
-        .child(text(format!("Delete side chat \"{title}\"?")).font(theme::XS_MEDIUM).color(t.c.foreground).wrap().w_full())
-        .child(text("This permanently clears its conversation history.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().w_full())
-        .child(
+/// The thread a side chat forked from: a run fork's thread, else its lineage parent.
+fn parent_of(t: &Value) -> &str {
+    if t["forkedFrom"]["type"] == "run" { data::s(&t["forkedFrom"], "threadId") } else { data::s(&t["lineage"], "parentThreadId") }
+}
+
+/// ThreadRelationshipsPanel's `sideChats` group: `parent`'s side chats, live shells ahead of
+/// archived copies, newest first (orderWebThreadLineageRows).
+fn side_chats<'a>(s: &'a App, parent: &str) -> Vec<&'a Value> {
+    let state = s.state();
+    let mut seen = HashSet::new();
+    let mut rows: Vec<&Value> = state
+        .threads
+        .iter()
+        .chain(&state.archived)
+        .filter(|&t| t["lineage"]["sideChat"] == true && parent_of(t) == parent && seen.insert(data::s(t, "id")))
+        .collect();
+    rows.sort_by(|a, b| match (data::ts(a, "createdAt"), data::ts(b, "createdAt")) {
+        (Some(x), Some(y)) if x != y => y.cmp(&x),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        _ => data::s(a, "id").cmp(data::s(b, "id")),
+    });
+    rows
+}
+
+/// threadRelationshipRowStatus for a side chat: its run's activity, else its own status.
+fn row_status(t: &Value) -> &str {
+    t["activityRunStatus"].as_str().or_else(|| t["status"].as_str()).unwrap_or("")
+}
+
+/// threadRelationshipStatusLabel.
+fn status_label(status: &str) -> &'static str {
+    match status {
+        "preparing" | "starting" => "Starting",
+        "running" | "in_progress" => "Running",
+        "pending" | "queued" => "Queued",
+        "waiting" | "blocked" => "Waiting",
+        "completed" => "Done",
+        "failed" | "error" => "Failed",
+        "cancelled" | "interrupted" => "Stopped",
+        "rolled_back" => "Reverted",
+        "resolved_native" => "Resolved (native)",
+        "resolved_portable" => "Resolved (portable)",
+        "consumed" => "Consumed",
+        "superseded" => "Superseded",
+        "idle" => "Idle",
+        _ => "Unknown",
+    }
+}
+
+/// ThreadRelationshipIcon's status dot.
+fn status_dot(t: &T, status: &str) -> Color {
+    match status {
+        "running" | "in_progress" | "pending" | "waiting" => t.c.info,
+        "failed" | "error" => t.c.destructive,
+        "completed" => t.c.success,
+        _ => t.c.muted_foreground.alpha_mul(0.45),
+    }
+}
+
+/// resolveThreadLineageWindow: how many rows show, and the "Show N more" under them.
+fn window(total: usize, shown: usize) -> (usize, Option<String>) {
+    let visible = total.min(shown);
+    let hidden = total - visible;
+    (visible, (hidden > 0).then(|| format!("Show {} more", hidden.min(LIST_PAGE))))
+}
+
+/// The details card's "Side chats" section (ThreadRelationshipsPanel): `parent`'s side chats,
+/// each opening beside it. Hidden while it has none.
+pub fn details_list(s: &App, t: &T, parent: &str, divided: bool) -> Option<El> {
+    let chats = side_chats(s, parent);
+    if chats.is_empty() {
+        return None;
+    }
+    let muted = t.c.muted_foreground;
+    let running = chats.iter().filter(|c| row_status(c) == "running").count();
+    let shown = s.ui.chat.side.listed.as_ref().filter(|(id, _)| id == parent).map_or(LIST_FIRST, |(_, n)| *n);
+    let (visible, more) = window(chats.len(), shown);
+    let mut rows = col().key("details-side-chats").w_full();
+    for chat in &chats[..visible] {
+        let id = data::s(chat, "id").to_owned();
+        let title = Some(data::s(chat, "title")).filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
+        let status = row_status(chat);
+        let failed = matches!(status, "failed" | "error");
+        let mark = el()
+            .size(16.0, 16.0)
+            .center()
+            .child(icon(&icons::MESSAGES_SQUARE, 16.0).color(muted))
+            .child(el().absolute(12.0, 12.0).size(8.0, 8.0).radius(4.0).fill(status_dot(t, status)).border(2.0, t.c.card));
+        let line = row()
+            .key(format!("details-side-chat-{id}"))
+            .w_full()
+            .h(32.0)
+            .pl(11.0)
+            .pr(10.0)
+            .gap(10.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .hover_group()
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .label(format!("{title} {}", status_label(status)))
+            .help(format!("{title}\nOpen side chat in this chat"))
+            .child(mark)
+            .child(text(title).font(theme::SM_MEDIUM.lh(16.0)).color(t.c.foreground.alpha_mul(0.85)).truncate().grow(1.0).shrink().min_w(0.0))
+            .child(icon(&icons::ARROW_RIGHT, 12.0).color(muted).group_opacity(0.0, 1.0))
+            .child(text(status_label(status)).font(theme::TEXT_2XS).color(if failed { t.c.destructive } else { muted }))
+            .on_press(move |s: &mut App| crate::shell::sidebar::open_thread(s, &id));
+        rows = rows.child(line);
+    }
+    let mut body = col().w_full().child(rows.max_h(216.0).scroll(rune::ScrollSpec { stick_bottom: false }));
+    if let Some(label) = more {
+        let (parent, next) = (parent.to_owned(), shown + LIST_PAGE);
+        let faint = muted.alpha_mul(0.7);
+        body = body.child(
             row()
+                .key("details-side-chats-more")
                 .w_full()
-                .gap(8.0)
-                .justify_end()
-                .child(Button::new("Cancel").variant("outline").size("xs").on_press(|s: &mut App| s.ui.chat.side.confirm_delete = None).build(t))
-                .child(Button::new("Delete").variant("destructive").size("xs").on_press(move |s: &mut App| delete(s, &id)).build(t)),
-        )
-        .child(el().h(1.0).w_full().fill(t.c.border))
+                .h(32.0)
+                .pl(11.0)
+                .gap(10.0)
+                .center_y()
+                .radius(theme::layout::CONTROL_RADIUS)
+                .hover(t.c.accent)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label(label.clone())
+                .child(icon(&icons::PLUS, 16.0).color(faint))
+                .child(text(label).font(theme::SM_MEDIUM).color(faint))
+                .on_press(move |s: &mut App| s.ui.chat.side.listed = Some((parent.clone(), next))),
+        );
+    }
+    let title = if running > 0 { format!("Side chats · {running} running") } else { "Side chats".to_owned() };
+    Some(crate::chat::details::section(t, &title, None, divided, body))
 }
 
 #[cfg(test)]
@@ -482,8 +595,6 @@ mod tests {
         assert_eq!(parse("/side"), Some(""));
         assert_eq!(parse("/sidebar"), None);
         assert_eq!(parse("ask /side later"), None);
-        assert_eq!(title_seed("  a  b\nc "), "a b c");
-        assert_eq!(title_seed(&"x".repeat(51)), format!("{}...", "x".repeat(50)));
     }
 
     #[test]
@@ -570,5 +681,48 @@ mod tests {
             t["latestRunId"] = json!("parent-run");
         }
         assert_eq!(bring_back_blocked(&s, &parent, "side-1"), Some("Available when the main thread is idle."));
+    }
+
+    #[test]
+    fn the_details_card_lists_a_threads_side_chats_newest_first() {
+        let (mut s, parent) = with_side_chats();
+        if let data::Source::Fixture(state) = &mut s.src {
+            let side = |id: &str, title: &str, status: &str, created: Value| {
+                json!({"id": id, "title": title, "status": status, "createdAt": created, "lineage": {"parentThreadId": parent, "sideChat": true}})
+            };
+            state.threads.push(side("side-3", "Newer", "running", json!("2026-11-02T00:00:00Z")));
+            state.threads.push(json!({"id": "fork-1", "title": "Fork", "lineage": {"parentThreadId": parent}}));
+            state.archived.push(side("side-4", "Archived", "idle", json!("2026-11-01T00:00:00Z")));
+            state.archived.push(side("side-3", "Stale copy", "idle", Value::Null));
+        }
+        let chats = side_chats(&s, &parent);
+        let ids: Vec<&str> = chats.iter().map(|t| data::s(t, "id")).collect();
+        assert_eq!(ids, ["side-3", "side-4", "side-1"], "undated last; a live shell wins over its archived copy");
+        assert_eq!(status_label(row_status(chats[0])), "Running");
+        assert_eq!(window(8, LIST_FIRST), (6, Some("Show 2 more".into())));
+        assert_eq!(window(30, LIST_FIRST), (6, Some("Show 12 more".into())));
+        assert_eq!(window(8, LIST_FIRST + LIST_PAGE), (8, None));
+    }
+
+    #[test]
+    fn a_side_chats_question_is_answered_from_its_own_composer() {
+        use crate::chat::{composer, timeline::question};
+        let (mut s, parent) = with_side_chats();
+        s.ui.chat.side.open.insert(parent.clone(), "side-1".into());
+        let ask = |id: &str| json!({"id": id, "header": "Pick", "question": "Which?", "options": [{"label": "A"}, {"label": "B"}]});
+        let projection = json!({
+            "runtimeRequests": [{"id": "ask", "kind": "user_input", "status": "pending", "responseCapability": {"type": "live"}}],
+            "turnItems": [{"id": "item", "type": "user_input_request", "requestId": "ask", "questions": [ask("q1"), ask("q2")]}],
+        });
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.thread_views.insert("side-1".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
+        }
+        assert_ne!(question::active(&s).map(|a| a.thread), Some("side-1".to_owned()), "the chat's composer leaves it alone");
+        assert_eq!(composer::within(&s, Some("side-1".into()), || question::active(&s).map(|a| a.thread)), Some("side-1".to_owned()));
+        // A picked single choice moves the side chat's question on, though the chat is routed.
+        s.ui.chat.timeline.answers.entry("ask".into()).or_default().insert("q1".into(), vec!["A".into()]);
+        s.ui.chat.timeline.auto_advance = Some(("ask".into(), 0, 0));
+        assert!(question::poll(&mut s));
+        assert_eq!(s.ui.chat.timeline.question_index.get("ask"), Some(&1));
     }
 }

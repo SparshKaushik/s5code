@@ -258,7 +258,8 @@ pub fn view(s: &App, l: &Look, n: usize) -> El {
     let ui = &s.ui.panel.diff;
     let t = &l.t;
     let Some(note) = ui.state.notes().get(n) else { return col() };
-    let wrap = col().w_full().px(12.0).py(6.0).fill(l.bg);
+    // Pierre puts an annotation in the code column, beside the gutter's annotation buffer.
+    let gutter = super::view::gutter_w(&ui.state, l, note.file);
     if note.draft {
         let range = ui
             .comment
@@ -272,72 +273,84 @@ pub fn view(s: &App, l: &Look, n: usize) -> El {
             })
             .unwrap_or_else(|| "line".into());
         let empty = ui.comment_edit.text.trim().is_empty();
+        // DiffCommentAnnotation's draft: a `size="sm"` Textarea, then the footer 6px below it.
         let input = text_input(&ui.comment_edit, theme::TEXT_SM)
             .key("comment-input")
             .role("textbox")
             .label(format!("Comment on lines {range}"))
             .placeholder("Add a comment…", t.c.contrast_placeholder)
             .w_full()
-            .min_h(44.0)
+            .min_h(66.0)
+            .px(9.0)
+            .py(3.0)
+            .radius(8.0)
+            .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
+            .border(1.0, t.c.contrast_input)
+            .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
             .color(t.c.foreground)
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(|s: &mut App| &mut s.ui.panel.diff.comment_edit)
             .on_input_key(editor_key);
         let footer = row()
             .w_full()
-            .gap(6.0)
+            .mt(6.0)
+            .gap(4.0)
             .items_center()
-            .child(text("⌘/Ctrl Enter to send").font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)).grow(1.0).min_w(0.0).truncate())
+            .child(text("⌘/Ctrl Enter to send").font(theme::TEXT_3XS).color(t.c.muted_foreground.alpha_mul(0.7)).grow(1.0).min_w(0.0).truncate())
             .child(kit::Button::new("Cancel").variant("ghost-muted").size("xs").on_press(cancel).build(t))
             .child(kit::Button::new("Comment").size("xs").disabled(empty).on_press(submit).build(t));
-        return wrap.key("comment-draft").child(
-            col()
-                .w_full()
-                .gap(6.0)
-                .padding(8.0)
-                .radius(8.0)
-                .border(1.0, t.c.border)
-                .fill(t.c.background)
-                .child(input)
-                .child(footer),
-        );
+        return col().w_full().key("comment-draft").pl(gutter).py(4.0).fill(l.bg).child(col().w_full().px(12.0).py(8.0).child(input).child(footer));
     }
     let body = comments(s).into_iter().find(|(id, ..)| *id == note.id).map(|c| c.2).unwrap_or_default();
     let id = note.id.clone();
+    // An `icon-xs` ghost-muted button with a 12px glyph, pulled 4px into the corner.
     let delete_btn = row()
         .key("delete")
         .size(24.0, 24.0)
+        .mt(-4.0)
+        .mb(-4.0)
+        .mr(-4.0)
         .center()
-        .radius(6.0)
+        .radius(8.0)
         .hover(t.c.accent)
         .cursor(Cursor::Pointer)
         .role("button")
         .label("Delete comment")
         .help("Delete comment")
         .group_opacity(0.0, 1.0)
-        .child(icon(&icons::TRASH_2, 14.0).color(t.c.muted_foreground))
+        .child(icon(&icons::TRASH_2, 12.0).color(t.c.contrast_muted_foreground))
         .on_press(move |s: &mut App| delete(s, &id));
-    wrap.key("comment").child(
-        row()
-            .w_full()
-            .hover_group()
-            .items_start()
-            .fill(t.c.primary.alpha_mul(0.045))
-            .radius(4.0)
-            .child(el().w(2.0).self_stretch().fill(t.c.primary.alpha_mul(0.55)))
-            .child(
-                row()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(8.0)
-                    .px(10.0)
-                    .py(6.0)
-                    .items_start()
-                    .child(icon(&icons::MESSAGE_CIRCLE, 14.0).color(t.c.primary.alpha_mul(0.7)).mt(3.0))
-                    .child(text(body).font(theme::TEXT_SM).color(t.c.foreground).wrap().grow(1.0).min_w(0.0))
-                    .child(delete_btn),
-            ),
-    )
+    let divider = || el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.3));
+    // DiffCommentAnnotation's comment between the annotation's border-y: a 2px primary edge,
+    // px-3 py-2.5, the icon centred on the first 20px line.
+    let comment = row()
+        .w_full()
+        .hover_group()
+        .items_start()
+        .fill(t.c.primary.alpha_mul(0.045))
+        .child(el().w(2.0).self_stretch().fill(t.c.primary.alpha_mul(0.55)))
+        .child(
+            row()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(10.0)
+                .px(12.0)
+                .py(10.0)
+                .items_start()
+                .child(row().size(14.0, 20.0).center().child(icon(&icons::MESSAGE_CIRCLE, 14.0).color(t.c.primary.alpha_mul(0.7))))
+                .child(text(body).font(theme::TEXT_SM).color(t.c.foreground).wrap().grow(1.0).min_w(0.0))
+                .child(delete_btn),
+        );
+    col().w_full().key("comment").pl(gutter).fill(l.bg).child(divider()).child(comment).child(divider())
+}
+
+/// A sent comment and a fresh draft on `src/greet.ts`, for headless scenes.
+pub(super) fn fixture(app: &mut App) {
+    let Some(f) = app.ui.panel.diff.state.files().iter().position(|f| f.path() == "src/greet.ts") else { return };
+    begin(app, f, LineRef { side: Side::New, line: 5 });
+    app.ui.panel.diff.comment_edit.replace_text("Inline the message; the binding adds nothing.");
+    submit(app);
+    begin(app, f, LineRef { side: Side::New, line: 42 });
 }
 
 fn editor_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {

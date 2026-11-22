@@ -51,6 +51,8 @@ enum Step {
     Download(Receiver<Result<Vec<String>, String>>),
     /// The rollback until the server accepts it (`rpc` taken), then until the projection settles.
     Rollback { rpc: Option<u64>, watch: Watch, started: i64 },
+    /// A resend with its files in hand.
+    Ready,
 }
 
 struct Pending {
@@ -58,6 +60,8 @@ struct Pending {
     restore_files: bool,
     /// The message's attachments, downloaded for the composer.
     files: Vec<String>,
+    /// Sends the prompt again instead of rolling back (the worktree card's Work locally).
+    resend: bool,
     step: Step,
 }
 
@@ -243,8 +247,156 @@ pub fn user(app: &App, thread: &str, item: &Value, targets: &HashMap<String, (St
             edit.on_press(move |app: &mut App| ask(app, &rewind))
         });
     }
-    buttons = buttons.child(super::copy_button(app, s(item, "text"), t, "Copy message"));
+    buttons = buttons.child(copy_message(app, thread, item, t));
+    if let Some(prompt) = link_prompt(s(item, "text")) {
+        let key = format!("prompt-link:{}", s(item, "id"));
+        buttons = buttons.child(copy_with(app, &key, t, &icons::LINK, "Copy prompt link", move |app, tx| {
+            if let Some(link) = crate::links::new_thread_link(&prompt, None, None, None) {
+                tx.copy(link);
+                crate::shell::palette::toast(app, "Prompt link copied", None);
+            }
+        }));
+    }
     row().gap(8.0).center_y().child(stamp(app, first_time(item, &["createdAt", "startedAt", "completedAt"]), t)).child(buttons)
+}
+
+/// MessageCopyButton: `glyph` until pressed, then a check while `key` reads as just copied.
+fn copy_with(app: &App, key: &str, t: &T, glyph: &'static rune::Icon, label: &str, copy: impl Fn(&mut App, &mut rune::Tx) + 'static) -> El {
+    let done = super::copied(app, key);
+    let label = if done { "Copied" } else { label }.to_owned();
+    let key = key.to_owned();
+    row()
+        .size(24.0, 24.0)
+        .center()
+        .child(if done { icon(&icons::CHECK, 12.0).color(t.c.primary) } else { icon(glyph, 12.0).color(t.c.muted_foreground) })
+        .radius(4.0)
+        .hover(t.c.muted)
+        .focusable(true)
+        .role("button")
+        .label(label.clone())
+        .help(label)
+        .on_press_tx(move |app: &mut App, tx| {
+            copy(app, tx);
+            app.ui.chat.timeline.copied = Some((key.clone(), crate::data::now_ms()));
+            tx.wake_after(std::time::Duration::from_millis(super::COPIED_MS as u64));
+        })
+}
+
+/// A prompt's copy: its text, and when it carries context, HTML holding the records so a paste
+/// into a composer brings its chips back (MessageCopyButton's `extraFlavors`).
+fn copy_message(app: &App, thread: &str, item: &Value, t: &T) -> El {
+    let text = s(item, "text").to_owned();
+    let records = rows::array(&item["context"], "records");
+    if records.is_empty() {
+        let body = text.clone();
+        return copy_with(app, &text, t, &icons::COPY, "Copy message", move |_, tx| tx.copy(body.clone()));
+    }
+    let message = [s(item, "messageId"), s(item, "id")].into_iter().find(|v| !v.is_empty()).unwrap_or_default().to_owned();
+    let (records, thread, body) = (records.to_vec(), thread.to_owned(), text.clone());
+    copy_with(app, &text, t, &icons::COPY, "Copy message", move |app, tx| {
+        let config = app.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str().map(str::to_owned));
+        let environment = config.unwrap_or_else(|| app.ui.env.active.clone());
+        match context_fragment(&environment, Some(&thread), Some(&message), &records) {
+            Some(fragment) => tx.copy_rich(rune::ClipboardContent::new(body.clone()).with_html(context_html(&body, &fragment))),
+            None => tx.copy(body.clone()),
+        }
+    })
+}
+
+/// `promptLinkFor` on a sent prompt, its context links read as their labels: the prompt a link
+/// would carry, or `None` for an attachment-only prompt or one past PROMPT_LINK_MAX_PROMPT_LENGTH.
+fn link_prompt(text: &str) -> Option<String> {
+    let plain = if text.contains("t3-context://") { crate::chat::composer::chips::display(text).0 } else { text.to_owned() };
+    // isAttachmentOnlyBootstrapPrompt
+    let unprefixed = match plain.get(..11) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("ultrathink:") => plain[11..].trim_start(),
+        _ => plain.as_str(),
+    };
+    let prompt = plain.trim();
+    (unprefixed != BOOTSTRAP_PROMPT && !prompt.is_empty() && prompt.chars().count() <= 8_000).then(|| prompt.to_owned())
+}
+
+/// `MAX_FRAGMENT_CHARS`, in UTF-16 units as JavaScript counts them.
+const MAX_FRAGMENT_CHARS: usize = 16_000_000;
+/// COMPOSER_CONTEXT_MAX_RECORDS.
+const MAX_CONTEXT_RECORDS: usize = 200;
+const FRAGMENT_ATTR: &str = "data-t3-context-fragment=";
+
+/// `encodeComposerContextFragment`: context records as clipboard JSON, `None` past the cap.
+pub fn context_fragment(environment: &str, thread: Option<&str>, message: Option<&str>, records: &[Value]) -> Option<String> {
+    let mut source = json!({ "environmentId": environment });
+    if let Some(thread) = thread {
+        source["threadId"] = json!(thread);
+    }
+    if let Some(message) = message {
+        source["messageId"] = json!(message);
+    }
+    let encoded = json!({ "version": 1, "source": source, "records": records }).to_string();
+    (encoded.encode_utf16().count() <= MAX_FRAGMENT_CHARS).then_some(encoded)
+}
+
+/// `encodeComposerContextClipboardHtml` without rich HTML: the text escaped in a `<pre>` that
+/// carries the fragment.
+pub fn context_html(text: &str, fragment: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(fragment.len() * 2);
+    for b in fragment.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            encoded.push(b as char);
+        } else {
+            let _ = write!(encoded, "%{b:02X}");
+        }
+    }
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!("<pre {FRAGMENT_ATTR}\"{encoded}\">{escaped}</pre>")
+}
+
+/// `decodeComposerContextClipboardHtml`, for the composer's paste: the fragment a context copy
+/// (Rune's or web's) put in clipboard HTML, if it holds a valid one.
+pub fn decode_context_html(html: &str) -> Option<Value> {
+    if html.len() > MAX_FRAGMENT_CHARS * 9 + 4096 {
+        return None;
+    }
+    let rest = &html[html.find(FRAGMENT_ATTR)? + FRAGMENT_ATTR.len()..];
+    // `encodeURIComponent` leaves `'` as is, so each quote style ends only at its own quote.
+    let quote = rest.chars().next().filter(|q| matches!(q, '"' | '\''))?;
+    let encoded = &rest[1..];
+    let encoded = &encoded[..encoded.find(quote)?];
+    let b = encoded.as_bytes();
+    let mut raw = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = encoded.get(i + 1..i + 3).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()))?;
+            raw.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            raw.push(b[i]);
+            i += 1;
+        }
+    }
+    decode_fragment(&String::from_utf8(raw).ok()?)
+}
+
+/// `decodeComposerContextFragment`: version 1 JSON naming its environment, at most 200 records,
+/// those without a kind and id dropped as forward-compatible decoding drops unknown ones.
+pub fn decode_fragment(raw: &str) -> Option<Value> {
+    if raw.is_empty() || raw.encode_utf16().count() > MAX_FRAGMENT_CHARS {
+        return None;
+    }
+    let mut fragment: Value = serde_json::from_str(raw).ok()?;
+    let source = &fragment["source"];
+    let id_or_absent = |key: &str| source.get(key).is_none_or(|v| v.as_str().is_some_and(|v| !v.is_empty()));
+    let named = source["environmentId"].as_str().is_some_and(|e| !e.trim().is_empty());
+    if fragment["version"] != 1 || !named || !id_or_absent("threadId") || !id_or_absent("messageId") {
+        return None;
+    }
+    let records = fragment["records"].as_array_mut()?;
+    if records.len() > MAX_CONTEXT_RECORDS {
+        return None;
+    }
+    records.retain(|r| r["kind"].as_str().is_some() && r["contextId"].as_str().is_some_and(|id| !id.is_empty()));
+    Some(fragment)
 }
 
 fn ask(app: &mut App, rewind: &Rewind) {
@@ -292,7 +444,7 @@ pub fn assistant(app: &App, thread: &str, item: &Value, t: &T) -> El {
         );
     }
     if !streaming {
-        out = out.child(super::copy_button(app, s(item, "text"), t, "Copy message"));
+        out = out.child(super::copy_button(app, &super::markdown::for_copy(s(item, "text")), t, "Copy message"));
     }
     let run = s(item, "runId");
     if !run.is_empty() && !streaming && item["visibility"] != "inherited" {
@@ -347,7 +499,7 @@ fn rewind(app: &mut App, thread: &str, restore_files: bool) {
     }
     app.ui.chat.timeline.actions.confirm.remove(thread);
     app.ui.chat.timeline.actions.errors.remove(thread);
-    match start(app, rewind, restore_files) {
+    match start(app, rewind, restore_files, false) {
         Ok(pending) => {
             app.ui.chat.timeline.actions.rewinds.insert(thread.to_owned(), pending);
         }
@@ -357,7 +509,7 @@ fn rewind(app: &mut App, thread: &str, restore_files: bool) {
     }
 }
 
-fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, String> {
+fn start(app: &mut App, rewind: Rewind, restore_files: bool, resend: bool) -> Result<Pending, String> {
     if rewind.attachments.iter().any(|a| s(a, "type") != "image" || image_ext(s(a, "mimeType")).is_none()) {
         return Err("This message has an attachment that cannot be restored.".into());
     }
@@ -366,7 +518,7 @@ fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, 
         return Err("Make room for this message's attachments in the composer before rewinding.".into());
     }
     let step = if rewind.attachments.is_empty() {
-        roll_back(app, &rewind, restore_files)?
+        after_files(app, &rewind, restore_files, resend)?
     } else {
         let net = app.src.net().ok_or_else(|| "The environment is not connected.".to_owned())?;
         Step::Urls(
@@ -380,7 +532,32 @@ fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, 
                 .collect(),
         )
     };
-    Ok(Pending { rewind, restore_files, files: Vec::new(), step })
+    Ok(Pending { rewind, restore_files, files: Vec::new(), resend, step })
+}
+
+fn after_files(app: &mut App, rewind: &Rewind, restore_files: bool, resend: bool) -> Result<Step, String> {
+    if resend { Ok(Step::Ready) } else { roll_back(app, rewind, restore_files) }
+}
+
+/// Work locally (ChatView onWorktreeSetupWorkLocally): once the setup is cancelled the server
+/// has cleared the thread's worktree, so the prompt goes out again from the project checkout.
+pub fn resend(app: &mut App, thread: &str, message: &Value) {
+    let rewind = Rewind {
+        thread: thread.to_owned(),
+        text: s(message, "text").to_owned(),
+        records: rows::array(&message["context"], "records").to_vec(),
+        attachments: rows::array(message, "attachments").to_vec(),
+        scope: String::new(),
+        checkpoint: String::new(),
+    };
+    match start(app, rewind, false, true) {
+        Ok(pending) => {
+            app.ui.chat.timeline.actions.rewinds.insert(thread.to_owned(), pending);
+        }
+        Err(message) => {
+            app.ui.chat.timeline.actions.errors.insert(thread.to_owned(), message);
+        }
+    }
 }
 
 /// The run ordinal a checkpoint rewinds to: the run it was taken after, 0 for the thread start.
@@ -522,7 +699,7 @@ fn step(app: &mut App, p: &mut Pending) -> Outcome {
         Step::Download(rx) => match rx.try_recv() {
             Ok(Ok(files)) => {
                 p.files = files;
-                match roll_back(app, &p.rewind, p.restore_files) {
+                match after_files(app, &p.rewind, p.restore_files, p.resend) {
                     Ok(step) => step,
                     Err(message) => return Outcome::Failed(message),
                 }
@@ -531,6 +708,7 @@ fn step(app: &mut App, p: &mut Pending) -> Outcome {
             Err(TryRecvError::Empty) => return Outcome::Waiting,
             Err(TryRecvError::Disconnected) => return Outcome::Failed(FAILED.into()),
         },
+        Step::Ready => return Outcome::Done,
         Step::Rollback { rpc, watch, started } => {
             let mut moved = false;
             if let Some(id) = *rpc {
@@ -565,6 +743,9 @@ fn land(app: &mut App, p: Pending) {
     let key = crate::chat::composer::draft_key(app, &Route::Thread(thread.clone()));
     let focus = matches!(app.frame_route(), Route::Thread(open) if *open == thread);
     crate::chat::composer::restore_rewound(app, &key, &recallable(&p.rewind.text), &p.rewind.records, p.files, focus);
+    if p.resend && focus {
+        crate::chat::composer::submit(app);
+    }
 }
 
 pub fn poll(app: &mut App) -> bool {
@@ -829,6 +1010,105 @@ pub fn proactive_changes(projection: &Value, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_copies_round_trip_through_clipboard_html() {
+        let records = vec![json!({"version": 1, "kind": "terminal", "contextId": "terminal", "label": "Build \"failure\" it's",
+            "terminalId": "main", "terminalLabel": "Main", "lineStart": 1, "lineEnd": 1, "text": "<script> & café"})];
+        let fragment = context_fragment("env-1", Some("thread-1"), Some("message-1"), &records).unwrap();
+        let html = context_html("<script> & café", &fragment);
+        assert!(html.contains("&lt;script&gt; &amp; café") && !html.contains("<script>"));
+        let decoded = decode_context_html(&html).unwrap();
+        assert_eq!(decoded, serde_json::from_str::<Value>(&fragment).unwrap());
+        assert_eq!(decoded["records"][0]["text"], "<script> & café");
+        // Web's encoder, read from single quotes too.
+        let web = "<div data-t3-context-fragment='%7B%22version%22%3A1%2C%22source%22%3A%7B%22environmentId%22%3A%22env%22%7D%2C%22records%22%3A%5B%5D%7D'>it</div>";
+        assert_eq!(decode_context_html(web), Some(json!({"version": 1, "source": {"environmentId": "env"}, "records": []})));
+        assert_eq!(decode_context_html("<pre data-t3-context-fragment=\"%ZZ\">bad</pre>"), None);
+        assert_eq!(decode_context_html("<p>Ordinary clipboard</p>"), None);
+        assert_eq!(decode_fragment(r#"{"version":2,"source":{"environmentId":"env"},"records":[]}"#), None);
+        assert_eq!(decode_fragment(r#"{"version":1,"source":{"environmentId":""},"records":[]}"#), None);
+        let unknown = decode_fragment(r#"{"version":1,"source":{"environmentId":"env"},"records":[{"kind":"x","contextId":"a"},{"nope":1}]}"#).unwrap();
+        assert_eq!(unknown["records"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn prompt_links_read_chips_as_labels_and_skip_attachment_only_prompts() {
+        assert_eq!(link_prompt("  Fix the tests  ").as_deref(), Some("Fix the tests"));
+        assert_eq!(link_prompt("Check [Build](t3-context://v1/terminal/ctx-1) please").as_deref(), Some("Check Build please"));
+        assert_eq!(link_prompt(BOOTSTRAP_PROMPT), None);
+        assert_eq!(link_prompt(&format!("Ultrathink: {BOOTSTRAP_PROMPT}")), None);
+        assert_eq!(link_prompt("   "), None);
+        assert_eq!(link_prompt(&"x".repeat(8_001)), None);
+    }
+
+    #[test]
+    fn work_locally_puts_the_prompt_back_without_rolling_back() {
+        let mut app = App::new();
+        let message = json!({"type": "user_message", "text": "fix the build", "attachments": []});
+        resend(&mut app, "t", &message);
+        let pending = app.ui.chat.timeline.actions.rewinds.remove("t").expect("FAILED: the resend is pending");
+        assert!(matches!(pending.step, Step::Ready), "FAILED: no rollback goes out");
+        land(&mut app, pending);
+        let key = crate::chat::composer::draft_key(&app, &Route::Thread("t".into()));
+        let draft = crate::chat::composer::take_draft(&mut app, &key).expect("FAILED: the prompt is in the thread's draft");
+        assert!(draft.to_string().contains("fix the build"), "{draft}");
+    }
+
+    /// Edit from here end to end against a recording connection: the confirmed rewind sends
+    /// `checkpoint.rollback` for the prompt's checkpoint, waits through the server's reply until the
+    /// projection rewinds, then puts the prompt back in the thread's draft; a recorded rollback
+    /// failure ends it with the server's message instead.
+    #[test]
+    fn edit_from_here_rolls_back_through_the_connection_and_returns_the_prompt() {
+        let projection = json!({
+            "thread": {"id": "t", "activeProviderThreadId": "pt"},
+            "providerThreads": [{"id": "pt", "providerInstanceId": "codex", "lastRunOrdinal": 2}],
+            "checkpoints": [{"id": "cp1", "appRunOrdinal": 1}],
+            "runs": [{"id": "r1", "ordinal": 1, "status": "completed"}, {"id": "r2", "ordinal": 2, "status": "completed"}],
+        });
+        let start = |restore_files: bool| {
+            let mut app = App::new();
+            let mut state = app.state().clone();
+            state.conn = s5_net::Conn::Open;
+            state.thread_views.insert("t".into(), s5_net::ThreadView { projection: projection.clone(), synchronized: true, ..Default::default() });
+            let (mut net, sent) = s5_net::Net::in_memory_sent("http://local.test");
+            *net.state_mut() = state;
+            app.src = crate::data::Source::Live(net);
+            let prompt = Rewind { thread: "t".into(), text: "try the other schema".into(), records: vec![], attachments: vec![], scope: "s1".into(), checkpoint: "cp1".into() };
+            app.ui.chat.timeline.actions.confirm.insert("t".into(), (prompt, None));
+            rewind(&mut app, "t", restore_files);
+            let requests = sent.requests();
+            let (id, _, command) = requests.into_iter().find(|(_, tag, _)| tag == "orchestration.dispatchCommand").expect("FAILED: the rollback goes out");
+            assert_eq!((command["type"].as_str(), command["scopeId"].as_str(), command["checkpointId"].as_str(), command["restoreFiles"].as_bool()), (Some("checkpoint.rollback"), Some("s1"), Some("cp1"), Some(restore_files)));
+            (app, id, command["commandId"].as_str().unwrap_or("").to_owned())
+        };
+        let edit = |app: &mut App, f: &dyn Fn(&mut Value)| {
+            if let Some(v) = app.src.net().and_then(|n| n.state_mut().thread_views.get_mut("t")) {
+                f(&mut v.projection);
+            }
+        };
+
+        let (mut app, id, _) = start(true);
+        app.src.net().expect("live").put_reply(id, Ok(json!({})));
+        poll(&mut app);
+        assert!(rewinding(&app, "t"), "FAILED: accepted, but the projection has not rewound yet");
+        edit(&mut app, &|p| {
+            p["providerThreads"][0]["lastRunOrdinal"] = json!(1);
+            p["runs"][1]["status"] = json!("rolled_back");
+        });
+        poll(&mut app);
+        assert!(!rewinding(&app, "t"));
+        let key = crate::chat::composer::draft_key(&app, &Route::Thread("t".into()));
+        let draft = crate::chat::composer::take_draft(&mut app, &key).expect("FAILED: the prompt is back in the draft");
+        assert!(draft.to_string().contains("try the other schema"), "{draft}");
+
+        let (mut app, _, command) = start(false);
+        edit(&mut app, &|p| p["thread"]["rollbackFailure"] = json!({"requestId": command, "message": "Checkpoint is gone."}));
+        poll(&mut app);
+        assert!(!rewinding(&app, "t"));
+        assert_eq!(app.ui.chat.timeline.actions.errors.get("t").map(String::as_str), Some("Checkpoint is gone."));
+    }
 
     #[test]
     fn a_fork_opens_once_its_thread_lands_or_reports_it_never_did() {

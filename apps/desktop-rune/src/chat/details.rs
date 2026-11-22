@@ -18,7 +18,8 @@ use crate::shell::palette;
 pub mod automations;
 pub mod child_work;
 pub mod cleanup;
-mod git;
+pub mod editor_icons;
+pub(crate) mod git;
 pub mod html_render;
 pub mod items;
 pub mod pr;
@@ -72,8 +73,8 @@ pub struct Ui {
     /// dismissed for this session.
     mismatch_shown: HashSet<String>,
     mismatch_dismissed: HashSet<String>,
-    /// "Switch to {branch}?" over uncommitted changes.
-    restore_confirm: Option<String>,
+    /// "Switch to {branch}?" over uncommitted changes, and the side chat whose notice asked.
+    restore_confirm: Option<(String, Option<String>)>,
     /// This connection's session (`GET /api/auth/session`): the reply, when it came, and the
     /// read in flight. Its grants gate git actions, branch changes and the diff panel.
     session: Option<Result<Value, ()>>,
@@ -147,7 +148,7 @@ fn scene_thread(s: &mut App) -> Option<String> {
 }
 
 /// ThreadDetailsSection: a titled list under a hairline when a section with content is above it.
-fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
+pub(crate) fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
     let heading = row()
         .w_full()
         .min_h(32.0)
@@ -391,10 +392,14 @@ fn vcs<'a>(s: &'a App) -> Option<&'a Value> {
 
 /// Subscribes to the framed checkout's status, as the card's `useVcsStatus` does.
 pub fn watch(s: &mut App) {
-    if let Some(cwd) = cwd(s)
-        && let Some(net) = s.src.net()
-    {
-        net.watch_vcs(&cwd);
+    // The project checkout too (BranchToolbar's `projectStatusQuery`): its root tells a ref's own
+    // worktree from another one while the thread works in a worktree.
+    let project = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).filter(|p| !p.is_empty());
+    let cwd = cwd(s);
+    if let Some(net) = s.src.net() {
+        for path in cwd.iter().chain(project.iter()) {
+            net.watch_vcs(path);
+        }
     }
     scripts::load_file(s, false);
     servers::watch(s);
@@ -853,15 +858,19 @@ fn mismatch(s: &App) -> Option<(String, String, String)> {
 }
 
 fn composer_has_content(s: &App) -> bool {
-    s.ui.chat.composer.drafts.get(&composer::draft_key(s, s.frame_route())).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
+    s.ui.chat.composer.drafts.get(&composer::draft_key(s, &composer::route(s))).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
 }
 
-/// The mismatch notice appears once the composer has content and stays for that mismatch.
+/// The mismatch notice appears once the composer has content and stays for that mismatch; the
+/// open side chat's composer notes its own.
 fn note_mismatch(s: &mut App) -> bool {
-    match mismatch(s) {
-        Some((key, ..)) if composer_has_content(s) => s.ui.chat.details.mismatch_shown.insert(key),
-        _ => false,
-    }
+    let app: &App = s;
+    let side = super::side::open_beside(app).map(str::to_owned);
+    let noted: Vec<String> = [None, side]
+        .into_iter()
+        .filter_map(|target| composer::within(app, target, || mismatch(app).filter(|_| composer_has_content(app)).map(|(key, ..)| key)))
+        .collect();
+    noted.into_iter().fold(false, |changed, key| s.ui.chat.details.mismatch_shown.insert(key) | changed)
 }
 
 fn restore_branch(s: &mut App, confirmed: bool) {
@@ -870,7 +879,7 @@ fn restore_branch(s: &mut App, confirmed: bool) {
         return;
     }
     if !confirmed && vcs(s).is_some_and(|v| v["local"]["hasWorkingTreeChanges"] == true) {
-        s.ui.chat.details.restore_confirm = Some(branch);
+        s.ui.chat.details.restore_confirm = Some((branch, composer::drawing(s)));
         return;
     }
     s.ui.chat.details.restore_confirm = None;
@@ -921,7 +930,7 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
                     .variant("ghost")
                     .size("xs")
                     .disabled(restoring)
-                    .on_press(|s: &mut App| restore_branch(s, false))
+                    .on_press(composer::act(s, |s: &mut App| restore_branch(s, false)))
                     .build(t),
             )
             .child(
@@ -936,15 +945,18 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
 }
 
 fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
-    let Some(branch) = s.ui.chat.details.restore_confirm.clone() else { return };
+    let Some((branch, side)) = s.ui.chat.details.restore_confirm.clone() else { return };
     let close = |s: &mut App| s.ui.chat.details.restore_confirm = None;
     let footer = row()
         .w_full()
         .gap(8.0)
         .child(el().grow(1.0))
         .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
-        .child(crate::kit::Button::new("Switch branch").on_press(|s: &mut App| restore_branch(s, true)).build(t));
+        .child(crate::kit::Button::new("Switch branch").disabled(!grants(s, "source-control:write")).on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
+    // ChatOverlayHosts: `Switch to <code className="font-medium">{branch}</code>?`.
+    let code = rune::Span::new("Switch to ".len(), "Switch to ".len() + branch.len()).mono().weight(500.0);
     crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
+        .title_spans(vec![code])
         .open(true)
         .alert()
         .description("You have uncommitted changes. They'll carry over to the other branch, or block the switch if they conflict.")
@@ -1044,7 +1056,7 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
     }
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
-    if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
+    if crate::env::ssh::open_in_editor(s, &editor, &cwd, crate::env::ssh::toast_open_error) {
         return;
     }
     if let Some(net) = s.src.net() {
@@ -1063,6 +1075,24 @@ fn editor_denied(s: &App) -> bool {
 
 fn can_open_editor(s: &App) -> bool {
     editor_mode(s) != crate::env::ssh::OpenMode::Unavailable && !editor_denied(s)
+}
+
+/// OpenInPicker's option icon: the editor's brand mark; the file manager is Finder, File
+/// Explorer, or a muted folder elsewhere. `None` for an editor web draws no icon for.
+fn editor_mark(t: &T, id: &str, size: f32) -> Option<El> {
+    let id = match id {
+        "file-manager" if cfg!(target_os = "macos") => "finder",
+        "file-manager" if cfg!(target_os = "windows") => "file-explorer",
+        "file-manager" => return Some(icon(&icons::FOLDER_CLOSED, size).color(t.c.muted_foreground)),
+        "antigravity" => return composer::provider_mark(t, "antigravity", size),
+        id => id,
+    };
+    let layers = editor_icons::layers(id)?;
+    Some(layers.iter().fold(el().size(size, size), |mark, &(glyph, light, dark)| {
+        let hex = if t.dark { dark } else { light };
+        let color = if hex == "currentColor" { t.c.foreground } else { rune::color::hex(hex).unwrap_or(t.c.foreground) };
+        mark.child(icon(glyph, size).color(color).absolute(0.0, 0.0))
+    }))
 }
 
 /// `editorLabelForPlatform`: the file manager takes this machine's name for it.
@@ -1218,7 +1248,8 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         "details-editor-menu",
         {
             let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
-            let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
+            let glyph = preferred.as_ref().and_then(|(id, _)| editor_mark(t, id, 16.0)).unwrap_or_else(|| icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted));
+            let open = action(t, "details-editor", glyph, &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
             if preferred.is_none() || !can_open_editor(s) { open.opacity(0.64).cursor(Cursor::Default) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
@@ -1303,6 +1334,12 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             body = body.child(panel);
             divided = true;
         }
+        if on("sideChats")
+            && let Some(panel) = super::side::details_list(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
     }
     // Shown only when no section has content, so an emptied card can be refilled.
     if !divided {
@@ -1367,7 +1404,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             for (id, label) in editors {
                 let mark = (preferred.as_deref() == Some(id.as_str()) && !shortcut.is_empty()).then(|| text(shortcut.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground));
                 list = list.child(
-                    menu_row(t, None, &label, Some(move |s: &mut App| {
+                    menu_row(t, editor_mark(t, &id, 16.0), &label, Some(move |s: &mut App| {
                         s.ui.chat.details.menu = None;
                         set_preferred_editor(s, &id);
                     }), None)
@@ -1452,30 +1489,34 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
     let ui = &s.ui.chat.details;
     let muted = t.c.muted_foreground;
     let project_cwd = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
-    let search = row()
+    // ComboboxSearchInput: a borderless field over a divider that takes the ring colour on focus.
+    let field = text_input(&ui.branch_query, theme::TEXT_SM)
+        .key("details-branch-search")
         .w_full()
-        .h(32.0)
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .child(icon(&icons::SEARCH, 16.0).color(muted.alpha_mul(0.8)))
-        .child(
-            text_input(&ui.branch_query, theme::TEXT_SM)
-                .key("details-branch-search")
-                .grow(1.0)
-                .min_w(0.0)
-                .font(theme::TEXT_SM)
-                .color(t.c.foreground)
-                .placeholder("Search refs...", muted)
-                .on_input_key(on_branch_key)
-                .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query),
-        );
-    let mut list = list.child(search).child(el().w_full().h(1.0).my(4.0).fill(t.c.border));
-    let status = |label: &str| row().h(32.0).px(8.0).center_y().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+        .h(26.0)
+        .pl(20.0)
+        .py(3.0)
+        .font(theme::TEXT_SM)
+        .color(t.c.contrast_foreground)
+        .placeholder("Search refs...", t.c.contrast_placeholder)
+        .on_input_key(on_branch_key)
+        .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query);
+    let underline = if ui.branch_query.focused { t.c.ring } else { t.c.contrast_border.alpha_mul(0.7) };
+    let search = col()
+        .w_full()
+        .px(12.0)
+        .pt(9.0)
+        .child(row().w_full().pb(6.0).child(icon(&icons::SEARCH, 16.0).absolute(0.0, 6.0).color(t.c.contrast_muted_foreground.alpha_mul(0.55))).child(field))
+        .child(el().w_full().h(1.0).fill(underline));
+    let list = list.padding(0.0).child(search);
+    // ComboboxEmpty (centred, p-2) and ComboboxStatus (px-3 py-2, medium xs).
+    let empty = |label: &str| row().w_full().padding(8.0).justify_center().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+    let status = |label: &str| row().w_full().px(12.0).py(8.0).child(text(label.to_string()).font(theme::XS_MEDIUM).color(muted));
     let Some(refs) = ui.refs.as_deref() else { return list.child(status("Loading refs...")) };
     let items = visible_items(s);
+    let mut list = list;
     if items.is_empty() {
-        list = list.child(status("No refs found."));
+        list = list.child(empty("No refs found."));
     }
     let active = ui.branch_active.min(items.len().saturating_sub(1));
     let mut rows = col().w_full();
@@ -1496,10 +1537,10 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             .px(8.0)
             .gap(8.0)
             .center_y()
-            .radius(radius::MD)
+            .radius(4.0)
             .cursor(Cursor::Pointer)
             .label(label.clone())
-            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
+            .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
             .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i);
         if let Item::Ref(r) = &item {
             let name = refs[*r].name.clone();
@@ -1516,12 +1557,14 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
         if i == active {
-            line = line.fill(t.c.accent);
+            line = line.fill(t.c.contrast_foreground.alpha_mul(0.09));
         }
         rows = rows.child(line);
     }
     let (near_end, last) = (ui.near_end.clone(), ui.last_scroll.clone());
     let waker = s.ui.panel.waker.clone();
+    // The list: ps-1 py-2 inside ComboboxListVirtualized's px-1 py-1, at most 224 tall.
+    let rows = col().w_full().pl(8.0).pr(4.0).py(12.0).child(rows);
     let rows = rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
         if next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
             if let Some(w) = &waker {
@@ -1536,19 +1579,20 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
         _ => None,
     };
     if let Some(footer) = footer {
-        list = list.child(row().px(8.0).py(6.0).child(text(footer).font(theme::TEXT_XS).color(muted)));
+        list = list.child(status(&footer));
     }
     if selecting_base(s) {
         let on = draft_run(s).is_some_and(|r| r.from_origin);
-        list = list.child(el().w_full().h(1.0).my(4.0).fill(t.c.border)).child(
+        // A label row under a border-border/60 rule: px-3 py-2, medium xs muted, a 12px icon.
+        list = list.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(
             row()
                 .w_full()
-                .h(32.0)
-                .px(8.0)
-                .gap(8.0)
+                .px(12.0)
+                .py(8.0)
+                .gap(12.0)
                 .center_y()
-                .child(icon(&icons::REFRESH_CW, 14.0).color(muted))
-                .child(text("Start from remote").font(theme::TEXT_SM).color(t.c.foreground).grow(1.0))
+                .help("Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.")
+                .child(row().gap(6.0).center_y().grow(1.0).min_w(0.0).child(icon(&icons::REFRESH_CW, 12.0).color(muted)).child(text("Start from remote").font(theme::XS_MEDIUM).color(muted).truncate()))
                 .child(
                     crate::kit::Switch::new(on)
                         .size("sm")
@@ -1603,6 +1647,34 @@ pub fn scene_editor_menu(s: &mut App) {
         config["availableEditors"] = json!(["cursor", "vscode", "zed", "file-manager"]);
     }
     s.ui.chat.details.menu = Some(Menu::Editor);
+}
+
+/// Scene: the branch picker over a page of refs, its second row highlighted.
+pub fn scene_branch_menu(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    let project = cwd(s).unwrap_or_default();
+    let r = |name: &str, remote: bool, current: bool, default: bool, worktree: Option<String>| Ref { name: name.into(), remote, current, default, worktree };
+    let refs = vec![
+        r("feat/greeting", false, true, false, None),
+        r("main", false, false, true, None),
+        r("fix/terminal-first-key", false, false, false, Some(format!("{project}-worktrees/terminal"))),
+        r("chore/bump-deps", false, false, false, None),
+        r("origin/main", true, false, false, None),
+        r("origin/release/1.4", true, false, false, None),
+    ];
+    let ui = &mut s.ui.chat.details;
+    ui.refs_total = refs.len() as u64;
+    ui.refs = Some(refs);
+    ui.branch_query = TextEdit::new("");
+    ui.branch_query.focused = true;
+    ui.branch_active = 1;
+    ui.menu = Some(Menu::Branch);
+}
+
+/// Scene: the confirm before restoring the thread's branch over uncommitted changes.
+pub fn scene_branch_restore(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    s.ui.chat.details.restore_confirm = Some(("feat/greeting".into(), None));
 }
 
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
@@ -1901,6 +1973,19 @@ mod tests {
         assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
         assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
         assert!(!can_change_branch(&s));
+    }
+
+    #[test]
+    fn every_editor_web_lists_has_its_brand_mark() {
+        // contracts EDITORS, in order.
+        let ids = ["cursor", "trae", "kiro", "vscode", "vscode-insiders", "vscodium", "zed", "antigravity", "idea", "aqua", "clion", "datagrip", "dataspell", "goland", "phpstorm", "pycharm", "rider", "rubymine", "rustrover", "webstorm", "file-manager"];
+        for dark in [false, true] {
+            let t = crate::theme::theme(dark);
+            for id in ids {
+                assert!(super::editor_mark(&t, id, 16.0).is_some(), "FAILED: {id} has no mark");
+            }
+        }
+        assert!(super::editor_mark(&crate::theme::theme(true), "nano", 16.0).is_none());
     }
 
     #[test]
