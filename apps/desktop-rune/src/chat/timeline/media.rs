@@ -177,12 +177,16 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-/// `fetchMediaBlob`: the response at an http(s) URL, or web's reason it can't be read.
-fn get(url: &str) -> Result<ureq::Response, String> {
-    let response = ureq::get(url).call().map_err(|e| match e {
+fn request(url: &str) -> Result<ureq::Response, String> {
+    ureq::get(url).call().map_err(|e| match e {
         ureq::Error::Status(code, _) => format!("The file could not be fetched (HTTP {code})."),
         ureq::Error::Transport(_) => "The file could not be fetched. Check the connection and try again.".to_owned(),
-    })?;
+    })
+}
+
+/// `fetchMediaBlob`: the response at an http(s) URL, or web's reason it can't be read.
+fn get(url: &str) -> Result<ureq::Response, String> {
+    let response = request(url)?;
     if response.content_type() == "text/html" {
         return Err("This link returned a web page instead of media. Open the original URL.".to_owned());
     }
@@ -591,9 +595,10 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
         Route::Thread(id) => Some(id.clone()),
         _ => None,
     };
+    let resolved = images.iter().map(|(alt, src)| resolve(alt, src, root.as_deref(), thread.as_deref())).collect::<Option<Vec<_>>>()?;
+    let gallery: Vec<String> = resolved.iter().filter(|(_, m, _)| m.kind == Kind::Image).map(|(k, ..)| k.clone()).collect();
     let mut out = col().w_full().gap(8.0);
-    for (alt, src) in images {
-        let (key, media, access) = resolve(&alt, &src, root.as_deref(), thread.as_deref())?;
+    for (key, media, access) in resolved {
         let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
         let framed = matches!(access, Access::Asset(_));
         if entry.is_none() {
@@ -602,7 +607,7 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
         let loaded = entry.and_then(|e| e.loaded.as_ref());
         let failed = entry.is_some_and(|e| e.failed);
         let shown = match media.kind {
-            Kind::Image => picture(&key, &media, loaded, failed, framed, t),
+            Kind::Image => picture(&key, &media, loaded, failed, framed, &gallery, t),
             Kind::Video => {
                 let original = match &media.reference {
                     Some(Reference::Url(url)) => Some(url.as_str()),
@@ -618,7 +623,7 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
 
 /// `ChatMarkdownImage` standalone: the picture at its size within 30rem, a muted frame while it
 /// loads, and "Image unavailable" when it can't.
-fn picture(key: &str, media: &Media, loaded: Option<&Loaded>, failed: bool, framed: bool, t: &T) -> El {
+fn picture(key: &str, media: &Media, loaded: Option<&Loaded>, failed: bool, framed: bool, gallery: &[String], t: &T) -> El {
     let frame = |e: El| e.radius(8.0).border(1.0, t.c.border.alpha_mul(0.4));
     let size = loaded.map(|l| l.pixels.size()).filter(|(w, h)| *w > 0 && *h > 0);
     if failed || loaded.is_some_and(Loaded::failed) {
@@ -632,13 +637,17 @@ fn picture(key: &str, media: &Media, loaded: Option<&Loaded>, failed: bool, fram
     let ratio = w as f32 / h as f32;
     let shown = el().w_full().max_w((w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio)).aspect_ratio(ratio).pixels_fit(&loaded.pixels, SurfaceFit::Fit);
     let shown = if framed { frame(shown).clip_rounded(8.0) } else { shown };
-    let open = key.to_owned();
+    let (open, gallery) = (key.to_owned(), gallery.to_vec());
     shown
         .focusable(true)
         .role("button")
         .cursor(rune::Cursor::Pointer)
         .label(format!("Preview {}", media.display_name()))
-        .on_press(move |app: &mut App| app.ui.chat.timeline.assets.open = Some(open.clone()))
+        .on_press(move |app: &mut App| {
+            let assets = &mut app.ui.chat.timeline.assets;
+            assets.open = Some(open.clone());
+            assets.gallery = gallery.clone();
+        })
 }
 
 /// `ChatMarkdownMediaUnavailableLabel`.
@@ -790,6 +799,32 @@ fn save(app: &mut App, media: &Media, loaded: Option<Loaded>, tx: &mut Tx) {
         let (url, errors, waker) = (loaded.url.clone(), errors.clone(), waker.clone());
         std::thread::spawn(move || {
             if let Err(e) = download(&url, &path) {
+                if let Ok(mut list) = errors.lock() {
+                    list.push((title, e));
+                }
+                if let Some(wake) = &waker {
+                    wake();
+                }
+            }
+        });
+    });
+}
+
+/// `downloadFileAttachment`: a save dialog named for the file, then its bytes from `url`.
+pub fn save_attachment(app: &mut App, url: String, name: String, tx: &mut Tx) {
+    let options = rune::FileDialogOptions { title: format!("Download {name}"), file_name: Some(name.clone()), ..Default::default() };
+    let errors = app.ui.chat.timeline.assets.media.errors.clone();
+    let waker = app.ui.panel.waker.clone();
+    tx.save_file(options, move |app: &mut App, picked: rune::FileDialogResult, _| {
+        let Ok(Some(path)) = picked else { return };
+        crate::shell::palette::toast(app, "Download started", None);
+        let (url, errors, waker, title) = (url.clone(), errors.clone(), waker.clone(), format!("Could not download {name}"));
+        std::thread::spawn(move || {
+            let saved = request(&url).and_then(|response| {
+                let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+                std::io::copy(&mut response.into_reader(), &mut file).map(drop).map_err(|e| e.to_string())
+            });
+            if let Err(e) = saved {
                 if let Ok(mut list) = errors.lock() {
                     list.push((title, e));
                 }

@@ -33,7 +33,16 @@ pub struct LineRange {
 
 pub const LINE_H: f32 = 20.0;
 pub const HEADER_H: f32 = 32.0;
-pub const SEP_H: f32 = 24.0;
+/// `[data-separator=line-info]`'s height.
+pub const SEP_H: f32 = 32.0;
+/// Pierre's `--diffs-gap-block` around a line-info separator.
+const SEP_GAP: f32 = 8.0;
+
+/// The space above and below the separator before hunk `h` of `hunks`: none above the file's
+/// first (`data-separator-first`) or below its trailing one (`data-separator-last`).
+pub fn sep_margins(h: usize, hunks: usize) -> (f32, f32) {
+    (if h == 0 { 0.0 } else { SEP_GAP }, if h >= hunks { 0.0 } else { SEP_GAP })
+}
 pub const NOTE_H: f32 = 32.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -643,7 +652,10 @@ impl DiffState {
         match self.rows[r] {
             Row::File(_) => HEADER_H,
             Row::Note(_) => NOTE_H,
-            Row::Sep { .. } => SEP_H,
+            Row::Sep { f, h } => {
+                let (top, bottom) = sep_margins(h as usize, self.files().get(f as usize).map_or(0, |file| file.hunks.len()));
+                SEP_H + top + bottom
+            }
             Row::Comment { n, .. } if self.notes.get(n as usize).is_some_and(|n| n.draft) => 104.0,
             Row::Comment { .. } => 40.0,
             _ => LINE_H,

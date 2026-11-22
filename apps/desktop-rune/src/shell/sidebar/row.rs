@@ -47,17 +47,22 @@ pub(super) fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
 /// The provider mark at 14px, 60% opaque (`ProviderInstanceIcon`).
 fn provider_icon(t: &T, model: &Model, th: &Thread, text_color: Color) -> Option<El> {
     let driver = model.drivers.get(&th.provider).map(String::as_str).unwrap_or(th.provider.as_str());
+    provider_mark(t, driver, text_color, 14.0)
+}
+
+/// `ProviderInstanceIcon` for a driver at `size`, 60% opaque.
+pub(crate) fn provider_mark(t: &T, driver: &str, text_color: Color, size: f32) -> Option<El> {
     let mark = match driver {
-        "codex" => icon(&brand::OPENAI, 14.0).color(text_color),
-        "claudeAgent" => icon(&brand::CLAUDE, 14.0).color(rune::color::hex("#d97757").unwrap_or(text_color)),
-        "acpRegistry" => icon(&brand::ACP_REGISTRY, 14.0).color(if t.dark { Color::WHITE } else { Color::BLACK }),
+        "codex" => icon(&brand::OPENAI, size).color(text_color),
+        "claudeAgent" => icon(&brand::CLAUDE, size).color(rune::color::hex("#d97757").unwrap_or(text_color)),
+        "acpRegistry" => icon(&brand::ACP_REGISTRY, size).color(if t.dark { Color::WHITE } else { Color::BLACK }),
         "opencode" => {
             let (frame, inner) = if t.dark { ("#F1ECEC", "#4B4646") } else { ("#211E1E", "#CFCECD") };
-            el().size(14.0, 14.0)
-                .child(icon(&brand::OPENCODE, 14.0).color(rune::color::hex(frame).unwrap_or(text_color)).absolute(0.0, 0.0))
-                .child(icon(&brand::OPENCODE_INNER, 14.0).color(rune::color::hex(inner).unwrap_or(text_color)).absolute(0.0, 0.0))
+            el().size(size, size)
+                .child(icon(&brand::OPENCODE, size).color(rune::color::hex(frame).unwrap_or(text_color)).absolute(0.0, 0.0))
+                .child(icon(&brand::OPENCODE_INNER, size).color(rune::color::hex(inner).unwrap_or(text_color)).absolute(0.0, 0.0))
         }
-        _ => crate::chat::composer::provider_mark(t, driver, 14.0)?,
+        _ => crate::chat::composer::provider_mark(t, driver, size)?,
     };
     Some(mark.shrink().opacity(0.6))
 }
@@ -136,6 +141,8 @@ pub struct RowCtx<'a> {
     pub shift: Option<f32>,
     /// A row under a boring-sidebar project folder: indented, without a favicon.
     pub folder: bool,
+    /// The jump shortcut shown in place of the time while its modifiers are held.
+    pub jump: Option<String>,
 }
 
 /// Applies the drag: the dragged row follows the pointer above the rest, peers slide to their
@@ -152,8 +159,9 @@ fn place(li: El, rc: &RowCtx) -> El {
 /// The press/drag/menu wiring every row shares: a click opens (Cmd toggles, Shift extends the
 /// selection), a drag past `DRAG_DISTANCE` moves it, a secondary press opens the menu.
 fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>) -> El {
-    let (id, hid, mid) = (th.id.clone(), th.id.clone(), th.id.clone());
+    let (id, hid, mid, fid) = (th.id.clone(), th.id.clone(), th.id.clone(), th.id.clone());
     e.key(format!("sb-row-{}", th.id))
+        .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| super::drop_files(s, &fid, files))
         .cursor(Cursor::Pointer)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.sb.ring)
@@ -479,7 +487,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     line1 = line1.child(super::favicon::mark(s, t, &th.project_id, model.project(th), false, 16.0));
     if th.pinned {
-        line1 = line1.child(icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
+        line1 = line1.child(unpin_button(s, t, th, hovered));
     }
     line1 = line1.child(text(model.project(th).to_string()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
     if let Some((_, verb)) = rc.dragging {
@@ -489,11 +497,15 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         let rest = match top_status(t, model, th, status) {
             Some((glyph, label, color)) => {
-                row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color))
+                woke_button(row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color)), model, th)
             }
             None => row().child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label)),
         };
-        let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered { 0.0 } else { 1.0 }));
+        let rest = match &rc.jump {
+            Some(label) => crate::kit::kbd(label, t),
+            None => rest,
+        };
+        let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && rc.jump.is_none() { 0.0 } else { 1.0 }));
         if hovered {
             let mut actions = row().h_full();
             if draft {
@@ -557,8 +569,27 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
+/// The pin glyph is an "Unpin thread" button, showing PIN_OFF while the row is hovered.
+fn unpin_button(s: &App, t: &T, th: &Thread, hovered: bool) -> El {
+    let glyph = icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink();
+    if !super::can_operate(s, &[th]) {
+        return glyph;
+    }
+    let id = th.id.clone();
+    glyph.key(format!("sb-unpin-{}", th.id)).role("button").label("Unpin thread").help("Unpin thread").cursor(Cursor::Pointer).on_press(move |s: &mut App| super::checked(s, &id, super::unpin))
+}
+
+/// "Woke" is a button that acknowledges the wake (`handleAcknowledgeWokeClick`); other statuses
+/// stay labels.
+fn woke_button(e: El, model: &Model, th: &Thread) -> El {
+    let shown = logic::status(th) == Status::Ready && th.woke(model.now);
+    let Some(at) = shown.then(|| th.woke_at(model.now)).flatten() else { return e };
+    let id = th.id.clone();
+    e.key(format!("sb-woke-{}", th.id)).role("button").label("Dismiss Woke notification").cursor(Cursor::Pointer).on_press(move |s: &mut App| super::acknowledge_woke(s, &id, at))
+}
+
 /// A pull request state's glyph and tone (`resolvePullRequestState` presentation).
-fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
+pub(crate) fn pr_glyph(t: &T, state: Option<&str>) -> (&'static rune::Icon, Color) {
     let dark = t.dark;
     match state {
         Some("draft") => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
@@ -654,7 +685,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         r = r.child(trailing_icons(s, t, model, th, false));
     }
     if th.pinned {
-        r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
+        r = r.child(unpin_button(s, t, th, hovered));
     }
     if !two_line && crate::panel::terminal::running(s, &th.id) > 0 {
         r = r.child(terminal_glyph(t));
@@ -668,12 +699,16 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let at = th.snoozed_until.unwrap_or(model.now);
             row().gap(4.0).center_y().child(icon(&i::ALARM_CLOCK, 12.0).color(t.sb.info_foreground)).child(text(wake_label(at, model.now, crate::data::Zone::Local)).font(theme::TEXT_XS).color(t.sb.info_foreground))
         } else if let Some((glyph, label, color)) = top_status(t, model, th, status).filter(|_| rc.folder) {
-            row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color))
+            woke_button(row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color)), model, th)
         } else {
             let at = if settled { th.settled_time() } else { th.card_time() };
             row().child(text(logic::relative_label(at, model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))
         };
-        let mut slot = row().ml(4.0).h(24.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && !woke { 0.0 } else { 1.0 }));
+        let rest = match &rc.jump {
+            Some(label) => crate::kit::kbd(label, t),
+            None => rest,
+        };
+        let mut slot = row().ml(4.0).h(24.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && !woke && rc.jump.is_none() { 0.0 } else { 1.0 }));
         if hovered {
             let id = th.id.clone();
             let action = match rc.section {
@@ -947,6 +982,8 @@ pub fn project(p: &Projection) -> Vec<Option<f32>> {
 pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let items = model.items(ui);
+    let jumps = super::jump_labels(s, model);
+    let width = super::width(s, cx);
     if let Some(h) = &ui.hover {
         ui.hover_rect.set(cx.layout(&format!("sb-row-{h}")).map(|r| [r[0], r[1], r[2], r[3]]));
     }
@@ -1055,7 +1092,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
             Item::Thread { key, section } => {
                 let Some(th) = model.thread(key) else { continue };
                 let dragging = drag.filter(|d| &d.key == key).map(|d| (min_dy.map_or(d.dy, |m| d.dy.max(m)), verb));
-                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift, folder: false };
+                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift, folder: false, jump: jumps.get(key.as_str()).cloned() };
                 let e = if matches!(section, Section::Snoozed | Section::Settled) { slim(s, model, th, t, &rc) } else { card(s, model, th, t, &rc) };
                 let e = if first { e } else { e.mt(1.0) };
                 first = false;
@@ -1069,12 +1106,12 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                     Marker::PinnedHeader | Marker::PinnedDivider => {
                         let (label, section) = if *m == Marker::PinnedHeader { ("Pinned", Section::Pinned) } else { ("Active", Section::Active) };
                         let e = base(0.0);
-                        if dragging { e.child(chrome::boundary(t, label, target_section == Some(section))) } else { e }
+                        if dragging { e.child(chrome::boundary(t, label, target_section == Some(section), width)) } else { e }
                     }
                     Marker::ActivePlaceholder if !model.folders.is_empty() => {
                         let row_of = |i: usize| {
                             let th = &model.threads[i];
-                            let rc = RowCtx { section: Section::Active, hovered: ui.hover.as_deref() == Some(th.id.as_str()), dragging: None, over: None, shift: Some(0.0), folder: true };
+                            let rc = RowCtx { section: Section::Active, hovered: ui.hover.as_deref() == Some(th.id.as_str()), dragging: None, over: None, shift: Some(0.0), folder: true, jump: jumps.get(th.id.as_str()).cloned() };
                             slim(s, model, th, t, &rc).mt(1.0)
                         };
                         let e = el().key(key.clone()).w_full().child(super::folders::view(s, t, model, &row_of));
@@ -1088,7 +1125,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                         let from_here = drag.is_some_and(|d| d.section == section);
                         let hint = dragging && (rows.is_empty() || (from_here && rows.len() == 1 && target_section.is_some_and(|ts| ts != section)));
                         let e = base(0.0);
-                        if hint { e.child(chrome::placeholder(t, label, target_section == Some(section))) } else { e }
+                        if hint { e.child(chrome::placeholder(t, label, target_section == Some(section), width)) } else { e }
                     }
                     Marker::WorkingHeader | Marker::SnoozedHeader | Marker::SettledHeader => {
                         let (shelf, count) = match m {

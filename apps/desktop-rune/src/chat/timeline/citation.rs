@@ -4,7 +4,7 @@
 use crate::data::s;
 use crate::theme::{self, T, radius};
 use crate::{App, Route, icons};
-use rune::{Align, Color, El, ScrollSpec, Side, Tx, col, el, row, text};
+use rune::{Align, Color, Cx, El, ScrollSpec, Side, Tx, col, el, row, text};
 
 const HREF_PREFIX: &str = "t3-citation://v1/";
 const MAX_TEXT: usize = 8_000;
@@ -166,6 +166,125 @@ pub fn label(c: &Citation) -> String {
     cut
 }
 
+fn normalized(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut space = false;
+    for ch in v.chars() {
+        if ch.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            out.push(ch);
+            space = false;
+        }
+    }
+    out
+}
+
+/// createAssistantTextSelector over `source`, the reply's Markdown standing in for its rendered
+/// text: the quote's span in whitespace-collapsed UTF-16 units and up to 32 units either side.
+/// A quote not found as written (it crosses Markdown syntax) keeps no context: the web finds
+/// its source by the quote alone then.
+fn selector(source: &str, quote: &str) -> Option<(u64, u64, String, String)> {
+    if quote.trim().is_empty() {
+        return None;
+    }
+    let (source, quote) = (normalized(source), normalized(quote));
+    let len = units(&quote) as u64;
+    let Some(at) = source.find(&quote) else { return Some((0, len, String::new(), String::new())) };
+    let (before, after) = (&source[..at], &source[at + quote.len()..]);
+    let mut n = 0;
+    let prefix: String = before.chars().rev().take_while(|c| { n += c.len_utf16(); n <= MAX_CONTEXT }).collect::<Vec<_>>().into_iter().rev().collect();
+    n = 0;
+    let suffix: String = after.chars().take_while(|c| { n += c.len_utf16(); n <= MAX_CONTEXT }).collect();
+    let start = units(before) as u64;
+    Some((start, start + len, prefix, suffix))
+}
+
+/// A settled selection in a reply (AssistantSelectionToolbar's state): the reply's item and
+/// thread, and whether the quote is too long to cite.
+pub struct Quote {
+    item: String,
+    thread: String,
+    too_long: bool,
+}
+
+fn items(p: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    super::rows::array(p, "visibleTurnItems").iter().map(|v| &v["item"]).chain(super::rows::array(p, "turnItems"))
+}
+
+/// A reply's text as a quote source (`data-assistant-citation-source`): its texts select as one,
+/// and a selection that settles inside shows the Cite toolbar.
+pub fn source(item: &str, body: El) -> El {
+    let item = item.to_owned();
+    col().w_full().selection_group(true).child(body).on_selection_change(move |app: &mut App, change: &rune::SelectionChange, tx: &mut Tx| {
+        let ours = app.ui.chat.timeline.quote.as_ref().is_some_and(|q| q.item == item);
+        match change.selection().filter(|sel| !change.dragging() && !sel.text().trim().is_empty()) {
+            Some(sel) => {
+                let too_long = units(sel.text()) > MAX_TEXT;
+                let thread = app.state().thread_views.iter().find(|(_, v)| items(&v.projection).any(|i| s(i, "id") == item)).map(|(id, _)| id.clone());
+                app.ui.chat.timeline.quote = thread.map(|thread| Quote { item: item.clone(), thread, too_long });
+            }
+            None if ours => app.ui.chat.timeline.quote = None,
+            None => tx.live_only(),
+        }
+    })
+}
+
+/// resolveSelectionActionPosition without a pointer: under the selection's last line box, at its
+/// end, kept inside the timeline (`bounds`) less the toolbar's width `w`. None once that box
+/// scrolled out of the timeline.
+fn toolbar_point(bounds: [f32; 4], last: [f32; 4], w: f32) -> Option<[f32; 2]> {
+    let [bx, by, bw, bh] = bounds;
+    let visible = last[0].max(bx) < (last[0] + last[2]).min(bx + bw) && last[1].max(by) < (last[1] + last[3]).min(by + bh);
+    if !visible {
+        return None;
+    }
+    let x = (last[0] + last[2]).min(bx + bw - w).max(bx);
+    let y = (last[1] + last[3] + 4.0).min(by + bh).max(by);
+    Some([x, y])
+}
+
+/// AssistantSelectionToolbar: Cite under the end of a settled selection in a reply, drawn in
+/// the chat body. Pressing it leaves the selection for [`cite`] to read.
+pub fn toolbar(app: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
+    let quote = app.ui.chat.timeline.quote.as_ref()?;
+    let bounds = cx.layout(&format!("timeline-{}", quote.thread))?;
+    let body = cx.layout("chat-body")?;
+    let w = cx.layout("assistant-quote-toolbar").map_or(64.0, |r| r[2]);
+    let last = *cx.selection_rects().last()?;
+    let [x, y] = toolbar_point(bounds, last, w)?;
+    let (label, help) = if quote.too_long { ("Shorten selection", "Selection is too long to cite") } else { ("Cite", "Cite selection in composer") };
+    let mut button = crate::kit::Button::new(label).variant("glass").size("xs").icon(&icons::QUOTE).disabled(quote.too_long).build(t).label(help);
+    if !quote.too_long {
+        button = button.on_press_tx(|app: &mut App, tx: &mut Tx| cite(app, tx));
+    }
+    Some(button.key("assistant-quote-toolbar").keeps_text_selection().absolute(x - body[0], y - body[1]))
+}
+
+/// The toolbar's press: the selected text into the composer of the reply's thread as a quote
+/// chip (citeAssistantText), and the selection cleared.
+fn cite(app: &mut App, tx: &mut Tx) {
+    let Some(quote) = app.ui.chat.timeline.quote.take() else { return };
+    let Some(text) = tx.text_selection().map(|sel| sel.text().to_owned()) else { return };
+    let Some(citation) = citation_for(app, &quote, &text) else { return };
+    let side = (!matches!(app.frame_route(), Route::Thread(id) if *id == quote.thread)).then(|| quote.thread.clone());
+    crate::chat::composer::acting(app, side, |app| crate::chat::composer::chips::cite(app, &citation));
+    tx.clear_text_selection();
+}
+
+fn citation_for(app: &App, quote: &Quote, text: &str) -> Option<Citation> {
+    let view = app.state().thread_views.get(&quote.thread)?;
+    let item = items(&view.projection).find(|i| s(i, "id") == quote.item)?;
+    let message_id = [s(item, "messageId"), s(item, "id")].into_iter().find(|v| !v.is_empty())?.to_owned();
+    let (start, end, prefix, suffix) = selector(s(item, "text"), text)?;
+    let owner = crate::env::owner(app, &quote.thread);
+    let environment_id = if owner == crate::env::LOCAL { crate::env::local_id(app).unwrap_or(owner) } else { owner };
+    Some(Citation { environment_id, thread_id: quote.thread.clone(), message_id, text: text.to_owned(), comment: None, start, end, prefix, suffix })
+}
+
 fn close(app: &mut App) {
     app.ui.chat.timeline.md_links.citation = None;
 }
@@ -302,5 +421,29 @@ mod tests {
         assert_eq!(label(&Citation { comment: Some("   ".into()), ..c.clone() }), "Use a *mutex* & retry when it fails");
         let long = Citation { text: "x".repeat(70), ..c };
         assert_eq!(label(&long), format!("{}…", "x".repeat(64)));
+    }
+
+    #[test]
+    fn selections_quote_with_whitespace_collapsed_offsets_and_context() {
+        // Values from the web's createAssistantTextSelector over the same text.
+        let source = "First,   use a mutex\nand retry when it fails. Then 🙂 log the error and move on to the next step.";
+        let (start, end, prefix, suffix) = selector(source, "use a mutex\nand retry").unwrap();
+        assert_eq!((start, end, prefix.as_str()), (7, 28, "First, "));
+        assert_eq!(suffix, " when it fails. Then 🙂 log the ");
+        assert_eq!(units(&suffix), 32);
+        // The context never splits a surrogate pair: 🙂 is two units and only one is left.
+        let (_, _, _, suffix) = selector("ab retry 01234567890123456789012345678 🙂 tail", "retry").unwrap();
+        assert_eq!(suffix, " 01234567890123456789012345678 ");
+        // Across Markdown syntax the quote isn't found as written: no context.
+        assert_eq!(selector("Use **bold** here", "Use bold here"), Some((0, 13, String::new(), String::new())));
+        assert_eq!(selector("anything", " \n "), None);
+    }
+
+    #[test]
+    fn the_toolbar_sits_under_the_selection_end_inside_the_timeline() {
+        let bounds = [100.0, 50.0, 600.0, 400.0];
+        assert_eq!(toolbar_point(bounds, [200.0, 100.0, 80.0, 20.0], 60.0), Some([280.0, 124.0]));
+        assert_eq!(toolbar_point(bounds, [600.0, 430.0, 120.0, 20.0], 60.0), Some([640.0, 450.0]), "FAILED: clamped to the timeline's right and bottom");
+        assert_eq!(toolbar_point(bounds, [200.0, 10.0, 80.0, 20.0], 60.0), None, "FAILED: a selection scrolled above the timeline hides it");
     }
 }

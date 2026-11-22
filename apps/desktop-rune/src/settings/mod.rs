@@ -24,6 +24,7 @@ mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
 mod keybindings;
+pub(crate) use keybindings::unshift;
 pub(crate) mod machines;
 mod models;
 mod host_logos;
@@ -48,6 +49,7 @@ mod licenses;
 mod secrets;
 pub(crate) mod tasks;
 pub(crate) mod themes;
+mod vivid;
 pub use themes::apply as apply_theme;
 
 use crate::theme::{self, AlphaMul, T};
@@ -61,6 +63,9 @@ pub struct Ui {
     pub theme_edit_dark: bool,
     pub theme_import_open: bool,
     pub theme_import: TextEdit,
+    /// Shown inside the import dialog, which covers the page's error banner.
+    pub theme_import_error: Option<String>,
+    pub theme_search: themes::Search,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
     pub theme_colors: HashMap<String, TextEdit>,
@@ -79,11 +84,8 @@ pub struct Ui {
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
-    pub delete_thread: Option<(String, String)>,
     /// The archived thread whose right-click menu is open: id, title, and where.
     pub archive_menu: Option<(String, String, f32, f32)>,
-    /// The project the Danger section is confirming removal of: id and title.
-    pub delete_project: Option<(String, String)>,
     pub icon_picker: Option<project_icon::Draft>,
     pub accent: Option<accent::Draft>,
     pub provider_picker: bool,
@@ -103,6 +105,11 @@ pub struct Ui {
     pub search_active: usize,
     /// A search result's title to scroll to once its page lays out (web's search target).
     pub reveal: Option<String>,
+    /// The revealed setting's one-shot pulse: its title, when it started, and whether the ring
+    /// shows this step.
+    pub pulse: Option<(String, i64, bool)>,
+    /// Open inheritance popover, by row key.
+    pub inheritance: Option<String>,
     pub edits: HashMap<String, TextEdit>,
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
@@ -127,8 +134,6 @@ pub struct Ui {
     pub resource_telemetry: resource_telemetry::Ui,
     pub licenses: licenses::Ui,
     pub telemetry: telemetry::Ui,
-    /// General's Restore device defaults confirmation is open.
-    pub restore_confirm: bool,
     /// The custom theme whose removal is being confirmed.
     pub theme_remove: Option<String>,
     pub thread_details_open: bool,
@@ -507,7 +512,7 @@ pub fn poll(s: &mut App) -> bool {
             request(s, "peerLinks.list", json!({}));
         }
         if page.as_deref() == Some("archived") {
-            request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+            projects::request_archives(s);
         }
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
@@ -587,7 +592,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && (diagnostics::tick(s) | resource_telemetry::tick(s));
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -606,8 +611,9 @@ pub fn poll(s: &mut App) -> bool {
                         source_control::scan(s);
                     }
                     if projects::failure_title(&method).is_some() {
-                        request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+                        projects::request_archives(s);
                     }
+                    projects::archive_fetched(s, &method, &result);
                     s.ui.settings.results.insert(method, result);
                 }
                 Err(error) if projects::failure_title(&method).is_some() => {
@@ -624,7 +630,7 @@ pub fn poll(s: &mut App) -> bool {
                         .to_owned();
                     let message = failure_message(&method, &environment, &error);
                     // Linked environments show their own failures, as web's section does.
-                    if method == "peerLinks.list" {
+                    if method == "peerLinks.list" || method == source_control::DISCOVERY || method.starts_with(projects::ARCHIVED_SNAPSHOT) {
                         let mut failed = json!({});
                         failed[LOAD_ERROR] = json!(message);
                         s.ui.settings.results.insert(method, failed);
@@ -832,12 +838,14 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
-    let reveal = search::reveal(page, title);
+    // Web keeps the `code-font` anchor on the simple Monospace row; only Prompt and Terminal
+    // font need the separate rows (`revealSettingsSearchTarget`).
+    let separate = value(s, "typographyAdvanced") == true;
+    let reveal = if title == "Code font" && !separate { "Monospace font" } else { search::reveal(page, title) };
     // Web's `AdvancedSettings` opens on a target inside it and stays open.
     s.ui.settings.advanced.extend(pages::fold_of(page, reveal));
     s.ui.settings.reveal = Some(reveal.to_owned());
-    // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
-    if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
+    if matches!(title, "Prompt font" | "Terminal font") {
         update(s, "typographyAdvanced", json!(true));
     }
     s.navigate(Route::Settings(page.to_owned()));
@@ -846,6 +854,51 @@ pub fn open_setting(s: &mut App, page: &str, title: &str) {
 /// The key on a setting's title text, so a search result can scroll to it.
 pub fn title_key(title: &str) -> String {
     format!("setting-title-{}", search::normalize(title))
+}
+
+/// Web's `settings-search-target-pulse`: two 650 ms in-out cycles, as four on/off steps.
+const PULSE_STEP_MS: i64 = 325;
+
+/// Whether the ring shows `elapsed` ms into the pulse, `None` once it's over.
+fn pulse_phase(elapsed: i64) -> Option<bool> {
+    let step = elapsed.max(0) / PULSE_STEP_MS;
+    (step < 4).then_some(step % 2 == 0)
+}
+
+/// Steps the revealed setting's pulse, then lets it idle.
+pub fn pulse_tick(s: &mut App, tx: &mut rune::Tx) -> bool {
+    let Some((_, started, on)) = &mut s.ui.settings.pulse else {
+        return false;
+    };
+    let elapsed = crate::data::now_ms() - *started;
+    let Some(next) = pulse_phase(elapsed) else {
+        s.ui.settings.pulse = None;
+        return true;
+    };
+    tx.wake_after(std::time::Duration::from_millis((PULSE_STEP_MS - elapsed.max(0) % PULSE_STEP_MS) as u64));
+    std::mem::replace(on, next) != next
+}
+
+/// Rings `row` while it's the pulsing search target titled `title`.
+pub fn pulsed(s: &App, t: &T, title: &str, row: El) -> El {
+    match &s.ui.settings.pulse {
+        Some((target, _, on)) if search::normalize(target) == search::normalize(title) => {
+            row.radius(12.0).outline(2.0, -2.0, t.c.primary.alpha_mul(if *on { 0.7 } else { 0.0 }))
+        }
+        _ => row,
+    }
+}
+
+/// Web's `SettingsScopeBoundary`: a server page scoped to one environment that isn't connected.
+fn reconnect_notice(s: &App, path: &str) -> Option<String> {
+    if scope::device_only(path) || path == "projects" || !s.ui.settings.environment_only {
+        return None;
+    }
+    if matches!(s.state().conn, s5_net::Conn::Open) {
+        return None;
+    }
+    let label = s.state().config.as_ref().and_then(|c| c["environment"]["label"].as_str()).unwrap_or("this environment");
+    Some(format!("Reconnect {label} to change its settings."))
 }
 
 /// Arrow keys move through the results and Enter opens the active one, as web's combobox does.
@@ -908,7 +961,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .center_y()
             .child(icon(&icons::SEARCH, 16.0).color(t.sb.muted_foreground))
             .child(search)
-            .child(
+            .child(if search::normalize(&s.ui.settings.search.text).is_empty() {
                 el().size(20.0, 20.0)
                     .center()
                     .radius(4.0)
@@ -917,14 +970,28 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                         text("/")
                             .font(theme::XS_MEDIUM)
                             .color(t.sb.muted_foreground),
-                    ),
-            );
+                    )
+            } else {
+                crate::kit::Button::new("Clear settings search")
+                    .variant("ghost-muted")
+                    .size("icon-micro")
+                    .icon(&icons::X)
+                    .build(t)
+                    .on_press(|s: &mut App| {
+                        let search = &mut s.ui.settings.search;
+                        search.clear();
+                        search.focused = true;
+                        s.ui.settings.search_active = 0;
+                    })
+            });
     let query = s.ui.settings.search.text.clone();
     if !search::normalize(&query).is_empty() {
         nav = nav.child(search_results(s, t, &query));
     }
+    // Web's sections are one `tree`: Up, Down, Home and End move focus without opening one.
+    let mut tree = col().w_full().gap(16.0).role("tree").label("Settings sections").focus_group();
     for (heading, items) in NAV.iter().filter(|_| search::normalize(&query).is_empty()) {
-        let mut group = col().gap(4.0).w_full();
+        let mut group = col().gap(4.0).w_full().role("group").label(*heading);
         if !heading.is_empty() {
             group = group.child(
                 text(*heading)
@@ -954,7 +1021,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     })
                     .hover(t.c.sidebar_row_hover)
                     .focusable(true)
-                    .role("link")
+                    .role("treeitem")
+                    .focus_selected(active)
                     .label(*title)
                     .on_press(move |s: &mut App| {
                         commit_edits(s, true);
@@ -973,7 +1041,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     })),
             );
         }
-        nav = nav.child(group);
+        tree = tree.child(group);
+    }
+    if search::normalize(&query).is_empty() {
+        nav = nav.child(tree);
     }
     let nav = col()
         .w(239.0)
@@ -1012,7 +1083,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .icon(&icons::ROTATE_CCW)
                 .disabled(restore::changed_labels(s).is_empty())
                 .build(t)
-                .on_press(|s: &mut App| s.ui.settings.restore_confirm = !restore::changed_labels(s).is_empty()),
+                .on_press(restore::ask),
         );
     }
     header = header.child(
@@ -1031,7 +1102,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .h_full()
         .child(header)
         .child(el().h(1.0).w_full().fill(t.c.border));
-    let page = pages::view(s, cx, t, path);
+    let page = match reconnect_notice(s, path) {
+        Some(notice) => col()
+            .w_full()
+            .max_w(768.0)
+            .px(24.0)
+            .py(24.0)
+            .child(text(notice).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()),
+        None => pages::view(s, cx, t, path),
+    };
     let scroll = format!("settings-scroll-{path}");
     let mut scroller = col()
         .key(scroll.clone())
@@ -1049,7 +1128,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         let key = title_key(&title);
         scroller = scroller.child(el().key(format!("settings-reveal-{key}")).size(0.0, 0.0).on_layout_tx(
             move |s: &mut App, _, tx: &mut rune::Tx| {
-                s.ui.settings.reveal = None;
+                if let Some(title) = s.ui.settings.reveal.take() {
+                    s.ui.settings.pulse = Some((title, crate::data::now_ms(), true));
+                    tx.wake_after(std::time::Duration::from_millis(PULSE_STEP_MS as u64));
+                }
                 tx.scroll_center_in(scroll.clone(), key.clone());
             },
         ));
@@ -1083,11 +1165,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::archive_menu(s, t, &mut overlays);
-    projects::confirm_delete(s, t, &mut overlays);
     secrets::overlays(s, t, &mut overlays);
-    diagnostics::overlays(s, t, &mut overlays);
-    resource_telemetry::overlays(s, t, &mut overlays);
-    projects::confirm_remove(s, t, &mut overlays);
     project_icon::dialog(s, t, &mut overlays);
     if crate::chat::details::scripts::settings_editor_open(s) {
         crate::chat::details::scripts::overlays(s, t, &mut overlays);
@@ -1097,7 +1175,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     about::update_dialog(s, t, &mut overlays);
     about::overlays(s, t, &mut overlays);
     checkout_grouping::overlays(s, t, &mut overlays);
-    restore::confirm(s, t, &mut overlays);
     thread_details::overlay(s, t, &mut overlays);
     themes::remove_dialog(s, t, &mut overlays);
     crate::desktop::exposure::confirm(s, t, &mut overlays);
@@ -1106,6 +1183,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, cx.env().scale, &mut overlays);
     scope::menu(s, t, &mut overlays);
+    scope::inheritance_popover(s, t, &mut overlays);
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
@@ -1621,8 +1699,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             s.ui.settings.theme_import_open = false;
             return true;
         }
-        if std::mem::take(&mut s.ui.settings.restore_confirm)
-            || std::mem::take(&mut s.ui.settings.thread_details_open)
+        if std::mem::take(&mut s.ui.settings.thread_details_open)
             || s.ui.settings.theme_remove.take().is_some()
             || about::escape(s)
         {
@@ -1638,9 +1715,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         }
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
-            || s.ui.settings.delete_thread.take().is_some()
             || s.ui.settings.archive_menu.take().is_some()
-            || s.ui.settings.delete_project.take().is_some()
         {
             return true;
         }
@@ -1762,6 +1837,16 @@ mod patch_tests {
         let setup = json!([{"_tag":"Fail","error":{"_tag":"ProviderSetupError","detail":"Sign-in expired."}}]);
         assert_eq!(failure_message("provider.auth.start", "Mac", &setup), "Sign-in expired.");
     }
+    #[test]
+    fn the_reveal_pulse_blinks_twice_then_idles() {
+        let steps: Vec<_> = [0, 324, 325, 649, 650, 975, 1299, 1300, 5000].into_iter().map(super::pulse_phase).collect();
+        assert_eq!(
+            steps,
+            [Some(true), Some(true), Some(false), Some(false), Some(true), Some(false), Some(false), None, None],
+            "FAILED: on, off, on, off, then done"
+        );
+    }
+
     #[test]
     fn escape_clears_a_search_before_closing() {
         let key = |key| rune::KeyEvent { key, mods: Default::default() };

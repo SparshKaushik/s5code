@@ -181,6 +181,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= env::drain(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
+    changed |= settings::pulse_tick(s, tx);
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s, tx);
     changed |= chat::composer::poll(s);
@@ -193,6 +194,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
+    changed |= shell::toast::poll(s, tx);
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);
@@ -213,10 +215,11 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    panel::note_key(e, tx);
     // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
     // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
     if matches!(e.key, rune::Key::Modifier { .. }) {
-        return settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
+        return shell::sidebar::on_modifier(s, e, tx) | settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
     }
     panel::preview::note_focus(s, tx);
     shell::quit::on_key(s, e, tx)
@@ -245,7 +248,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::updates::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 
@@ -259,6 +262,11 @@ pub fn scene_clock(s: &mut App) {
 fn main() {
     if std::env::args().any(|a| a == "--check-server") {
         std::process::exit(host::check());
+    }
+    if let [_, flag, manifest, archive] = std::env::args().collect::<Vec<_>>().as_slice()
+        && flag == "--check-update-archive"
+    {
+        std::process::exit(desktop::updates::check_archive(manifest.as_ref(), archive.as_ref()));
     }
     // A second launch focuses the running window and exits.
     let Some(instance) = desktop::single::claim() else { return };

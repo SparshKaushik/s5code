@@ -295,8 +295,10 @@ pub enum Attribution {
 /// A prompt's attribution, the text people see, and the scheduled task that sent it.
 pub fn presentation(item: &Value) -> (Attribution, &str, Option<&str>) {
     let text = s(item, "text");
-    if item["context"]["guest"].is_object() {
-        return (Attribution::Guest, text, None);
+    // The stored text names the guest for the agent; people see the guest's own words.
+    let guest = &item["context"]["guest"];
+    if guest.is_object() {
+        return (Attribution::Guest, s(guest, "text"), None);
     }
     let task = s(item, "scheduledTaskId");
     if !task.is_empty() {
@@ -315,6 +317,12 @@ pub fn presentation(item: &Value) -> (Attribution, &str, Option<&str>) {
         _ => Attribution::Own,
     };
     (attribution, text, None)
+}
+
+/// The guest who wrote a prompt sent from a guest link (`guestName`).
+pub fn guest_name(item: &Value) -> Option<&str> {
+    let guest = &item["context"]["guest"];
+    guest.is_object().then(|| s(guest, "name")).filter(|n| !n.is_empty())
 }
 
 /// LEGACY_AUTOMATION_PREFIX: `[Triggered by schedule task: …]` and a blank line, stripped.
@@ -427,5 +435,9 @@ mod tests {
         assert_eq!(presentation(&json!({"text": "x", "createdBy": "agent", "creationSource": "server"})).0, Attribution::T3Code);
         assert_eq!(presentation(&json!({"text": "x", "createdBy": "agent", "creationSource": "mcp"})).0, Attribution::Agent);
         assert_eq!(presentation(&json!({"text": "x", "createdBy": "agent", "context": {"guest": {"text": "hey"}}})).0, Attribution::Guest);
+        let guest = json!({"text": "Ada (guest) asks: hey", "context": {"guest": {"name": "Ada", "text": "hey"}}});
+        assert_eq!(presentation(&guest).1, "hey", "the guest's own words, not the agent's copy");
+        assert_eq!(guest_name(&guest), Some("Ada"));
+        assert_eq!(guest_name(&json!({"text": "x"})), None);
     }
 }

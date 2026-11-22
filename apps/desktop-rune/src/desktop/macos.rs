@@ -165,6 +165,41 @@ pub fn fix_menus(settings_title: &str, updates_title: &str, quit_title: &str) {
         {
             insert(edit, new_item("Paste as Text", c"paste:", "v", COMMAND | SHIFT), index(edit, paste) + 1);
         }
+        // Electron's Edit › Delete: AppKit sends `delete:` to the first responder, Rune's view.
+        if let Some(edit) = top_menu(root, "Edit")
+            && let Some(after) = find(edit, |i| title(i) == "Paste as Text").or_else(|| find_action(edit, c"paste:"))
+            && find_action(edit, c"delete:").is_none()
+            && answer_delete()
+        {
+            insert(edit, new_item("Delete", c"delete:", "", 0), index(edit, after) + 1);
+        }
+        // Electron's Edit menu sets Select All apart.
+        if let Some(edit) = top_menu(root, "Edit")
+            && let Some(all) = find_action(edit, c"selectAll:")
+            && let Some(&before) = items(edit).get((index(edit, all) - 1).max(0) as usize)
+            && index(edit, all) > 0
+            && msg!(before, c"isSeparatorItem"; i8) == 0
+        {
+            insert(edit, separator(), index(edit, all));
+        }
+        // Electron's Edit › Speech. Its items are AppKit's own, sent to Rune's view: Rune's menu
+        // places items only in top-level menus, and removes each from the menu it put it in, so
+        // one moved into a submenu would make AppKit raise when Rune rebuilds or drops its menu.
+        if let Some(edit) = top_menu(root, "Edit")
+            && find(edit, |i| title(i) == "Speech").is_none()
+            && answer_speech()
+        {
+            let speech = msg!(msg!(class(c"NSMenu"), c"alloc"; Id), c"initWithTitle:", ns_string("Speech") => Id; Id);
+            add(speech, new_item("Start Speaking", c"startSpeaking:", "", 0));
+            add(speech, new_item("Stop Speaking", c"stopSpeaking:", "", 0));
+            // `submenuAction:` is AppKit's own action for an item that opens a submenu.
+            let item = new_item("Speech", c"submenuAction:", "", 0);
+            msg!(item, c"setSubmenu:", speech => Id; ());
+            msg!(speech, c"release"; ());
+            add(edit, separator());
+            add(edit, item);
+            msg!(item, c"release"; ());
+        }
         if let Some(view) = top_menu(root, "View")
             && find_action(view, c"toggleFullScreen:").is_none()
         {
@@ -227,6 +262,93 @@ unsafe fn fix_app_menu(menu: Id, settings_title: &str, updates_title: &str, quit
                     msg!(item, c"setTitle:", ns_string(&old.replace(&process, crate::desktop::APP_NAME)) => Id; ());
                 }
             }
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+const KEY_DOWN: usize = 10;
+const KEY_UP: usize = 11;
+const BACKSPACE_CODE: u16 = 51;
+
+/// Teaches winit's view `delete:`, as standard_macos teaches it `copy:` and the rest.
+unsafe fn answer_delete() -> bool {
+    let view = class(c"WinitView");
+    if view.is_null() {
+        return false;
+    }
+    unsafe { class_addMethod(view, sel(c"delete:"), delete as *const c_void, c"v@:@".as_ptr()) };
+    true
+}
+
+/// Teaches winit's view Speech's `startSpeaking:` and `stopSpeaking:`.
+unsafe fn answer_speech() -> bool {
+    let view = class(c"WinitView");
+    if view.is_null() {
+        return false;
+    }
+    unsafe {
+        class_addMethod(view, sel(c"startSpeaking:"), start_speaking as *const c_void, c"v@:@".as_ptr());
+        class_addMethod(view, sel(c"stopSpeaking:"), stop_speaking as *const c_void, c"v@:@".as_ptr());
+    }
+    true
+}
+
+/// The app reads the text selection on its own thread, as a Rune menu item would.
+extern "C" fn start_speaking(_: Id, _: Id, _: Id) {
+    if let Some(app) = OPENED.lock().ok().and_then(|a| a.clone()) {
+        app.update(|_, tx| speak(Some(tx.text_selection().map_or("", |t| t.text()))));
+    }
+}
+
+extern "C" fn stop_speaking(_: Id, _: Id, _: Id) {
+    speak(None);
+}
+
+/// Delete presses Backspace in the view, which erases a field's selection.
+extern "C" fn delete(view: Id, _: Id, _: Id) {
+    unsafe {
+        let window = msg!(view, c"window"; Id);
+        let number = if window.is_null() { 0 } else { msg!(window, c"windowNumber"; isize) };
+        let time = msg!(msg!(class(c"NSProcessInfo"), c"processInfo"; Id), c"systemUptime"; f64);
+        let chars = ns_string("\u{7f}");
+        for (kind, handler) in [(KEY_DOWN, c"keyDown:"), (KEY_UP, c"keyUp:")] {
+            let event = msg!(class(c"NSEvent"), c"keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:",
+                kind => usize, Point { x: 0.0, y: 0.0 } => Point, 0usize => usize, time => f64, number => isize, std::ptr::null_mut::<c_void>() => Id, chars => Id, chars => Id, false => bool, BACKSPACE_CODE => u16; Id);
+            if !event.is_null() {
+                let f: unsafe extern "C" fn(Id, Id, Id) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                f(view, sel(handler), event);
+            }
+        }
+    }
+}
+
+/// Edit › Speech, as AppKit's `startSpeaking:`: speaks `text` (the selection), or stops with `None`.
+pub fn speak(text: Option<&str>) {
+    thread_local! { static VOICE: std::cell::Cell<Id> = const { std::cell::Cell::new(std::ptr::null_mut()) }; }
+    unsafe {
+        let mut voice = VOICE.with(|v| v.get());
+        if voice.is_null() {
+            let alloc = msg!(class(c"NSSpeechSynthesizer"), c"alloc"; Id);
+            if alloc.is_null() {
+                return;
+            }
+            // Kept for the process, so Stop Speaking reaches the voice that's talking.
+            voice = msg!(alloc, c"init"; Id);
+            VOICE.with(|v| v.set(voice));
+        }
+        if voice.is_null() {
+            return;
+        }
+        msg!(voice, c"stopSpeaking"; ());
+        if let Some(text) = text.map(str::trim).filter(|t| !t.is_empty()) {
+            msg!(voice, c"startSpeakingString:", ns_string(text) => Id; bool);
         }
     }
 }

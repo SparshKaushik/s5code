@@ -62,6 +62,7 @@ impl Kind {
     pub fn rendered_mode(self) -> Option<&'static str> {
         match self {
             Kind::Markdown => Some("markdown"),
+            Kind::Mermaid => Some("mermaid"),
             Kind::Table(_) => Some("table"),
             _ => None,
         }
@@ -240,6 +241,11 @@ pub fn markdown(app: &App, path: &str, source: &str, t: &T) -> El {
             col().w_full().max_w(896.).px(24.).py(20.).child(crate::chat::timeline::markdown::view(app, source, &format!("file-{path}"), t)),
         ),
     )
+}
+
+/// MermaidPreview: the diagram centred in a scrolling canvas.
+pub fn diagram(diagram: El) -> El {
+    el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(row().w_full().justify_center().padding(24.).child(diagram))
 }
 
 /// LargeTextViewer's table: "N rows · C columns", the first row as the header.

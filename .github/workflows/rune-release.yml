@@ -1,0 +1,306 @@
+name: Rune release
+
+# Builds S5 Code (Rune) for macOS arm64 and Linux x64 with a version stamped in, writes the
+# `rune-update.json` manifest the app's updater reads (apps/desktop-rune/src/desktop/updates.rs),
+# checks each archive with the stamped app itself (`--check-update-archive`), and, only when
+# dispatched with `publish`, creates the `rune-v<version>` GitHub release. Rune releases never
+# become the repository's "Latest" release, which stays Electron's.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp, for example 0.1.0 or 0.1.1-nightly.20261122.1"
+        required: true
+      prerelease:
+        description: "Publish as a prerelease (only the Nightly update track sees it)"
+        type: boolean
+        default: true
+      publish:
+        description: "Create the GitHub release (off: build and check only)"
+        type: boolean
+        default: false
+      notes:
+        description: "Release notes shown in the app's update dialog"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rune-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version || format('0.0.1-ci.{0}', github.run_number) }}
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check version
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Invalid version: $VERSION" >&2; exit 1; }
+
+  macos:
+    needs: meta
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop-rune
+    env:
+      S5_CRATE_NOTICES: target/crate-notices.json
+      S5_RUNE_VERSION: ${{ inputs.version || format('0.0.1-ci.{0}', github.run_number) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-rune/target
+          key: rune-macos-${{ runner.arch }}-${{ hashFiles('apps/desktop-rune/Cargo.lock') }}
+          restore-keys: rune-macos-${{ runner.arch }}-
+
+      - name: Build
+        run: |
+          cargo fetch --locked
+          mkdir -p target
+          python3 tools/crate_notices.py target/crate-notices.json
+          cargo build --release --locked
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Build server binary
+        working-directory: .
+        run: node scripts/build-server-binary.ts --platform darwin --arch arm64 --output-dir "$RUNNER_TEMP/server" --verbose
+
+      - name: Bundle
+        run: |
+          app="dist/S5 Code (Rune).app"
+          mkdir -p "$app/Contents/MacOS"
+          cp target/release/s5code-rune "$app/Contents/MacOS/s5code-rune"
+          install -m 755 "$RUNNER_TEMP"/server/s5code-server-*-darwin-arm64 "$app/Contents/MacOS/s5code-server"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>S5 Code (Rune)</string>
+            <key>CFBundleDisplayName</key><string>S5 Code (Rune)</string>
+            <key>CFBundleIdentifier</key><string>in.newsa.s5code.rune-prototype</string>
+            <key>CFBundleExecutable</key><string>s5code-rune</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION%%-*}</string>
+            <key>CFBundleVersion</key><string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>S5 Code prompt link</string>
+                <key>CFBundleURLSchemes</key><array><string>s5code</string><string>t3code</string></array>
+              </dict>
+              <dict>
+                <key>CFBundleURLName</key><string>Web link</string>
+                <key>CFBundleTypeRole</key><string>Viewer</string>
+                <key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array>
+              </dict>
+            </array>
+            <key>CFBundleDocumentTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleTypeName</key><string>Web page</string>
+                <key>CFBundleTypeRole</key><string>Viewer</string>
+                <key>LSHandlerRank</key><string>Alternate</string>
+                <key>LSItemContentTypes</key><array><string>public.html</string><string>public.xhtml</string></array>
+              </dict>
+            </array>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --force --sign - "$app/Contents/MacOS/s5code-server"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --verbose "$app"
+          T3CODE_HOME="$RUNNER_TEMP/t3home" "$app/Contents/MacOS/s5code-rune" --check-server || {
+            tail -80 "$RUNNER_TEMP/t3home/userdata/logs/desktop-rune-server.log"; exit 1; }
+          name="S5-Code-Rune-$VERSION-macos-arm64.zip"
+          ditto -c -k --keepParent "$app" "dist/$name"
+          python3 - "dist/$name" macos-arm64 <<'PY'
+          import hashlib, json, os, sys
+          path, platform = sys.argv[1], sys.argv[2]
+          entry = {"name": os.path.basename(path), "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest(), "size": os.path.getsize(path)}
+          json.dump({platform: entry}, open(f"dist/files-{platform}.json", "w"))
+          json.dump({"version": os.environ["VERSION"], "files": {platform: entry}}, open("dist/check.json", "w"))
+          PY
+          "$app/Contents/MacOS/s5code-rune" --check-update-archive dist/check.json "dist/$name"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rune-release-macos-arm64
+          path: |
+            apps/desktop-rune/dist/S5-Code-Rune-*-macos-arm64.zip
+            apps/desktop-rune/dist/files-macos-arm64.json
+          if-no-files-found: error
+
+  linux:
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop-rune
+    env:
+      S5_CRATE_NOTICES: target/crate-notices.json
+      S5_RUNE_VERSION: ${{ inputs.version || format('0.0.1-ci.{0}', github.run_number) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config cmake libxkbcommon-dev libxkbcommon-x11-0 \
+            libvulkan1 libssl-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev libfontconfig-dev
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-rune/target
+          key: rune-linux-release-${{ hashFiles('apps/desktop-rune/Cargo.lock') }}
+          restore-keys: rune-linux-
+
+      - name: Build
+        run: |
+          cargo fetch --locked
+          mkdir -p target
+          python3 tools/crate_notices.py target/crate-notices.json
+          cargo build --release --locked
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Build server binary
+        working-directory: .
+        run: node scripts/build-server-binary.ts --arch x64 --output-dir "$RUNNER_TEMP/server" --verbose
+
+      - name: Archive
+        run: |
+          mkdir -p dist/pkg
+          install -m 755 target/release/s5code-rune dist/pkg/s5code-rune
+          install -m 755 "$RUNNER_TEMP"/server/s5code-server-*-linux-x64 dist/pkg/s5code-server
+          name="S5-Code-Rune-$VERSION-linux-x64.tar.gz"
+          tar -czf "dist/$name" -C dist/pkg .
+          python3 - "dist/$name" linux-x64 <<'PY'
+          import hashlib, json, os, sys
+          path, platform = sys.argv[1], sys.argv[2]
+          entry = {"name": os.path.basename(path), "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest(), "size": os.path.getsize(path)}
+          json.dump({platform: entry}, open(f"dist/files-{platform}.json", "w"))
+          json.dump({"version": os.environ["VERSION"], "files": {platform: entry}}, open("dist/check.json", "w"))
+          PY
+          dist/pkg/s5code-rune --check-update-archive dist/check.json "dist/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rune-release-linux-x64
+          path: |
+            apps/desktop-rune/dist/S5-Code-Rune-*-linux-x64.tar.gz
+            apps/desktop-rune/dist/files-linux-x64.json
+          if-no-files-found: error
+
+  manifest:
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rune-release-*
+          path: release
+          merge-multiple: true
+
+      - name: Write rune-update.json
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          python3 - <<'PY'
+          import datetime, glob, hashlib, json, os
+          files = {}
+          for fragment in sorted(glob.glob("release/files-*.json")):
+              for platform, entry in json.load(open(fragment)).items():
+                  data = open(os.path.join("release", entry["name"]), "rb").read()
+                  assert hashlib.sha256(data).hexdigest() == entry["sha256"] and len(data) == entry["size"], entry
+                  files[platform] = entry
+          assert set(files) == {"macos-arm64", "linux-x64"}, files
+          manifest = {
+              "version": os.environ["VERSION"],
+              "releaseDate": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "notes": os.environ.get("NOTES", ""),
+              "files": files,
+          }
+          json.dump(manifest, open("release/rune-update.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rune-release-${{ env.VERSION }}
+          path: |
+            release/rune-update.json
+            release/S5-Code-Rune-*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          flags=(--latest=false --target "$GITHUB_SHA" --title "S5 Code (Rune) $VERSION" --notes "${NOTES:-S5 Code (Rune) $VERSION}")
+          [[ "$PRERELEASE" == "true" ]] && flags+=(--prerelease)
+          gh release create "rune-v$VERSION" "${flags[@]}" release/rune-update.json release/S5-Code-Rune-*

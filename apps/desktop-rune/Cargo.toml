@@ -11,7 +11,7 @@ members = ["net"]
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["native-file-dialog"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["markdown"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["markdown", "mermaid"] }
 rune-mac = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda" }
 s5-net = { path = "net" }
 serde_json = "1"
@@ -28,6 +28,14 @@ ring = "0.17"
 # Already in the tree through rune-kit; chat Markdown blocks that hold file and thread chips.
 pulldown-cmark = { version = "0.13", default-features = false }
 qrcodegen = "1.8"
+
+# Linux SnapShots over the session bus (Screenshot portal, GNOME extension), on the versions and
+# features Rune's `dbus` feature already brings in.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }
+tokio = { version = "1", features = ["rt", "time"] }
+futures-util = "0.3"
+openh264 = "0.9.10"
 
 [dev-dependencies]
 s5-net = { path = "net", features = ["test-support"] }

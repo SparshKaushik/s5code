@@ -4,7 +4,7 @@ use crate::data::{iso_ms, s};
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, Route};
-use rune::{Color, Cursor, El, LineCap, Shape, canvas, col, el, row, text};
+use rune::{Color, Cursor, El, LineCap, Shape, canvas, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 #[derive(Debug, PartialEq, Default)]
@@ -17,6 +17,10 @@ pub struct Usage {
     pub threshold: Option<f64>,
     /// The amount and currency the provider reports.
     pub cost: Option<(f64, String)>,
+    /// When the usage was reported, ms.
+    pub updated_at: Option<i64>,
+    /// How long the provider keeps its prompt cache, from a live turn's report.
+    pub cache_ttl: Option<i64>,
 }
 
 /// Hover state of the ring and its popover; either keeps the popover open.
@@ -52,12 +56,15 @@ pub fn usage(p: &Value) -> Option<Usage> {
             max: num(&u["maxTokens"]),
             compacts: true,
             threshold: num(&u["autoCompactThreshold"]),
+            updated_at: iso_ms(s(u, "updatedAt")),
+            cache_ttl: u["promptCacheTtlMs"].as_i64().filter(|n| *n > 0),
             ..Usage::default()
         });
     }
     let active = s(&p["thread"], "activeProviderThreadId");
     let provider = p["providerThreads"].as_array().into_iter().flatten().find(|t| !active.is_empty() && s(t, "id") == active);
-    if let Some(u) = provider.map(|t| &t["contextUsage"]).filter(|u| u.is_object()) {
+    if let Some(t) = provider.filter(|t| t["contextUsage"].is_object()) {
+        let u = &t["contextUsage"];
         let cost = num(&u["cost"]["amount"]).zip(u["cost"]["currency"].as_str().map(str::to_owned));
         return Some(Usage {
             used: num(&u["usedTokens"]).unwrap_or(0.0),
@@ -66,6 +73,8 @@ pub fn usage(p: &Value) -> Option<Usage> {
             compacts: u["compactsAutomatically"] == true,
             threshold: num(&u["autoCompactThreshold"]),
             cost,
+            updated_at: iso_ms(s(t, "updatedAt")),
+            ..Usage::default()
         });
     }
     let items = p["visibleTurnItems"].as_array().map(|v| v.iter().map(|e| &e["item"]).collect::<Vec<_>>()).unwrap_or_else(|| p["turnItems"].as_array().into_iter().flatten().collect());
@@ -73,7 +82,10 @@ pub fn usage(p: &Value) -> Option<Usage> {
         .into_iter()
         .rev()
         .filter(|i| s(i, "type") == "compaction")
-        .find_map(|i| Some(Usage { used: num(&i["afterTokenCount"]).filter(|n| *n >= 0.0)?, total: num(&i["beforeTokenCount"]), compacts: true, ..Usage::default() }))
+        .find_map(|i| {
+            let used = num(&i["afterTokenCount"]).filter(|n| *n >= 0.0)?;
+            Some(Usage { used, total: num(&i["beforeTokenCount"]), compacts: true, updated_at: iso_ms(s(i, "updatedAt")), ..Usage::default() })
+        })
 }
 
 /// formatContextWindowTokens: 950, 1.2k, 42k, 1.5m.
@@ -129,6 +141,15 @@ fn current(app: &App) -> Option<Usage> {
     usage(&app.state().thread_views.get(&id)?.projection)
 }
 
+/// A user message that is more than a bare `/compact` (activeThreadHasCompactableConversation).
+fn compactable(p: &Value) -> bool {
+    let visible = p["visibleTurnItems"].as_array().map(|v| v.iter().map(|e| &e["item"]).collect::<Vec<_>>());
+    let items = visible.unwrap_or_else(|| p["turnItems"].as_array().into_iter().flatten().collect());
+    items.into_iter().any(|i| {
+        s(i, "type") == "user_message" && (!s(i, "text").trim().eq_ignore_ascii_case("/compact") || i["attachments"].as_array().is_some_and(|a| !a.is_empty()))
+    })
+}
+
 /// Why "Compact context" is off (ChatView's compactDisabledReason), or `None` when it can run.
 /// `None` overall when the provider has no `/compact`, so the button stays out.
 pub(super) fn compact_state(app: &App) -> Option<Option<&'static str>> {
@@ -138,8 +159,115 @@ pub(super) fn compact_state(app: &App) -> Option<Option<&'static str>> {
     if !supported {
         return None;
     }
-    let busy = super::running(app) || !super::approvals(app).is_empty() || super::asking(app);
-    Some(busy.then_some("Compacting is unavailable right now"))
+    if !crate::chat::can_operate(app) {
+        return Some(Some(super::READ_ONLY));
+    }
+    if super::ctx(app).project.is_none() {
+        return Some(Some("Choose a project before compacting"));
+    }
+    let Route::Thread(id) = super::route(app) else { return Some(Some(UNAVAILABLE)) };
+    let has_history = app.state().thread_views.get(&id).is_some_and(|v| compactable(&v.projection));
+    let busy = !has_history
+        || super::running(app)
+        || !super::approvals(app).is_empty()
+        || super::asking(app)
+        || super::plan_follow_up(app).is_some()
+        || super::rewinding(app)
+        || super::feedback_uploading(app)
+        || super::disconnected(app)
+        || super::no_provider(app)
+        || super::send_busy(app);
+    Some(busy.then_some(UNAVAILABLE))
+}
+
+const UNAVAILABLE: &str = "Compacting is unavailable right now";
+
+/// COMPACTION_SUGGESTION_MIN_TOKENS.
+const SUGGEST_MIN_TOKENS: f64 = 200_000.0;
+/// Claude's hour-long prompt cache and some slack, when the turn reports no TTL.
+const FALLBACK_CACHE_TTL_MS: i64 = 70 * 60_000;
+/// CLAUDE_RESUME_COMPACTION_NEVER_ANSWER.
+const NEVER_ANSWER: &str = "Don't ask again";
+
+/// shouldOfferResumeCompaction: a Claude session big enough to matter whose prompt cache has
+/// expired since its last report.
+fn offers_resume(driver: &str, u: &Usage, now: i64) -> bool {
+    driver == "claudeAgent"
+        && u.used >= SUGGEST_MIN_TOKENS
+        && u.updated_at.is_some_and(|at| now - at >= u.cache_ttl.unwrap_or(FALLBACK_CACHE_TTL_MS))
+}
+
+/// resolveIdleCompaction: the provider instance's own `idleCompaction`, else the server's.
+fn idle_compaction<'a>(settings: &'a Value, instance: &str) -> &'a str {
+    let own = s(&settings["providerInstances"][instance]["config"], "idleCompaction");
+    if !own.is_empty() && own != "default" {
+        return own;
+    }
+    match &settings["compactIdleThreads"] {
+        _ if !s(settings, "idleCompaction").is_empty() => s(settings, "idleCompaction"),
+        Value::String(mode) => mode.as_str(),
+        Value::Bool(true) => "beforeCacheExpires",
+        _ => "onReturn",
+    }
+}
+
+/// hasDismissedResumeCompaction: the provider's own resume question was answered "Don't ask again".
+fn dismissed_resume(p: &Value) -> bool {
+    let asks = |q: &str| q.starts_with("This session is ") && q.ends_with(" tokens. Compact it before continuing?");
+    p["runtimeRequests"].as_array().into_iter().flatten().filter(|r| s(r, "kind") == "user_input" && s(r, "status") == "resolved").any(|r| {
+        r["answers"].as_object().is_some_and(|answers| {
+            answers.iter().any(|(question, answer)| asks(question) && (answer == NEVER_ANSWER || answer.as_array().is_some_and(|a| a.iter().any(|v| v == NEVER_ANSWER))))
+        })
+    })
+}
+
+/// ChatView's resumeCompactionTokens: the tokens a send would compact first on an idle Claude
+/// thread whose cache has gone cold, unless compaction is off, dismissed or can't run now.
+pub(super) fn resume_compaction(app: &App) -> Option<f64> {
+    let Route::Thread(id) = super::route(app) else { return None };
+    let (instance, _) = super::selection(app)?;
+    let driver = s(super::provider(app, &instance)?, "driver");
+    let p = &app.state().thread_views.get(&id)?.projection;
+    let u = usage(p)?;
+    let offered = idle_compaction(crate::settings::server_settings(app), &instance) != "off"
+        && !dismissed_resume(p)
+        && !super::held_queue(p)
+        && matches!(compact_state(app), Some(None))
+        && offers_resume(driver, &u, app.now_ms);
+    offered.then_some(u.used)
+}
+
+/// The Compact/Keep toggle beside Send while a send would compact first (ComposerPrimaryActions).
+pub(super) fn compact_toggle(app: &App, t: &T, amount: f64) -> El {
+    let keep = super::keeps_full_history(app);
+    let tokens = tokens(amount);
+    let help = if keep {
+        format!("Next send keeps all {tokens} tokens.\nClick to compact first")
+    } else {
+        format!("Next send compacts {tokens} tokens first.\nClick to keep full history")
+    };
+    let mut toggle = row()
+        .key(super::keyed(app, "composer-compact-toggle"))
+        .h(28.0)
+        .px(8.0)
+        .gap(6.0)
+        .center_y()
+        .radius(crate::theme::layout::CONTROL_RADIUS)
+        .role("button")
+        .label(format!("Compact {tokens} tokens of history before sending"))
+        .help(help)
+        .child(icon(&icons::MINIMIZE_2, 16.0).color(t.c.muted_foreground))
+        .child(text(if keep { "Keep" } else { "Compact" }).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)))
+        .child(text(tokens).font(theme::SM_MEDIUM).color(t.c.muted_foreground));
+    if !keep {
+        toggle = toggle.fill(t.c.accent.alpha_mul(0.6));
+    }
+    if crate::chat::can_operate(app) {
+        toggle = toggle.hover(t.c.accent).cursor(Cursor::Pointer).on_press(super::act(app, super::toggle_full_history));
+    } else {
+        toggle = toggle.opacity(0.64);
+    }
+    toggle
 }
 
 /// `sendStandaloneCommand("/compact")`: a turn of its own, whatever the composer holds.
@@ -296,7 +424,7 @@ mod tests {
             {"tokenUsage":{"usedTokens":900,"maxTokens":1000,"updatedAt":"2026-01-01T00:00:02Z"}},
             {"tokenUsage":{"usedTokens":100,"maxTokens":1000,"updatedAt":"2026-01-01T00:00:01Z"}}
         ]});
-        assert_eq!(usage(&live), Some(Usage { used: 900.0, max: Some(1000.0), compacts: true, ..Usage::default() }));
+        assert_eq!(usage(&live), Some(Usage { used: 900.0, max: Some(1000.0), compacts: true, updated_at: iso_ms("2026-01-01T00:00:02Z"), ..Usage::default() }));
         let provider = json!({"thread":{"activeProviderThreadId":"p"},"providerThreads":[{"id":"p","contextUsage":{
             "usedTokens":5,"maxTokens":null,"compactsAutomatically":true,"autoCompactThreshold":160000,"cost":{"amount":0.004,"currency":"USD"}}}]});
         assert_eq!(
@@ -306,6 +434,35 @@ mod tests {
         let compacted = json!({"turnItems":[{"type":"compaction","afterTokenCount":42,"beforeTokenCount":900}]});
         assert_eq!(usage(&compacted), Some(Usage { used: 42.0, total: Some(900.0), compacts: true, ..Usage::default() }));
         assert_eq!(usage(&json!({})), None);
+    }
+
+    #[test]
+    fn a_cold_claude_session_over_200k_offers_to_compact_before_sending() {
+        let hour = 60 * 60_000;
+        let at = 1_000 * hour;
+        let u = |used: f64, ttl: Option<i64>| Usage { used, updated_at: Some(at), cache_ttl: ttl, ..Usage::default() };
+        assert!(offers_resume("claudeAgent", &u(240_000.0, None), at + 70 * 60_000));
+        assert!(!offers_resume("claudeAgent", &u(240_000.0, None), at + 69 * 60_000), "FAILED: the cache may still be warm");
+        assert!(offers_resume("claudeAgent", &u(240_000.0, Some(5 * 60_000)), at + 5 * 60_000), "FAILED: the turn's own TTL wins");
+        assert!(!offers_resume("claudeAgent", &u(199_999.0, None), at + 2 * hour), "FAILED: too small to matter");
+        assert!(!offers_resume("codex", &u(240_000.0, None), at + 2 * hour), "FAILED: Claude only");
+        assert!(!offers_resume("claudeAgent", &Usage { used: 240_000.0, ..Usage::default() }, at), "FAILED: no report time, no offer");
+
+        assert_eq!(idle_compaction(&json!({}), "claudeAgent"), "onReturn");
+        assert_eq!(idle_compaction(&json!({"compactIdleThreads": true}), "claudeAgent"), "beforeCacheExpires");
+        assert_eq!(idle_compaction(&json!({"compactIdleThreads": false, "idleCompaction": "off"}), "claudeAgent"), "off");
+        let own = json!({"idleCompaction": "off", "providerInstances": {"work": {"config": {"idleCompaction": "onReturn"}}}});
+        assert_eq!(idle_compaction(&own, "work"), "onReturn", "FAILED: the instance's own mode wins");
+        assert_eq!(idle_compaction(&own, "claudeAgent"), "off");
+
+        let question = "This session is 2h 5m old and uses 240,000 tokens. Compact it before continuing?";
+        let answered = |answer: Value| json!({"runtimeRequests": [{"kind": "user_input", "status": "resolved", "answers": {question: answer}}]});
+        assert!(dismissed_resume(&answered(json!("Don't ask again"))));
+        assert!(dismissed_resume(&answered(json!(["Don't ask again"]))));
+        assert!(!dismissed_resume(&answered(json!("Compact and continue"))));
+
+        assert!(!compactable(&json!({"turnItems": [{"type": "user_message", "text": " /COMPACT ", "attachments": []}]})));
+        assert!(compactable(&json!({"turnItems": [{"type": "user_message", "text": "hi", "attachments": []}]})));
     }
 
     #[test]

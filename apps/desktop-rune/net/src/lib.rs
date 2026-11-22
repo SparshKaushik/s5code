@@ -181,6 +181,15 @@ impl Net {
             wake: Arc::new(|| {}),
         }
     }
+    /// [`Net::in_memory`] that keeps the requests it is sent, so a client test can check what
+    /// went out and answer it with [`Net::put_reply`].
+    #[cfg(feature = "test-support")]
+    pub fn in_memory_sent(base_url: &str) -> (Net, Sent) {
+        let (tx, commands) = mpsc::channel::<Command>();
+        let mut net = Net::in_memory(base_url);
+        net.tx = tx;
+        (net, Sent(commands))
+    }
     /// Folds decoded messages without waiting for network I/O.
     pub fn drain(&mut self) -> bool {
         let mut changed = false;
@@ -486,6 +495,24 @@ impl Drop for Net {
 }
 /// A WebSocket to one of the server's `/api` routes as this client, such as the preview frame
 /// stream. Reads time out after `read_timeout`, so the caller's loop can also write.
+/// What an [`Net::in_memory_sent`] connection was sent.
+#[cfg(feature = "test-support")]
+pub struct Sent(Receiver<Command>);
+
+#[cfg(feature = "test-support")]
+impl Sent {
+    /// Requests sent since the last call, in order: id, method, payload.
+    pub fn requests(&self) -> Vec<(u64, String, Value)> {
+        self.0
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::Request(id, tag, payload) => Some((id, tag, payload)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 pub fn api_socket(
     base: &str,
     bearer: &str,
@@ -571,6 +598,22 @@ pub fn api_post(base: &str, bearer: &str, path: &str, query: &str, content_type:
         .send_bytes(body)
         .map(|_| ())
         .map_err(api_error)
+}
+/// The body of an empty POST to one of the server's `/api` routes as this client, at most `limit` bytes.
+pub fn api_post_read(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .post(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .call()
+        .map_err(api_error)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {

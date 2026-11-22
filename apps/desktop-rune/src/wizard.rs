@@ -253,7 +253,7 @@ fn start_setup(s: &mut App, setup: &Setup) {
     use crate::panel::terminal;
     let payload = json!({"threadId": SETUP_THREAD, "terminalId": setup.id, "cwd": setup.cwd, "providerInstanceId": setup.instance});
     terminal::attach(s, SETUP_THREAD, &setup.id, payload);
-    terminal::run(s, SETUP_THREAD, &setup.id, &terminal::Launch { cwd: &setup.cwd, worktree: None, root: None }, setup.command.clone());
+    terminal::run(s, SETUP_THREAD, &setup.id, &terminal::Launch { cwd: &setup.cwd, worktree: None, root: None, size: None }, setup.command.clone());
     terminal::focus(s, SETUP_THREAD, &setup.id);
 }
 

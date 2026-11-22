@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use rune::{El, row};
+use rune::{El, Tx, row};
 
 use crate::App;
 use crate::theme::T;
@@ -12,7 +12,8 @@ use crate::theme::T;
 struct Pending {
     message: String,
     destructive: bool,
-    on_confirm: Rc<dyn Fn(&mut App)>,
+    on_confirm: Rc<dyn Fn(&mut App, &mut Tx)>,
+    on_cancel: Rc<dyn Fn(&mut App)>,
 }
 
 #[derive(Default)]
@@ -28,7 +29,18 @@ impl Ui {
 
 /// `requestConfirmDialog`: asks `message`, running `on_confirm` only if it is confirmed.
 pub fn request(s: &mut App, message: impl Into<String>, destructive: bool, on_confirm: impl Fn(&mut App) + 'static) {
-    s.ui.shell.confirm.queue.push_back(Pending { message: message.into(), destructive, on_confirm: Rc::new(on_confirm) });
+    request_with(s, message, destructive, move |s: &mut App, _: &mut Tx| on_confirm(s), |_: &mut App| {});
+}
+
+/// `request` whose answer also settles the caller's own state: `on_cancel` runs on a cancel.
+pub fn request_with(
+    s: &mut App,
+    message: impl Into<String>,
+    destructive: bool,
+    on_confirm: impl Fn(&mut App, &mut Tx) + 'static,
+    on_cancel: impl Fn(&mut App) + 'static,
+) {
+    s.ui.shell.confirm.queue.push_back(Pending { message: message.into(), destructive, on_confirm: Rc::new(on_confirm), on_cancel: Rc::new(on_cancel) });
 }
 
 /// The question on screen, for tests and callers that must not stack a second one.
@@ -38,9 +50,15 @@ pub fn current(s: &App) -> Option<&str> {
 
 /// `respondToConfirmDialog`: closes the question; the next queued one follows.
 pub fn respond(s: &mut App, confirmed: bool) {
+    respond_tx(s, confirmed, &mut Tx::default());
+}
+
+fn respond_tx(s: &mut App, confirmed: bool, tx: &mut Tx) {
     let Some(pending) = s.ui.shell.confirm.queue.pop_front() else { return };
     if confirmed {
-        (pending.on_confirm)(s);
+        (pending.on_confirm)(s, tx);
+    } else {
+        (pending.on_cancel)(s);
     }
 }
 
@@ -68,8 +86,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
     let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| respond(s, false)).build(t);
     let confirm = crate::kit::Button::new("Confirm")
         .variant(if pending.destructive { "destructive" } else { "default" })
-        .on_press(|s: &mut App| respond(s, true))
-        .build(t);
+        .build(t)
+        .on_press_tx(|s: &mut App, tx: &mut Tx| respond_tx(s, true, tx));
     let mut dialog = crate::kit::Dialog::new("confirm-dialog", title).alert().width(448.0).open(true);
     if let Some(description) = description {
         dialog = dialog.description(description);
@@ -100,7 +118,7 @@ mod tests {
     fn questions_queue_and_only_a_confirm_runs_the_action() {
         let mut s = App::new();
         request(&mut s, "First?", false, |s: &mut App| s.ui.shell.panel_open = true);
-        request(&mut s, "Second?", true, |s: &mut App| s.ui.shell.panel_open = false);
+        request_with(&mut s, "Second?", true, |s: &mut App, _: &mut Tx| s.ui.shell.panel_open = false, |s: &mut App| s.ui.shell.panel_open = true);
         assert_eq!(current(&s), Some("First?"));
         s.ui.shell.panel_open = false;
         respond(&mut s, false);
@@ -109,5 +127,8 @@ mod tests {
         s.ui.shell.panel_open = true;
         respond(&mut s, true);
         assert!(!s.ui.shell.panel_open && current(&s).is_none());
+        request_with(&mut s, "Third?", true, |_: &mut App, _: &mut Tx| {}, |s: &mut App| s.ui.shell.panel_open = true);
+        respond(&mut s, false);
+        assert!(s.ui.shell.panel_open, "FAILED: a cancel settles the caller's state");
     }
 }

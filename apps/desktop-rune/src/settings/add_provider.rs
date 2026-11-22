@@ -1,7 +1,8 @@
 //! Web `AddProviderInstanceDialog`: built-in drivers take Provider, Identity and Config steps,
 //! ACP Registry agents take Provider, Identity and a post-create Sign in step, and Codex can
 //! instead add a managed ChatGPT account (web `AddCodexAccountDialog`).
-use super::{providers, request, server_settings};
+use super::providers::{self, policy};
+use super::{request, server_settings};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
 use rune::{El, TextEdit, col, el, icon, row, text};
@@ -66,8 +67,18 @@ pub struct Wizard {
     /// The ACP instance created on Identity; the Sign in step follows it.
     created: Option<String>,
     chatgpt: Option<ChatGpt>,
-    /// The local ACP command's variables (web `localEnvironment`).
+    /// The local ACP command's variables (web `localEnvironment`) and arguments.
     env: Vec<EnvVar>,
+    args: Vec<TextEdit>,
+    /// The create in flight; the dialog stays open until the server confirms it.
+    saving: Option<Saving>,
+}
+
+struct Saving {
+    reply: u64,
+    id: String,
+    label: &'static str,
+    signs_in: bool,
 }
 
 #[derive(Clone)]
@@ -94,7 +105,11 @@ pub struct ChatGpt {
 }
 
 pub fn open(s: &mut App) {
-    s.ui.settings.add_provider = Wizard::default();
+    let policy = policy::of(s);
+    let first = DRIVERS.iter().map(|d| d.0).find(|d| policy::driver_allowed(policy, d));
+    // A policy that allows only Show more drivers or ACP agents opens there.
+    let more = !DRIVERS.iter().any(|d| d.2 && Some(d.0) == first);
+    s.ui.settings.add_provider = Wizard { driver: first, more, ..Wizard::default() };
     s.ui.settings.error = None;
     s.ui.settings.provider_picker = true;
 }
@@ -241,7 +256,7 @@ fn acp_problem(w: &Wizard) -> Option<&'static str> {
 fn navigate(s: &mut App, step: usize) {
     let error = validate_id(&instance_id(s), &existing(s));
     let w = wizard(s);
-    if w.created.is_some() {
+    if w.created.is_some() || w.saving.is_some() {
         return;
     }
     let step = step.min(step_labels(w).len() - 1);
@@ -278,8 +293,12 @@ fn choose_acp(w: &mut Wizard, acp: Acp) {
 }
 
 fn save(s: &mut App) {
+    if s.ui.settings.add_provider.saving.is_some() || !providers::can_manage(s) {
+        return;
+    }
     let id = instance_id(s);
     let existing = existing(s);
+    let policy = policy::of(s).clone();
     let w = wizard(s);
     w.attempted = true;
     if validate_id(&id, &existing).is_some() {
@@ -287,6 +306,10 @@ fn save(s: &mut App) {
         return;
     }
     let driver = driver(w);
+    if !policy::driver_allowed(&policy, driver) {
+        return;
+    }
+    let locks = policy::locks(&policy, driver);
     let label = label_text(w).trim().to_owned();
     let mut config = Map::new();
     match &w.acp {
@@ -299,13 +322,18 @@ fn save(s: &mut App) {
         }
         Some(Acp::Local) => {
             config.insert("source".into(), json!("local"));
-            config.insert("commandArgs".into(), json!([]));
+            let args: Vec<&str> = w.args.iter().map(|a| a.text.as_str()).filter(|a| !a.trim().is_empty()).collect();
+            config.insert("commandArgs".into(), json!(args));
         }
         _ => {}
     }
     let shape = if w.acp == Some(Acp::Local) { json!({"source": "local"}) } else { Value::Null };
     let fields = if matches!(w.acp, Some(Acp::Registry(_))) { vec![] } else { providers::runtime_fields(driver, &shape) };
     for (field, ..) in fields {
+        // The server applies what the policy pins.
+        if locks.as_ref().is_some_and(|l| l.config_reason(field).is_some()) {
+            continue;
+        }
         if let Some(value) = w.config.get(&config_key(driver, field)).map(|e| e.text.trim().to_owned()).filter(|v| !v.is_empty()) {
             config.insert(field.into(), json!(value));
         }
@@ -328,24 +356,44 @@ fn save(s: &mut App) {
         instance["environment"] = json!(environment);
     }
     let signs_in = matches!(w.acp, Some(Acp::Registry(_) | Acp::Manual));
-    if signs_in {
-        w.created = Some(id.clone());
-        w.step = 2;
+    let label = driver_label(driver);
+    s.ui.settings.error = None;
+    let payload = json!({"patch": {}, "providerInstanceMutation": {"operation": "create", "instanceId": id, "instance": instance}});
+    if let Some(reply) = providers::send_settings(s, payload) {
+        wizard(s).saving = Some(Saving { reply, id, label, signs_in });
     }
-    s.ui.settings.provider = Some(id.clone());
-    request(s, "server.updateSettings", json!({"patch": {}, "providerInstanceMutation": {"operation": "create", "instanceId": id, "instance": instance}}));
-    if signs_in {
-        return;
+}
+
+/// The create's reply: a failure keeps the dialog open on what the user entered.
+fn saved(s: &mut App) -> bool {
+    let Some(pending) = s.ui.settings.add_provider.saving.as_ref().map(|v| v.reply) else { return false };
+    let Some(reply) = providers::take_reply(s, pending) else { return false };
+    let Some(saving) = wizard(s).saving.take() else { return false };
+    match reply {
+        Ok(_) => {
+            s.ui.settings.provider = Some(saving.id.clone());
+            if saving.signs_in {
+                let w = wizard(s);
+                w.created = Some(saving.id);
+                w.step = 2;
+            } else {
+                s.ui.settings.provider_picker = false;
+                let description = format!("{} instance '{}' was added.", saving.label, saving.id);
+                crate::shell::palette::toast(s, "Provider instance added", Some(&description));
+            }
+        }
+        Err(error) => {
+            let detail = super::failure_detail(&error).unwrap_or_else(|| "The settings update failed.".into());
+            crate::shell::palette::toast_error_brief(s, "Could not add provider instance", Some(&detail));
+        }
     }
-    s.ui.settings.provider_picker = false;
-    let description = format!("{} instance '{id}' was added.", driver_label(driver));
-    crate::shell::palette::toast(s, "Provider instance added", Some(&description));
+    true
 }
 
 fn steps(s: &App, t: &T) -> El {
     let w = &s.ui.settings.add_provider;
     let mut list = row().w_full().gap(4.0).padding(4.0).radius(12.0).fill(t.c.background).border(1.0, t.c.foreground.alpha_mul(0.05)).role("list").label("Setup progress");
-    let locked = w.created.is_some();
+    let locked = w.created.is_some() || w.saving.is_some();
     for (index, step) in step_labels(w).iter().enumerate() {
         let current = index == w.step;
         let (badge_fill, badge_text, ring) = if index < w.step {
@@ -390,8 +438,9 @@ fn steps(s: &App, t: &T) -> El {
 
 fn option_grid(s: &App, t: &T, featured: bool) -> El {
     let selected = driver(&s.ui.settings.add_provider);
+    let policy = policy::of(s);
     let mut cards = vec![];
-    for &(kind, label, _, badge) in DRIVERS.iter().filter(|d| d.2 == featured) {
+    for &(kind, label, _, badge) in DRIVERS.iter().filter(|d| d.2 == featured && policy::driver_allowed(policy, d.0)) {
         let checked = kind == selected;
         let mut option = row()
             .key(format!("add-provider-{kind}"))
@@ -519,8 +568,13 @@ fn config(s: &App, t: &T) -> El {
     if fields.is_empty() {
         return text("This driver has no required configuration. You can add the instance now.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap();
     }
+    let locks = policy::locks(policy::of(s), driver);
     let mut body = col().w_full();
     for (field, title, description, placeholder) in fields {
+        if let Some(reason) = locks.as_ref().and_then(|l| l.config_reason(field)) {
+            body = body.child(field_row(t, title, &reason, None, icon(&icons::LOCK, 14.0).color(t.c.muted_foreground).label(reason.clone())));
+            continue;
+        }
         let key = config_key(driver, field);
         let edit = w.config.get(&key).cloned().unwrap_or_default();
         let owned = key.clone();
@@ -728,9 +782,62 @@ fn acp_form(s: &App, t: &T, local: bool) -> El {
         body = body.child(field_row(t, title, description, None, control));
     }
     if local {
-        body = body.child(env_section(t, &w.env));
+        body = body.child(args_section(t, &w.args)).child(env_section(t, &w.env));
     }
     body
+}
+
+/// The local command's launch arguments, one literal per row.
+fn args_section(t: &T, args: &[TextEdit]) -> El {
+    let head = row()
+        .w_full()
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Arguments").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text("One literal argument per row, in launch order.").font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
+        )
+        .child(
+            kit::Button::new("Add argument")
+                .variant("outline")
+                .size("sm")
+                .icon(&icons::PLUS)
+                .on_press(|s: &mut App| wizard(s).args.push(TextEdit::new("")))
+                .build(t),
+        );
+    let mut out = col().w_full().py(12.0).gap(8.0).child(head);
+    for (index, arg) in args.iter().enumerate() {
+        let input = kit::Input::new(arg)
+            .size("sm")
+            .font("mono")
+            .on_edit(move |s: &mut App| &mut wizard(s).args[index])
+            .build(t)
+            .key(format!("add-provider-arg-{index}"))
+            .single_line()
+            .grow(1.0)
+            .min_w(0.0)
+            .label(format!("Argument {}", index + 1));
+        out = out.child(
+            row().w_full().gap(6.0).center_y().child(input).child(
+                kit::Button::new(format!("Remove argument {}", index + 1))
+                    .variant("ghost-destructive")
+                    .size("icon-micro")
+                    .icon(&icons::X)
+                    .on_press(move |s: &mut App| {
+                        let args = &mut wizard(s).args;
+                        if index < args.len() {
+                            args.remove(index);
+                        }
+                    })
+                    .build(t),
+            ),
+        );
+    }
+    out
 }
 
 /// Web's `ProviderEnvironmentSection` for the command not saved yet.
@@ -898,6 +1005,9 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let body = match (w.step, &w.created) {
         (_, Some(id)) => sign_in(s, t, id),
         (0, _) => {
+            let policy = policy::of(s);
+            let acp_allowed = policy::driver_allowed(policy, "acpRegistry");
+            let more_allowed = acp_allowed || DRIVERS.iter().any(|d| !d.2 && policy::driver_allowed(policy, d.0));
             let mut step = col()
                 .w_full()
                 .gap(8.0)
@@ -908,19 +1018,23 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
             {
                 step = step.child(note);
             }
-            step = step.child(
-                row().pt(8.0).child(
-                    kit::Button::new(if w.more { "Show less" } else { "Show more" })
-                        .variant("ghost-muted")
-                        .size("xs")
-                        .icon(if w.more { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN })
-                        .on_press(|s: &mut App| wizard(s).more ^= true)
-                        .build(t)
-                        .expanded(w.more),
-                ),
-            );
-            if w.more {
+            if more_allowed {
+                step = step.child(
+                    row().pt(8.0).child(
+                        kit::Button::new(if w.more { "Show less" } else { "Show more" })
+                            .variant("ghost-muted")
+                            .size("xs")
+                            .icon(if w.more { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN })
+                            .on_press(|s: &mut App| wizard(s).more ^= true)
+                            .build(t)
+                            .expanded(w.more),
+                    ),
+                );
+            }
+            if w.more && more_allowed {
                 step = step.child(col().w_full().pt(16.0).child(option_grid(s, t, false)));
+            }
+            if w.more && acp_allowed {
                 let divider = |t: &T| el().h(1.0).grow(1.0).fill(t.c.border);
                 step = step.child(
                     row()
@@ -954,6 +1068,8 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         panel = panel.child(notice(t, error));
     }
     let step = w.step;
+    let busy = w.saving.is_some();
+    let can_create = providers::can_manage(s) && !busy;
     let mut footer = row().w_full().gap(8.0).child(el().grow(1.0));
     if let Some(id) = w.created.clone() {
         let (signed_in, active) = sign_in_state(s, &id);
@@ -970,6 +1086,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
             kit::Button::new(if step == 0 { "Cancel" } else { "Back" })
                 .variant(if step == 0 { "ghost-muted" } else { "outline" })
                 .size("sm")
+                .disabled(busy)
                 .on_press(move |s: &mut App| {
                     if step == 0 {
                         s.ui.settings.provider_picker = false;
@@ -980,25 +1097,35 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .build(t),
         );
         let last = step + 1 == step_labels(w).len();
+        // A policy that pins Codex's setup mode leaves no managed ChatGPT account to add.
+        let chatgpt = policy::config_reason(policy::of(s), "codex", "setupMode").is_none();
         footer = match step {
-            0 if w.acp.is_none() && driver(w) == "codex" => footer
-                .child(kit::Button::new("Configure manually").variant("outline").size("sm").on_press(|s: &mut App| navigate(s, 1)).build(t))
-                .child(
-                    kit::Button::new("Continue with ChatGPT")
-                        .size("sm")
-                        .icon(&crate::chat::composer::provider_icons::OPENAI)
-                        .on_press(|s: &mut App| {
-                            s.ui.settings.provider_picker = false;
-                            s.ui.settings.error = None;
-                            wizard(s).chatgpt = Some(ChatGpt { name: TextEdit::new("Personal"), created: None, install_sent: false, auth_sent: false });
-                        })
-                        .build(t),
-                ),
-            1 if matches!(w.acp, Some(Acp::Registry(_) | Acp::Manual)) => {
-                footer.child(kit::Button::new("Continue to sign-in").size("sm").on_press(move |s: &mut App| navigate(s, 2)).build(t))
+            0 if w.acp.is_none() && w.driver == Some("codex") => {
+                let footer = footer.child(kit::Button::new("Configure manually").variant("outline").size("sm").on_press(|s: &mut App| navigate(s, 1)).build(t));
+                if !chatgpt {
+                    footer
+                } else {
+                    footer.child(
+                        kit::Button::new("Continue with ChatGPT")
+                            .size("sm")
+                            .icon(&crate::chat::composer::provider_icons::OPENAI)
+                            .disabled(!providers::can_manage(s))
+                            .on_press(|s: &mut App| {
+                                s.ui.settings.provider_picker = false;
+                                s.ui.settings.error = None;
+                                wizard(s).chatgpt = Some(ChatGpt { name: TextEdit::new("Personal"), created: None, install_sent: false, auth_sent: false });
+                            })
+                            .build(t),
+                    )
+                }
             }
-            _ if last => footer.child(kit::Button::new("Add instance").size("sm").on_press(save).build(t)),
-            _ => footer.child(kit::Button::new("Next").size("sm").on_press(move |s: &mut App| navigate(s, step + 1)).build(t)),
+            1 if matches!(w.acp, Some(Acp::Registry(_) | Acp::Manual)) => footer.child(
+                kit::Button::new(if busy { "Adding..." } else { "Continue to sign-in" }).size("sm").disabled(!can_create).on_press(move |s: &mut App| navigate(s, 2)).build(t),
+            ),
+            _ if last => footer.child(kit::Button::new(if busy { "Adding..." } else { "Add instance" }).size("sm").disabled(!can_create).on_press(save).build(t)),
+            _ => footer.child(
+                kit::Button::new("Next").size("sm").disabled(w.acp.is_none() && w.driver.is_none()).on_press(move |s: &mut App| navigate(s, step + 1)).build(t),
+            ),
         };
     }
     kit::Dialog::new("add-provider", "Add provider")
@@ -1007,6 +1134,9 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .scroll_all()
         .description(format!("Add an account or configure a provider on {environment}."))
         .on_close(|s: &mut App| {
+            if s.ui.settings.add_provider.saving.is_some() {
+                return;
+            }
             super::accent::close(s);
             s.ui.settings.provider_picker = false;
         })
@@ -1106,6 +1236,12 @@ pub fn wanted(s: &App) -> Vec<(String, Value)> {
         out.push(("provider.auth.subscribe".to_owned(), json!({"instanceId": id})));
         out.push(("provider.install.subscribe".to_owned(), json!({"instanceId": id})));
     }
+    // The Providers page's own needs ride along: `settings::wanted` reads only this list.
+    for resource in providers::wanted(s) {
+        if !out.contains(&resource) {
+            out.push(resource);
+        }
+    }
     out
 }
 
@@ -1135,7 +1271,7 @@ pub(super) fn agents(s: &App) -> &[Value] {
 /// Drives the wizard's own requests: the registry list, agent preparation, and the ChatGPT
 /// account's install then sign-in.
 pub fn poll(s: &mut App) -> bool {
-    let mut changed = false;
+    let mut changed = saved(s);
     let w = &s.ui.settings.add_provider;
     let query = search_query(w, crate::data::now_ms());
     if s.ui.settings.provider_picker

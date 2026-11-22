@@ -18,7 +18,8 @@ use crate::shell::palette;
 pub mod automations;
 pub mod child_work;
 pub mod cleanup;
-mod git;
+pub mod editor_icons;
+pub(crate) mod git;
 pub mod html_render;
 pub mod items;
 pub mod pr;
@@ -72,8 +73,8 @@ pub struct Ui {
     /// dismissed for this session.
     mismatch_shown: HashSet<String>,
     mismatch_dismissed: HashSet<String>,
-    /// "Switch to {branch}?" over uncommitted changes.
-    restore_confirm: Option<String>,
+    /// "Switch to {branch}?" over uncommitted changes, and the side chat whose notice asked.
+    restore_confirm: Option<(String, Option<String>)>,
     /// This connection's session (`GET /api/auth/session`): the reply, when it came, and the
     /// read in flight. Its grants gate git actions, branch changes and the diff panel.
     session: Option<Result<Value, ()>>,
@@ -93,7 +94,6 @@ const SESSION_STALE_MS: i64 = 5 * 60_000;
 
 /// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
 /// leaves it to the server; a failed read denies, as web's guards do.
-#[cfg(test)]
 pub(crate) fn set_session(s: &mut App, session: Option<Result<Value, ()>>) {
     s.ui.chat.details.session = session;
 }
@@ -148,7 +148,7 @@ fn scene_thread(s: &mut App) -> Option<String> {
 }
 
 /// ThreadDetailsSection: a titled list under a hairline when a section with content is above it.
-fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
+pub(crate) fn section(t: &T, title: &str, actions: Option<El>, divided: bool, body: El) -> El {
     let heading = row()
         .w_full()
         .min_h(32.0)
@@ -392,10 +392,14 @@ fn vcs<'a>(s: &'a App) -> Option<&'a Value> {
 
 /// Subscribes to the framed checkout's status, as the card's `useVcsStatus` does.
 pub fn watch(s: &mut App) {
-    if let Some(cwd) = cwd(s)
-        && let Some(net) = s.src.net()
-    {
-        net.watch_vcs(&cwd);
+    // The project checkout too (BranchToolbar's `projectStatusQuery`): its root tells a ref's own
+    // worktree from another one while the thread works in a worktree.
+    let project = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).filter(|p| !p.is_empty());
+    let cwd = cwd(s);
+    if let Some(net) = s.src.net() {
+        for path in cwd.iter().chain(project.iter()) {
+            net.watch_vcs(path);
+        }
     }
     scripts::load_file(s, false);
     servers::watch(s);
@@ -420,22 +424,22 @@ fn action(t: &T, key: &str, glyph: El, label: &str, color: Color) -> El {
 }
 
 fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
+    split_with(t, key, main, label, menu, true)
+}
+
+/// [`split`] whose chooser is disabled unless `enabled`.
+fn split_with(t: &T, key: &str, main: El, label: &str, menu: Menu, enabled: bool) -> El {
+    let chooser = el().key(key.to_string()).size(32.0, 32.0).center().corners([0.0, 8.0, 8.0, 0.0]).label(label.to_string()).help(label.to_string());
+    let chooser = if enabled {
+        chooser.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle_menu(s, menu))
+    } else {
+        chooser.opacity(0.64)
+    };
     row()
         .w_full()
         .gap(1.0)
         .child(main.w(229.0).corners([8.0, 0.0, 0.0, 8.0]))
-        .child(
-            el().key(key.to_string())
-                .size(32.0, 32.0)
-                .center()
-                .corners([0.0, 8.0, 8.0, 0.0])
-                .hover(t.c.accent)
-                .cursor(Cursor::Pointer)
-                .label(label.to_string())
-                .help(label.to_string())
-                .child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground))
-                .on_press(move |s: &mut App| toggle_menu(s, menu)),
-        )
+        .child(chooser.child(icon(&icons::CHEVRON_DOWN, 16.0).color(t.c.muted_foreground)))
 }
 
 /// A card menu row: icon, label, and the reason it is disabled as its tooltip.
@@ -733,10 +737,38 @@ fn pick_item(s: &mut App, item: Item) {
 
 /// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
 /// the thread there; anything else is switched to in the thread's checkout.
+/// `canUpdateThreadBranch`: a started thread's branch is orchestration metadata.
+fn can_update_branch(s: &App) -> bool {
+    composer::ctx(s).thread.is_none() || grants(s, "orchestration:operate")
+}
+
+/// `canChangeThreadBranch`: switching or creating a ref also writes source control.
+fn can_change_branch(s: &App) -> bool {
+    grants(s, "source-control:write") && can_update_branch(s)
+}
+
+/// `BranchPickerRefItem`'s `disabled`: moving to a ref's existing worktree needs no source control.
+fn ref_disabled(s: &App, r: &Ref) -> bool {
+    !can_update_branch(s) || (!grants(s, "source-control:write") && !selecting_base(s) && r.worktree.is_none())
+}
+
+/// `resolveBranchSelectionTarget`: a ref's worktree is the project's own checkout when it is the
+/// checkout root, or, until that root loads, when it holds the project.
+fn own_checkout(worktree: &str, project_cwd: &str, root: Option<&str>) -> bool {
+    let trim = |p: &str| p.trim_end_matches('/').to_string();
+    let worktree = trim(worktree);
+    match root {
+        Some(root) => worktree == trim(root),
+        None => {
+            let project = trim(project_cwd);
+            worktree == project || worktree.starts_with(&format!("{project}/"))
+        }
+    }
+}
+
 /// `runBranchAction`'s guard: changing the branch writes source control, and a thread's metadata.
 fn branch_denied(s: &mut App) -> bool {
-    let thread = composer::ctx(s).thread.is_some();
-    let denied = !grants(s, "source-control:write") || (thread && !grants(s, "orchestration:operate"));
+    let denied = !can_change_branch(s);
     if denied {
         palette::toast_error_brief(s, "Action unavailable", Some("This connection cannot change the thread's branch."));
     }
@@ -744,22 +776,23 @@ fn branch_denied(s: &mut App) -> bool {
 }
 
 fn select_ref(s: &mut App, r: &Ref) {
+    if ref_disabled(s, r) || switching(s) {
+        return;
+    }
     if selecting_base(s) {
         draft_run_mut(s).base = Some(r.name.clone());
-        return;
-    }
-    if branch_denied(s) {
-        return;
-    }
-    if switching(s) {
         return;
     }
     let c = composer::ctx(s);
     let project_cwd = c.project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
     let active = worktree_here(s);
     if let Some(path) = &r.worktree {
-        let own = path == &project_cwd || path.starts_with(&format!("{}/", project_cwd.trim_end_matches('/')));
+        let root = s.state().vcs.get(&project_cwd).and_then(|v| v["local"]["workingTree"]["rootPath"].as_str());
+        let own = own_checkout(path, &project_cwd, root);
         set_thread_branch(s, &r.name, (!own).then(|| path.clone()));
+        return;
+    }
+    if branch_denied(s) {
         return;
     }
     let next = if r.default { None } else { active };
@@ -825,15 +858,19 @@ fn mismatch(s: &App) -> Option<(String, String, String)> {
 }
 
 fn composer_has_content(s: &App) -> bool {
-    s.ui.chat.composer.drafts.get(&composer::draft_key(s, s.frame_route())).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
+    s.ui.chat.composer.drafts.get(&composer::draft_key(s, &composer::route(s))).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty())
 }
 
-/// The mismatch notice appears once the composer has content and stays for that mismatch.
+/// The mismatch notice appears once the composer has content and stays for that mismatch; the
+/// open side chat's composer notes its own.
 fn note_mismatch(s: &mut App) -> bool {
-    match mismatch(s) {
-        Some((key, ..)) if composer_has_content(s) => s.ui.chat.details.mismatch_shown.insert(key),
-        _ => false,
-    }
+    let app: &App = s;
+    let side = super::side::open_beside(app).map(str::to_owned);
+    let noted: Vec<String> = [None, side]
+        .into_iter()
+        .filter_map(|target| composer::within(app, target, || mismatch(app).filter(|_| composer_has_content(app)).map(|(key, ..)| key)))
+        .collect();
+    noted.into_iter().fold(false, |changed, key| s.ui.chat.details.mismatch_shown.insert(key) | changed)
 }
 
 fn restore_branch(s: &mut App, confirmed: bool) {
@@ -842,7 +879,7 @@ fn restore_branch(s: &mut App, confirmed: bool) {
         return;
     }
     if !confirmed && vcs(s).is_some_and(|v| v["local"]["hasWorkingTreeChanges"] == true) {
-        s.ui.chat.details.restore_confirm = Some(branch);
+        s.ui.chat.details.restore_confirm = Some((branch, composer::drawing(s)));
         return;
     }
     s.ui.chat.details.restore_confirm = None;
@@ -893,7 +930,7 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
                     .variant("ghost")
                     .size("xs")
                     .disabled(restoring)
-                    .on_press(|s: &mut App| restore_branch(s, false))
+                    .on_press(composer::act(s, |s: &mut App| restore_branch(s, false)))
                     .build(t),
             )
             .child(
@@ -908,14 +945,14 @@ pub fn mismatch_banner(s: &App, t: &T) -> Option<El> {
 }
 
 fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
-    let Some(branch) = s.ui.chat.details.restore_confirm.clone() else { return };
+    let Some((branch, side)) = s.ui.chat.details.restore_confirm.clone() else { return };
     let close = |s: &mut App| s.ui.chat.details.restore_confirm = None;
     let footer = row()
         .w_full()
         .gap(8.0)
         .child(el().grow(1.0))
         .child(crate::kit::Button::new("Cancel").variant("outline").on_press(close).build(t))
-        .child(crate::kit::Button::new("Switch branch").on_press(|s: &mut App| restore_branch(s, true)).build(t));
+        .child(crate::kit::Button::new("Switch branch").disabled(!grants(s, "source-control:write")).on_press(move |s: &mut App| composer::acting(s, side.clone(), |s| restore_branch(s, true))).build(t));
     crate::kit::Dialog::new("branch-restore", format!("Switch to {branch}?"))
         .open(true)
         .alert()
@@ -927,8 +964,8 @@ fn restore_dialog(s: &App, t: &T, out: &mut Vec<El>) {
 
 fn visible_items(s: &App) -> Vec<Item> {
     let ui = &s.ui.chat.details;
-    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s));
-    if let Some(reference) = pr::parse_reference(&ui.branch_query.text) {
+    let mut items = branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s) && can_change_branch(s));
+    if let Some(reference) = pr::parse_reference(&ui.branch_query.text).filter(|_| can_change_branch(s)) {
         items.insert(0, Item::CheckoutPr(reference));
     }
     items
@@ -1011,9 +1048,12 @@ fn poll_branch(s: &mut App) -> bool {
 }
 
 fn open_in_editor(s: &mut App, editor: Option<String>) {
+    if !can_open_editor(s) {
+        return;
+    }
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
-    if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
+    if crate::env::ssh::open_in_editor(s, &editor, &cwd, crate::env::ssh::toast_open_error) {
         return;
     }
     if let Some(net) = s.src.net() {
@@ -1021,10 +1061,54 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
     }
 }
 
-/// `(id, label)` for each editor the server found.
+fn editor_mode(s: &App) -> crate::env::ssh::OpenMode {
+    crate::env::ssh::open_mode(s, &s.ui.env.active)
+}
+
+/// OpenInPicker's `isHostEditorDenied`: the server's own editors need orchestration access.
+fn editor_denied(s: &App) -> bool {
+    editor_mode(s) == crate::env::ssh::OpenMode::Local && !grants(s, "orchestration:operate")
+}
+
+fn can_open_editor(s: &App) -> bool {
+    editor_mode(s) != crate::env::ssh::OpenMode::Unavailable && !editor_denied(s)
+}
+
+/// OpenInPicker's option icon: the editor's brand mark; the file manager is Finder, File
+/// Explorer, or a muted folder elsewhere. `None` for an editor web draws no icon for.
+fn editor_mark(t: &T, id: &str, size: f32) -> Option<El> {
+    let id = match id {
+        "file-manager" if cfg!(target_os = "macos") => "finder",
+        "file-manager" if cfg!(target_os = "windows") => "file-explorer",
+        "file-manager" => return Some(icon(&icons::FOLDER_CLOSED, size).color(t.c.muted_foreground)),
+        "antigravity" => return composer::provider_mark(t, "antigravity", size),
+        id => id,
+    };
+    let layers = editor_icons::layers(id)?;
+    Some(layers.iter().fold(el().size(size, size), |mark, &(glyph, light, dark)| {
+        let hex = if t.dark { dark } else { light };
+        let color = if hex == "currentColor" { t.c.foreground } else { rune::color::hex(hex).unwrap_or(t.c.foreground) };
+        mark.child(icon(glyph, size).color(color).absolute(0.0, 0.0))
+    }))
+}
+
+/// `editorLabelForPlatform`: the file manager takes this machine's name for it.
+fn editor_label(id: &str) -> String {
+    match id {
+        "file-manager" if cfg!(target_os = "macos") => "Finder".into(),
+        "file-manager" if cfg!(target_os = "windows") => "File Explorer".into(),
+        "file-manager" => "Files".into(),
+        id => crate::panel::diff::file_menu::label(id).to_string(),
+    }
+}
+
+/// `(id, label)` for each editor the server found; none without a route to the host.
 fn editors(s: &App) -> Vec<(String, String)> {
     if let Some(remote) = crate::env::ssh::editors(s) {
         return remote;
+    }
+    if editor_mode(s) == crate::env::ssh::OpenMode::Unavailable {
+        return Vec::new();
     }
     s.state()
         .config
@@ -1033,7 +1117,7 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .map(|v| {
             v.iter()
                 .map(|e| match e.as_str() {
-                    Some(id) => (id.to_string(), id.to_string()),
+                    Some(id) => (id.to_string(), editor_label(id)),
                     None => (data::s(e, "id").to_string(), data::s(e, "label").to_string()),
                 })
                 .collect()
@@ -1156,17 +1240,19 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
     let preferred = preferred_editor(s);
-    let editor = split(
+    let editor = split_with(
         t,
         "details-editor-menu",
         {
             let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
-            let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
+            let glyph = preferred.as_ref().and_then(|(id, _)| editor_mark(t, id, 16.0)).unwrap_or_else(|| icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted));
+            let open = action(t, "details-editor", glyph, &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
-            if preferred.is_none() { open.opacity(0.64) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
+            if preferred.is_none() || !can_open_editor(s) { open.opacity(0.64).cursor(Cursor::Default) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
         "Choose editor",
         Menu::Editor,
+        !editor_denied(s),
     );
     let on = |id: &str| items::visible(&s.client_settings.values, id);
     let general: Vec<El> = [(on("environment"), Some(run_context)), (on("openIn"), Some(editor)), (on("scripts"), None)]
@@ -1245,6 +1331,12 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             body = body.child(panel);
             divided = true;
         }
+        if on("sideChats")
+            && let Some(panel) = super::side::details_list(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
     }
     // Shown only when no section has content, so an emptied card can be refilled.
     if !divided {
@@ -1295,21 +1387,29 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         Menu::Editor => {
             let editors = editors(s);
             let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
-            if editors.is_empty() {
-                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No installed editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let note = |list: El, line: String| list.child(row().h(32.0).px(8.0).center_y().child(text(line).font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            let mode = editor_mode(s);
+            if mode == crate::env::ssh::OpenMode::Unavailable {
+                list = note(list, format!("No SSH route to {}", crate::env::label(s, &s.ui.env.active)));
+            } else if editors.is_empty() {
+                list = note(list, "No installed editors found".into());
             }
+            let hint = matches!(mode, crate::env::ssh::OpenMode::Links(..)) && s.client_settings.values.get(crate::env::ssh::REMOTE_OPEN_HINT_SEEN) != Some(&json!(true));
             let preferred = preferred_editor(s).map(|e| e.0);
             let shortcut = palette::shortcut_label(s, "editor.openFavorite");
             // OpenInPicker's panel menu picks the button's editor; the button opens it.
             for (id, label) in editors {
                 let mark = (preferred.as_deref() == Some(id.as_str()) && !shortcut.is_empty()).then(|| text(shortcut.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground));
                 list = list.child(
-                    menu_row(t, None, &label, Some(move |s: &mut App| {
+                    menu_row(t, editor_mark(t, &id, 16.0), &label, Some(move |s: &mut App| {
                         s.ui.chat.details.menu = None;
                         set_preferred_editor(s, &id);
                     }), None)
                     .children(mark),
                 );
+            }
+            if hint {
+                list = note(list, format!("Opens over SSH. Needs your key on {}", crate::env::label(s, &s.ui.env.active)));
             }
             ("details-editor-menu", list)
         }
@@ -1386,30 +1486,34 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
     let ui = &s.ui.chat.details;
     let muted = t.c.muted_foreground;
     let project_cwd = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
-    let search = row()
+    // ComboboxSearchInput: a borderless field over a divider that takes the ring colour on focus.
+    let field = text_input(&ui.branch_query, theme::TEXT_SM)
+        .key("details-branch-search")
         .w_full()
-        .h(32.0)
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .child(icon(&icons::SEARCH, 16.0).color(muted.alpha_mul(0.8)))
-        .child(
-            text_input(&ui.branch_query, theme::TEXT_SM)
-                .key("details-branch-search")
-                .grow(1.0)
-                .min_w(0.0)
-                .font(theme::TEXT_SM)
-                .color(t.c.foreground)
-                .placeholder("Search refs...", muted)
-                .on_input_key(on_branch_key)
-                .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query),
-        );
-    let mut list = list.child(search).child(el().w_full().h(1.0).my(4.0).fill(t.c.border));
-    let status = |label: &str| row().h(32.0).px(8.0).center_y().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+        .h(26.0)
+        .pl(20.0)
+        .py(3.0)
+        .font(theme::TEXT_SM)
+        .color(t.c.contrast_foreground)
+        .placeholder("Search refs...", t.c.contrast_placeholder)
+        .on_input_key(on_branch_key)
+        .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query);
+    let underline = if ui.branch_query.focused { t.c.ring } else { t.c.contrast_border.alpha_mul(0.7) };
+    let search = col()
+        .w_full()
+        .px(12.0)
+        .pt(9.0)
+        .child(row().w_full().pb(6.0).child(icon(&icons::SEARCH, 16.0).absolute(0.0, 6.0).color(t.c.contrast_muted_foreground.alpha_mul(0.55))).child(field))
+        .child(el().w_full().h(1.0).fill(underline));
+    let list = list.padding(0.0).child(search);
+    // ComboboxEmpty (centred, p-2) and ComboboxStatus (px-3 py-2, medium xs).
+    let empty = |label: &str| row().w_full().padding(8.0).justify_center().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+    let status = |label: &str| row().w_full().px(12.0).py(8.0).child(text(label.to_string()).font(theme::XS_MEDIUM).color(muted));
     let Some(refs) = ui.refs.as_deref() else { return list.child(status("Loading refs...")) };
     let items = visible_items(s);
+    let mut list = list;
     if items.is_empty() {
-        list = list.child(status("No refs found."));
+        list = list.child(empty("No refs found."));
     }
     let active = ui.branch_active.min(items.len().saturating_sub(1));
     let mut rows = col().w_full();
@@ -1430,10 +1534,10 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             .px(8.0)
             .gap(8.0)
             .center_y()
-            .radius(radius::MD)
+            .radius(4.0)
             .cursor(Cursor::Pointer)
             .label(label.clone())
-            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
+            .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
             .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i);
         if let Item::Ref(r) = &item {
             let name = refs[*r].name.clone();
@@ -1441,7 +1545,8 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
                 s.ui.chat.details.branch_copy = Some((name.clone(), (at.x, at.y)));
             });
         }
-        let mut line = line.on_press(move |s: &mut App| pick_item(s, item.clone()));
+        let disabled = matches!(&item, Item::Ref(r) if ref_disabled(s, &refs[*r]));
+        let mut line = if disabled { line.opacity(0.64).cursor(Cursor::Default) } else { line.on_press(move |s: &mut App| pick_item(s, item.clone())) };
         if let Some(subtitle) = subtitle {
             line = line.child(text(subtitle).font(theme::TEXT_XS).color(muted).single_line().truncate().shrink().min_w(0.0).max_w(160.0));
         }
@@ -1449,12 +1554,14 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
         if i == active {
-            line = line.fill(t.c.accent);
+            line = line.fill(t.c.contrast_foreground.alpha_mul(0.09));
         }
         rows = rows.child(line);
     }
     let (near_end, last) = (ui.near_end.clone(), ui.last_scroll.clone());
     let waker = s.ui.panel.waker.clone();
+    // The list: ps-1 py-2 inside ComboboxListVirtualized's px-1 py-1, at most 224 tall.
+    let rows = col().w_full().pl(8.0).pr(4.0).py(12.0).child(rows);
     let rows = rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }).on_scroll_offset(move |at: rune::ScrollPos| {
         if next_page_after_scroll(last.replace(Some(at.offset[1])), at.offset[1], at.max[1]) && !near_end.replace(true) {
             if let Some(w) = &waker {
@@ -1469,19 +1576,20 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
         _ => None,
     };
     if let Some(footer) = footer {
-        list = list.child(row().px(8.0).py(6.0).child(text(footer).font(theme::TEXT_XS).color(muted)));
+        list = list.child(status(&footer));
     }
     if selecting_base(s) {
         let on = draft_run(s).is_some_and(|r| r.from_origin);
-        list = list.child(el().w_full().h(1.0).my(4.0).fill(t.c.border)).child(
+        // A label row under a border-border/60 rule: px-3 py-2, medium xs muted, a 12px icon.
+        list = list.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(
             row()
                 .w_full()
-                .h(32.0)
-                .px(8.0)
-                .gap(8.0)
+                .px(12.0)
+                .py(8.0)
+                .gap(12.0)
                 .center_y()
-                .child(icon(&icons::REFRESH_CW, 14.0).color(muted))
-                .child(text("Start from remote").font(theme::TEXT_SM).color(t.c.foreground).grow(1.0))
+                .help("Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.")
+                .child(row().gap(6.0).center_y().grow(1.0).min_w(0.0).child(icon(&icons::REFRESH_CW, 12.0).color(muted)).child(text("Start from remote").font(theme::XS_MEDIUM).color(muted).truncate()))
                 .child(
                     crate::kit::Switch::new(on)
                         .size("sm")
@@ -1527,12 +1635,23 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     out
 }
 
+/// Scene: the Open in editor chooser, with web's editor names.
+pub fn scene_editor_menu(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    if let crate::data::Source::Fixture(state) = &mut s.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["availableEditors"] = json!(["cursor", "vscode", "zed", "file-manager"]);
+    }
+    s.ui.chat.details.menu = Some(Menu::Editor);
+}
+
 /// `composer.branch` opens the branch picker and `composer.workspace` a draft's run context,
 /// showing the card first when it is closed. Web binds both outside the terminal.
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
     // `editor.openFavorite` opens the card's preferred editor, as its button does.
     if crate::panel::shortcut(s, e, "editor.openFavorite") {
-        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some()) else { return false };
+        let Some((editor, _)) = preferred_editor(s).filter(|_| cwd(s).is_some() && can_open_editor(s)) else { return false };
         open_in_editor(s, Some(editor));
         return true;
     }
@@ -1807,6 +1926,56 @@ mod tests {
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
+    }
+
+    #[test]
+    fn a_ref_in_a_worktree_is_the_projects_own_only_at_its_checkout_root() {
+        use super::{can_change_branch, own_checkout, ref_disabled, set_session};
+        assert!(own_checkout("/repo/", "/repo/apps/web", Some("/repo")), "a subfolder project's checkout is the repository root");
+        assert!(!own_checkout("/repo/apps/web", "/repo/apps/web", Some("/repo")));
+        assert!(!own_checkout("/wt/feature", "/repo", Some("/repo")));
+        assert!(own_checkout("/repo/nested", "/repo", None), "until the root loads, one holding the project counts");
+        assert!(!own_checkout("/repo-2", "/repo", None));
+        let r = |worktree: Option<&str>| Ref { name: "feature".into(), remote: false, current: false, default: false, worktree: worktree.map(str::to_string) };
+        let mut s = App::new();
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}))));
+        assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
+        assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
+        assert!(!can_change_branch(&s));
+    }
+
+    #[test]
+    fn every_editor_web_lists_has_its_brand_mark() {
+        // contracts EDITORS, in order.
+        let ids = ["cursor", "trae", "kiro", "vscode", "vscode-insiders", "vscodium", "zed", "antigravity", "idea", "aqua", "clion", "datagrip", "dataspell", "goland", "phpstorm", "pycharm", "rider", "rubymine", "rustrover", "webstorm", "file-manager"];
+        for dark in [false, true] {
+            let t = crate::theme::theme(dark);
+            for id in ids {
+                assert!(super::editor_mark(&t, id, 16.0).is_some(), "FAILED: {id} has no mark");
+            }
+        }
+        assert!(super::editor_mark(&crate::theme::theme(true), "nano", 16.0).is_none());
+    }
+
+    #[test]
+    fn open_in_editor_needs_orchestration_access_and_a_route() {
+        use super::{can_open_editor, editor_denied, editor_label, editors, set_session};
+        let mut s = App::new();
+        assert!(can_open_editor(&s));
+        set_session(&mut s, Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:read"]}))));
+        assert!(editor_denied(&s) && !can_open_editor(&s), "FAILED: the server's editors need orchestration:operate");
+        set_session(&mut s, None);
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+        s.ui.env.active = "box".into();
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = state.config.as_mut().and_then(|c| c.as_object_mut())
+        {
+            config.remove("remoteOpenTargets");
+        }
+        assert!(!editor_denied(&s) && !can_open_editor(&s), "FAILED: no SSH route leaves nothing to open with");
+        assert!(editors(&s).is_empty());
+        assert_eq!(editor_label("vscode"), "VS Code");
+        assert_eq!(editor_label("file-manager"), if cfg!(target_os = "macos") { "Finder" } else { "Files" });
     }
 
     #[test]

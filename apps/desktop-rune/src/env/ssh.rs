@@ -1744,7 +1744,7 @@ fn editor_label(id: &str) -> &'static str {
 /// SSH, as web's OpenInPicker in remote mode. None when the active environment is not SSH.
 pub fn editors(s: &App) -> Option<Vec<(String, String)>> {
     static PROBED: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    remote_host(s, &s.ui.env.active)?;
+    let OpenMode::Links(..) = open_mode(s, &s.ui.env.active) else { return None };
     // Rendering asks every frame, so probe once, after the login shell's PATH is known.
     let ids = match crate::desktop::shell_path::get() {
         Some(path) => PROBED.get_or_init(|| probe_remote_editors(path)).clone(),
@@ -1753,15 +1753,58 @@ pub fn editors(s: &App) -> Option<Vec<(String, String)>> {
     Some(ids.into_iter().map(|id| (id.to_owned(), editor_label(id).to_owned())).collect())
 }
 
-/// Opens `path` on the active SSH environment's host in `editor`; false off SSH.
-pub fn open_in_editor(s: &mut App, editor: &str, path: &str) -> bool {
-    let Some((host, user)) = remote_host(s, &s.ui.env.active) else { return false };
+/// Opens `path` on the active SSH environment's host in `editor`; false off SSH. A launch
+/// failure goes to `failed`, so it lands where the open started (a terminal's own buffer).
+pub fn open_in_editor(s: &mut App, editor: &str, path: &str, failed: impl FnOnce(&mut App, &str)) -> bool {
+    let OpenMode::Links(host, user) = open_mode(s, &s.ui.env.active) else { return false };
     let Some(url) = remote_open_url(editor, &host, user.as_deref(), path, false) else { return true };
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    if let Err(e) = Command::new(opener).arg(&url).stdin(Stdio::null()).spawn() {
-        crate::shell::palette::toast(s, "Could not open the editor.", Some(&e.to_string()));
-    }
+    launch(s, if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &url, failed);
     true
+}
+
+fn launch(s: &mut App, opener: &str, url: &str, failed: impl FnOnce(&mut App, &str)) {
+    match Command::new(opener).arg(url).stdin(Stdio::null()).spawn() {
+        Ok(_) => {
+            s.client_settings.values.insert(REMOTE_OPEN_HINT_SEEN.into(), serde_json::json!(true));
+            s.client_settings.save();
+        }
+        Err(e) => failed(s, &format!("Could not open the editor. {e}")),
+    }
+}
+
+/// [`open_in_editor`]'s failure for opens with no terminal to write into.
+pub fn toast_open_error(s: &mut App, message: &str) {
+    let (title, detail) = message.split_once(". ").unwrap_or((message, ""));
+    crate::shell::palette::toast(s, &format!("{title}."), (!detail.is_empty()).then_some(detail));
+}
+
+/// `useRemoteOpenHint`: set after the first remote open goes through.
+pub const REMOTE_OPEN_HINT_SEEN: &str = "remoteOpenHintSeen";
+
+/// `RemoteOpenState`: where an environment's Open in editor runs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenMode {
+    /// The server launches the editor on its own machine.
+    Local,
+    /// This machine's editor opens the host over SSH.
+    Links(String, Option<String>),
+    /// A remote server with no SSH route, whose editors would open out of sight.
+    Unavailable,
+}
+
+/// `resolveRemoteOpenState`: an SSH target, then this machine, then the server's advertised target.
+pub fn open_mode(s: &App, id: &str) -> OpenMode {
+    if let Some((host, user)) = remote_host(s, id) {
+        return OpenMode::Links(host, user);
+    }
+    if crate::settings::machines::loopback(s, id) {
+        return OpenMode::Local;
+    }
+    let config = crate::env::source(s, id).and_then(|src| src.state().config.as_ref());
+    match config.map(|c| &c["remoteOpenTargets"][0]).and_then(|t| t["host"].as_str().map(|h| (h, t["username"].as_str()))) {
+        Some((host, user)) if !host.trim().is_empty() => OpenMode::Links(host.trim().to_owned(), user.map(str::to_owned)),
+        _ => OpenMode::Unavailable,
+    }
 }
 
 /// `encodeURIComponent`.
@@ -1818,6 +1861,16 @@ pub fn remote_open_url(editor: &str, host: &str, username: Option<&str>, path: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remote_editor_that_cannot_launch_reports_to_its_caller_and_leaves_the_hint_unseen() {
+        let mut app = App::new();
+        let mut reported = None;
+        launch(&mut app, "/nonexistent/s5-opener", "vscode://vscode-remote/ssh-remote+box/repo", |_, message| reported = Some(message.to_owned()));
+        let message = reported.expect("FAILED: the caller hears about the failed launch");
+        assert!(message.starts_with("Could not open the editor. "), "{message}");
+        assert!(app.client_settings.values.get(REMOTE_OPEN_HINT_SEEN).is_none(), "FAILED: a failed open is not a first remote open");
+    }
 
     fn target(alias: &str, hostname: &str, username: Option<&str>, port: Option<u16>) -> Target {
         Target { alias: alias.into(), hostname: hostname.into(), username: username.map(Into::into), port }
@@ -1959,6 +2012,25 @@ mod tests {
             Some("jetbrains://gateway/ssh/environment?h=box&launchIde=true&ideHint=IU&projectHint=%2Fsrv%2Fapp&u=me")
         );
         assert_eq!(remote_open_url("trae", "box", None, "/a", false), None);
+    }
+
+    #[test]
+    fn open_mode_matches_remote_opens_resolution() {
+        let mut s = crate::App::new();
+        let saved = |id: &str, base: &str| crate::env::Saved { id: id.into(), label: id.into(), base: base.into(), bearer: String::new() };
+        s.ui.env.saved.push(saved("box", "https://box.example.com"));
+        s.ui.env.saved.push(saved("tunnel", "http://127.0.0.1:4100"));
+        s.ui.env.saved.push(saved("devbox", "http://127.0.0.1:4200"));
+        s.ui.env.saved.push(saved("advertised", "https://far.example.com"));
+        s.ui.env.ssh.targets.push(("devbox".into(), target("me@devbox", "devbox", None, None)));
+        let mut far = crate::data::empty_state();
+        far.config = Some(serde_json::json!({"remoteOpenTargets": [{"kind": "ssh-alias", "host": "far", "username": "ops"}]}));
+        crate::env::park(&mut s, "advertised", crate::data::Source::Fixture(far));
+        assert_eq!(open_mode(&s, crate::env::LOCAL), OpenMode::Local);
+        assert_eq!(open_mode(&s, "tunnel"), OpenMode::Local, "a loopback route is this machine");
+        assert_eq!(open_mode(&s, "devbox"), OpenMode::Links("devbox".into(), Some("me".into())), "an SSH target wins over its forwarded loopback port");
+        assert_eq!(open_mode(&s, "advertised"), OpenMode::Links("far".into(), Some("ops".into())));
+        assert_eq!(open_mode(&s, "box"), OpenMode::Unavailable, "FAILED: a remote server without a route must not open editors on itself");
     }
 
     #[test]

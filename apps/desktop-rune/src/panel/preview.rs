@@ -146,6 +146,10 @@ pub struct Ui {
     dialog: Option<Dialog>,
     /// A server page's `<input multiple>` picker, collecting files to upload.
     chooser: Option<Chooser>,
+    /// Electron's permission prompt: a clipboard read or an external link, one at a time.
+    prompt: Option<Prompt>,
+    /// Each origin's clipboard-read answer, kept for the session as Electron keeps it.
+    clipboard_reads: HashMap<String, bool>,
     /// The page's right-click menu.
     context: Option<Context>,
     /// Chrome starts after a failed start; part of the viewport key so the new worker gets it.
@@ -203,6 +207,91 @@ fn choose(files: &mut Vec<std::path::PathBuf>, picked: impl IntoIterator<Item = 
             files.push(path);
         }
     }
+}
+
+struct Prompt {
+    tab: TabId,
+    ask: Ask,
+}
+
+enum Ask {
+    ClipboardRead { id: u64, origin: String },
+    External { url: String },
+}
+
+/// Electron's `MAX_PROMPT_URL_LENGTH`.
+fn truncate_for_prompt(text: &str) -> String {
+    if text.chars().count() > 300 { text.chars().take(300).chain(['…']).collect() } else { text.to_owned() }
+}
+
+/// A page's clipboard read: the origin's remembered answer, else a prompt, else (while another
+/// prompt is open) refused, as Electron auto-denies a second prompt.
+fn clipboard_read(app: &mut App, tx: &mut Tx, tab: TabId, id: u64, origin: String) {
+    let remembered = app.ui.panel.browser.clipboard_reads.get(&origin).copied();
+    match remembered {
+        Some(true) => read_for_page(tx, tab, id),
+        None if app.ui.panel.browser.prompt.is_none() => app.ui.panel.browser.prompt = Some(Prompt { tab, ask: Ask::ClipboardRead { id, origin } }),
+        _ => send(app, Cmd::ClipboardAnswer(tab, id, None)),
+    }
+}
+
+fn read_for_page(tx: &mut Tx, tab: TabId, id: u64) {
+    tx.read_clipboard(move |s: &mut App, content, _| send(s, Cmd::ClipboardAnswer(tab, id, Some(content.text().to_string()))));
+}
+
+/// The prompt's answer; Escape and closing the tab refuse it.
+fn answer_prompt(app: &mut App, tx: &mut Tx, allow: bool) {
+    let Some(p) = app.ui.panel.browser.prompt.take() else { return };
+    match p.ask {
+        Ask::ClipboardRead { id, origin } => {
+            app.ui.panel.browser.clipboard_reads.insert(origin, allow);
+            if allow {
+                read_for_page(tx, p.tab, id);
+            } else {
+                send(app, Cmd::ClipboardAnswer(p.tab, id, None));
+            }
+        }
+        Ask::External { url } if allow => {
+            if let Err(e) = tx.open_url(&url) {
+                crate::shell::palette::toast(app, "Unable to open the link", Some(&e.to_string()));
+            }
+        }
+        Ask::External { .. } => {}
+    }
+}
+
+/// Electron's native permission box, drawn over the page as the page's own dialogs are.
+fn permission_prompt(t: &T, p: &Prompt) -> El {
+    let (title, detail, yes, no) = match &p.ask {
+        Ask::ClipboardRead { origin, .. } => (format!("{} wants to see text and images copied to the clipboard", truncate_for_prompt(origin)), None, "Allow", "Block"),
+        Ask::External { url } => {
+            let scheme = url.split(':').next().unwrap_or_default();
+            (format!("Open this {scheme} link?"), Some(format!("A page in the browser wants to open another application:\n\n{}", truncate_for_prompt(url))), "Open", "Cancel")
+        }
+    };
+    let card = col()
+        .key("browser-permission")
+        .role("alertdialog")
+        .label(title.clone())
+        .w(400.)
+        .padding(16.)
+        .gap(12.)
+        .radius(12.)
+        .border(1., t.c.border)
+        .fill(t.c.popover)
+        .shadow(8., 24., Color::BLACK.alpha(0.25))
+        .child(text(title).font(theme::SM_MEDIUM).color(t.c.contrast_foreground).wrap().w_full())
+        .children(detail.map(|d| text(d).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().w_full()))
+        .child(
+            row()
+                .w_full()
+                .gap(8.)
+                .center_y()
+                .child(el().grow(1.))
+                .child(kit::Button::new(no).variant("outline").size("sm").build(t).on_press_tx(|s: &mut App, tx: &mut Tx| answer_prompt(s, tx, false)))
+                .child(kit::Button::new(yes).size("sm").build(t).on_press_tx(|s: &mut App, tx: &mut Tx| answer_prompt(s, tx, true))),
+        );
+    row().pin(Some(0.), Some(0.), Some(0.), Some(0.)).fill(Color::BLACK.alpha(0.2)).items_start().pt(24.).child(el().grow(1.)).child(card).child(el().grow(1.))
 }
 
 struct Dialog {
@@ -373,6 +462,34 @@ pub fn import(app: &mut App, scale: f32, source: &'static browser_import::Source
     Some(browser_import::start(source, directory, ui.browser.sender()?, waker))
 }
 
+/// Captures a page once for an inline frame, in the Default profile's Chrome. Chrome starts for
+/// it when no tab has, at the scale the panel last saw or 2; the panel relaunches it at the
+/// window's own scale when it opens, as after an import.
+pub fn snapshot(app: &mut App, url: String, width: u32, dark: bool) -> Option<browser::Shot> {
+    let shot = browser::Shot::new(url, width, dark);
+    inline_frame_cmd(app, Cmd::Snapshot(shot.clone())).then_some(shot)
+}
+
+/// Shows a page live inline, as `snapshot` starts Chrome for it; `inline_frame_cmd` drives it.
+pub fn live(app: &mut App, url: String, width: u32, height: u32, dark: bool) -> Option<browser::Live> {
+    let live = browser::Live::new(url, width, height, dark);
+    inline_frame_cmd(app, Cmd::LiveOpen(live.clone())).then_some(live)
+}
+
+/// Sends an inline frame's command to the Default profile's Chrome, starting it if need be.
+pub fn inline_frame_cmd(app: &mut App, cmd: Cmd) -> bool {
+    let Some(waker) = app.ui.panel.waker.clone() else { return false };
+    let ui = &mut app.ui.panel.browser;
+    if !ui.browser.started() {
+        let scale = ui.chrome_scale.unwrap_or(2.);
+        ui.browser.start(waker);
+        ui.browser.send(Cmd::Viewport { w: 0., h: 0., scale });
+        ui.chrome_scale = Some(scale);
+    }
+    ui.browser.send(cmd);
+    true
+}
+
 /// "Try again" after Chrome failed: a fresh worker, with the open tabs back on blank pages.
 fn restart(app: &mut App) {
     let Some(waker) = app.ui.panel.waker.clone() else { return };
@@ -482,6 +599,22 @@ fn adopt(app: &mut App, target: String, opener: String, url: String) {
     }
 }
 
+/// Electron's "new-tab" window open: the link loads afresh in a tab of its opener's profile,
+/// shown unless a middle or Ctrl/Cmd-click opened it (`emitOpenLink`'s `background`).
+fn open_link(app: &mut App, opener: TabId, url: String, background: bool) {
+    let Some(profile) = app.ui.panel.browser.tabs.get(&opener).map(|t| t.profile.clone()) else { return };
+    let floating = app.ui.panel.browser.pip == Some(opener);
+    let tab = open_tab(app, &profile);
+    send(app, Cmd::Navigate(tab, url));
+    match app.frame_route().clone() {
+        Route::Thread(thread) if background || floating => {
+            super::add_browser(app, &thread, tab, floating && !background);
+        }
+        _ => super::activate(app, super::Surface::Browser(tab)),
+    }
+    register(app, tab);
+}
+
 pub fn close(app: &mut App, tab: TabId) {
     if let Some((opener, target)) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.adopting.clone()) {
         agent::popup_gone(&opener, target);
@@ -507,6 +640,9 @@ pub fn close(app: &mut App, tab: TabId) {
     }
     if ui.chooser.as_ref().is_some_and(|c| c.tab == tab) {
         ui.chooser = None;
+    }
+    if ui.prompt.as_ref().is_some_and(|p| p.tab == tab) {
+        ui.prompt = None;
     }
     if ui.popout == Some(tab) {
         ui.popout = None;
@@ -609,7 +745,7 @@ fn send(app: &mut App, cmd: Cmd) {
     }
     let ui = &app.ui.panel.browser;
     let tab = match &cmd {
-        Cmd::Mouse { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) | Cmd::ClearCookies | Cmd::ClearCache => ui.shown,
+        Cmd::Mouse { .. } | Cmd::Pointer { .. } | Cmd::Wheel { .. } | Cmd::Text(_) | Cmd::Key(_) | Cmd::Inspect { .. } | Cmd::CopySelection { .. } | Cmd::Edit(_) | Cmd::ClearCookies | Cmd::ClearCache => ui.shown,
         Cmd::Navigate(tab, _) | Cmd::Back(tab) | Cmd::Forward(tab) | Cmd::Reload { tab, .. } | Cmd::Stop(tab) | Cmd::Zoom(tab, _) | Cmd::Device(tab, _) | Cmd::Pick(tab, _) | Cmd::DevTools(tab) | Cmd::Screenshot(tab, _) | Cmd::Record { tab, .. } | Cmd::Dialog { tab, .. } | Cmd::Mute(tab, _) | Cmd::ColorScheme(tab, _) => Some(*tab),
         _ => None,
     };
@@ -1090,6 +1226,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
+            browser::Event::OpenLink { tab, url, background } => open_link(app, tab, url, background),
+            browser::Event::PopupClosed(tab) => close(app, tab),
+            browser::Event::FrameLink(url) => super::open_preview(app, &url),
             browser::Event::Picked { tab, element, image } => pick(app, tab, element, image),
             browser::Event::Enclosed(tab, rect, elements) => enclosed(app, tab, rect, elements),
             browser::Event::DevTools(Ok(url)) => {
@@ -1113,6 +1252,12 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             }
             browser::Event::Context { tab, at, info } => app.ui.panel.browser.context = Some(Context { tab, at, info }),
             browser::Event::Clipboard(text) => tx.copy(text),
+            browser::Event::ClipboardRead { tab, id, origin } => clipboard_read(app, tx, tab, id, origin),
+            browser::Event::External { tab, url } => {
+                if app.ui.panel.browser.prompt.is_none() {
+                    app.ui.panel.browser.prompt = Some(Prompt { tab, ask: Ask::External { url } });
+                }
+            }
             browser::Event::Image(png) => match rune::ClipboardImage::from_png(png) {
                 Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
                 None => crate::shell::palette::toast(app, "Unable to copy image", None),
@@ -1209,7 +1354,9 @@ fn sync_remote(app: &mut App) -> bool {
 fn stream_status(snapshot: &Value, state: &super::stream::State) -> Status {
     let nav = &snapshot["navStatus"];
     let url = nav["url"].as_str().unwrap_or_default().to_owned();
-    let failure = state.error.clone().filter(|_| state.ended).map(|description| browser::Failure { url: url.clone(), description });
+    // Web's `PreviewUnreachable` for a page that failed to load; a download has its own page.
+    let failed = (nav["_tag"] == "LoadFailed" && nav["download"].is_null()).then(|| nav["description"].as_str().unwrap_or_default().to_owned());
+    let failure = state.error.clone().filter(|_| state.ended).or(failed).map(|description| browser::Failure { url: url.clone(), description });
     Status {
         title: nav["title"].as_str().unwrap_or_default().to_owned(),
         loading: nav["_tag"] == "Loading",
@@ -1767,7 +1914,8 @@ fn profile_badge(app: &App, t: &T, tab: TabId) -> Option<El> {
 }
 
 /// A headless scene's tab on a painted page, without Chrome or a server: `annotation`, `rails`,
-/// `stream-dialog`, `host-setup`, `more` (a Work-profile server tab's More menu) or `chooser`.
+/// `stream-dialog`, `host-setup`, `more` (a Work-profile server tab's More menu), `chooser`, the
+/// permission prompts, or a server page that failed or downloaded.
 pub fn scene(app: &mut App, kind: &str) -> TabId {
     app.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
     let url = "http://localhost:5173/login";
@@ -1796,6 +1944,18 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
         }
         "host-setup" => {
             fresh.stream = streamed(Some(("The server's machine is missing the libraries Chrome needs.".into(), Some("npx playwright install-deps chromium".into()))));
+        }
+        "clipboard-prompt" => ui.prompt = Some(Prompt { tab, ask: Ask::ClipboardRead { id: 1, origin: "http://localhost:5173".into() } }),
+        "external-prompt" => ui.prompt = Some(Prompt { tab, ask: Ask::External { url: "mailto:support@example.com?subject=Login%20help".into() } }),
+        "file-not-shown" | "server-unreachable" => {
+            fresh.stream = streamed(None);
+            let nav = if kind == "file-not-shown" {
+                json!({ "_tag": "LoadFailed", "url": "http://localhost:5173/export/report.zip", "title": "", "code": -3, "description": "", "download": { "id": "d1", "fileName": "report.zip" } })
+            } else {
+                json!({ "_tag": "LoadFailed", "url": "http://localhost:5173/login", "title": "", "code": -102, "description": "ERR_CONNECTION_REFUSED" })
+            };
+            fresh.snapshot = json!({ "profileId": "default", "navStatus": nav });
+            status = stream_status(&fresh.snapshot, &fresh.stream.as_ref().map(|s| s.state()).unwrap_or_default());
         }
         _ => {
             fresh.stream = streamed(None);
@@ -2758,7 +2918,8 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             .child(content)
             .children(zoom_pill)
             .children(ui.dialog.as_ref().filter(|d| d.tab == tab).map(|d| js_dialog(t, d, &status.url)))
-            .children(ui.chooser.as_ref().filter(|c| c.tab == tab).map(|c| chooser_sheet(t, c))),
+            .children(ui.chooser.as_ref().filter(|c| c.tab == tab).map(|c| chooser_sheet(t, c)))
+            .children(ui.prompt.as_ref().filter(|p| p.tab == tab).map(|p| permission_prompt(t, p))),
     )
 }
 
@@ -2856,6 +3017,8 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
             .label(format!("Viewport {axis}"))
             .w(if width >= 360. { 56. } else { 52. })
             .h(24.)
+            // A 16-point line centred in the 24-point box.
+            .py(4.)
             .px(6.)
             .radius(6.)
             .fill(t.c.input.alpha_mul(0.32))
@@ -3040,13 +3203,13 @@ fn pip_fit(desired: f32, aspect: f32, (max_w, max_h): (f32, f32), min_w: f32) ->
     (w, (w / aspect).round())
 }
 
-fn pip_clamp((x, y): (f32, f32), (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
+pub(super) fn pip_clamp((x, y): (f32, f32), (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
     (x.max(PIP_GAP).min((cw - w - PIP_GAP).max(PIP_GAP)), y.max(PIP_GAP).min((ch - h - PIP_GAP).max(PIP_GAP)))
 }
 
 /// `resolvePreviewMiniPlayerFrame`: `[x, y, w, h]` in the chat area; a moved or resized
 /// preview keeps its width, the default sits top right at up to 320 pt.
-fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f32; 4] {
+pub(super) fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f32; 4] {
     let max = (container.0 - 2. * PIP_GAP, container.1 - 2. * PIP_GAP);
     let (desired, min_w) = match frame {
         Some([_, _, w]) => (w, w),
@@ -3059,7 +3222,7 @@ fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f3
 }
 
 /// `resizePreviewMiniPlayer`; `dir` is -1/0/1 per axis (west/north is -1).
-fn pip_resize([x, y, w, h]: [f32; 4], (dx, dy): (i8, i8), (mx, my): (f32, f32), aspect: f32, (cw, ch): (f32, f32)) -> [f32; 4] {
+pub(super) fn pip_resize([x, y, w, h]: [f32; 4], (dx, dy): (i8, i8), (mx, my): (f32, f32), aspect: f32, (cw, ch): (f32, f32)) -> [f32; 4] {
     let (right, bottom) = (x + w, y + h);
     let max_w = match dx {
         -1 => right - PIP_GAP,
@@ -3118,6 +3281,9 @@ fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
         return Some(host_setup(t, need, command));
     }
     let nav = &ui.tabs.get(&tab)?.snapshot["navStatus"];
+    if let (Some(url), Some(id), Some(name)) = (nav["url"].as_str().filter(|_| nav["_tag"] == "LoadFailed"), nav["download"]["id"].as_str(), nav["download"]["fileName"].as_str()) {
+        return Some(file_not_shown(t, tab, url, id, name));
+    }
     if let Some(pdf) = nav["url"].as_str().filter(|_| nav["_tag"] == "Success").and_then(|url| pdf_asset_url(url, stream.base())) {
         return Some(stream_pdf(t, pdf));
     }
@@ -3142,6 +3308,41 @@ fn stream_pdf(t: &T, url: String) -> El {
     });
     let notice = col().max_w(360.).gap(10.).padding(16.).center().child(icon(&icons::FILE, 24.).color(t.c.muted_foreground)).child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground).wrap()).child(text("This PDF opens in your system's viewer.").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()).child(open);
     col().key("browser-stream-pdf").grow(1.).min_h(0.).w_full().center().child(notice)
+}
+
+/// Web's `PreviewFileNotShown`: a server page that turned out to be a download.
+fn file_not_shown(t: &T, tab: TabId, url: &str, id: &str, name: &str) -> El {
+    let host = host(url).unwrap_or(url).to_owned();
+    let message = format!("{name} from {host} was downloaded instead.");
+    let (open, id, file) = (url.to_owned(), id.to_owned(), name.to_owned());
+    let buttons = row()
+        .w_full()
+        .gap(8.)
+        .center_y()
+        .child(el().grow(1.))
+        .child(kit::Button::new("Open in browser").variant("outline").size("sm").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            if let Err(e) = tx.open_url(&open) {
+                crate::shell::palette::toast(s, "Unable to open the link", Some(&e.to_string()));
+            }
+        }))
+        .child(kit::Button::new("Download").size("sm").build(t).on_press(move |s: &mut App| {
+            if let Some(stream) = s.ui.panel.browser.tabs.get(&tab).and_then(|t| t.stream.as_ref()) {
+                stream.save(&id, file.clone());
+            }
+        }));
+    // `PreviewUnreachable`'s frame: the buttons sit at the page's foot (`mt-auto pt-8`).
+    let body = col()
+        .w_full()
+        .max_w(576.)
+        .grow(1.)
+        .px(32.)
+        .py(64.)
+        .child(icon(&ERROR_ICON, 48.).size(48., 48.).color(t.c.muted_foreground.alpha_mul(0.7)).mb(24.))
+        .child(text("This file can’t be shown here").font(theme::weight(theme::TEXT_2XL, theme::SEMIBOLD)).color(t.c.contrast_foreground).mb(12.))
+        .child(rich(message, vec![Span::new(0, name.len()).weight(theme::SEMIBOLD).color(t.c.contrast_foreground)]).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full())
+        .child(el().grow(1.).min_h(32.))
+        .child(buttons);
+    row().key("browser-file-not-shown").grow(1.).min_h(0.).w_full().fill(t.c.background).child(el().grow(1.)).child(body).child(el().grow(1.))
 }
 
 /// Web's `PreviewStreamHostSetup` notice: the server's machine can't run its browser until this
@@ -3391,7 +3592,28 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
     el().pixels(pixels)
         .focusable(true)
         .key(key.to_string())
-        .on_drag(move |s: &mut App, d, _| {
+        // A mouse's back and forward buttons go back and forward, as on Electron's page; the
+        // middle one reaches the page, so a link opens in a background tab.
+        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward, rune::PointerButton::Middle])
+        .on_press_tx(|s: &mut App, tx: &mut Tx| {
+            let Some(tab) = s.ui.panel.browser.shown else { return };
+            match tx.button() {
+                rune::PointerButton::Back => send(s, Cmd::Back(tab)),
+                rune::PointerButton::Forward => send(s, Cmd::Forward(tab)),
+                _ => {}
+            }
+        })
+        .on_drag(move |s: &mut App, d, tx| {
+            let button = match tx.button() {
+                rune::PointerButton::Primary => "left",
+                rune::PointerButton::Middle => "middle",
+                _ => return,
+            };
+            if matches!(d.phase, Phase::Down) {
+                let mods = tx.mods();
+                let modifiers = u32::from(mods.alt) | u32::from(mods.ctrl) << 1 | u32::from(mods.logo || (mods.cmd && !mods.ctrl)) << 2 | u32::from(mods.shift) << 3;
+                send(s, Cmd::Pointer { button, modifiers });
+            }
             send(
                 s,
                 Cmd::Mouse {
@@ -3419,6 +3641,13 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             // Web's way out of a page that takes every key.
             if matches!(e.key, Key::Escape) && e.mods.shift {
                 tx.blur();
+                return true;
+            }
+            // A permission prompt blocks the page too; Escape refuses it, as Electron's default.
+            if s.ui.panel.browser.prompt.as_ref().is_some_and(|p| Some(p.tab) == s.ui.panel.browser.shown) {
+                if matches!(e.key, Key::Escape) {
+                    answer_prompt(s, tx, false);
+                }
                 return true;
             }
             // An open dialog blocks the page: Enter accepts it, Escape cancels it.
@@ -4250,6 +4479,17 @@ mod tests {
         assert_eq!(viewport_size(&json!({ "_tag": "freeform", "width": 800, "height": 600 })), Some(Some((800, 600))));
         assert_eq!(viewport_size(&json!({ "_tag": "fill" })), Some(None));
         assert_eq!(viewport_size(&Value::Null), None);
+    }
+
+    #[test]
+    fn a_server_page_that_failed_shows_webs_unreachable_page_unless_it_downloaded() {
+        let state = super::super::stream::State { painted: true, ..Default::default() };
+        let failed = json!({ "navStatus": { "_tag": "LoadFailed", "url": "http://localhost:9/", "title": "", "code": -102, "description": "ERR_CONNECTION_REFUSED" } });
+        let failure = stream_status(&failed, &state).failure.expect("a failed load is unreachable");
+        assert_eq!((failure.url.as_str(), failure.description.as_str()), ("http://localhost:9/", "ERR_CONNECTION_REFUSED"));
+        let downloaded = json!({ "navStatus": { "_tag": "LoadFailed", "url": "http://localhost:9/a.zip", "title": "", "code": -3, "description": "", "download": { "id": "d1", "fileName": "a.zip" } } });
+        assert!(stream_status(&downloaded, &state).failure.is_none(), "a download shows its own page");
+        assert!(stream_status(&json!({ "navStatus": { "_tag": "Success", "url": "http://a/" } }), &state).failure.is_none());
     }
 
     #[test]

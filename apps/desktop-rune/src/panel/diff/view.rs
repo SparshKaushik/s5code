@@ -123,10 +123,12 @@ impl Look {
             bg,
             fg,
             muted: c.muted_foreground,
-            number: mix(fg, bg, 0.5),
+            // `--diffs-fg-number`: 65% of the text over the surface.
+            number: mix(fg, bg, 0.65),
             hover: mix(bg, fg, 0.94),
-            sep_bg: mix(bg, fg, 0.97),
-            sep_fg: mix(fg, bg, 0.5),
+            // DIFF_SURFACE_THEME_UNSAFE_CSS `--diffs-bg-separator-override`.
+            sep_bg: mix(bg, fg, 0.95),
+            sep_fg: mix(fg, bg, 0.65),
             buffer: mix(bg, fg, 0.9),
             border: c.border,
             button_hover: c.accent,
@@ -513,11 +515,15 @@ fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
     l.number_w(st.digits(f))
 }
 
+/// `[data-separator-content]`'s corners and the wrapper's `--diffs-gap-inline` inset.
+const SEP_RADIUS: f32 = 6.0;
+const SEP_INSET: f32 = 8.0;
+
 /// The unchanged lines folded away before a hunk: "N unmodified lines".
 pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
     let n = st.remaining(f, h);
     let label = if n == 1 { "1 unmodified line".to_owned() } else { format!("{n} unmodified lines") };
-    let mut cell = row().key("expand").w(gutter_w(st, l, f)).h(SEP_H).center().gap(2.0);
+    let mut cell = row().key("expand").h_full().px(6.0).center().gap(2.0).fill(l.sep_bg).corners([SEP_RADIUS, 0.0, 0.0, SEP_RADIUS]);
     if st.expandable {
         use super::Expand;
         let tail = h == st.files()[f].hunks.len();
@@ -533,21 +539,36 @@ pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
             }
             buttons.push(("all", "Expand all lines", &icons::CHEVRONS_UP_DOWN, Expand::All));
         }
-        cell = cell.min_w(buttons.len() as f32 * 22.0);
+        cell = cell.min_w(32.0);
         for (key, label, glyph, how) in buttons {
             cell = cell.child(micro(l, key, label, glyph, 14.0, l.sep_fg).on_press(move |s: &mut App| super::expand(s, f, h, how)));
         }
     }
-    let mut caption = text(label.clone()).font(l.small).color(l.sep_fg).pl(CODE_PAD.0);
+    // `[data-separator-content]`: rounded on its right, and on its left too with no expand buttons.
+    let left = if st.expandable { 0.0 } else { SEP_RADIUS };
+    let mut caption = row()
+        .key("caption")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .items_center()
+        .px(l.adv)
+        .fill(l.sep_bg)
+        .corners([left, SEP_RADIUS, SEP_RADIUS, left])
+        .child(text(label.clone()).font(l.small).color(l.sep_fg).single_line().truncate());
     if st.expandable {
         // The count expands the whole gap, as pierre's separator label does.
         caption = caption.cursor(Cursor::Pointer).on_press(move |s: &mut App| super::expand(s, f, h, super::Expand::All));
     }
-    let mut inner = row().key("inner").h(SEP_H).items_center().child(cell).child(caption);
-    if let Some(w) = view_w(st) {
-        inner = inner.w(w).sticky_left(0.0);
-    }
-    row().w_full().h(SEP_H).fill(l.sep_bg).role("separator").label(label).child(inner)
+    // Pierre's wrapper spans the viewport (`100cqi`), inset by `--diffs-gap-inline` on both sides,
+    // with a 2px code-background seam after the expand buttons.
+    let mut inner = row().key("inner").h(SEP_H).px(SEP_INSET).items_stretch().gap(2.0).children(st.expandable.then_some(cell)).child(caption);
+    inner = match view_w(st) {
+        Some(w) => inner.w(w).sticky_left(0.0),
+        None => inner.w_full(),
+    };
+    let (top, bottom) = super::state::sep_margins(h, st.files()[f].hunks.len());
+    col().w_full().pt(top).pb(bottom).child(row().w_full().h(SEP_H).fill(l.bg).role("separator").label(label).child(inner))
 }
 
 /// A file with no lines to show.

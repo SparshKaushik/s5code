@@ -537,3 +537,76 @@ pub fn escape(s: &mut App) -> bool {
     let p = &mut s.ui.settings.profiles;
     p.menu.take().is_some() || p.remove.take().is_some() || p.clear.take().is_some() || p.import.take().is_some()
 }
+
+/// `PREVIEW_VIEWPORT_PRESETS`: Chromium DevTools' devices in its default order, as id, label,
+/// width and height.
+const VIEWPORT_PRESETS: [(&str, &str, u32, u32); 17] = [
+    ("iphone-se", "iPhone SE", 375, 667),
+    ("iphone-xr", "iPhone XR", 414, 896),
+    ("iphone-12-pro", "iPhone 12 Pro", 390, 844),
+    ("iphone-14-pro-max", "iPhone 14 Pro Max", 430, 932),
+    ("pixel-7", "Pixel 7", 412, 915),
+    ("samsung-galaxy-s8-plus", "Samsung Galaxy S8+", 360, 740),
+    ("samsung-galaxy-s20-ultra", "Samsung Galaxy S20 Ultra", 412, 915),
+    ("ipad-mini", "iPad Mini", 768, 1024),
+    ("ipad-air", "iPad Air", 820, 1180),
+    ("ipad-pro", "iPad Pro", 1024, 1366),
+    ("surface-pro-7", "Surface Pro 7", 912, 1368),
+    ("surface-duo", "Surface Duo", 540, 720),
+    ("galaxy-z-fold-5", "Galaxy Z Fold 5", 344, 882),
+    ("asus-zenbook-fold", "Asus Zenbook Fold", 853, 1280),
+    ("samsung-galaxy-a51-71", "Samsung Galaxy A51/71", 412, 914),
+    ("nest-hub", "Nest Hub", 1024, 600),
+    ("nest-hub-max", "Nest Hub Max", 1280, 800),
+];
+
+/// `RESPONSIVE_SEED_SIZE`: what Responsive starts at from Fill panel.
+const RESPONSIVE_SEED: (u32, u32) = (1280, 800);
+
+/// Web `BrowserViewportSetting`'s choices for the stored `current`: Fill panel, Responsive, then
+/// each preset. The current viewport is its own option's value (a rotated preset, any freeform
+/// size, a legacy preset as Responsive), so the select shows it; Responsive keeps its size.
+pub(crate) fn viewport_options(current: &Value) -> Vec<(Value, String)> {
+    let preset = current["presetId"].as_str().filter(|_| current["_tag"] == "preset");
+    let known = preset.is_some_and(|id| VIEWPORT_PRESETS.iter().any(|p| p.0 == id));
+    let sized = current["_tag"] != "fill" && current["width"].is_u64() && current["height"].is_u64();
+    let responsive = if sized && !known {
+        current.clone()
+    } else if sized {
+        json!({"_tag": "freeform", "width": current["width"], "height": current["height"]})
+    } else {
+        json!({"_tag": "freeform", "width": RESPONSIVE_SEED.0, "height": RESPONSIVE_SEED.1})
+    };
+    let mut options = vec![(json!({"_tag": "fill"}), "Fill panel".to_owned()), (responsive, "Responsive".to_owned())];
+    for (id, label, width, height) in VIEWPORT_PRESETS {
+        let value = if known && preset == Some(id) { current.clone() } else { json!({"_tag": "preset", "width": width, "height": height, "presetId": id}) };
+        options.push((value, label.to_owned()));
+    }
+    options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_choices_follow_web_presets() {
+        let fill = viewport_options(&json!({"_tag": "fill"}));
+        let labels: Vec<&str> = fill.iter().take(4).map(|(_, l)| l.as_str()).collect();
+        assert_eq!(labels, ["Fill panel", "Responsive", "iPhone SE", "iPhone XR"]);
+        assert_eq!(fill.len(), 19);
+        assert_eq!(fill[1].0, json!({"_tag": "freeform", "width": 1280, "height": 800}), "Responsive seeds from Fill");
+        assert_eq!(fill.last().unwrap().0, json!({"_tag": "preset", "width": 1280, "height": 800, "presetId": "nest-hub-max"}));
+
+        let rotated = json!({"_tag": "preset", "width": 667, "height": 375, "presetId": "iphone-se"});
+        let options = viewport_options(&rotated);
+        assert_eq!(options[2].0, rotated, "a rotated preset still reads as its preset");
+        assert_eq!(options[1].0, json!({"_tag": "freeform", "width": 667, "height": 375}), "Responsive keeps the size");
+
+        let freeform = json!({"_tag": "freeform", "width": 500, "height": 900});
+        assert_eq!(viewport_options(&freeform)[1].0, freeform);
+        let legacy = json!({"_tag": "preset", "width": 1920, "height": 1080, "presetId": "desktop-1920x1080"});
+        let options = viewport_options(&legacy);
+        assert_eq!(options[1], (legacy, "Responsive".to_owned()), "web shows a retired preset as Responsive");
+    }
+}

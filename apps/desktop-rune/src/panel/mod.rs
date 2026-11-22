@@ -10,6 +10,7 @@ mod favicon;
 mod file_preview;
 mod files;
 mod history;
+pub(crate) mod html_frame;
 pub mod popout;
 mod proactive;
 pub(crate) mod pull_requests;
@@ -82,6 +83,7 @@ pub struct Ui {
     /// What `right-panel.json` holds; `None` until the first poll reads it.
     saved: Option<Value>,
     pub waker: Option<Waker>,
+    pub(crate) html_frames: html_frame::Frames,
     proactive: proactive::Watch,
     history: history::History,
 }
@@ -115,6 +117,7 @@ impl Default for Ui {
             stash_key: String::new(),
             saved: None,
             waker: None,
+            html_frames: Default::default(),
             proactive: Default::default(),
             history: Default::default(),
         }
@@ -643,7 +646,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | device::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)
-        | preview::poll(app, tx);
+        | preview::poll(app, tx)
+        | html_frame::poll(app);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
@@ -655,12 +659,19 @@ pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
 }
 
 fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn(&str) -> bool) -> Option<&'a str> {
+    // Shift turns "[" into "{" on the key event; bindings name the unshifted key, and Space "space".
+    let char_key = |c: char| match if e.mods.shift { crate::settings::unshift(c) } else { c } {
+        ' ' => "space".to_string(),
+        c => c.to_string(),
+    };
     let key = match &e.key {
-        // Shift turns "[" into "{" on the key event; bindings name the unshifted key.
-        Key::Command('{') => "[".to_string(),
-        Key::Command('}') => "]".to_string(),
-        Key::Command(c) => c.to_string(),
+        Key::Command(c) => char_key(*c),
+        Key::Text(v) if v.chars().count() == 1 => char_key(v.chars().next().unwrap_or(' ')),
         Key::Text(v) => v.clone(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::PageUp => "pageup".into(),
+        Key::PageDown => "pagedown".into(),
         Key::Function(n) => format!("f{n}"),
         Key::Enter => "enter".into(),
         Key::Tab => "tab".into(),
@@ -676,20 +687,90 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
     if key.is_empty() {
         return None;
     }
+    let keys = event_keys(&key.to_lowercase(), physical_code(e).as_deref());
     bindings
         .iter()
         .rev()
         .find(|v| {
             let k = &v["shortcut"];
-            let yes = |name: &str| k[name].as_bool().unwrap_or(false);
             (v["whenAst"].is_null() || when(&v["whenAst"], context))
-                && k["key"].as_str().is_some_and(|v| v.eq_ignore_ascii_case(&key))
-                && e.mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
-                && e.mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
-                && e.mods.shift == yes("shiftKey")
-                && e.mods.alt == yes("altKey")
+                && k["key"].as_str().is_some_and(|v| keys.iter().any(|key| v.eq_ignore_ascii_case(key)))
+                && modifiers_match(k, e.mods)
         })
         .and_then(|v| v["command"].as_str())
+}
+
+pub(crate) fn terminal_focused(app: &App) -> bool {
+    app.ui.panel.terminal.focused()
+}
+
+thread_local! {
+    /// What a key handler's `Tx` knew about the key the window is handling: the key, its
+    /// physical code (winit's name, "KeyA") and whether a control had focus.
+    static KEY_CONTEXT: std::cell::RefCell<Option<(Key, Option<String>, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records the key's physical code and focus for the shortcut matcher, which handlers call
+/// without their `Tx`.
+pub fn note_key(e: &KeyEvent, tx: &Tx) {
+    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused().is_some());
+    KEY_CONTEXT.with(|c| *c.borrow_mut() = Some(context));
+}
+
+/// The noted physical code, when it was noted for this key.
+fn physical_code(e: &KeyEvent) -> Option<String> {
+    KEY_CONTEXT.with(|c| c.borrow().as_ref().filter(|(key, _, _)| *key == e.key).and_then(|(_, code, _)| code.clone()))
+}
+
+/// `editableFocus`. Rune names only the focused element, not whether it edits text, so a control
+/// having focus stands in, as the sidebar's undo key already reads it.
+fn editable_focus() -> bool {
+    KEY_CONTEXT.with(|c| c.borrow().as_ref().is_some_and(|(_, _, focused)| *focused))
+}
+
+/// `EVENT_CODE_SHORTCUT_KEYS`: the US key at a physical position.
+fn code_key(code: &str) -> Option<String> {
+    if let Some(letter) = code.strip_prefix("Key").filter(|l| l.len() == 1) {
+        return Some(letter.to_lowercase());
+    }
+    if let Some(digit) = code.strip_prefix("Digit").filter(|d| d.len() == 1) {
+        return Some(digit.to_owned());
+    }
+    let key = match code {
+        "Backquote" => "`",
+        "Backslash" => "\\",
+        "BracketLeft" => "[",
+        "BracketRight" => "]",
+        "Comma" => ",",
+        "Equal" => "=",
+        "Minus" => "-",
+        "Period" => ".",
+        "Quote" => "'",
+        "Semicolon" => ";",
+        "Slash" => "/",
+        _ => return None,
+    };
+    Some(key.to_owned())
+}
+
+/// `resolveEventKeys`: the typed key, and unless it is a Latin letter the key at its physical
+/// position, so ⌘⇧7 on a German layout (typed "/") and ⌘К on a Russian one match ⌘⇧7 and ⌘K.
+fn event_keys(typed: &str, code: Option<&str>) -> Vec<String> {
+    let mut keys = vec![typed.to_owned()];
+    let letter = typed.len() == 1 && typed.chars().all(|c| c.is_ascii_lowercase());
+    if let Some(physical) = code.and_then(code_key).filter(|k| !letter && *k != typed) {
+        keys.push(physical);
+    }
+    keys
+}
+
+/// `matchesKeybindingShortcutModifiers`: exactly the shortcut's modifiers are held.
+pub(crate) fn modifiers_match(k: &serde_json::Value, mods: rune::Mods) -> bool {
+    let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
+        && mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
+        && mods.shift == yes("shiftKey")
+        && mods.alt == yes("altKey")
 }
 
 /// `evaluateWhenNode`: unknown identifiers are false.
@@ -721,6 +802,8 @@ fn when_context(app: &App, name: &str) -> bool {
         "composerFocus" => crate::chat::composer::focused(app),
         "turnRunning" => crate::chat::composer::running(app),
         "draftThreadRoute" => matches!(app.frame_route(), crate::Route::Home { .. }),
+        // While the sidebar's undo notice claims mod+z it is not a text field's (AppSidebarLayout).
+        "editableFocus" => editable_focus() && !(!app.ui.shell.sidebar.collapsed && app.ui.shell.sidebar.undos.claims_key(crate::data::now_ms())),
         _ => false,
     }
 }
@@ -983,7 +1066,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 .role("tab")
                 .label(title.clone())
                 .focusable(true)
-                .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                // Web closes a tab on a middle click.
+                .pointer_buttons([rune::PointerButton::Middle])
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| match tx.button() {
+                    rune::PointerButton::Middle => close(s, surface),
+                    _ => s.ui.panel.active = Some(surface),
+                })
                 .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
                 .children(speaker)
@@ -1016,7 +1104,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
         Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
-        Some(Surface::Device) => device::view(app, t),
+        Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Surface::Terminal) => col()
             .grow(1.)
             .min_h(0.)
@@ -1089,6 +1177,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-host-setup", |s| browser_scene(s, "host-setup")),
     ("browser-more-menu", |s| browser_scene(s, "more")),
     ("browser-file-chooser", |s| browser_scene(s, "chooser")),
+    ("browser-clipboard-prompt", |s| browser_scene(s, "clipboard-prompt")),
+    ("browser-external-prompt", |s| browser_scene(s, "external-prompt")),
+    ("browser-file-not-shown", |s| browser_scene(s, "file-not-shown")),
+    ("browser-server-unreachable", |s| browser_scene(s, "server-unreachable")),
     ("panel-launcher-profiles", |s| {
         scene(s, None);
         s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));
@@ -1108,6 +1200,17 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
     }),
+    ("panel-diff-tree", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+    }),
+    ("panel-diff-tree-split", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::tree_fixture(s);
+        s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
+    }),
+    ("git-commit", crate::chat::details::git::commit_scene),
+    ("details-pr-conflict", crate::chat::details::pr::conflict_scene),
     ("panel-diff-split", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
@@ -1131,6 +1234,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "data/models.csv", "provider,model,context,notes\nClaude,Opus 5.5,1000000,\"Default for \"\"hard\"\" turns\"\nClaude,Haiku 5.5,200000,Cheap replays\nCodex,Luna,400000,\nCursor,Auto,128000,\"Multi\nline\"\n", true);
     }),
+    ("panel-file-mermaid", |s| {
+        scene(s, Some(Surface::Files));
+        files::preview_fixture(s, "docs/turn.mmd", "flowchart LR\n  Client -->|command| Orchestrator\n  Orchestrator -->|events| Sink[(Event sink)]\n  Sink --> Projections\n  Sink --> Worker[Effect worker]\n  Worker -->|result command| Orchestrator\n", true);
+    }),
     ("panel-file-no-preview", |s| {
         scene(s, Some(Surface::Files));
         files::preview_fixture(s, "docs/spec.pdf", "", false);
@@ -1139,9 +1246,42 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([]));
     }),
-    ("panel-device-h264", |s| {
+    ("panel-device-webrtc", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "eas", "deviceId": "eas-16", "platform": "ios"}]));
+    }),
+    ("panel-device-stream", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+    }),
+    ("panel-device-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::open_menu(s);
+    }),
+    ("panel-add-menu", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([]));
+        s.ui.panel.add_menu = true;
+    }),
+    ("panel-device-android", |s| {
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-tools", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::open_tools(s);
+    }),
+    ("device-float", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::float_fixture(s);
+    }),
+    ("panel-device-tools-more", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::tools_more_fixture(s);
     }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
@@ -1232,6 +1372,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-fanout-uncertain", crate::chat::composer::fanout::scene_uncertain),
     ("composer-allow-retry", crate::chat::composer::fanout::scene_allow_retry),
     ("delete-worktree-too", crate::chat::details::cleanup::scene),
+    ("script-editor-locked", crate::chat::details::scripts::scene_locked),
+    ("details-editor-menu", crate::chat::details::scene_editor_menu),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);
@@ -1286,6 +1428,7 @@ pub(super) fn notice(t: &T, message: &str) -> El {
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
     let mut out = vec![];
     preview::pip(app, t, &mut out);
+    device::float(app, t, &mut out);
     if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
         out.extend(diff::overlays(app, t));
     }
@@ -1428,6 +1571,29 @@ mod sheet_tests {
 mod tests {
     use super::*;
     #[test]
+    fn the_launchers_profile_chevron_opens_its_menu_without_a_default_tab() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(480., 640.).child(picker(s, &crate::theme::theme(true)))
+        }
+        let mut rt = rune::Runtime::new(App::new(), view, (480., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let chevron = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("panel-launcher-profiles")).expect("the Browser row's chevron").rect;
+        let click = |rt: &mut rune::Runtime<App>, (x, y): (f32, f32)| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.);
+        };
+        let y = chevron[1] + chevron[3] / 2.;
+        click(&mut rt, (chevron[0] + chevron[2] / 2., y));
+        assert!(rt.state.ui.panel.launcher_profiles, "the chevron opens the profile menu");
+        assert!(rt.state.ui.panel.surfaces.is_empty(), "and opens no tab");
+        // The rest of the row still opens a tab in the default profile.
+        click(&mut rt, (chevron[0] - 120., y));
+        assert!(matches!(rt.state.ui.panel.surfaces[..], [Surface::Browser(_)]), "the row opens one tab");
+    }
+
+    #[test]
     fn each_thread_gets_its_own_panel_back() {
         let mut app = App::new();
         let ids: Vec<String> = app.state().threads.iter().take(2).map(|v| data::s(v, "id").to_string()).collect();
@@ -1534,6 +1700,43 @@ mod tests {
         let bindings = app.state().config.as_ref().unwrap()["keybindings"].as_array().unwrap().clone();
         assert_eq!(resolve(&bindings, &press('d'), &context), Some("terminal.split"));
         assert!(when(&id("true"), &context) && !when(&id("unknown"), &context));
+        // Keys the recorder saves by name, and shifted punctuation by its unshifted key.
+        let named = serde_json::json!([
+            {"command": "a.space", "shortcut": {"key": "space", "modKey": true}},
+            {"command": "a.home", "shortcut": {"key": "home", "modKey": true}},
+            {"command": "a.help", "shortcut": {"key": "/", "modKey": true, "shiftKey": true}},
+        ]);
+        let named = named.as_array().unwrap();
+        let with = |key: Key, shift: bool| {
+            let mut event = KeyEvent::from(key);
+            event.mods.cmd = true;
+            event.mods.ctrl = !cfg!(target_os = "macos");
+            event.mods.shift = shift;
+            event
+        };
+        assert_eq!(resolve(named, &with(Key::Command(' '), false), &context), Some("a.space"));
+        assert_eq!(resolve(named, &with(Key::Home, false), &context), Some("a.home"));
+        assert_eq!(resolve(named, &with(Key::Command('?'), true), &context), Some("a.help"));
+    }
+
+    #[test]
+    fn other_layouts_match_by_the_keys_physical_position() {
+        assert_eq!(event_keys("/", Some("Digit7")), ["/", "7"], "German ⌘⇧7");
+        assert_eq!(event_keys("к", Some("KeyR")), ["к", "r"], "Russian letters fall back to the key's place");
+        assert_eq!(event_keys("q", Some("KeyA")), ["q"], "AZERTY letters keep their own letter");
+        assert_eq!(event_keys("ö", Some("Semicolon")), ["ö", ";"]);
+        assert_eq!(event_keys("space", Some("Space")), ["space"]);
+        let bindings = serde_json::json!([{"command": "seven", "shortcut": {"key": "7", "modKey": true, "shiftKey": true}}]);
+        let mut e = KeyEvent::from(Key::Command('/'));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        let context = |_: &str| false;
+        assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), None, "without a physical code only the typed key counts");
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), Some("Digit7".into()), true)));
+        assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), Some("seven"));
+        assert!(editable_focus());
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
     }
 
     #[test]

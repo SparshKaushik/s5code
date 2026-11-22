@@ -9,22 +9,10 @@
           "description": "System alerts when a thread finishes, fails, or needs input or approval. Applies to this device while T3 Code is open.",
           "kind": "select",
           "options": [
-            [
-              "off",
-              "Off"
-            ],
-            [
-              "notifications",
-              "Notifications only"
-            ],
-            [
-              "sound",
-              "Sound only"
-            ],
-            [
-              "notifications-and-sound",
-              "Notifications with sound"
-            ]
+            ["off", "Off"],
+            ["notifications", "Notifications only"],
+            ["sound", "Sound only"],
+            ["notifications-and-sound", "Notifications with sound"]
           ]
         },
         {
@@ -52,18 +40,9 @@
           "description": "Order of projects in the sidebar project picker and command palette.",
           "kind": "select",
           "options": [
-            [
-              "updated_at",
-              "Last user message"
-            ],
-            [
-              "created_at",
-              "Created at"
-            ],
-            [
-              "manual",
-              "Manual"
-            ]
+            ["updated_at", "Last user message"],
+            ["created_at", "Created at"],
+            ["manual", "Manual"]
           ]
         },
         {
@@ -105,18 +84,9 @@
           "description": "Hold mode also quits on two quick presses.",
           "kind": "select",
           "options": [
-            [
-              "direct",
-              "Direct"
-            ],
-            [
-              "hold",
-              "Hold"
-            ],
-            [
-              "double-click",
-              "Double press"
-            ]
+            ["direct", "Direct"],
+            ["hold", "Hold"],
+            ["double-click", "Double press"]
           ]
         }
       ]
@@ -130,18 +100,9 @@
           "description": "System default follows your browser or OS clock preference.",
           "kind": "select",
           "options": [
-            [
-              "locale",
-              "System default"
-            ],
-            [
-              "12-hour",
-              "12-hour"
-            ],
-            [
-              "24-hour",
-              "24-hour"
-            ]
+            ["locale", "System default"],
+            ["12-hour", "12-hour"],
+            ["24-hour", "24-hour"]
           ]
         }
       ]
@@ -164,18 +125,9 @@
           "description": "Choose when Enter sends a prompt or inserts a new line",
           "kind": "select",
           "options": [
-            [
-              "enter",
-              "Enter"
-            ],
-            [
-              "mod-enter-multiline",
-              "{mod} + Enter for multiline prompts"
-            ],
-            [
-              "mod-enter",
-              "{mod} + Enter always"
-            ]
+            ["enter", "Enter"],
+            ["mod-enter-multiline", "{mod} + Enter for multiline prompts"],
+            ["mod-enter", "{mod} + Enter always"]
           ]
         }
       ]
@@ -201,14 +153,8 @@
           "description": "Queue follow-ups while the agent runs or steer the current run.",
           "kind": "select",
           "options": [
-            [
-              "steer",
-              "Steer"
-            ],
-            [
-              "queue",
-              "Queue"
-            ]
+            ["steer", "Steer"],
+            ["queue", "Queue"]
           ]
         }
       ]
@@ -224,14 +170,8 @@
           "description": "Show diffs stacked or side by side. The toggle in the diff toolbar changes this too.",
           "kind": "select",
           "options": [
-            [
-              "stacked",
-              "Stacked"
-            ],
-            [
-              "split",
-              "Split"
-            ]
+            ["stacked", "Stacked"],
+            ["split", "Split"]
           ]
         },
         {
@@ -247,14 +187,8 @@
           "description": "Start with files expanded or collapsed when opening diffs or a pull request's Code tab.",
           "kind": "select",
           "options": [
-            [
-              false,
-              "Expanded"
-            ],
-            [
-              true,
-              "Collapsed"
-            ]
+            [false, "Expanded"],
+            [true, "Collapsed"]
           ]
         },
         {
@@ -263,14 +197,8 @@
           "description": "Choose colors for additions and deletions, including change counts.",
           "kind": "select",
           "options": [
-            [
-              "red-green",
-              "Red & green (default)"
-            ],
-            [
-              "blue-orange",
-              "Blue & orange"
-            ]
+            ["red-green", "Red & green (default)"],
+            ["blue-orange", "Blue & orange"]
           ]
         }
       ]
@@ -319,18 +247,9 @@
           "description": "Set how wide messages and the composer can grow on large screens.",
           "kind": "select",
           "options": [
-            [
-              "comfortable",
-              "Comfortable (default)"
-            ],
-            [
-              "wide",
-              "Wide"
-            ],
-            [
-              "full",
-              "Full"
-            ]
+            ["comfortable", "Comfortable (default)"],
+            ["wide", "Wide"],
+            ["full", "Full"]
           ]
         },
         {
@@ -346,14 +265,8 @@
           "description": "Show reasoning effort in the composer as its name, such as High, or as bars.",
           "kind": "select",
           "options": [
-            [
-              "label",
-              "Word (default)"
-            ],
-            [
-              "bars",
-              "Bars"
-            ]
+            ["label", "Word (default)"],
+            ["bars", "Bars"]
           ]
         },
         {
@@ -381,26 +294,11 @@
           "description": "",
           "kind": "select",
           "options": [
-            [
-              "artwork",
-              "Artwork"
-            ],
-            [
-              "nightly-artwork",
-              "Nightly artwork"
-            ],
-            [
-              "dev-artwork",
-              "Dev artwork"
-            ],
-            [
-              "pill",
-              "Pill"
-            ],
-            [
-              "none",
-              "None"
-            ]
+            ["artwork", "Artwork"],
+            ["nightly-artwork", "Nightly artwork"],
+            ["dev-artwork", "Dev artwork"],
+            ["pill", "Pill"],
+            ["none", "None"]
           ]
         },
         {
@@ -434,10 +332,7 @@
           "min": 12,
           "max": 20,
           "placeholder": "{interface}",
-          "when": [
-            "typographyAdvanced",
-            true
-          ]
+          "when": ["typographyAdvanced", true]
         },
         {
           "key": "fontFamilyCode",
@@ -448,10 +343,7 @@
           "min": 10,
           "max": 18,
           "placeholder": "{mono}",
-          "unless": [
-            "typographyAdvanced",
-            true
-          ]
+          "unless": ["typographyAdvanced", true]
         },
         {
           "key": "fontFamilyCode",
@@ -462,10 +354,7 @@
           "min": 10,
           "max": 18,
           "placeholder": "{mono}",
-          "when": [
-            "typographyAdvanced",
-            true
-          ]
+          "when": ["typographyAdvanced", true]
         },
         {
           "key": "fontFamilyTerminal",
@@ -476,10 +365,7 @@
           "min": 8,
           "max": 20,
           "placeholder": "{mono}",
-          "when": [
-            "typographyAdvanced",
-            true
-          ]
+          "when": ["typographyAdvanced", true]
         },
         {
           "key": "wordWrap",
@@ -540,14 +426,8 @@
           "description": "Where links in the chat and terminal open. Hold ⌘ or Ctrl while clicking a link to open it in your default browser either way.",
           "kind": "select",
           "options": [
-            [
-              "system",
-              "Your default browser"
-            ],
-            [
-              "app",
-              "T3 Code"
-            ]
+            ["system", "Your default browser"],
+            ["app", "T3 Code"]
           ]
         },
         {
@@ -563,34 +443,13 @@
           "description": "What the address bar searches when you type something that isn't a URL.",
           "kind": "select",
           "options": [
-            [
-              "duckduckgo",
-              "DuckDuckGo"
-            ],
-            [
-              "google",
-              "Google"
-            ],
-            [
-              "bing",
-              "Bing"
-            ],
-            [
-              "brave",
-              "Brave Search"
-            ],
-            [
-              "kagi",
-              "Kagi"
-            ],
-            [
-              "ecosia",
-              "Ecosia"
-            ],
-            [
-              "custom",
-              "Custom"
-            ]
+            ["duckduckgo", "DuckDuckGo"],
+            ["google", "Google"],
+            ["bing", "Bing"],
+            ["brave", "Brave Search"],
+            ["kagi", "Kagi"],
+            ["ecosia", "Ecosia"],
+            ["custom", "Custom"]
           ]
         },
         {
@@ -602,10 +461,7 @@
           "width": 256,
           "size": "sm",
           "placeholder": "https://example.com/search?q=%s",
-          "when": [
-            "browserSearchEngine",
-            "custom"
-          ]
+          "when": ["browserSearchEngine", "custom"]
         }
       ]
     },
@@ -640,74 +496,23 @@
           "description": "Page zoom applied to new browser tabs.",
           "kind": "select",
           "options": [
-            [
-              0.25,
-              "25%"
-            ],
-            [
-              0.33,
-              "33%"
-            ],
-            [
-              0.5,
-              "50%"
-            ],
-            [
-              0.67,
-              "67%"
-            ],
-            [
-              0.75,
-              "75%"
-            ],
-            [
-              0.8,
-              "80%"
-            ],
-            [
-              0.9,
-              "90%"
-            ],
-            [
-              1,
-              "100%"
-            ],
-            [
-              1.1,
-              "110%"
-            ],
-            [
-              1.25,
-              "125%"
-            ],
-            [
-              1.5,
-              "150%"
-            ],
-            [
-              1.75,
-              "175%"
-            ],
-            [
-              2,
-              "200%"
-            ],
-            [
-              2.5,
-              "250%"
-            ],
-            [
-              3,
-              "300%"
-            ],
-            [
-              4,
-              "400%"
-            ],
-            [
-              5,
-              "500%"
-            ]
+            [0.25, "25%"],
+            [0.33, "33%"],
+            [0.5, "50%"],
+            [0.67, "67%"],
+            [0.75, "75%"],
+            [0.8, "80%"],
+            [0.9, "90%"],
+            [1, "100%"],
+            [1.1, "110%"],
+            [1.25, "125%"],
+            [1.5, "150%"],
+            [1.75, "175%"],
+            [2, "200%"],
+            [2.5, "250%"],
+            [3, "300%"],
+            [4, "400%"],
+            [5, "500%"]
           ]
         },
         {
@@ -716,18 +521,9 @@
           "description": "The color scheme pages are told to prefer. System follows your OS setting.",
           "kind": "select",
           "options": [
-            [
-              "system",
-              "System"
-            ],
-            [
-              "light",
-              "Light"
-            ],
-            [
-              "dark",
-              "Dark"
-            ]
+            ["system", "System"],
+            ["light", "Light"],
+            ["dark", "Dark"]
           ]
         }
       ]
@@ -741,14 +537,8 @@
           "description": "Maximum recording rate. 30 fps saves CPU and storage; 60 fps is smoother.",
           "kind": "select",
           "options": [
-            [
-              30,
-              "30 fps"
-            ],
-            [
-              60,
-              "60 fps"
-            ]
+            [30, "30 fps"],
+            [60, "60 fps"]
           ]
         },
         {
@@ -859,20 +649,14 @@
           "key": "worktreeSubmodules",
           "title": "Submodules",
           "description": "How new worktrees populate git submodules. Projects and their t3.json can override it.",
+          "projectDescription": "How new worktrees in this project populate git submodules.",
+          "ariaLabel": "Worktree submodules",
+          "resetLabel": "worktree submodules",
           "kind": "select",
           "options": [
-            [
-              "recursive",
-              "Recursive"
-            ],
-            [
-              "top-level",
-              "Top level only"
-            ],
-            [
-              "none",
-              "Skip"
-            ]
+            ["recursive", "Recursive"],
+            ["top-level", "Top level only"],
+            ["none", "Skip"]
           ]
         }
       ]
@@ -886,18 +670,9 @@
           "description": "Choose how new worktree branches are named from your first message.",
           "kind": "select",
           "options": [
-            [
-              "static",
-              "Static prefix"
-            ],
-            [
-              "semantic",
-              "Semantic prefix"
-            ],
-            [
-              "custom",
-              "Custom instructions"
-            ]
+            ["static", "Static prefix"],
+            ["semantic", "Semantic prefix"],
+            ["custom", "Custom instructions"]
           ]
         },
         {
@@ -909,10 +684,7 @@
           "width": 232,
           "size": "default",
           "placeholder": "No prefix",
-          "when": [
-            "branchNamingMode",
-            "static"
-          ]
+          "when": ["branchNamingMode", "static"]
         },
         {
           "key": "branchNameInstructions",
@@ -921,10 +693,7 @@
           "kind": "textarea",
           "options": [],
           "placeholder": "Use julius/ followed by the issue ID and a short description.",
-          "when": [
-            "branchNamingMode",
-            "custom"
-          ]
+          "when": ["branchNamingMode", "custom"]
         }
       ]
     }
@@ -989,22 +758,10 @@
           "description": "Default permissions for new threads. Projects can override them.",
           "kind": "select",
           "options": [
-            [
-              "approval-required",
-              "Supervised"
-            ],
-            [
-              "auto-accept-edits",
-              "Auto-accept edits"
-            ],
-            [
-              "auto",
-              "Auto"
-            ],
-            [
-              "full-access",
-              "Full access"
-            ]
+            ["approval-required", "Supervised"],
+            ["auto-accept-edits", "Auto-accept edits"],
+            ["auto", "Auto"],
+            ["full-access", "Full access"]
           ]
         },
         {
@@ -1013,14 +770,8 @@
           "description": "Where new threads start. Projects and their t3.json can override it.",
           "kind": "select",
           "options": [
-            [
-              "local",
-              "Current checkout"
-            ],
-            [
-              "worktree",
-              "New worktree"
-            ]
+            ["local", "Current checkout"],
+            ["worktree", "New worktree"]
           ]
         }
       ]
@@ -1081,10 +832,7 @@
           "kind": "input",
           "width": 96,
           "options": [],
-          "unless": [
-            "sidebarAutoSettleAfterDays",
-            null
-          ]
+          "unless": ["sidebarAutoSettleAfterDays", null]
         },
         {
           "key": "sidebarAutoSettleKeepPullRequests",
@@ -1093,10 +841,7 @@
           "kind": "switch",
           "options": [],
           "capability": "threadAutoSettlementScope",
-          "unless": [
-            "sidebarAutoSettleAfterDays",
-            null
-          ]
+          "unless": ["sidebarAutoSettleAfterDays", null]
         }
       ]
     },
@@ -1119,7 +864,8 @@
           "key": "threadTitleInstructions",
           "title": "Thread title instructions",
           "description": "Appended to the prompt for new and regenerated thread titles.",
-          "kind": "input",
+          "kind": "textarea",
+          "placeholder": "Keep titles to a few words. Lead with the main subject.",
           "options": []
         },
         {
@@ -1128,14 +874,8 @@
           "description": "",
           "kind": "select",
           "options": [
-            [
-              "turn",
-              "Wait for the full response"
-            ],
-            [
-              "paragraph",
-              "Show finished paragraphs"
-            ]
+            ["turn", "Wait for the full response"],
+            ["paragraph", "Show finished paragraphs"]
           ]
         }
       ]
@@ -1186,22 +926,10 @@
           "description": "Pull requests start with this method. Last selected reuses whatever you chose most recently on this device.",
           "kind": "select",
           "options": [
-            [
-              null,
-              "Last selected"
-            ],
-            [
-              "merge",
-              "Merge"
-            ],
-            [
-              "squash",
-              "Squash and merge"
-            ],
-            [
-              "rebase",
-              "Rebase and merge"
-            ]
+            [null, "Last selected"],
+            ["merge", "Merge"],
+            ["squash", "Squash and merge"],
+            ["rebase", "Rebase and merge"]
           ]
         }
       ]
@@ -1215,27 +943,15 @@
           "description": "",
           "kind": "select",
           "options": [
-            [
-              "repo_conventions",
-              "Repository conventions"
-            ],
-            [
-              "conventional_commits",
-              "Conventional Commits"
-            ],
-            [
-              "custom",
-              "Custom instructions"
-            ]
+            ["repo_conventions", "Repository conventions"],
+            ["conventional_commits", "Conventional Commits"],
+            ["custom", "Custom instructions"]
           ],
           "textarea": {
             "key": "sourceControlWritingStyle.customInstructions",
             "label": "Custom source control writing instructions",
             "placeholder": "Keep titles concise. Use short bullet points in descriptions.",
-            "when": [
-              "sourceControlWritingStyle.mode",
-              "custom"
-            ]
+            "when": ["sourceControlWritingStyle.mode", "custom"]
           }
         },
         {
@@ -1251,10 +967,7 @@
           "description": "Model that reads a pull request to write its review guide. It reads the change itself over many steps, so a stronger model helps. Off uses the source control writer model.",
           "kind": "model",
           "options": [],
-          "when": [
-            "reviewGuidesEnabled",
-            true
-          ]
+          "when": ["reviewGuidesEnabled", true]
         },
         {
           "key": "reviewGuideInstructions",
@@ -1263,10 +976,7 @@
           "kind": "textarea",
           "options": [],
           "placeholder": "Show service interfaces before implementations. Skip test files unless they change behavior. Keep summaries to two sentences.",
-          "when": [
-            "reviewGuidesEnabled",
-            true
-          ]
+          "when": ["reviewGuidesEnabled", true]
         }
       ]
     },
