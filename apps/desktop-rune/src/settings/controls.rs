@@ -80,6 +80,10 @@ pub fn select_width(key: &str) -> f32 {
 }
 
 fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
+    // `WorktreeSubmodulesRow` with no environment to resolve against.
+    if key == "worktreeSubmodules" && s.state().config.is_none() {
+        return "Unavailable".to_owned();
+    }
     let current = match value(s, key) {
         // Unset values resolve to their built-in defaults (`resolveProjectSettings`).
         Value::Null if key == "defaultThreadEnvMode" => json!("local"),
@@ -235,7 +239,8 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         };
         Some(text.to_owned())
     });
-    let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
+    let project_description = spec["projectDescription"].as_str().filter(|_| s.ui.settings.project.is_some());
+    let description = dynamic.as_deref().or(project_description).unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
     let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
             .key(super::title_key(spec["searchTitle"].as_str().unwrap_or(title)))
@@ -259,7 +264,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         let owned = key.to_owned();
         let size_key = size_key.clone();
         heading = heading.child(
-            crate::kit::Button::new(format!("Reset {title}"))
+            crate::kit::Button::new(spec["resetLabel"].as_str().map_or_else(|| format!("Reset {title}"), |l| format!("Reset {l} to default")))
                 .variant("ghost-muted")
                 .size("icon-micro")
                 .icon(&icons::UNDO_2)
@@ -337,7 +342,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 .flatten()
                 .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
                 .collect();
-            select(s, t, key, title, &options, select_width(key))
+            select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
         Some("font") => font(s, t, key, title, spec),
@@ -656,6 +661,19 @@ mod tests {
         ] {
             assert!(!valid_search_template(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn worktree_submodules_read_recursive_when_unset_and_unavailable_without_an_environment() {
+        let mut s = App::new();
+        let options = [(json!("recursive"), "Recursive".to_owned()), (json!("top-level"), "Top level only".to_owned()), (json!("none"), "Skip".to_owned())];
+        if value(&s, "worktreeSubmodules").is_null() {
+            assert_eq!(current_label(&s, "worktreeSubmodules", &options), "Recursive", "FAILED: null inherits recursive");
+        }
+        if let crate::data::Source::Fixture(st) = &mut s.src {
+            st.config = None;
+        }
+        assert_eq!(current_label(&s, "worktreeSubmodules", &options), "Unavailable");
     }
 
     #[test]
