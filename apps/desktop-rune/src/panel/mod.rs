@@ -688,12 +688,15 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
         .rev()
         .find(|v| {
             let k = &v["shortcut"];
-            let yes = |name: &str| k[name].as_bool().unwrap_or(false);
             (v["whenAst"].is_null() || when(&v["whenAst"], context))
                 && k["key"].as_str().is_some_and(|v| v.eq_ignore_ascii_case(&key))
                 && modifiers_match(k, e.mods)
         })
         .and_then(|v| v["command"].as_str())
+}
+
+pub(crate) fn terminal_focused(app: &App) -> bool {
+    app.ui.panel.terminal.focused()
 }
 
 /// `matchesKeybindingShortcutModifiers`: exactly the shortcut's modifiers are held.

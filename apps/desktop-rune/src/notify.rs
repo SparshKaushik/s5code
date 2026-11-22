@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 
 use rune::Tx;
 
-use crate::data;
 use crate::shell::sidebar::logic::{self, Status, Thread};
 use crate::{App, Route, icons};
 
@@ -180,12 +179,11 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     if let Some(waker) = &s.ui.panel.waker {
         os::listen(waker.clone());
     }
-    let now = data::now_ms();
     let _ = tx;
-    open_clicked(s) | observe(s, now)
+    open_clicked(s) | observe(s)
 }
 
-fn observe(s: &mut App, now: i64) -> bool {
+fn observe(s: &mut App) -> bool {
     let mode = mode(s).to_string();
     if s.ui.notify.applied_mode.as_deref() != Some(mode.as_str()) {
         s.ui.notify.applied_mode = Some(mode.clone());
@@ -467,6 +465,7 @@ mod os {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data;
     use serde_json::json;
 
     #[test]
@@ -558,7 +557,7 @@ mod tests {
                 st.threads.push(row.clone());
                 st.shell_revision += 1;
             }
-            observe(s, 0);
+            observe(s);
         };
 
         for row in turn("t1", "run:1", "2026-11-11T17:56:04.759Z") {
@@ -578,7 +577,7 @@ mod tests {
             st.threads = vec![row];
             st.shell_revision += 1;
             crate::env::drain(&mut s);
-            observe(&mut s, 0);
+            observe(&mut s);
         }
         assert_eq!(titles(&s)[1], ("Thread completed".to_string(), "Title t2".to_string()));
 
@@ -610,7 +609,7 @@ mod tests {
             st.threads.retain(|t| t["id"] != row["id"]);
             st.threads.push(row);
             st.shell_revision += 1;
-            observe(&mut s, 0);
+            observe(&mut s);
         }
         assert_eq!(titles(&s)[2], ("Thread completed".to_string(), "Title t5".to_string()));
     }

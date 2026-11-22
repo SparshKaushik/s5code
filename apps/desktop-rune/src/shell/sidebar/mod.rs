@@ -1334,7 +1334,7 @@ const JUMP_HINT_DELAY_MS: i64 = 200;
 /// `shouldShowThreadJumpHintsForModifiers`: the held modifiers are exactly those of a
 /// `thread.jump.N` shortcut, and the terminal does not have focus.
 fn jump_modifiers(s: &App, mods: rune::Mods) -> bool {
-    if s.ui.panel.terminal.focused() {
+    if crate::panel::terminal_focused(s) {
         return false;
     }
     let bindings = s.state().config.as_ref().and_then(|c| c["keybindings"].as_array().cloned());
