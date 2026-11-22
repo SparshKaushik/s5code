@@ -826,7 +826,7 @@ mod bus {
         let title = title.to_owned();
         block(|session| async move {
             let address: String = call(&session, ("org.a11y.Bus", "/org/a11y/bus"), "org.a11y.Bus", "GetAddress", &()).await.map_err(message)?;
-            let a11y = zbus::connection::Builder::address(address.as_str()).map_err(message)?.build().await.map_err(message)?;
+            let a11y = zbus::connection::Builder::address(address.as_str()).build().await.map_err(message)?;
             let mut values = Vec::new();
             let walk = async {
                 let root = children(&a11y, ("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root")).await;
