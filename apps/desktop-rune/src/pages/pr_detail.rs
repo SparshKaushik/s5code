@@ -93,7 +93,7 @@ pub struct Ui {
     /// The header's condensed state per tab, which the scrollers set (condensedByTab).
     pub(super) condense: Arc<Condense>,
     /// `sourceControl.appAccess` for the repository: what was asked, the request, the status.
-    app_access: (String, Option<u64>, Option<String>),
+    pub(super) app_access: (String, Option<u64>, Option<String>),
 }
 
 /// Bits by tab, and the offset that keeps the content still once a header condenses.
