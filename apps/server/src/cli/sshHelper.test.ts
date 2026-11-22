@@ -7,7 +7,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { Command } from "effect/cli";
 
-import { sshHelperCommand } from "./sshHelper.ts";
+import { keepsRunningServer, sshHelperCommand } from "./sshHelper.ts";
 
 // Like the standalone server binary, which ships no web client: `/` is unavailable.
 const serverWithoutWebClient = Effect.acquireRelease(
@@ -45,3 +45,21 @@ it.live("wait-ready accepts a running server that ships no web client", () =>
     assert.equal(exitCode, exitCodeBefore);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+const runtime = (fields: Record<string, unknown>) =>
+  JSON.stringify({ version: 1, pid: 42, port: 3773, ...fields });
+
+it("keeps a same-or-newer server and replaces an older or unidentified one", () => {
+  assert.isTrue(keepsRunningServer(runtime({ serverVersion: "0.1.6" }), 42, "0.1.6"));
+  assert.isTrue(
+    keepsRunningServer(runtime({ serverVersion: "0.1.7-nightly.20261102.4080" }), 42, "0.1.6"),
+  );
+  assert.isFalse(
+    keepsRunningServer(runtime({ serverVersion: "0.1.7-nightly.20261102.4080" }), 42, "0.1.7"),
+  );
+  assert.isFalse(keepsRunningServer(runtime({ serverVersion: "0.1.5" }), 42, "0.1.6"));
+  assert.isFalse(keepsRunningServer(runtime({ serverVersion: "0.1.6" }), 7, "0.1.6"));
+  assert.isFalse(keepsRunningServer(runtime({}), 42, "0.1.6"));
+  assert.isFalse(keepsRunningServer(runtime({ serverVersion: "latest" }), 42, "0.1.6"));
+  assert.isFalse(keepsRunningServer("", 42, "0.1.6"));
+});

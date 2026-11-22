@@ -16,6 +16,7 @@ import * as Scope from "effect/Scope";
 import { HttpRouter, HttpServer } from "effect/http";
 
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
+import * as SessionStore from "../../auth/SessionStore.ts";
 import * as ServerBrowser from "../ServerBrowser.ts";
 import { routeLayer } from "../ServerBrowserStream.ts";
 
@@ -63,6 +64,9 @@ for (const slow of [false, true]) {
             }),
           ),
           Layer.provide(auth),
+          Layer.provide(
+            Layer.mock(SessionStore.SessionStore, { awaitInvalidation: () => Effect.never }),
+          ),
         ),
       );
       const server = Context.get(services, HttpServer.HttpServer);

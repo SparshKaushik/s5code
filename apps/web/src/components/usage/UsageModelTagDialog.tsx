@@ -2,6 +2,7 @@
  * Maps an unpriced model name onto a catalog entry instead of guessing. Tags
  * live in client settings, so one tag covers every environment.
  */
+import { T, useGT, Var } from "gt-react";
 import { useDeferredValue, useState } from "react";
 
 import { useUsageModelSearch } from "../../state/usage";
@@ -33,6 +34,7 @@ const COST = new Intl.NumberFormat("en-US", {
 });
 
 export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageModelTagDialogProps) {
+  const gt = useGT();
   const [query, setQuery] = useState("");
   // The search is a round trip per keystroke otherwise. Deferring keeps typing
   // responsive and collapses bursts into one query.
@@ -51,13 +53,21 @@ export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageMo
     >
       <DialogPopup className="max-w-2xl overflow-hidden">
         <DialogHeader>
-          <DialogTitle>Tag {target?.label}</DialogTitle>
+          <DialogTitle>{gt("Tag {model}", { model: target?.label ?? "" })}</DialogTitle>
           <DialogDescription>
             {target?.taggedAs !== null && target !== null
-              ? `Currently counted as ${target.taggedAs}. Pick a different model, or remove the tag to leave this usage unpriced.`
+              ? gt(
+                  "Currently counted as {model}. Pick a different model, or remove the tag to leave this usage unpriced.",
+                  { model: target.taggedAs },
+                )
               : target?.untagged?.apiProvider
-                ? `Served through ${target.untagged.apiProvider}. Pick the model it really is, and its rates apply to this usage everywhere.`
-                : "Pick the model this really is, and its rates apply to this usage everywhere."}
+                ? gt(
+                    "Served through {provider}. Pick the model it really is, and its rates apply to this usage everywhere.",
+                    { provider: target.untagged.apiProvider },
+                  )
+                : gt(
+                    "Pick the model this really is, and its rates apply to this usage everywhere.",
+                  )}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -65,17 +75,17 @@ export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageMo
             autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search models…"
+            placeholder={gt("Search models…")}
           />
           <ScrollArea className="h-72">
             <div className="flex flex-col gap-1 pr-3">
               {deferredQuery.trim().length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
-                  Search the models.dev catalog by model or provider name.
+                  <T>Search the models.dev catalog by model or provider name.</T>
                 </p>
               ) : models.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
-                  {isPending ? "Searching…" : "No models match that search."}
+                  {isPending ? gt("Searching…") : gt("No models match that search.")}
                 </p>
               ) : (
                 models.map((model) => (
@@ -98,8 +108,10 @@ export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageMo
                       </span>
                     </span>
                     <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                      {COST.format(model.inputCostPerMillion)} in /{" "}
-                      {COST.format(model.outputCostPerMillion)} out per 1M
+                      <T>
+                        <Var>{COST.format(model.inputCostPerMillion)}</Var> in /{" "}
+                        <Var>{COST.format(model.outputCostPerMillion)}</Var> out per 1M
+                      </T>
                     </span>
                   </button>
                 ))
@@ -117,11 +129,11 @@ export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageMo
                 onClear();
               }}
             >
-              Remove tag
+              <T>Remove tag</T>
             </Button>
           )}
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            <T>Cancel</T>
           </Button>
         </DialogFooter>
       </DialogPopup>
