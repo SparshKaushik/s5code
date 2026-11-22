@@ -4,6 +4,7 @@ pub mod confirm;
 pub mod sidebar;
 pub mod palette;
 pub mod quit;
+pub mod swipe;
 pub mod toast;
 pub(crate) mod workspace;
 
@@ -20,6 +21,7 @@ pub struct Ui {
     pub confirm: confirm::Ui,
     pub quit: quit::QuitHold,
     pub toasts: toast::Stack,
+    pub swipe: swipe::Swipe,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -28,6 +30,14 @@ pub struct Ui {
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("home", |s| open_titled(s, "New thread")),
     ("thread-showcase", |s| open_titled(s, "Replay showcase")),
+    ("history-swipe-back", |s| {
+        open_titled(s, "Replay showcase");
+        swipe::scene(s, true, 72.0);
+    }),
+    ("history-swipe-forward", |s| {
+        open_titled(s, "Replay showcase");
+        swipe::scene(s, false, 140.0);
+    }),
     ("palette", |s| {
         open_titled(s, "Replay showcase");
         s.ui.shell.palette.open = true;
@@ -93,6 +103,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         _ => chat::view(s, cx, t),
     };
     overlays.extend(chat::details::overlays(s, t));
+    if swipe::tracking(s) {
+        overlays.extend(swipe::indicator(s, cx.layout_with("main", |r| r), t));
+    }
     // Everything under the frame is content: switching or loading a thread lands at once.
     let mut body = crate::kit::motion::content(row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main));
     if s.ui.shell.panel_open {

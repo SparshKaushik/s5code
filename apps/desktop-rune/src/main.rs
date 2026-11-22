@@ -189,6 +189,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::remember_route(s);
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
+    changed |= shell::swipe::poll(s);
     changed |= pages::poll(s);
     changed |= pages::pr_code::answer_reveal(s, tx);
     changed |= shell::quit::poll(s);
@@ -278,6 +279,7 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
+        on_wheel: Some(shell::swipe::on_wheel),
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
