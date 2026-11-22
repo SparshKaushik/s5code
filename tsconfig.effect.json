@@ -3,6 +3,7 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "includeSuggestionsInTsc": false,
         "allowedDuplicatedPackages": ["effect"],
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "effectFn": ["span", "inferred-span", "suggested-span"],
