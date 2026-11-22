@@ -809,7 +809,7 @@ fn open_logs(s: &mut App) {
             Some(format!("No available editor can open {path} in environment {environment}."));
         return;
     };
-    if crate::env::ssh::open_in_editor(s, &editor, &path) {
+    if crate::env::ssh::open_in_editor(s, &editor, &path, crate::env::ssh::toast_open_error) {
         return;
     }
     let id = s.src.net().map(|n| n.request("shell.openInEditor", json!({"cwd": path, "editor": editor})));
