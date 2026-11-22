@@ -268,7 +268,7 @@ fn in_app_entry(projects: &[Value], url: &str) -> Option<Value> {
 }
 
 /// `useOpenPrLink`: in the app unless Cmd or Ctrl asks for the browser.
-fn open_link(s: &mut App, tx: &mut Tx, url: &str) {
+pub(crate) fn open_link(s: &mut App, tx: &mut Tx, url: &str) {
     let mods = tx.mods();
     if !(mods.cmd || mods.ctrl) && open_in_app(s, url) {
         return;

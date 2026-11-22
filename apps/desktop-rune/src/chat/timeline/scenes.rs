@@ -295,15 +295,19 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-guest-share", guest_share),
     ("timeline-lightbox-zoom", lightbox_zoom),
     ("timeline-minimap-in-view", minimap_in_view),
+    ("chat-width-normal", |app| chat_width(app, "normal")),
     ("chat-width-wide", |app| chat_width(app, "wide")),
     ("chat-width-full", |app| chat_width(app, "full")),
     ("timeline-math", math),
 ];
 
 /// The showcase under a Chat width other than Comfortable: the timeline and composer widen.
+/// The chat column at each width with the details card closed; render wider than 1440 to tell
+/// wide from full.
 fn chat_width(app: &mut App, width: &str) {
     showcase(app);
     app.client_settings.values.insert("chatWidth".into(), serde_json::json!(width));
+    crate::chat::details::toggle(app, true);
 }
 /// Render math on: each formula reads as its TeX source; prices stay prose.
 fn math(app: &mut App) {

@@ -1238,22 +1238,43 @@ fn frame(t: &T, body: El, cap: f32) -> El {
         .child(body.key("thread-details-scroll").w_full().max_h((cap - 2.0).max(0.0)).scroll(rune::ScrollSpec { stick_bottom: false }))
 }
 
-fn card(s: &App, t: &T, cap: f32) -> Option<El> {
-    let muted = t.c.muted_foreground;
-    let fg = t.c.foreground.alpha_mul(0.8);
-    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
-    let thread = composer::ctx(s).thread;
-    let run = draft_run(s);
-    let fanout = composer::fanout::forces_worktree(s);
-    let new_worktree = fanout || run.as_ref().is_some_and(|r| r.worktree);
+/// The workspace label (`resolveEnvModeLabel` and the locked labels), whether the run makes a
+/// new worktree, and whether it is in an existing one.
+fn workspace_mode(s: &App) -> (&'static str, bool, bool) {
+    let new_worktree = composer::fanout::forces_worktree(s) || draft_run(s).is_some_and(|r| r.worktree);
     let worktree = worktree_here(s).is_some();
-    let mode = match (new_worktree, worktree, thread.is_some()) {
+    let mode = match (new_worktree, worktree, composer::ctx(s).thread.is_some()) {
         (true, ..) => "New worktree",
         (_, true, true) => "Worktree",
         (_, true, false) => "Current worktree",
         (_, false, true) => "Local checkout",
         _ => "Current checkout",
     };
+    (mode, new_worktree, worktree)
+}
+
+/// resolveBranchTriggerLabel over the checkout's local status `v`: a new worktree names the
+/// branch it starts from.
+fn branch_label(s: &App, v: &Value) -> String {
+    let current = data::s(v, "refName").to_string();
+    match draft_run(s).filter(|r| r.worktree) {
+        Some(r) => match worktree_base(s, &r) {
+            Some(base) if r.from_origin => format!("From {base} (remote)"),
+            Some(base) => format!("From {base}"),
+            None => "Select ref".into(),
+        },
+        None if current.is_empty() => "Select ref".into(),
+        None => current,
+    }
+}
+
+fn card(s: &App, t: &T, cap: f32) -> Option<El> {
+    let muted = t.c.muted_foreground;
+    let fg = t.c.foreground.alpha_mul(0.8);
+    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
+    let thread = composer::ctx(s).thread;
+    let fanout = composer::fanout::forces_worktree(s);
+    let (mode, new_worktree, worktree) = workspace_mode(s);
     // A draft can still choose where it runs, so its row is the env mode picker.
     let draft = thread.is_none();
     let mut run_context = row()
@@ -1313,17 +1334,7 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
     if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true) {
         let mut rows: Vec<El> = vec![];
         if on("branch") {
-            let current = data::s(v, "refName").to_string();
-            // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
-            let branch = match run.as_ref().filter(|r| r.worktree) {
-                Some(r) => match worktree_base(s, r) {
-                    Some(base) if r.from_origin => format!("From {base} (remote)"),
-                    Some(base) => format!("From {base}"),
-                    None => "Select ref".into(),
-                },
-                None if current.is_empty() => "Select ref".into(),
-                None => current,
-            };
+            let branch = branch_label(s, v);
             rows.push(
                 branch_row(t, &branch, fg, muted)
                     .help(with_shortcut(s, &branch, "composer.branch"))
