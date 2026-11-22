@@ -1,5 +1,6 @@
 //! The window's frame: sidebar, the main column the route fills, and the right panel.
 
+pub mod chatgpt_welcome;
 pub mod confirm;
 pub mod sidebar;
 pub mod palette;
@@ -20,6 +21,7 @@ pub struct Ui {
     pub confirm: confirm::Ui,
     pub quit: quit::QuitHold,
     pub toasts: toast::Stack,
+    pub chatgpt_welcome: chatgpt_welcome::Ui,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -49,6 +51,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("toasts-expanded", |s| {
         open_titled(s, "Replay showcase");
         toast::scene(s, true);
+    }),
+    ("chatgpt-welcome", |s| {
+        open_titled(s, "Replay showcase");
+        chatgpt_welcome::scene(s);
     }),
 ];
 
@@ -117,6 +123,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
     confirm::view(s, t, &mut overlays);
+    chatgpt_welcome::view(s, t, &mut overlays);
     overlays.extend(crate::search::overlay(s, t));
     crate::links::overlays(s, t, &mut overlays);
     crate::add_to_machine::overlays(s, t, &mut overlays);
