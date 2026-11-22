@@ -33,7 +33,9 @@ fn parse(css: &str) -> Option<Lch> {
                 .collect::<Option<_>>()?,
             _ => return None,
         };
-        return Some(to_lch(Rgb { r: digits[0] as f64, g: digits[1] as f64, b: digits[2] as f64 }));
+        // culori reports hues in [0, 360).
+        let lch = to_lch(Rgb { r: digits[0] as f64, g: digits[1] as f64, b: digits[2] as f64 });
+        return Some(Lch { h: lch.h.rem_euclid(360.0), ..lch });
     }
     let raw = css.strip_prefix("oklch(")?.strip_suffix(')')?;
     let parts: Vec<&str> = raw.split('/').next()?.split_whitespace().collect();
