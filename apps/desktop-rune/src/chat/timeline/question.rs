@@ -41,14 +41,17 @@ fn turn_items(p: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// The first pending question of the thread the composer in use writes into (a side chat's own).
+/// One that arrived mid-typing waits until typing goes idle, so it neither takes the keyboard
+/// nor the digit keys (composer `holds`).
 pub fn active(app: &App) -> Option<Active<'_>> {
     let Route::Thread(thread) = crate::chat::composer::route(app) else { return None };
     let p = &app.state().thread_views.get(&thread)?.projection;
-    array(p, "runtimeRequests").iter().filter(|r| s(r, "status") == "pending").find_map(|request| {
+    let first = array(p, "runtimeRequests").iter().filter(|r| s(r, "status") == "pending").find_map(|request| {
         let item = turn_items(p).find(|i| s(i, "requestId") == s(request, "id") && !s(request, "id").is_empty());
         let question = s(request, "kind") == "user_input" || item.is_some_and(|i| s(i, "type") == "user_input_request");
         question.then(|| Active { thread: thread.clone(), request, item: item.unwrap_or(request) })
-    })
+    });
+    first.filter(|a| !crate::chat::composer::holds(app, a.id()))
 }
 
 /// Where the answers to one request stand.
@@ -429,7 +432,7 @@ pub fn actions(app: &App, t: &T, stop: Option<El>) -> Option<El> {
     } else {
         "Submit answer"
     };
-    let enabled = a.can_respond() && !responding && if p.last { p.complete } else { p.can_advance };
+    let enabled = a.can_respond() && !responding && crate::chat::can_operate(app) && if p.last { p.complete } else { p.can_advance };
     let mut pill = row()
         .key("question-submit")
         .h(28.0)

@@ -27,6 +27,8 @@ mod media;
 mod work;
 mod lifecycle;
 pub mod now;
+pub mod pending;
+mod minimap;
 
 use crate::data::s;
 use crate::theme::{self, AlphaMul, T};
@@ -36,6 +38,7 @@ use rune::{Cx, El, GrowthSpec, ScrollSpec, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+pub use minimap::view as minimap;
 pub use scenes::SCENES;
 
 #[derive(Default)]
@@ -74,6 +77,8 @@ pub struct Ui {
     pub actions: actions::State,
     pub plan: plan::State,
     pub errors: error_banner::State,
+    minimap: minimap::State,
+    pending: pending::State,
 }
 
 /// Each row's key in the virtual list, from its id so rows paged in above keep theirs; a
@@ -789,8 +794,9 @@ pub(crate) fn rpc_failure(cause: &Value) -> &Value {
 
 pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
     let mut changed = attachments::poll(app, tx) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
-        | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | worktree_setup::poll(app)
-        | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app);
+        | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | subagent::poll(app) | worktree_setup::poll(app)
+        | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app)
+        | pending::poll(app, tx) | crate::chat::guest::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -942,17 +948,25 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         return el().grow(1.0);
     };
     let (follow, composer_h, banner_h) = pane(app, cx, thread_id);
-    let (rows, meta) = rows::derive_with_meta(&view.projection, app.now_ms);
+    let (mut rows, meta) = rows::derive_with_meta(&view.projection, app.now_ms);
+    // Sent messages show at once, until the server's copy takes their place.
+    rows.extend(pending::shown(app, thread_id, &view.projection).into_iter().map(Row::User));
     let targets = rows::revert_targets(&view.projection, view.has_more_history);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
+    let routed = !in_side_pane(app, thread_id);
+    let anchor_row = pending::anchor(app, thread_id).filter(|_| routed).and_then(|id| {
+        rows.iter().position(|r| matches!(r, Row::User(i) if s(i, "messageId") == id || s(i, "id") == id)).map(|at| keys[at].clone())
+    });
     // Replies whose meta row moved below their trailing work.
     let moved: HashSet<String> = rows.iter().filter_map(|r| if let Row::Meta { item, .. } = r { Some(s(item, "id").to_owned()) } else { None }).collect();
     // Superseded attempts inside finished turns' folds, found once a fold is open.
     let mut nested: Option<HashMap<String, String>> = None;
     let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
+    let skills = crate::chat::composer::chips::timeline_skills(app);
     // A run of steers shows the marker once (continuesSteer).
     let mut prev_steer = false;
+    let opening = subagent::opening(app, thread_id);
     let mut stack = col()
         .w(lane.width)
         .growth(GrowthSpec::default())
@@ -972,6 +986,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         let steer_marker = steer.filter(|_| !prev_steer);
         prev_steer = steer.is_some();
         let (_, body) = match r {
+            Row::User(item) if opening.as_ref().is_some_and(|o| o.opens(item)) => {
+                (s(item, "id").to_owned(), opening.as_ref().map_or_else(el, |o| subagent::opening_view(app, o, t)))
+            }
             Row::User(item) => {
                 let (who, words, task) = lifecycle::presentation(item);
                 let folds = matches!(who, lifecycle::Attribution::Automation | lifecycle::Attribution::Agent);
@@ -990,14 +1007,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         use crate::chat::composer::chips;
                         // Context links read as their chips (ContextChip inline in the bubble).
                         let (shown, links) = chips::display(s(item, "text"));
+                        // `$skill` tokens read as skill chips (SkillInlineText).
+                        let (shown, links, skilled) = chips::with_skills(shown, links, &skills);
                         // Text without chips renders as Markdown, as web's ChatMarkdown does.
-                        let rich = links.is_empty();
+                        let rich = links.is_empty() && skilled.is_empty();
                         let records = array(&item["context"], "records");
-                        let chip_links = chip::links(&links, records);
+                        let mut chip_links = chip::links(&links, records);
+                        chip_links.extend(chips::skill_links(&skilled, &skills));
                         let pills = links.into_iter().map(|c| {
                             let record = records.iter().find(|r| s(r, "contextId") == c.id);
                             (c.range, chips::style(&c.kind, record))
                         });
+                        let pills = pills.chain(skilled.into_iter().map(|c| (c.range, chips::style("skill", None))));
                         let highlights = if rich { Vec::new() } else { marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown)) };
                         let found = if rich { marks.is_some() } else { !highlights.is_empty() };
                         // A find match inside shows the whole message, as web's findReveal does.
@@ -1018,7 +1039,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                             for link in chip_links {
                                 body = body.link(link);
                             }
-                            body = body.on_link(move |app: &mut App, id: &str, tx: &mut rune::Tx| chip::pressed(app, &pressed, id, &records, tx));
+                            body = body.on_link(move |app: &mut App, id: &str, tx: &mut rune::Tx| {
+                                if !chips::open_skill(app, id) {
+                                    chip::pressed(app, &pressed, id, &records, tx);
+                                }
+                            });
                         }
                         let body = rendered.unwrap_or(body);
                         // max-h-44 with a 1.75rem fade, as CollapsibleUserMessageBody folds.
@@ -1075,6 +1100,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         .children((who == lifecycle::Attribution::T3Code).then(|| {
                             row().w_full().justify_end().pr(4.0).child(text("Sent by T3 Code").font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)))
                         }))
+                        .children(lifecycle::guest_name(item).map(|name| row().w_full().justify_end().child(crate::chat::guest::name(name, t))))
                         .children(steer_marker.map(|help| row().w_full().justify_end().pr(4.0).child(work::steer_marker(help, t))))
                         .child(row().w_full().justify_end().child(bubble))
                         .children(pill.map(|pill| row().w_full().justify_end().pr(4.0).child(pill)))
@@ -1238,11 +1264,24 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     if let Some(queue) = queue::view(app, thread_id, t, lane.width) {
         stack = stack.child(col().key("timeline-row-queue").w_full().py(3.0).child(queue));
     }
+    if let Some(guests) = crate::chat::guest::pending(app, thread_id, t, lane.width) {
+        stack = stack.child(col().key("timeline-row-guests").w_full().py(3.0).child(guests));
+    }
     if let Some(error) = actions::error(app, t) {
         stack = stack.child(col().key("timeline-row-action-error").w_full().py(3.0).child(error));
     }
+    let list = format!("timeline-{thread_id}");
+    // anchoredEndSpace: room after a new turn so its message rests near the top at the end.
+    if let Some(anchor_row) = anchor_row {
+        stack = stack.child(el().key(pending::END).w_full());
+        let clearance = composer_h + crate::chat::composer::BOTTOM + 21.0 + banner_h;
+        if let Some(space) = pending::end_space(cx, &list, &anchor_row, clearance).filter(|h| *h >= 1.0) {
+            stack = stack.child(el().key("timeline-anchor-space").w_full().h(space));
+        }
+    }
+    let report = routed.then(|| pending::reporter(app, thread_id));
     col()
-        .key(format!("timeline-{thread_id}"))
+        .key(list)
         .grow(1.0)
         .shrink()
         .min_h(0.0)
@@ -1254,6 +1293,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 let away = at.max[1] - at.offset[1] > AWAY;
                 opacity.set(if away { 1.0 } else { 0.0 });
                 offset.set(if away { [0.0, 0.0] } else { HIDDEN });
+                if let Some(report) = &report {
+                    report(at);
+                }
             }
         })
         // Rows share the composer's lane, which the details card narrows.

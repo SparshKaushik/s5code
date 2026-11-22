@@ -1,6 +1,7 @@
-//! The composer's trigger drawer (ComposerCommandMenu): `@` files and folders from
-//! `projects.searchEntries`, `/` commands, `$` skills, `#` the project's pull requests. It rises out of the top of the composer,
-//! tucked 17 points under it.
+//! The composer's trigger drawer (ComposerCommandMenu): `@` threads, machines, and files and
+//! folders from `projects.searchEntries`, `/` commands, `$` skills, `#` the project's pull
+//! requests. It rises out of the top of the composer, tucked 17 points under it. Skills and
+//! commands come from the cwd's workspace snapshot when the provider has one.
 
 use rune::{Cursor, Cx, El, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
@@ -40,6 +41,133 @@ pub struct Mention {
     pub loading: bool,
     entries: Vec<(String, bool)>,
     prs: Prs,
+    snapshot: Snapshot,
+}
+
+/// useProviderWorkspaceSnapshotRefresh: one `server.refreshProviders` scan per environment,
+/// provider and cwd (`key`), again once the TTL passes, retried after a cooldown up to three
+/// times. The config stream then carries the snapshot.
+#[derive(Default)]
+struct Snapshot {
+    key: Option<(String, String, String)>,
+    /// The scan in flight and the key it asked about.
+    request: Option<u64>,
+    asked: Option<(String, String, String)>,
+    requested_at: Option<i64>,
+    retry_at: Option<i64>,
+    failures: u32,
+    had: bool,
+}
+
+/// PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS, WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS, WORKSPACE_SNAPSHOT_MAX_ATTEMPTS.
+const SNAPSHOT_TTL_MS: i64 = 5 * 60_000;
+const SNAPSHOT_RETRY_MS: i64 = 10_000;
+const SNAPSHOT_ATTEMPTS: u32 = 3;
+
+impl Snapshot {
+    /// planProviderWorkspaceSnapshotRefresh: whether to scan now. A lost snapshot lifts the
+    /// TTL and the cooldown.
+    fn plan(&mut self, complete: bool, current: bool, now: i64) -> bool {
+        if self.had && !complete {
+            (self.requested_at, self.retry_at, self.failures) = (None, None, 0);
+        }
+        self.had = complete;
+        if self.requested_at.is_some_and(|at| now - at >= SNAPSHOT_TTL_MS) {
+            (self.requested_at, self.failures) = (None, 0);
+        }
+        if self.retry_at.is_some_and(|at| now >= at) {
+            self.retry_at = None;
+        }
+        let due = self.request.is_none() && !current && self.requested_at.is_none() && self.retry_at.is_none();
+        if due {
+            self.requested_at = Some(now);
+        }
+        due
+    }
+
+    /// failProviderWorkspaceSnapshotRefresh: cool down before the next try; after the last, only
+    /// the TTL lets one through.
+    fn failed(&mut self, now: i64) {
+        self.failures += 1;
+        if self.failures < SNAPSHOT_ATTEMPTS {
+            (self.requested_at, self.retry_at) = (None, Some(now + SNAPSHOT_RETRY_MS));
+        }
+    }
+
+    /// isProviderWorkspaceSnapshotScanning.
+    fn scanning(&self, complete: bool, pending: bool) -> bool {
+        (self.requested_at.is_some() || pending) && !complete && self.failures < SNAPSHOT_ATTEMPTS
+    }
+}
+
+fn workspace_snapshot<'a>(provider: &'a Value, cwd: &str) -> Option<&'a Value> {
+    provider["workspaceSnapshots"].as_array()?.iter().find(|w| data::s(w, "cwd") == cwd)
+}
+
+/// The cwd's snapshot is (complete, current, pending): hasCompleteProviderWorkspaceSnapshot,
+/// hasCurrentProviderWorkspaceSnapshot and `slashCommandsPending`.
+fn snapshot_status(provider: Option<&Value>, cwd: &str, now: i64) -> (bool, bool, bool) {
+    let Some(w) = provider.and_then(|p| workspace_snapshot(p, cwd)) else { return (false, false, false) };
+    let pending = w["slashCommandsPending"] == true;
+    let current = !pending && data::ts(w, "checkedAt").is_some_and(|at| now - at < SNAPSHOT_TTL_MS);
+    (!pending, current, pending)
+}
+
+/// Keeps the cwd's snapshot fresh and takes its scan's reply. It scans when the provider or cwd
+/// changes, the snapshot goes missing, a pending scan's cooldown ends, or (`typed`) the user
+/// types, each only when the snapshot is stale and no scan ran within the TTL.
+pub fn sync_snapshot(s: &mut App, typed: bool) -> bool {
+    let request = s.ui.chat.composer.mention.snapshot.request;
+    let reply = match (request, s.src.net()) {
+        (_, None) => return false,
+        (Some(r), Some(net)) => net.take_reply(r),
+        (None, Some(_)) => None,
+    };
+    let now = data::now_ms();
+    let target = selection(s).map(|(i, _)| i).zip(search_root(s)).map(|(i, cwd)| (s.ui.env.active.clone(), i, cwd));
+    let (complete, current, pending) = target.as_ref().map_or((false, false, false), |(_, i, cwd)| snapshot_status(provider(s, i), cwd, now));
+    let snap = &mut s.ui.chat.composer.mention.snapshot;
+    let mut check = typed;
+    if let Some(reply) = &reply {
+        snap.request = None;
+        check = true;
+        // A scan counts once its reply holds the cwd's complete snapshot.
+        if snap.asked.is_some() && snap.asked == snap.key {
+            let done = snap.asked.as_ref().is_some_and(|(_, instance, cwd)| {
+                let providers = reply.as_ref().ok().and_then(|v| v["providers"].as_array());
+                let replied = providers.and_then(|list| list.iter().find(|p| data::s(p, "instanceId") == instance.as_str()));
+                snapshot_status(replied, cwd, now).0
+            });
+            if !done {
+                snap.failed(now);
+            }
+        }
+    }
+    let Some(key) = target else { return reply.is_some() };
+    if snap.key.as_ref() != Some(&key) {
+        let (request, asked) = (snap.request, snap.asked.take());
+        *snap = Snapshot { key: Some(key), request, asked, ..Snapshot::default() };
+        check = true;
+    }
+    check |= snap.had != complete || (pending && snap.retry_at.is_some_and(|at| now >= at));
+    if !check || !snap.plan(complete, current, now) {
+        return reply.is_some();
+    }
+    snap.asked = snap.key.clone();
+    let Some((_, instance, cwd)) = snap.key.clone() else { return true };
+    // The reply carries only this cwd's snapshot; the config stream carries it to everyone.
+    let input = json!({"instanceId": instance, "cwd": cwd, "workspaceSnapshotsOnDemand": true});
+    let id = s.src.net().map(|net| net.request("server.refreshProviders", input));
+    s.ui.chat.composer.mention.snapshot.request = id;
+    true
+}
+
+/// The cwd's skills are still being scanned, so more may arrive.
+fn skills_scanning(s: &App) -> bool {
+    let snap = &s.ui.chat.composer.mention.snapshot;
+    let Some((_, instance, cwd)) = &snap.key else { return false };
+    let (complete, _, pending) = snapshot_status(provider(s, instance), cwd, data::now_ms());
+    snap.scanning(complete, pending)
 }
 
 /// The `#` list: one `pullRequests.list` read per project and text query (numbers filter
@@ -61,7 +189,11 @@ pub struct Item {
     pub description: String,
     pub folder: Option<bool>,
     pub pr: Option<Value>,
+    /// A thread or machine's context record, which goes in as a chip.
+    pub context: Option<Value>,
 }
+
+const THREAD_RESULTS: usize = 5;
 
 const BUILTIN_SLASH: [(&str, &str); 1] = [("model", "Switch response model for this thread")];
 /// Shown after `/model` when the provider has plan mode.
@@ -93,13 +225,83 @@ pub fn open_menu(s: &App) -> Option<Open> {
     Some(Open { kind, token: token.to_string(), start, end: caret })
 }
 
+/// The selected provider's `skills` or `slashCommands`: the cwd's workspace snapshot's when it has
+/// one, else the machine-wide list (resolveProviderSkillsForCwd, resolveProviderSlashCommandsForCwd).
 fn provider_list<'a>(s: &'a App, key: &str) -> Vec<&'a Value> {
-    selection(s).and_then(|(i, _)| provider(s, &i)).and_then(|p| p[key].as_array()).map(|v| v.iter().collect()).unwrap_or_default()
+    let Some(p) = selection(s).and_then(|(i, _)| provider(s, &i)) else { return Vec::new() };
+    resolved(p, search_root(s).as_deref(), key).iter().collect()
+}
+
+fn resolved<'a>(provider: &'a Value, cwd: Option<&str>, key: &str) -> &'a [Value] {
+    let snapshot = cwd.and_then(|cwd| workspace_snapshot(provider, cwd));
+    snapshot.map_or(&provider[key], |w| &w[key]).as_array().map_or(&[], |v| v.as_slice())
+}
+
+/// The selected provider's skills for the cwd.
+pub fn skills(s: &App) -> Vec<&Value> {
+    provider_list(s, "skills")
+}
+
+/// The composer's own environment.
+fn own_environment(s: &App) -> String {
+    s.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_owned()).unwrap_or_default()
+}
+
+fn context_item(record: Value, description: &str) -> Item {
+    let label = data::s(&record, "label").to_owned();
+    Item { id: super::chips::pill_id(&record), label, description: description.to_owned(), folder: None, pr: None, context: Some(record) }
+}
+
+/// matchComposerThreadItems: this environment's listed threads other than the open one, best
+/// title match first. A bare `@` lists none.
+fn thread_items(s: &App, query: &str) -> Vec<Item> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let open = ctx(s).thread.map(|t| data::s(t, "id"));
+    let candidates: Vec<&Value> = s
+        .state()
+        .threads
+        .iter()
+        .filter(|t| {
+            t.get(crate::env::TAG).is_none()
+                && Some(data::s(t, "id")) != open
+                && t["archivedAt"].is_null()
+                && t["lineage"]["relationshipToParent"] != "subagent"
+                && t["lineage"]["sideChat"] != true
+        })
+        .collect();
+    let recency = |t: &Value| data::ts(t, "latestUserMessageAt").or_else(|| data::ts(t, "updatedAt")).unwrap_or(0);
+    let titles: Vec<(&str, i64)> = candidates.iter().map(|t| (data::s(t, "title"), recency(*t))).collect();
+    let environment = own_environment(s);
+    super::search::rank_titles(&titles, query, THREAD_RESULTS)
+        .into_iter()
+        .map(|i| context_item(super::chips::thread(&environment, data::s(candidates[i], "id"), titles[i].0), "Thread"))
+        .collect()
+}
+
+/// matchComposerEnvironmentItems: the user's other machines whose name holds the query, when
+/// this server links machines (offersLinkedEnvironments).
+fn environment_items(s: &App, query: &str) -> Vec<Item> {
+    let query = query.trim().to_lowercase();
+    let peer_links = s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["peerLinks"] == true);
+    if query.is_empty() || !peer_links || crate::settings::server_settings(s)["linkedEnvironmentsEnabled"] != true {
+        return Vec::new();
+    }
+    let own = own_environment(s);
+    crate::env::keys(s)
+        .into_iter()
+        .filter_map(|key| {
+            let id = if key == crate::env::LOCAL { crate::env::local_id(s)? } else { key.clone() };
+            let label = crate::env::label(s, &key);
+            (id != own && label.to_lowercase().contains(&query)).then(|| context_item(super::chips::environment(&id, &label), "Machine"))
+        })
+        .collect()
 }
 
 pub fn items(s: &App, m: &Open) -> Vec<Item> {
     let q = m.query().to_lowercase();
-    let item = |id: String, label: String, description: String| Item { id, label, description, folder: None, pr: None };
+    let item = |id: String, label: String, description: String| Item { id, label, description, folder: None, pr: None, context: None };
     match m.kind {
         Kind::Slash => {
             let plan: &[(&str, &str)] = if supports_plan(s) { &PLAN_SLASH[..] } else { &[] };
@@ -126,26 +328,24 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
         }
         Kind::Skill => provider_list(s, "skills")
             .into_iter()
-            .map(|c| item(format!("${}", data::s(c, "name")), data::s(c, "name").to_string(), skill_description(c, "Run provider skill")))
-            .filter(|i| i.label.to_lowercase().contains(&q))
+            .map(|c| item(format!("${}", data::s(c, "name")), super::chips::skill_label(c), skill_description(c, "Run provider skill")))
+            .filter(|i| i.label.to_lowercase().contains(&q) || i.id[1..].to_lowercase().contains(&q))
             .collect(),
         Kind::Path => {
+            let mut out = thread_items(s, m.query());
+            out.extend(environment_items(s, m.query()));
             let mention = &s.ui.chat.composer.mention;
-            if mention.query.as_deref() != Some(m.query()) {
-                return Vec::new();
-            }
-            mention
-                .entries
-                .iter()
-                .map(|(path, folder)| {
+            if mention.query.as_deref() == Some(m.query()) {
+                out.extend(mention.entries.iter().map(|(path, folder)| {
                     let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
-                    Item { id: path.clone(), label: name.to_string(), description: dir.to_string(), folder: Some(*folder), pr: None }
-                })
-                .collect()
+                    Item { id: path.clone(), label: name.to_string(), description: dir.to_string(), folder: Some(*folder), pr: None, context: None }
+                }));
+            }
+            out
         }
         Kind::PullRequest => pr_matches(s, m.query())
             .into_iter()
-            .map(|e| Item { id: format!("#{}", e["number"]), label: format!("#{}", e["number"]), description: data::s(e, "title").to_string(), folder: None, pr: Some(e.clone()) })
+            .map(|e| Item { id: format!("#{}", e["number"]), label: format!("#{}", e["number"]), description: data::s(e, "title").to_string(), folder: None, pr: Some(e.clone()), context: None })
             .collect(),
     }
 }
@@ -303,8 +503,10 @@ pub(super) fn search_root(s: &App) -> Option<String> {
     worktree.or_else(|| c.project.map(|p| data::s(p, "workspaceRoot"))).filter(|p| !p.is_empty()).map(str::to_string)
 }
 
-/// Starts a file search when the `@` query changed, or a pull request read for `#`.
+/// Starts a file search when the `@` query changed, or a pull request read for `#`; typing also
+/// re-checks the workspace snapshot.
 pub fn refresh(s: &mut App) {
+    sync_snapshot(s, true);
     let Some(m) = open_menu(s) else { return };
     if m.kind == Kind::PullRequest {
         let Some(project) = ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return };
@@ -411,6 +613,24 @@ pub fn choose(s: &mut App, m: &Open, index: usize, _tx: &mut Tx) {
     if matches!(item.id.as_str(), "/side" | "/btw") && m.kind == Kind::Slash && crate::chat::side::disabled_reason(s).is_some() {
         return;
     }
+    if let Some(record) = item.context {
+        let id = super::chips::pill_id(&record);
+        let d = draft_mut(s);
+        d.edit.replace_with_pill(m.start..m.end, id.clone(), data::s(&record, "label"));
+        d.edit.insert(" ");
+        if !d.contexts.iter().any(|c| super::chips::pill_id(c) == id) {
+            d.contexts.push(record);
+        }
+        return;
+    }
+    // A skill goes in as a chip that sends as `$name` (the composer-skill node).
+    if let Some(name) = item.id.strip_prefix('$').filter(|_| matches!(m.kind, Kind::Skill | Kind::Slash)) {
+        let label = skills(s).into_iter().find(|k| data::s(k, "name") == name).map_or_else(|| name.to_owned(), super::chips::skill_label);
+        let d = draft_mut(s);
+        d.edit.replace_with_pill(m.start..m.end, super::chips::skill_pill(name), &label);
+        d.edit.insert(" ");
+        return;
+    }
     if let Some(pr) = &item.pr {
         let record = super::chips::pull_request(pr, false, &[]);
         let d = draft_mut(s);
@@ -449,6 +669,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
         let message = match m.kind {
             Kind::Path if s.ui.chat.composer.mention.loading => "Searching workspace files...".to_string(),
             Kind::Path => "No matching files or folders.".to_string(),
+            Kind::Skill | Kind::Slash if skills_scanning(s) => "Searching workspace skills...".to_string(),
             Kind::Skill => "No skills found. Try / to browse provider commands.".to_string(),
             Kind::Slash => "No matching command.".to_string(),
             Kind::PullRequest if ctx(s).project.is_none() => "Pull requests are not available for this project.".to_string(),
@@ -482,6 +703,11 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
         if let Some(folder) = item.folder {
             r = r.child(icon(if folder { &icons::FOLDER } else { &icons::FILE }, 16.0).color(t.c.secondary_label));
         }
+        if let Some(record) = &item.context
+            && let Some((_, glyph)) = super::chips::look(data::s(record, "kind"), Some(record))
+        {
+            r = r.child(icon(glyph, 16.0).color(t.c.secondary_label));
+        }
         if let Some(pr) = &item.pr
             && let Some((tone, glyph)) = super::chips::look("review-comment", Some(&json!({"pullRequest": pr})))
         {
@@ -496,9 +722,154 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
     Some(surface(t).px(8.0).pt(8.0).pb(8.0 + 17.0).child(rows).child(el()))
 }
 
+/// `@replay` on the showcase: the other replay threads, then a machine this server can link.
+pub fn threads_scene(s: &mut App) {
+    super::on_replay_showcase(s);
+    if let data::Source::Fixture(state) = &mut s.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["settings"]["linkedEnvironmentsEnabled"] = json!(true);
+    }
+    s.ui.env.saved.push(crate::env::Saved { id: "replay-box".into(), label: "Replay box".into(), base: "https://replay-box.example.com".into(), bearer: String::new() });
+    super::set_text(s, "@replay");
+    refresh(s);
+}
+
+/// A skill picked from the `$` menu sits in the prompt as a chip.
+pub fn skill_pill_scene(s: &mut App) {
+    super::on_replay_showcase(s);
+    let slug = provider(s, "opencode").and_then(|p| p["models"][0]["slug"].as_str()).unwrap_or("").to_owned();
+    draft_mut(s).model = Some(("opencode".into(), slug));
+    super::set_text(s, "$contr");
+    if let Some(m) = open_menu(s) {
+        choose(s, &m, 0, &mut Tx::default());
+    }
+    draft_mut(s).edit.insert("triage the open pull requests");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workspace_snapshot_replaces_the_machine_wide_lists() {
+        let provider = json!({
+            "skills": [{"name": "global"}], "slashCommands": [{"name": "init"}],
+            "workspaceSnapshots": [{"cwd": "/repo", "checkedAt": "2026-01-01T00:00:00Z", "skills": [{"name": "repo-skill"}], "slashCommands": []}],
+        });
+        let names = |cwd: Option<&str>, key: &str| resolved(&provider, cwd, key).iter().map(|v| data::s(v, "name").to_owned()).collect::<Vec<_>>();
+        assert_eq!(names(Some("/repo"), "skills"), ["repo-skill"]);
+        assert!(names(Some("/repo"), "slashCommands").is_empty(), "the snapshot's empty list wins");
+        assert_eq!(names(Some("/other"), "skills"), ["global"]);
+        assert_eq!(names(None, "slashCommands"), ["init"]);
+
+        let at = data::ts(&json!({"t": "2026-01-01T00:00:00Z"}), "t").unwrap();
+        assert_eq!(snapshot_status(Some(&provider), "/repo", at + 1000), (true, true, false));
+        assert_eq!(snapshot_status(Some(&provider), "/repo", at + SNAPSHOT_TTL_MS), (true, false, false), "stale after the TTL");
+        assert_eq!(snapshot_status(Some(&provider), "/other", at), (false, false, false));
+        let pending = json!({"workspaceSnapshots": [{"cwd": "/repo", "checkedAt": "2026-01-01T00:00:00Z", "slashCommandsPending": true}]});
+        assert_eq!(snapshot_status(Some(&pending), "/repo", at), (false, false, true));
+    }
+
+    #[test]
+    fn a_cwd_scans_once_per_ttl_and_retries_a_failed_scan_after_a_cooldown() {
+        let mut snap = Snapshot::default();
+        assert!(snap.plan(false, false, 0), "FAILED: a cwd without a snapshot scans");
+        assert!(snap.scanning(false, false));
+        snap.request = Some(1);
+        assert!(!snap.plan(false, false, 10), "FAILED: never twice while one is in flight");
+        snap.request = None;
+        assert!(!snap.plan(true, true, 20), "FAILED: a current snapshot needs no scan");
+        assert!(!snap.scanning(true, false));
+        assert!(!snap.plan(true, false, 1_000), "FAILED: a stale snapshot waits out the TTL from the last scan");
+        assert!(snap.plan(true, false, SNAPSHOT_TTL_MS), "FAILED: and scans again after it");
+
+        let mut snap = Snapshot::default();
+        assert!(snap.plan(false, false, 0));
+        snap.failed(100);
+        assert!(!snap.scanning(false, false), "FAILED: a failed scan stops the scanning row");
+        assert!(!snap.plan(false, false, 5_000), "FAILED: cools down");
+        assert!(snap.plan(false, false, 100 + SNAPSHOT_RETRY_MS));
+        snap.failed(20_000);
+        assert!(snap.plan(false, false, 20_000 + SNAPSHOT_RETRY_MS));
+        snap.failed(40_000);
+        assert!(!snap.plan(false, false, 40_000 + SNAPSHOT_RETRY_MS), "FAILED: three failures wait for the TTL");
+        assert!(snap.plan(false, false, 30_000 + SNAPSHOT_TTL_MS));
+
+        let mut snap = Snapshot::default();
+        assert!(snap.plan(false, false, 0));
+        assert!(!snap.plan(true, true, 10));
+        assert!(snap.plan(false, false, 20), "FAILED: a lost snapshot scans at once");
+    }
+
+    #[test]
+    fn at_mentions_list_threads_and_insert_them_as_chips() {
+        let mut s = App::new();
+        let showcase = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_owned()).unwrap();
+        s.navigate(crate::Route::Thread(showcase.clone()));
+        let d = draft_mut(&mut s);
+        d.edit = rune::TextEdit::new("see @replay");
+        d.edit.set_caret(11);
+        let m = open_menu(&s).unwrap();
+        let list = items(&s, &m);
+        let labels: Vec<&str> = list.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Approval flow replay") && labels.contains(&"Todo list replay"), "{labels:?}");
+        assert!(!labels.contains(&"Replay showcase"), "FAILED: the open thread is left out");
+        assert!(list.iter().all(|i| i.description == "Thread"), "FAILED: machines need linked environments on");
+
+        let index = list.iter().position(|i| i.label == "Todo list replay").unwrap();
+        choose(&mut s, &m, index, &mut Tx::default());
+        let d = draft(&s).unwrap();
+        let record = d.contexts.last().unwrap().clone();
+        assert_eq!((data::s(&record, "kind"), data::s(&record, "label")), ("thread", "Todo list replay"));
+        let (text, sent) = super::super::chips::outgoing(&d.edit, &d.contexts);
+        assert_eq!(text, format!("see [Todo list replay](t3-context://v1/thread/{}) ", data::s(&record, "contextId")));
+        assert_eq!(sent, [record]);
+    }
+
+    #[test]
+    fn at_mentions_offer_other_machines_only_when_this_server_links_them() {
+        let mut s = App::new();
+        s.ui.env.saved.push(crate::env::Saved { id: "env-box".into(), label: "Build box".into(), base: "https://box".into(), bearer: String::new() });
+        let labels = |s: &App| {
+            let d = draft(s).unwrap();
+            let m = open_menu(s).unwrap();
+            assert_eq!(d.edit.text, "@box");
+            items(s, &m).into_iter().filter(|i| i.description == "Machine").map(|i| i.label).collect::<Vec<_>>()
+        };
+        let d = draft_mut(&mut s);
+        d.edit = rune::TextEdit::new("@box");
+        d.edit.set_caret(4);
+        assert!(labels(&s).is_empty());
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.as_mut().unwrap()["settings"]["linkedEnvironmentsEnabled"] = json!(true);
+        }
+        assert_eq!(labels(&s), ["Build box"]);
+        let m = open_menu(&s).unwrap();
+        let index = items(&s, &m).iter().position(|i| i.label == "Build box").unwrap();
+        choose(&mut s, &m, index, &mut Tx::default());
+        let record = draft(&s).unwrap().contexts[0].clone();
+        assert_eq!((data::s(&record, "kind"), data::s(&record, "environmentId")), ("environment", "env-box"));
+    }
+
+    #[test]
+    fn a_picked_skill_is_a_chip_that_sends_as_its_token() {
+        for (text, index) in [("$contr", 0), ("/skill:contr", usize::MAX)] {
+            let mut s = App::new();
+            let d = draft_mut(&mut s);
+            d.model = Some(("opencode".into(), "m".into()));
+            d.edit = rune::TextEdit::new(text);
+            d.edit.set_caret(text.len());
+            let m = open_menu(&s).unwrap();
+            let list = items(&s, &m);
+            let index = if index == usize::MAX { list.iter().position(|i| i.label == "/skill:contribution-triage").unwrap() } else { index };
+            assert_eq!(list[index].id, "$contribution-triage");
+            choose(&mut s, &m, index, &mut Tx::default());
+            let d = draft(&s).unwrap();
+            assert_eq!(d.edit.pills().map(|(_, id)| id.to_owned()).collect::<Vec<_>>(), ["skill:contribution-triage"]);
+            assert_eq!(super::super::chips::outgoing(&d.edit, &d.contexts).0, "$contribution-triage ");
+        }
+    }
 
     fn slash_labels(model: &str) -> Vec<String> {
         let mut s = App::new();
@@ -512,7 +883,7 @@ mod tests {
 
     #[test]
     fn slash_commands_rank_by_name_then_description_and_mid_prompt_keep_built_ins() {
-        let it = |n: &str, d: &str| Item { id: format!("/{n}"), label: format!("/{n}"), description: d.into(), folder: None, pr: None };
+        let it = |n: &str, d: &str| Item { id: format!("/{n}"), label: format!("/{n}"), description: d.into(), folder: None, pr: None, context: None };
         let labels = |items: Vec<Item>| items.into_iter().map(|i| i.label).collect::<Vec<_>>();
         let list = vec![it("model", "Switch response model"), it("side", "Ask a side question"), it("review", "Review the diff"), it("mode", "x")];
         assert_eq!(labels(ranked_slash(list, 2, "mod")), ["/mode", "/model"]);

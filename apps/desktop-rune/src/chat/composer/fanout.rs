@@ -142,6 +142,7 @@ pub(super) fn send(s: &mut App) -> bool {
     if text.is_empty() && paths.is_empty() && contexts.is_empty() {
         return true;
     }
+    let title = crate::chat::thread_title::seed(&text, &paths, &contexts);
     let staged = match paths.iter().map(|p| attachments::stage_upload(p)).collect::<Result<Vec<_>, _>>() {
         Ok(staged) => staged,
         Err(message) => {
@@ -174,7 +175,7 @@ pub(super) fn send(s: &mut App) -> bool {
         let message_id = s5_net::uuid();
         let mut payload = json!({
             "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project,
-            "title": "New thread", "generateTitle": true, "modelSelection": {"instanceId": instance, "model": model},
+            "title": &title, "generateTitle": true, "modelSelection": {"instanceId": instance, "model": model},
             "runtimeMode": runtime, "interactionMode": interaction, "workspaceStrategy": workspace,
             "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
         });

@@ -213,7 +213,6 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-child-approval", child_approval),
     ("timeline-worktree-setup", worktree_setup),
     ("timeline-worktree-retry", worktree_retry),
-    ("timeline-worktree-work-locally", worktree_work_locally),
     ("timeline-tool-group", tool_group),
     ("timeline-tool-group-open", tool_group_open),
     ("timeline-tool-live", tool_live),
@@ -223,6 +222,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("chat-server-update-running", server_update_running),
     ("chat-server-update-failed", server_update_failed),
     ("timeline-user-markdown", user_markdown),
+    ("timeline-skill-chips", skill_chips),
     ("timeline-steer", steer),
     ("timeline-load-earlier", load_earlier),
     ("timeline-load-earlier-error", load_earlier_error),
@@ -279,7 +279,54 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-subagent-bar", subagent_bar),
     ("composer-subagent-bar-instance", subagent_bar_instance),
     ("composer-usage-limits-reset-credits", usage_reset_credits),
+    ("timeline-workflow-opening", workflow_opening),
+    ("timeline-minimap", timeline_minimap),
+    ("timeline-markdown-alerts", markdown_alerts),
+    ("timeline-codex-directives", codex_directives),
+    ("timeline-file-card", file_card),
+    ("timeline-lightbox-nav", lightbox_nav),
+    ("timeline-optimistic-send", optimistic_send),
+    ("chat-drop-overlay", drop_overlay),
+    ("timeline-offline-reconnecting", offline_reconnecting),
+    ("timeline-offline-disconnect", offline_disconnect),
+    ("timeline-guest-share", guest_share),
 ];
+
+/// Every GitHub alert kind, and a `<details>` folded and one written open.
+fn markdown_alerts(app: &mut App) {
+    showcase(app);
+    let text = "Before you merge:\n\n> [!NOTE]\n> The cache warms on first request.\n\n> [!TIP]\n> Run `vp test run` while iterating.\n\n> [!IMPORTANT]\n> Migrations run in order.\n\n> [!WARNING]\n> This drops the old index.\n\n> [!CAUTION]\n> Back up `statev2.sqlite` first.\n\n<details>\n<summary>Full test log</summary>\n\n```sh\nvp test run\n```\n</details>\n\n<details open>\n<summary>Why this is safe</summary>\n\nThe index is rebuilt **before** the old one drops.\n</details>";
+    push_visible(app, vec![serde_json::json!({"id": "scene-alerts", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+}
+/// A Codex reply citing a file, offering follow-ups, and an artifact template card.
+fn codex_directives(app: &mut App) {
+    showcase(app);
+    let text = "Created :codex-file-citation{path=\"outputs/report.xlsx\" line_range_start=\"4\"}.\n\n::artifact-template{skill_name=\"artifact-template-hello-world\" skill_directory=\"/Users/test/.codex/skills/artifact-template-hello-world\" display_name=\"Hello World\" artifact_kind=\"document\"}\n\nNext steps:\n\n- :codex-followup[Prepare print version]{prompt=\"Prepare the document for printing.\"}\n- :codex-followup[Review **document**]{prompt=\"Review it.\"}";
+    push_visible(app, vec![serde_json::json!({"id": "scene-directives", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+}
+/// Sent files: one signed (Preview and Download) and one still unsigned (Download off).
+fn file_card(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    push_visible(app, vec![json!({"id": "scene-file-card", "type": "user_message", "status": "completed", "inputIntent": "turn_start",
+        "text": "Here is the failing build.", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
+            {"type": "file", "id": "scene-file-signed", "name": "build.log", "mimeType": "text/plain", "sizeBytes": 48_213},
+            {"type": "file", "id": "scene-file-unsigned", "name": "trace.json", "mimeType": "application/json", "sizeBytes": 2048}]})]);
+    let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
+    app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
+}
+/// The lightbox on the second of three pictures in one paragraph: Previous, Next and "(2/3)".
+fn lightbox_nav(app: &mut App) {
+    showcase(app);
+    let root = super::workspace_root(app).unwrap_or_else(|| "/tmp".into());
+    let srcs: Vec<String> = ["before", "after", "diff"].iter().map(|n| format!("{}/docs/{n}.png", root.trim_end_matches('/'))).collect();
+    let text = format!("Screens:\n\n![Before]({}) ![After]({}) ![Diff]({})", srcs[0], srcs[1], srcs[2]);
+    push_visible(app, vec![serde_json::json!({"id": "scene-gallery", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    let keys: Vec<String> = [("Before", &srcs[0]), ("After", &srcs[1]), ("Diff", &srcs[2])].into_iter().filter_map(|(alt, src)| super::media::scene_entry(app, alt, src, false)).collect();
+    let assets = &mut app.ui.chat.timeline.assets;
+    assets.open = keys.get(1).cloned();
+    assets.gallery = keys;
+}
 
 /// A prompt quoting the showcase's first reply twice, the first quote's popover open.
 fn citations(app: &mut App) {
@@ -576,19 +623,7 @@ fn worktree_setup(app: &mut App) {
     app.ui.chat.timeline.worktree.details.insert(id.clone());
     app.ui.chat.timeline.worktree.held.insert(id, snapshot);
 }
-/// A new thread's first message waiting on its worktree, so it can move to the checkout.
-fn worktree_work_locally(app: &mut App) {
-    worktree_setup(app);
-    patch_shell(app, serde_json::json!({"latestRunStartedAt": null}));
-    let Route::Thread(id) = app.route.clone() else { return };
-    if let crate::data::Source::Fixture(state) = &mut app.src
-        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["turnItems"].as_array_mut())
-    {
-        let mut first = true;
-        items.retain(|i| i["type"] != "user_message" || std::mem::take(&mut first));
-    }
-}
-/// A run whose workspace preparation failed, with Retry on its error row.
+/// A new thread's first message waiting on its worktree, so it error row.
 fn worktree_retry(app: &mut App) {
     failed_run(app, serde_json::json!({"class": "workspace_error", "code": "workspace_preparation_failed", "retryable": true,
         "message": "git worktree add failed: branch t3/billing-schema is already checked out"}));
@@ -725,6 +760,21 @@ fn user_markdown(app: &mut App) {
         serde_json::json!({"id": "scene-user-md", "type": "user_message", "text": short, "createdAt": "2026-01-01T00:00:00Z", "attachments": []}),
         serde_json::json!({"id": "scene-user-md-long", "type": "user_message", "text": long, "createdAt": "2026-01-01T00:00:01Z", "attachments": []}),
     ]);
+}
+/// `$skill` tokens in a prompt read as skill chips; an amount and an unknown name stay text.
+fn skill_chips(app: &mut App) {
+    showcase(app);
+    let skill = |name: &str, display: &str, description: &str| {
+        serde_json::json!({"name": name, "displayName": display, "description": description, "path": format!("/repo/.claude/skills/{name}/SKILL.md"), "enabled": true})
+    };
+    let skills = serde_json::json!([skill("review-pr", "Review PR", "Review the open pull request"), skill("release-notes", "", "Draft release notes")]);
+    patch_config(app, |c| {
+        for provider in c["providers"].as_array_mut().into_iter().flatten() {
+            provider["skills"] = skills.clone();
+        }
+    });
+    let text = "$review-pr the retry loop, then $release-notes for v2.\nBudget is $5k; $unknown stays text.";
+    push_visible(app, vec![serde_json::json!({"id": "scene-user-skills", "type": "user_message", "text": text, "createdAt": "2026-01-01T00:00:00Z", "attachments": []})]);
 }
 fn steer(app: &mut App) {
     showcase(app);
@@ -1366,4 +1416,132 @@ fn usage_reset_credits(app: &mut App) {
             p["usageLimits"]["resetCredits"] = serde_json::json!({"availableCount": 2, "nextExpiresAt": "2026-12-08T00:00:00.000Z", "nextCreditId": "credit-1"});
         }
     });
+}
+
+/// A workflow coordinator's thread: its script opens with the workflow, its agents in phases
+/// from the parent's coordinator row, and the script folded (WorkflowOpeningBlock).
+fn workflow_opening(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let parent = other_thread(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    patch_shell(app, json!({"creationSource": "provider", "lineage": {"parentThreadId": parent, "relationshipToParent": "subagent"}}));
+    let base = crate::data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(0);
+    app.now_ms = base + 95_000;
+    let script = "// Audit billing for rounding bugs, one phase at a time.\n\
+        // Survey maps the call sites, Fix patches them, Verify adds tests.\n\
+        export const meta = { name: \"billing-audit\", phases: [\"Survey\", \"Fix\", \"Verify\"] };\n\
+        \n\
+        export default async function run({ phase, agent }) {\n\
+        \x20 const sites = await phase(\"Survey\", () => agent(\"Map rounding call sites\"));\n\
+        \x20 await phase(\"Fix\", () => Promise.all(sites.map((site) => agent(`Patch ${site}`))));\n\
+        \x20 await phase(\"Verify\", () => agent(\"Write regression tests\"));\n\
+        \x20 return sites.length;\n\
+        }";
+    let agents = json!([
+        {"index": 0, "label": "Map rounding call sites", "state": "completed", "phaseIndex": 0, "startedAt": base, "completedAt": base + 21_000,
+            "prompt": "Find every place billing rounds money", "result": "Found 14 call sites across 5 files", "childThreadId": "scene-wf-map"},
+        {"index": 1, "label": "Check currency conversions", "state": "completed", "phaseIndex": 0, "startedAt": base + 1_000, "completedAt": base + 34_000,
+            "prompt": "Check how conversions round", "result": "Conversions round twice in `fx.ts`", "childThreadId": "scene-wf-fx"},
+        {"index": 2, "label": "Patch invoice totals", "state": "running", "phaseIndex": 1, "startedAt": base + 40_000,
+            "prompt": "Round once, at the invoice boundary", "childThreadId": "scene-wf-invoice"},
+        {"index": 3, "label": "Patch refunds", "state": "failed", "phaseIndex": 1, "startedAt": base + 40_000, "completedAt": base + 52_000,
+            "prompt": "Round refunds like invoices", "result": "Refund fixtures are missing the currency field"},
+        {"index": 4, "label": "Write regression tests", "state": "queued", "phaseIndex": 2, "phaseTitle": "Verify", "prompt": "Cover half-cent amounts in every currency"}]);
+    let coordinator = json!({"id": "scene-workflow", "threadId": parent, "childThreadId": id, "origin": "provider_native", "driver": "claudeAgent",
+        "providerInstanceId": "claudeAgent", "title": "Audit billing for rounding bugs", "prompt": script, "status": "running",
+        "startedAt": "2026-12-01T00:00:00.000Z", "completedAt": null, "updatedAt": "2026-12-01T00:01:35.000Z", "result": null,
+        "workflow": {"name": "billing-audit", "phases": [{"index": 0, "title": "Survey"}, {"index": 1, "title": "Fix"}], "agents": agents}});
+    let crate::data::Source::Fixture(state) = &mut app.src else { return };
+    if let Some(v) = state.thread_views.get_mut(&id) {
+        let mut message = String::new();
+        if let Some(first) = v.projection["messages"].as_array_mut().and_then(|m| m.iter_mut().find(|m| m["role"] == "user")) {
+            first["text"] = json!(script);
+            first["workflowScript"] = json!(true);
+            message = crate::data::s(first, "id").to_owned();
+        }
+        for list in ["visibleTurnItems", "turnItems"] {
+            let entries = v.projection[list].as_array_mut().into_iter().flatten();
+            if let Some(item) = entries.map(|e| if e["item"].is_object() { &mut e["item"] } else { e }).find(|i| i["type"] == "user_message") {
+                item["text"] = json!(script);
+                item["messageId"] = json!(message);
+                item["workflowScript"] = json!(true);
+            }
+        }
+    }
+    state.thread_views.entry(parent).or_default().projection["subagents"] = json!([coordinator]);
+}
+
+/// Six prompts in the timeline's minimap, the third under the pointer with its turn's preview.
+fn timeline_minimap(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let turns = [
+        ("Why does the upload retry twice?", "The retry loop re-sends after a **timeout** even when the first request landed, as <t3-thread://v2/env-1/thread-1> found."),
+        ("Make it idempotent instead", "Each upload now carries an idempotency key, so a second send returns the first result."),
+        ("Add a test for the double send", "Added `upload.retry.test.ts`, which sends twice and expects one stored file."),
+        ("Does the key survive a restart?", "Yes. It's derived from the file's hash and the session, so a restart keeps it."),
+        ("Ship it", "Committed as `fix(upload): retries no longer store twice`."),
+    ];
+    let mut items = Vec::new();
+    for (n, (prompt, reply)) in turns.iter().enumerate() {
+        items.push(json!({"id": format!("scene-minimap-prompt-{n}"), "type": "user_message", "text": prompt, "createdAt": "2026-01-01T00:00:00Z", "attachments": []}));
+        items.push(json!({"id": format!("scene-minimap-reply-{n}"), "type": "assistant_message", "text": reply, "streaming": false, "createdAt": "2026-01-01T00:00:01Z"}));
+    }
+    push_visible(app, items);
+    app.ui.chat.timeline.minimap.active = Some(2);
+}
+
+/// A message just sent, shown before the server echoes it and anchored near the list's top.
+fn optimistic_send(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    let message = super::pending::message("scene-optimistic", "Can you also cover the empty state with a test?", &[], serde_json::json!([]), false);
+    super::pending::show(app, &id, message);
+}
+
+/// A file drag over the chat: "Drop files to attach" covers it.
+fn drop_overlay(app: &mut App) {
+    showcase(app);
+    app.ui.chat.drop_over = true;
+}
+
+/// The machine dropped a few seconds ago and a retry is under way.
+fn offline_reconnecting(app: &mut App) {
+    showcase(app);
+    super::banners::scene_outage(app, s5_net::Conn::Connecting, 5_000);
+}
+
+/// A saved machine offline long enough to offer "Disconnect server".
+fn offline_disconnect(app: &mut App) {
+    showcase(app);
+    app.ui.env.saved.push(crate::env::Saved { id: "scene-studio".into(), label: "Studio".into(), base: "https://studio.example.ts.net".into(), bearer: String::new() });
+    app.ui.env.active = "scene-studio".into();
+    super::banners::scene_outage(app, s5_net::Conn::Closed("Connection refused (os error 61)".into()), 30_000);
+}
+
+/// A guest link in use: the header's status, a sent guest message under the guest's name, and
+/// two waiting for Send or Dismiss.
+fn guest_share(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    push_visible(app, vec![json!({
+        "id": "scene-guest-sent", "type": "user_message", "messageId": "scene-guest-sent", "createdBy": "user",
+        "text": "Ada (guest) wrote: Could the empty state link to the docs?", "createdAt": "2026-01-01T00:00:02Z",
+        "context": {"version": 1, "records": [], "guest": {"name": "Ada", "text": "Could the empty state link to the docs?"}},
+    })]);
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        v.projection["thread"]["guestShare"] = json!({
+            "id": "scene-share", "host": "scene.t3.codes", "createdAt": "2026-01-01T00:00:00Z", "expiresAt": "2099-01-01T00:00:00Z",
+            "guestName": "Ada",
+            "messages": [
+                {"id": "scene-guest-1", "text": "Also, the button label reads \"Sumbit\".", "status": "pending", "submittedAt": "2026-01-01T00:00:03Z"},
+                {"id": "scene-guest-2", "text": "Can we ship this today?", "status": "pending", "submittedAt": "2026-01-01T00:00:04Z"},
+                {"id": "scene-guest-0", "text": "Hi!", "status": "sent", "submittedAt": "2026-01-01T00:00:01Z"},
+            ],
+        });
+    }
 }

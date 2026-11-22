@@ -69,14 +69,6 @@ pub fn parse(text: &str) -> Option<&str> {
     (head.eq_ignore_ascii_case("/side") || head.eq_ignore_ascii_case("/btw")).then(|| rest.trim())
 }
 
-/// deriveThreadTitleSeed for plain text: whitespace collapsed, cut at 50 characters.
-fn title_seed(text: &str) -> String {
-    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match words.char_indices().nth(50) {
-        Some((at, _)) => format!("{}...", &words[..at]),
-        None => words,
-    }
-}
 
 fn thread<'a>(s: &'a App, id: &str) -> Option<&'a Value> {
     s.state().threads.iter().find(|t| data::s(t, "id") == id)
@@ -202,7 +194,7 @@ pub fn poll(s: &mut App) -> bool {
             let rpc = net.dispatch(json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
                 "threadId": p.target, "messageId": s5_net::uuid(), "text": p.prompt, "attachments": [],
-                "titleSeed": title_seed(&p.prompt), "deliveryIntent": "auto", "dispatchMode": {"type": "start_immediately"},
+                "titleSeed": crate::chat::thread_title::seed(&p.prompt, &[], &[]), "deliveryIntent": "auto", "dispatchMode": {"type": "start_immediately"},
             }));
             p.stage = Stage::Turn(rpc);
             changed = true;
@@ -323,9 +315,7 @@ fn close(s: &mut App, side: &str) {
     focus(s, side, false);
 }
 
-fn can_operate(s: &App) -> bool {
-    crate::chat::details::grants(s, "orchestration:operate")
-}
+use super::can_operate;
 
 fn confirm_delete(s: &App) -> bool {
     let key = "confirmThreadDelete";
@@ -630,8 +620,6 @@ mod tests {
         assert_eq!(parse("/side"), Some(""));
         assert_eq!(parse("/sidebar"), None);
         assert_eq!(parse("ask /side later"), None);
-        assert_eq!(title_seed("  a  b\nc "), "a b c");
-        assert_eq!(title_seed(&"x".repeat(51)), format!("{}...", "x".repeat(50)));
     }
 
     #[test]
