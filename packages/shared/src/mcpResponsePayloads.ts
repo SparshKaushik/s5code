@@ -15,7 +15,7 @@ function sseEventData(rawEvent: string): string {
     .join("\n");
 }
 
-type BodyReader = Pick<ReadableStreamDefaultReader<Uint8Array>, "read">;
+type BodyReader = Effect.Success<ReturnType<typeof scopedReader>>;
 
 async function* sseDataLines(reader: BodyReader): AsyncGenerator<string> {
   const decoder = new TextDecoder();
