@@ -11,7 +11,7 @@ pub fn builtins() -> &'static Vec<Value> {
     THEMES.get_or_init(|| serde_json::from_str(include_str!("themes.json")).unwrap())
 }
 pub fn library(s: &App) -> Vec<Value> {
-    builtins()
+    let mut out: Vec<Value> = builtins()
         .iter()
         .cloned()
         .chain(
@@ -23,6 +23,72 @@ pub fn library(s: &App) -> Vec<Value> {
                 .flatten()
                 .cloned(),
         )
+        .collect();
+    // `useThemeCards`: published themes come last, and an id already listed wins.
+    for theme in environment_themes(s) {
+        if !out.iter().any(|v| v["id"] == theme["id"]) {
+            out.push(theme);
+        }
+    }
+    out
+}
+
+/// `RESERVED_THEME_IDS`: appearance keywords, built-ins and legacy aliases.
+const RESERVED: [&str; 13] =
+    ["system", "light", "dark", "t3-chat", "grove", "ocean", "ember", "iris", "t3-chat-dark", "t3-grove", "t3-ocean", "t3-ember", "t3-iris"];
+
+/// `publishedThemeDefinitions` over the primary environment's `environmentThemes`.
+fn environment_themes(s: &App) -> Vec<Value> {
+    let Some(src) = crate::env::source(s, crate::env::LOCAL) else { return vec![] };
+    let state = src.state();
+    let Some(themes) = state.config.as_ref().and_then(|c| c["environmentThemes"].as_array()) else { return vec![] };
+    themes.iter().filter_map(environment_theme).collect()
+}
+
+/// `lenientThemeColorOverrides` onto `colors`: known roles with valid colors; the count applied.
+fn overlay_colors(colors: &mut Value, overrides: &Value) -> usize {
+    let mut applied = 0;
+    for (role, css) in overrides.as_object().into_iter().flatten() {
+        if colors.get(role).is_some() && css.as_str().and_then(color).is_some() {
+            colors[role] = css.clone();
+            applied += 1;
+        }
+    }
+    applied
+}
+
+/// `environmentThemeDefinition`: a published theme over the stock roles of each appearance. A
+/// canvas and accent seed generates its own appearance's roles (`createVividThemeColors`).
+pub(crate) fn environment_theme(theme: &Value) -> Option<Value> {
+    let id = theme["id"].as_str().filter(|id| !id.is_empty() && !RESERVED.contains(id))?;
+    let appearance = theme["appearance"].as_str().filter(|a| matches!(*a, "light" | "dark"))?;
+    let other = if appearance == "dark" { "light" } else { "dark" };
+    let seed = |key: &str| theme[key].as_str().filter(|css| color(css).is_some());
+    let seeded = seed("canvas").is_some() && seed("accent").is_some();
+    let stock = palette(&builtins()[0], appearance == "dark");
+    let mut colors = match (seed("canvas"), seed("accent")) {
+        (Some(canvas), Some(accent)) => super::vivid::colors(stock, appearance == "dark", canvas, accent),
+        _ => stock.clone(),
+    };
+    let own = overlay_colors(&mut colors, &theme["colors"]);
+    let mut variant = palette(&builtins()[0], other == "dark").clone();
+    let theirs = overlay_colors(&mut variant, &theme["variants"][other]);
+    if !seeded && own == 0 && theirs == 0 {
+        return None;
+    }
+    let mut out = json!({"id": id, "label": theme["name"].as_str().unwrap_or(id), "appearance": appearance, "colors": colors});
+    if theme["variants"][other].is_object() {
+        out["variants"] = Value::Object(serde_json::Map::from_iter([(other.to_owned(), variant)]));
+    }
+    Some(out)
+}
+
+/// `getThemeModes`: the appearances a theme has colors for.
+pub(crate) fn modes(theme: &Value) -> Vec<&'static str> {
+    let has = |colors: &Value| colors.as_object().is_some_and(|c| !c.is_empty());
+    ["light", "dark"]
+        .into_iter()
+        .filter(|mode| (theme["appearance"] == *mode && has(&theme["colors"])) || has(&theme["variants"][*mode]))
         .collect()
 }
 pub fn color(css: &str) -> Option<Color> {
@@ -185,6 +251,16 @@ fn scheme_colors(s: &App, dark: bool) -> Value {
     preview_palette(theme, dark).clone()
 }
 fn orb(theme: &Value, dark: bool, background: Color) -> El {
+    el().size(56.0, 56.0)
+        .padding(2.0)
+        .radius(28.0)
+        .fill(background)
+        .shadow(1.0, 2.0, Color::BLACK.alpha_mul(if dark { 0.18 } else { 0.08 }))
+        .child(preview_circle(theme, dark, 52.0))
+}
+
+/// `ThemePreviewCircle` without its card border, `d` across; the palette's theme rows use 12.
+pub(crate) fn preview_circle(theme: &Value, dark: bool, d: f32) -> El {
     let p = preview_palette(theme, dark);
     let spec = &preview()["specs"][if dark { "dark" } else { "light" }];
     let point = |key: &str| {
@@ -195,8 +271,8 @@ fn orb(theme: &Value, dark: bool, background: Color) -> El {
     };
     let n = |key: &str, field: &str| spec[key][field].as_f64().unwrap() as f32;
     let top = |key: &str, default: f64| spec[key].as_f64().unwrap_or(default) as f32;
-    let size = 52.0 * top("scale", 1.1);
-    let inset = (size - 52.0) / 2.0;
+    let size = d * top("scale", 1.1);
+    let inset = (size - d) / 2.0;
     let reach = |c: [f32; 2]| size * c[0].max(1.0 - c[0]).hypot(c[1].max(1.0 - c[1]));
     let base = mix_oklab(
         paint(p, "canvas"),
@@ -209,50 +285,43 @@ fn orb(theme: &Value, dark: bool, background: Color) -> El {
     } else {
         Color::BLACK.alpha_mul(0.1)
     };
-    el().size(56.0, 56.0)
-        .padding(2.0)
-        .radius(28.0)
-        .fill(background)
-        .shadow(1.0, 2.0, Color::BLACK.alpha_mul(if dark { 0.18 } else { 0.08 }))
+    el().size(d, d)
+        .radius(d / 2.0)
+        .clip_rounded(d / 2.0)
+        .box_shadow(rune::Shadow {
+            spread: 1.0,
+            color: edge,
+            inset: true,
+            ..Default::default()
+        })
         .child(
-            el().size(52.0, 52.0)
-                .radius(26.0)
-                .clip_rounded(26.0)
-                .box_shadow(rune::Shadow {
-                    spread: 1.0,
-                    color: edge,
-                    inset: true,
-                    ..Default::default()
-                })
-                .child(
-                    el().absolute(-inset, -inset)
-                        .size(size, size)
-                        .fill(base)
-                        .blur(top("blurAt56Px", 3.0))
-                        .radial_gradient(
-                            action,
-                            reach(action),
-                            [
-                                (
-                                    0.0,
-                                    paint(p, "messageAction").alpha_mul(n("action", "startOpacity")),
-                                ),
-                                (n("action", "endOffset"), Color::TRANSPARENT),
-                            ],
-                        )
-                        .child(el().w_full().h_full().radial_gradient(
-                            accent,
-                            reach(accent),
-                            [
-                                (0.0, paint(p, "accent")),
-                                (
-                                    n("accent", "middleOffset"),
-                                    paint(p, "accent").alpha_mul(n("accent", "middleOpacity")),
-                                ),
-                                (n("accent", "endOffset"), Color::TRANSPARENT),
-                            ],
-                        )),
-                ),
+            el().absolute(-inset, -inset)
+                .size(size, size)
+                .fill(base)
+                .blur(top("blurAt56Px", 3.0) * d / 52.0)
+                .radial_gradient(
+                    action,
+                    reach(action),
+                    [
+                        (
+                            0.0,
+                            paint(p, "messageAction").alpha_mul(n("action", "startOpacity")),
+                        ),
+                        (n("action", "endOffset"), Color::TRANSPARENT),
+                    ],
+                )
+                .child(el().w_full().h_full().radial_gradient(
+                    accent,
+                    reach(accent),
+                    [
+                        (0.0, paint(p, "accent")),
+                        (
+                            n("accent", "middleOffset"),
+                            paint(p, "accent").alpha_mul(n("accent", "middleOpacity")),
+                        ),
+                        (n("accent", "endOffset"), Color::TRANSPARENT),
+                    ],
+                )),
         )
 }
 
@@ -551,7 +620,7 @@ pub fn view(s: &App, t: &T) -> El {
             // The standard theme has no actions; other built-ins duplicate, saved themes edit.
             let action = if item["id"] == builtins()[0]["id"] {
                 None
-            } else if builtins().iter().any(|b| b["id"] == item["id"]) {
+            } else if builtins().iter().any(|b| b["id"] == item["id"]) || !is_custom(s, &id) {
                 Some((format!("Duplicate {label}"), &crate::icons::COPY))
             } else {
                 Some(("Edit theme".to_owned(), &crate::icons::PENCIL))
@@ -887,6 +956,17 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
+/// `getThemeModes`: the theme's own appearance, then any other mode its variants cover.
+fn imported_modes(theme: &Value) -> Vec<&'static str> {
+    let mut modes: Vec<&'static str> = ["light", "dark"].into_iter().filter(|m| theme["appearance"] == *m).collect();
+    for mode in ["light", "dark"] {
+        if theme["variants"].get(mode).is_some() && !modes.contains(&mode) {
+            modes.push(mode);
+        }
+    }
+    modes
+}
+
 pub fn import_theme(raw: &str) -> Result<Value, String> {
     let mut theme: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let appearance = theme["appearance"]
@@ -940,7 +1020,10 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .open(true)
         .width(640.0)
         .description("Paste a theme JSON file.")
-        .on_close(|s: &mut App| s.ui.settings.theme_import_open = false)
+        .on_close(|s: &mut App| {
+            s.ui.settings.theme_import_open = false;
+            s.ui.settings.theme_import_error = None;
+        })
         .child(
             rune::text_input(&s.ui.settings.theme_import, theme::MONO_XS)
                 .w_full()
@@ -955,25 +1038,36 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .on_edit(|s: &mut App| &mut s.ui.settings.theme_import),
         )
         .child(
+            text(s.ui.settings.theme_import_error.clone().unwrap_or_default())
+                .role("alert")
+                .font(theme::TEXT_XS.lh(18.0))
+                .color(t.c.destructive)
+                .wrap(),
+        )
+        .child(
             crate::kit::Button::new("Import theme")
-                .on_press(
-                    |s: &mut App| match import_theme(&s.ui.settings.theme_import.text) {
-                        Ok(theme) => {
-                            let mut library = s
-                                .client_settings
-                                .values
-                                .get("customThemes")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            library.push(theme);
-                            super::update(s, "customThemes", json!(library));
-                            s.ui.settings.theme_import_open = false;
-                            s.ui.settings.theme_import.clear();
+                .on_press(|s: &mut App| match import_theme(&s.ui.settings.theme_import.text) {
+                    Ok(theme) => {
+                        let mut library = s.client_settings.values.get("customThemes").and_then(Value::as_array).cloned().unwrap_or_default();
+                        let (id, label) = (theme["id"].clone(), theme["label"].as_str().unwrap_or("Theme").to_owned());
+                        let modes = imported_modes(&theme);
+                        library.push(theme);
+                        super::update(s, "customThemes", json!(library));
+                        // `onImported`: a one-mode theme becomes that half; one with both takes both.
+                        for mode in &modes {
+                            super::update(s, if *mode == "dark" { "themeDark" } else { "themeLight" }, id.clone());
                         }
-                        Err(error) => s.ui.settings.error = Some(error),
-                    },
-                )
+                        let description = match modes.as_slice() {
+                            [mode] => format!("It\u{2019}s now your {mode} theme."),
+                            _ => "It\u{2019}s now active.".to_owned(),
+                        };
+                        crate::shell::palette::toast(s, &format!("{label} added"), Some(&description));
+                        s.ui.settings.theme_import_open = false;
+                        s.ui.settings.theme_import_error = None;
+                        s.ui.settings.theme_import.clear();
+                    }
+                    Err(error) => s.ui.settings.theme_import_error = Some(error),
+                })
                 .build(t),
         )
         .build(t, layers);
@@ -1000,6 +1094,31 @@ mod contrast_tests {
 mod tests {
     use super::*;
     #[test]
+    fn published_themes_follow_the_web_filter_and_keep_their_appearances() {
+        let mono = environment_theme(&json!({"id":"dusk","name":"Dusk","appearance":"dark","colors":{"accent":"#123456"}})).unwrap();
+        assert_eq!((mono["label"].as_str(), modes(&mono)), (Some("Dusk"), vec!["dark"]));
+        assert_eq!(mono["colors"]["accent"], "#123456");
+        let both = environment_theme(&json!({"id":"dawn","name":"Dawn","appearance":"light","canvas":"#fafafa","accent":"#aa3355","colors":{"border":"#010203"},"variants":{"dark":{}}})).unwrap();
+        assert_eq!(modes(&both), vec!["light", "dark"]);
+        // The seed generates the light roles (web's vivid generator), overrides land on top, and the
+        // dark variant stays the stock dark palette.
+        let stock = palette(&builtins()[0], false);
+        assert!(both["colors"]["canvas"].as_str().unwrap().starts_with("oklch(0.98"));
+        assert_ne!(both["colors"]["sidebar"], stock["sidebar"]);
+        assert_ne!(both["colors"]["text"], stock["text"]);
+        assert_eq!(both["colors"]["border"], "#010203");
+        assert_eq!(&both["variants"]["dark"], palette(&builtins()[0], true));
+        for rejected in [
+            json!({"id":"grove","name":"Taken","appearance":"dark","colors":{"accent":"#123456"}}),
+            json!({"id":"empty","name":"Empty","appearance":"dark","colors":{"accent":"url(x)"}}),
+            json!({"id":"half","name":"Half","appearance":"dark","canvas":"#000000"}),
+        ] {
+            assert!(environment_theme(&rejected).is_none(), "FAILED: {rejected}");
+        }
+        assert_eq!(modes(&builtins()[0]), vec!["light", "dark"]);
+    }
+
+    #[test]
     fn theme_import_validates_colors_before_filling_missing_roles() {
         let theme = import_theme(
             r##"{"name":"Example","appearance":"dark","colors":{"accent":"#123456"}}"##,
@@ -1007,6 +1126,9 @@ mod tests {
         .unwrap();
         assert_eq!(theme["colors"]["accent"], "#123456");
         assert!(theme["colors"].get("canvas").is_some());
+        assert_eq!(imported_modes(&theme), ["dark"], "a one-mode theme becomes that half");
+        let both = json!({"appearance": "light", "variants": {"dark": {}}});
+        assert_eq!(imported_modes(&both), ["light", "dark"]);
         assert!(
             import_theme(
                 r#"{"name":"Bad","appearance":"dark","colors":{"accent":"url(example)"}}"#

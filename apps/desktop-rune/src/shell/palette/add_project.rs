@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 
 pub struct Provider {
     pub kind: &'static str,
+    /// `pickerLabel`, for the source rows; `name` is the definition's `label`.
     pub label: &'static str,
+    pub name: &'static str,
     pub hint: &'static str,
     https: bool,
     owner: Owner,
@@ -19,12 +21,12 @@ enum Owner {
 }
 /// The built-in source control definitions, in registry order.
 pub const PROVIDERS: [Provider; 6] = [
-    Provider { kind: "github", label: "GitHub", hint: "owner/repo", https: true, owner: Owner::Always },
-    Provider { kind: "gitlab", label: "GitLab", hint: "group/project", https: false, owner: Owner::Always },
-    Provider { kind: "gitcafe", label: "GitCafe", hint: "owner/repo", https: false, owner: Owner::WithAccount },
-    Provider { kind: "forgejo", label: "Forgejo / Gitea", hint: "owner/repo", https: true, owner: Owner::WithAccount },
-    Provider { kind: "bitbucket", label: "Bitbucket", hint: "workspace/repository", https: false, owner: Owner::Never },
-    Provider { kind: "azure-devops", label: "Azure DevOps", hint: "project/repository", https: false, owner: Owner::Never },
+    Provider { kind: "github", label: "GitHub", name: "GitHub", hint: "owner/repo", https: true, owner: Owner::Always },
+    Provider { kind: "gitlab", label: "GitLab", name: "GitLab", hint: "group/project", https: false, owner: Owner::Always },
+    Provider { kind: "gitcafe", label: "GitCafe", name: "GitCafe", hint: "owner/repo", https: false, owner: Owner::WithAccount },
+    Provider { kind: "forgejo", label: "Forgejo / Gitea", name: "Forgejo", hint: "owner/repo", https: true, owner: Owner::WithAccount },
+    Provider { kind: "bitbucket", label: "Bitbucket", name: "Bitbucket", hint: "workspace/repository", https: false, owner: Owner::Never },
+    Provider { kind: "azure-devops", label: "Azure DevOps", name: "Azure DevOps", hint: "project/repository", https: false, owner: Owner::Never },
 ];
 
 #[derive(Clone, PartialEq, Debug)]
@@ -458,6 +460,10 @@ pub fn busy(s: &App) -> bool {
 pub fn raw_items(s: &App) -> Option<Vec<Item>> {
     if browsing(s) {
         let v = view(s);
+        // `relativePathNeedsActiveProject` shows only its message.
+        if v.needs_project {
+            return Some(vec![]);
+        }
         let mut rows = vec![];
         let group = if confirm_step(s) { "Select where to clone" } else { "Directories" };
         if v.can_up {
@@ -524,13 +530,25 @@ pub fn source_items(s: &App) -> Vec<Item> {
     rows
 }
 fn new_project_items(s: &App) -> Vec<Item> {
-    let mut existing = item("Add existing project", "", &crate::icons::FOLDER_PLUS, "", Action::Source(Source::Existing));
-    existing.description = Some("Open a folder or clone a repository".into());
-    existing.trailing = Trailing::Chevron;
-    let mut rows = vec![existing];
+    let mut rows = vec![];
+    if new_project_machines(s) {
+        let selected = target(s);
+        for key in new_project_options(s) {
+            let local = key == crate::env::LOCAL;
+            let label = option_label(s, &key);
+            let mut v = item(label.clone(), "Environments", crate::settings::env_machine_icon(s, &key), "", Action::NewProjectIn(key.clone()));
+            v.description = Some(if local { "This device".into() } else { key.clone() });
+            v.fields = keywords(&[label.as_str(), key.as_str(), if local { "this device" } else { "" }]);
+            if key == selected {
+                v.trailing = Trailing::Picked;
+            }
+            v.disabled = busy(s);
+            rows.push(v);
+        }
+    }
     let name = s.ui.shell.palette.query.text.trim().to_owned();
     if let (Some((i, owner, several)), Some(root)) = (publish_target(s), new_projects_root(s)) {
-        let label = PROVIDERS[i].label;
+        let label = PROVIDERS[i].name;
         let title = if several { "Create private repository".to_string() } else { format!("Create private repository on {label}") };
         let mut v = item(title, "Options", &crate::icons::GIT_PULL_REQUEST_ARROW, "", Action::TogglePublish);
         v.brand = Some(i);
@@ -543,7 +561,52 @@ fn new_project_items(s: &App) -> Vec<Item> {
         v.disabled = busy(s);
         rows.push(v);
     }
+    let mut existing = item("Add existing project", "", &crate::icons::FOLDER_PLUS, "", Action::Source(Source::Existing));
+    existing.description = Some("Open a folder or clone a repository".into());
+    existing.trailing = Trailing::Chevron;
+    rows.push(existing);
     rows
+}
+
+/// `newProjectEnvironmentOptions`: connected environments with a new-projects root, this device
+/// first, then by label.
+pub fn new_project_options(s: &App) -> Vec<String> {
+    let has_root = |key: &str| {
+        crate::env::source(s, key)
+            .and_then(|src| src.state().config.as_ref())
+            .and_then(|c| c["newProjectsRoot"].as_str())
+            .is_some_and(|root| !root.is_empty())
+    };
+    let mut keys: Vec<String> = crate::env::keys(s).into_iter().filter(|k| crate::env::connected(s, k) && has_root(k)).collect();
+    keys.sort_by_key(|k| (k != crate::env::LOCAL, option_label(s, k)));
+    keys
+}
+
+/// `showNewProjectMachines`: several environments can take it, or the picked one no longer can.
+pub fn new_project_machines(s: &App) -> bool {
+    let options = new_project_options(s);
+    options.len() > 1 || (!options.is_empty() && !options.contains(&target(s)))
+}
+
+/// The summary's " on {label}" while the environment switcher shows.
+pub fn new_project_suffix(s: &App) -> String {
+    if new_project_machines(s) { format!(" on {}", option_label(s, &target(s))) } else { String::new() }
+}
+
+/// The root "New project": the first environment that can take one.
+pub fn start_new(s: &mut App) {
+    let Some(key) = new_project_options(s).into_iter().next() else { return };
+    set_env(s, &key);
+    choose(s, Source::New);
+}
+
+/// `switchNewProjectEnvironment`.
+pub fn switch_new(s: &mut App, key: &str) {
+    if busy(s) {
+        return;
+    }
+    set_env(s, key);
+    request_discovery(s);
 }
 
 // Transitions.
@@ -567,6 +630,12 @@ pub fn open(s: &mut App) {
 }
 /// The source list for adding a project to the environment `key`.
 pub fn open_in(s: &mut App, key: &str) {
+    set_env(s, key);
+    s.ui.shell.palette.add.clone = None;
+    push_page(s, "add-project", "");
+    request_discovery(s);
+}
+fn set_env(s: &mut App, key: &str) {
     let add = &mut s.ui.shell.palette.add;
     if add.env.as_deref() != Some(key) {
         add.discovery = None;
@@ -574,9 +643,6 @@ pub fn open_in(s: &mut App, key: &str) {
         add.browse = None;
     }
     add.env = Some(key.to_owned());
-    add.clone = None;
-    push_page(s, "add-project", "");
-    request_discovery(s);
 }
 /// Whether any environment can take a new project (`canCreateProjectInEnvironment`).
 pub fn any_connected(s: &App) -> bool {
@@ -965,7 +1031,7 @@ pub fn poll(s: &mut App) -> bool {
                 let pending = net.request("sourceControl.publishRepository", json!({
                     "cwd": root, "provider": PROVIDERS[i].kind, "repository": new_repository(&owner, &root), "visibility": "private",
                 }));
-                s.ui.shell.palette.add.published = Some((pending, PROVIDERS[i].label));
+                s.ui.shell.palette.add.published = Some((pending, PROVIDERS[i].name));
             }
             finish(s, Route::Home { project_id: Some(data::s(&v, "projectId").to_owned()) });
         }
@@ -997,12 +1063,21 @@ fn rgb(v: &str) -> rune::Color {
     rune::color::hex(v).unwrap_or(rune::Color::BLACK)
 }
 /// A provider's mark at `size`, or `None` for the generic fallback glyph.
+static BITBUCKET_BODY: rune::Icon = rune::Icon { name: "bitbucket-a", view: 2490.0, body: "<path d=\"M88.92,14.4C45.02,13.83,8.97,48.96,8.41,92.86c-0.06,4.61,0.28,9.22,1.02,13.77l337.48,2048.72 c8.68,51.75,53.26,89.8,105.74,90.24h1619.03c39.38,0.5,73.19-27.9,79.49-66.78l337.49-2071.78c7.03-43.34-22.41-84.17-65.75-91.2 c-4.55-0.74-9.15-1.08-13.76-1.02L88.92,14.4z M1509.99,1495.09H993.24l-139.92-731h781.89L1509.99,1495.09z\" fill=\"currentColor\"/>" };
+static BITBUCKET_FOLD: rune::Icon = rune::Icon { name: "bitbucket-b", view: 2490.0, body: "<path d=\"M2379.27,763.06h-745.5l-125.12,730.42H992.31l-609.67,723.67c19.32,16.71,43.96,26,69.5,26.21h1618.13 c39.35,0.51,73.14-27.88,79.44-66.72L2379.27,763.06z\" fill=\"currentColor\"/>" };
+static AZURE_LEFT: rune::Icon = rune::Icon { name: "azure-devops-a", view: 512.0, body: "<path d=\"M116.1 73.4c-5.8 5.8-13.7 13.8-13.7 22.6v216.4c0 8.9-3.3 17.3-9 23.4s-13.3 9.2-21.1 8.5l-42.7-3.1c-7.9-.5-15-3.9-20.3-9.3-5.7-5.7-9.3-13.7-9.3-22.6V202.7c0-8.9 3.6-16.9 9.4-22.6l2-1.9z\" fill=\"currentColor\"/>" };
+static AZURE_BOTTOM: rune::Icon = rune::Icon { name: "azure-devops-b", view: 512.0, body: "<path d=\"m500.5 366-128 106.7c-5.5 4.6-12.7 7.4-20.5 7.4q-2.4 0-4.8-.3l-112.5-16.9v27.8c0 11.7-9.6 21.3-21.3 21.3-7.3 0-13.5-3.6-17.5-9.1l-36.2-51.4-5.4-7.6-36.6-51.9-7-10c-2.6-3.5-3.9-7.8-3.9-12.3 0-6 2.5-11.6 6.8-15.7 3.8-3.7 9.1-5.8 14.5-5.8.4 0 1 .1 1.5.1l105.2 7.5L384 366.5l93.7 6.7c.7.1 1.6.1 2.3.1 7.8 0 14.9-2.7 20.5-7.3\" fill=\"currentColor\"/>" };
+static AZURE_RIGHT: rune::Icon = rune::Icon { name: "azure-devops-c", view: 512.0, body: "<path d=\"M512 170.7v170.7c0 9.9-4.5 18.8-11.5 24.6l-128 106.7c7-5.9 11.5-14.7 11.5-24.6V175.3c0-16.7 13-30.7 29.8-31.9l63.9-4.6c.7-.1 1.6-.1 2.3-.1 7.8 0 14.9 2.8 20.5 7.4 7 5.8 11.5 14.6 11.5 24.6\" fill=\"currentColor\"/>" };
+static AZURE_TOP: rune::Icon = rune::Icon { name: "azure-devops-d", view: 512.0, body: "<path d=\"M384 125.5c0 11.2-8.6 20.5-19.8 21.3-.5 0-1.1.1-1.6.1l-127.9 9.2-132.3 9.1-72.7 5.5c-6.9.4-13.2 3.1-18.2 7.4L116.1 73.4c4.7-4.7 10.9-8 17.8-9.1l100.8-15.1V21.3C234.7 9.6 244.3 0 256 0c5.8 0 11.1 2.3 14.9 6.1l33.4 32.6 16.9 16.5 40.3 39.3 16.1 15.8c4.1 3.9 6.4 9.4 6.4 15.2\" fill=\"currentColor\"/>" };
 pub fn brand(provider: usize, size: f32, muted: rune::Color) -> Option<rune::El> {
     let layers: Vec<(&'static rune::Icon, rune::Color)> = match PROVIDERS[provider].kind {
         "github" => vec![(&GITHUB, muted)],
         "gitlab" => vec![(&GITLAB_RED, rgb("#E24329")), (&GITLAB_ORANGE, rgb("#FC6D26")), (&GITLAB_YELLOW, rgb("#FCA326"))],
         "gitcafe" => vec![(&GITCAFE, rgb("#a78bfa"))],
         "forgejo" => vec![(&FORGEJO_ORANGE, rgb("#ff6600")), (&FORGEJO_RED, rgb("#d40000"))],
+        // The marks' gradients flattened to one stop per layer.
+        "bitbucket" => vec![(&BITBUCKET_BODY, rgb("#2684FF")), (&BITBUCKET_FOLD, rgb("#0052CC"))],
+        "azure-devops" => vec![(&AZURE_LEFT, rgb("#2052cb")), (&AZURE_BOTTOM, rgb("#2052cb")), (&AZURE_RIGHT, rgb("#367af2")), (&AZURE_TOP, rgb("#0fafff"))],
         _ => return None,
     };
     let mut mark = rune::el().w(size).h(size);
@@ -1058,6 +1133,33 @@ mod tests {
         assert_eq!(s.ui.shell.palette.page, "add-environment");
         assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Connect an environment"]);
         assert!(matches!(&rows[0].action, Action::Navigate(crate::Route::Settings(p)) if p == "connections"));
+    }
+    #[test]
+    fn new_project_starts_on_the_first_environment_and_switches_between_them() {
+        let ready = |root: &str| {
+            let mut state = crate::data::empty_state();
+            state.conn = s5_net::Conn::Open;
+            state.shell_ready = true;
+            state.config = Some(json!({"newProjectsRoot": root}));
+            state
+        };
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(ready("/home/me/new"));
+        assert_eq!(new_project_options(&s), [crate::env::LOCAL]);
+        assert!(!new_project_machines(&s), "FAILED: one environment needs no switcher");
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: "t".into() });
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(ready("/srv/new")));
+        crate::shell::palette::reset(&mut s, true);
+        start_new(&mut s);
+        assert_eq!((s.ui.shell.palette.page.as_str(), target(&s)), ("add-new", crate::env::LOCAL.to_owned()));
+        let rows = new_project_items(&s);
+        let shape: Vec<_> = rows.iter().map(|r| (r.group, r.title.as_str(), matches!(r.trailing, Trailing::Picked))).collect();
+        assert_eq!(shape, [("Environments", "This device", true), ("Environments", "Box", false), ("", "Add existing project", false)]);
+        assert_eq!(new_project_suffix(&s), " on This device");
+        switch_new(&mut s, "box");
+        assert_eq!(new_projects_root(&s).as_deref(), Some("/srv/new"), "FAILED: the picked environment's root");
+        assert_eq!(new_project_suffix(&s), " on Box");
+        assert_eq!(s.ui.shell.palette.page, "add-new", "FAILED: switching stays on the page");
     }
     #[test]
     fn browse_paths_follow_client_runtime() {

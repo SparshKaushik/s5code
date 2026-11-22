@@ -22,6 +22,8 @@ pub struct Ui {
     pub rescan: bool,
     app: AppSignIn,
     app_revealed: bool,
+    /// Hosts whose signed-in account is shown (`RedactedAccount`).
+    accounts: HashSet<String>,
 }
 
 /// Web `SourceControlAppSignInSettings`'s state: GitHub's device flow, run by the server.
@@ -278,8 +280,8 @@ fn enabled(item: &Value) -> bool {
     }
 }
 
-/// `itemSummary`: the line under the label.
-pub fn summary(item: &Value) -> String {
+/// `itemSummary`: the line under the label, the account redacted until `reveal`.
+pub fn summary(item: &Value, reveal: bool) -> String {
     let label = item["label"].as_str().unwrap_or("");
     let hint = item["installHint"].as_str().unwrap_or("");
     if not_ready(item) {
@@ -297,7 +299,8 @@ pub fn summary(item: &Value) -> String {
         Some("authenticated") => {
             let mut line = "Authenticated".to_owned();
             if let Some(account) = opt(&auth["account"]) {
-                line.push_str(&format!(" as {account}"));
+                let shown = if reveal { account.to_owned() } else { crate::pages::usage_limits::redacted(account) };
+                line.push_str(&format!(" as {shown}"));
             }
             if let Some(detail) = detail {
                 line.push_str(&format!(" · {detail}"));
@@ -326,6 +329,22 @@ fn dot(item: &Value, t: &T) -> rune::Color {
     } else {
         t.c.success
     }
+}
+
+/// The summary line; with a signed-in account, a click reveals or hides it.
+fn account_summary(s: &App, item: &Value, kind: &str, t: &T) -> El {
+    let revealed = s.ui.settings.source_control.accounts.contains(kind);
+    let line = text(summary(item, revealed)).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground.alpha_mul(0.8)).wrap();
+    if !is_provider(item) || item["auth"]["status"] != "authenticated" || opt(&item["auth"]["account"]).is_none() {
+        return line;
+    }
+    let kind = kind.to_owned();
+    line.key(format!("source-control-account-{kind}")).focusable(true).role("button").label("Toggle source control account visibility").on_press(move |s: &mut App| {
+        let accounts = &mut s.ui.settings.source_control.accounts;
+        if !accounts.remove(&kind) {
+            accounts.insert(kind.clone());
+        }
+    })
 }
 
 fn item_row(s: &App, item: &Value, t: &T) -> El {
@@ -359,7 +378,7 @@ fn item_row(s: &App, item: &Value, t: &T) -> El {
                 .min_w(0.0)
                 .gap(4.0)
                 .child(heading)
-                .child(text(summary(item)).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground.alpha_mul(0.8)).wrap()),
+                .child(account_summary(s, item, kind, t)),
         );
     let panel = is_provider(item) && has_panel(kind);
     let expanded = panel && s.ui.settings.source_control.open.contains(kind);
@@ -903,6 +922,20 @@ fn rescan(pending: bool, t: &T) -> El {
 /// The scan sections, in web order after Repositories.
 pub fn view(s: &App, t: &T) -> Vec<El> {
     let pending = s.ui.settings.pending.values().any(|m| m == DISCOVERY);
+    if let Some(error) = s.ui.settings.results.get(DISCOVERY).and_then(|r| r[super::LOAD_ERROR].as_str()) {
+        // `EmptySourceControlDiscovery` with an error.
+        let scan_button = crate::kit::Button::new("Scan").variant("outline").size("sm").icon(&icons::REFRESH_CW).disabled(pending).on_press(scan).build(t);
+        let body = col()
+            .w_full()
+            .items_center()
+            .gap(8.0)
+            .px(16.0)
+            .py(24.0)
+            .child(text("Could not scan the server environment").font(theme::SM_MEDIUM).color(t.c.foreground))
+            .child(text(error.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap())
+            .child(row().pt(4.0).child(scan_button));
+        return vec![c::section("Server environment", vec![body], t).key(super::title_key("Source control"))];
+    }
     let Some(result) = s.ui.settings.results.get(DISCOVERY) else {
         let body = text(if pending { "Scanning the server environment…" } else { "Connect an environment to inspect its version control tools and hosting integrations." })
             .font(theme::TEXT_SM)
@@ -968,17 +1001,18 @@ mod tests {
     #[test]
     fn summaries_follow_web_item_summary() {
         let git = json!({"kind":"git","label":"Git","implemented":true,"status":"available","installHint":"Install Git"});
-        assert_eq!(summary(&git), "Available");
+        assert_eq!(summary(&git, false), "Available");
         let jj = json!({"kind":"jj","label":"Jujutsu","implemented":false,"status":"missing","installHint":"x"});
-        assert_eq!(summary(&jj), "Support for Jujutsu is coming soon.");
+        assert_eq!(summary(&jj, false), "Support for Jujutsu is coming soon.");
         let gh = json!({"kind":"github","label":"GitHub","executable":"gh","status":"available","installHint":"Install gh",
             "auth":{"status":"authenticated","account":{"_tag":"Some","value":"octo"},"detail":{"_tag":"None"}}});
-        assert_eq!(summary(&gh), "Authenticated as octo");
+        assert_eq!(summary(&gh, true), "Authenticated as octo");
+        assert!(!summary(&gh, false).contains("octo"), "the account stays redacted until revealed");
         let signed_out = json!({"kind":"github","label":"GitHub","executable":"gh","status":"available","installHint":"Install gh",
             "auth":{"status":"unauthenticated","account":null,"detail":null}});
-        assert!(summary(&signed_out).starts_with("GitHub is not authenticated on this server."));
+        assert!(summary(&signed_out, false).starts_with("GitHub is not authenticated on this server."));
         let missing = json!({"kind":"gitlab","label":"GitLab","status":"missing","installHint":"Install glab","auth":{"status":"unknown"}});
-        assert_eq!(summary(&missing), "Not available on this server: Install glab");
+        assert_eq!(summary(&missing, false), "Not available on this server: Install glab");
     }
 
     #[test]

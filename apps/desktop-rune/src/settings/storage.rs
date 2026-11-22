@@ -644,6 +644,7 @@ fn cleanup(s: &App, cx: &Cx<App>, t: &T) -> El {
         _ if !rules => "Turn on a cleanup rule to use this.".to_owned(),
         Some(report) => last_run(report, s.now_ms),
         None if failed => "Could not load the last run.".to_owned(),
+        None if streamed.is_none() => "Loading last run…".to_owned(),
         None => "Cleanup hasn't run yet.".to_owned(),
     };
     let delete = crate::kit::Button::new(if pending { "Deleting…" } else { "Delete now" })

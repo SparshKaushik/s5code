@@ -1957,11 +1957,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let dropped = drawing(s);
     // The capture fly-in lands on the main composer, not a side chat's.
     let main = !side(s);
+    let window = crate::desktop::capture::window_size(cx);
     let mut body = col()
         .key(keyed(s, "composer"))
         .on_screen_layout(move |s: &mut App, rect: [f32; 4]| {
             if main {
-                crate::desktop::capture::note_composer(s, rect);
+                crate::desktop::capture::note_composer(s, rect, window);
             }
         })
         .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
