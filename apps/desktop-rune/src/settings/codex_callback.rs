@@ -167,7 +167,7 @@ enum Purpose {
     Handoff(Handoff),
 }
 
-fn open_browser(url: &str) -> bool {
+pub(crate) fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let program = "open";
     #[cfg(not(target_os = "macos"))]

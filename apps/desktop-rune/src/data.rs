@@ -47,6 +47,7 @@ pub fn empty_state() -> State {
         thread_views: HashMap::new(),
         vcs: HashMap::new(),
         shell_revision: 0,
+        conn_trace: None,
     }
 }
 
