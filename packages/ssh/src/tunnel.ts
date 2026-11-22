@@ -606,10 +606,10 @@ const REMOTE_MANAGED_SERVER_RUNNING_SCRIPT = `managed_server_running() {
   ! ps -ww -o args= -p "$$" >/dev/null 2>&1
 }`;
 
-// NFS-shared homes can link ~/.t3 to a directory that does not exist yet, and
+// NFS-shared homes can link the server home to a directory that does not exist yet, and
 // mkdir -p fails with EEXIST on a dangling symlink, so create its target first.
-const REMOTE_ENSURE_T3_HOME_SCRIPT = `if [ -L "$HOME/.t3" ] && [ ! -e "$HOME/.t3" ]; then
-  (cd "$HOME" && mkdir -p "$(readlink .t3)")
+const REMOTE_ENSURE_T3_HOME_SCRIPT = `if [ -L "${REMOTE_SERVER_HOME}" ] && [ ! -e "${REMOTE_SERVER_HOME}" ]; then
+  (cd "$HOME" && mkdir -p "$(readlink ${SERVER_HOME_DIR_NAME})")
 fi`;
 
 const REMOTE_LAUNCH_SCRIPT = `set -eu

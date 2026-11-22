@@ -10,6 +10,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
+import { SERVER_HOME_DIR_NAME } from "@t3tools/shared/serverHome";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -181,7 +182,7 @@ const localRemoteShellLayer = (home: string) =>
   );
 
 // Runs the remote half of each SSH command on this machine with `home` as $HOME,
-// so the generated scripts execute for real. Launches skip the login-shell
+// so the generated scripts execute for real. Both commands skip the login-shell
 // wrapper, like localRemoteShellLayer, so this machine's profiles cannot move HOME.
 const remoteOnLocalHost = (home: string) =>
   Layer.effect(
@@ -189,14 +190,10 @@ const remoteOnLocalHost = (home: string) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       return ChildProcessSpawner.make((command) => {
-        const args = commandArgs(command);
         const stateKey = launchStateKey(command);
-        const [shell = "sh", ...remoteArgs] =
-          stateKey === undefined
-            ? args.slice(args.indexOf("--") + 2)
-            : ["sh", "-s", "--", stateKey];
+        const remoteArgs = stateKey === undefined ? ["-s"] : ["-s", "--", stateKey];
         return spawner.spawn(
-          ChildProcess.make(shell, remoteArgs, {
+          ChildProcess.make("sh", remoteArgs, {
             ...(command._tag === "StandardCommand" ? command.options : {}),
             env: { HOME: home },
             extendEnv: true,
@@ -426,7 +423,10 @@ describe("ssh tunnel scripts", () => {
           assert.equal(result.stdout, "host t3 serve\n");
         } else {
           assert.notEqual(result.status, 0);
-          assert.include(result.stderr, "has no t3 release archive.");
+          assert.include(
+            result.stderr,
+            "S5 Code publishes SSH server archives for Linux hosts only",
+          );
         }
       } finally {
         NodeFS.rmSync(root, { recursive: true, force: true });
@@ -567,7 +567,7 @@ describe("ssh tunnel scripts", () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-home-" });
-        const serverHome = path.join(home, ".s5code");
+        const serverHome = path.join(home, SERVER_HOME_DIR_NAME);
         const runtimeDir = path.join(serverHome, "runtime", "versions", ARCHIVE.archiveVersion);
         yield* fs.makeDirectory(runtimeDir, { recursive: true });
         yield* fs.makeDirectory(path.join(serverHome, "userdata"));
@@ -1842,13 +1842,13 @@ const canBind = (port) =>
       const fs = yield* FileSystem.FileSystem;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-archive-launch-" });
       const home = `${root}/home`;
-      const stateDir = `${home}/.t3/ssh-launch/test-state`;
+      const stateDir = `${home}/${SERVER_HOME_DIR_NAME}/ssh-launch/test-state`;
       const fakeT3 = `${root}/fake-t3.cjs`;
       yield* fs.makeDirectory(stateDir, { recursive: true });
       yield* fs.writeFileString(`${stateDir}/port`, `${yield* freeLoopbackPort}\n`);
       yield* fs.writeFileString(fakeT3, FAKE_T3);
       for (const version of versions) {
-        const runtimeDir = `${home}/.t3/runtime/versions/${version}`;
+        const runtimeDir = `${home}/${SERVER_HOME_DIR_NAME}/runtime/versions/${version}`;
         yield* fs.makeDirectory(runtimeDir, { recursive: true });
         yield* fs.writeFileString(
           `${runtimeDir}/t3`,
@@ -1861,7 +1861,7 @@ const canBind = (port) =>
         .readFileString(`${stateDir}/pid`)
         .pipe(Effect.map((pid) => Number(pid.trim())));
       const readServerVersion = fs
-        .readFileString(`${home}/.t3/userdata/server-runtime.json`)
+        .readFileString(`${home}/${SERVER_HOME_DIR_NAME}/userdata/server-runtime.json`)
         .pipe(Effect.map((raw) => (JSON.parse(raw) as { serverVersion: string }).serverVersion));
       // Launched servers outlive the script, so stop each PID it recorded.
       const launchedPids = new Set<number>();
@@ -1907,27 +1907,29 @@ const canBind = (port) =>
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  // An NFS home can carry a ~/.t3 symlink whose target exists only on another host.
-  it.live.skipIf(windowsHost)("launches through a ~/.t3 symlink whose target is missing", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dangling-home-" });
-      const home = `${root}/home`;
-      const target = `${root}/shared/t3`;
-      yield* fs.makeDirectory(home, { recursive: true });
-      yield* fs.symlink(target, `${home}/.t3`);
-      const launch = `${root}/launch.sh`;
-      yield* fs.writeFileString(
-        launch,
-        SshTunnel.buildRemoteLaunchScript({
-          archiveVersion: "0.1.6",
-          releaseBaseUrl: "http://127.0.0.1:9",
-        }),
-      );
-      const result = yield* runScript(home, [launch, "test-state"]);
-      assert.notInclude(result.stderr, "File exists");
-      assert.isTrue(yield* fs.exists(`${target}/ssh-launch/test-state`), result.stderr);
-    }).pipe(Effect.provide(NodeServices.layer)),
+  // An NFS home can carry a server-home symlink whose target exists only on another host.
+  it.live.skipIf(windowsHost)(
+    "launches through a server-home symlink whose target is missing",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dangling-home-" });
+        const home = `${root}/home`;
+        const target = `${root}/shared/t3`;
+        yield* fs.makeDirectory(home, { recursive: true });
+        yield* fs.symlink(target, `${home}/${SERVER_HOME_DIR_NAME}`);
+        const launch = `${root}/launch.sh`;
+        yield* fs.writeFileString(
+          launch,
+          SshTunnel.buildRemoteLaunchScript({
+            archiveVersion: "0.1.6",
+            releaseBaseUrl: "http://127.0.0.1:9",
+          }),
+        );
+        const result = yield* runScript(home, [launch, "test-state"]);
+        assert.notInclude(result.stderr, "File exists");
+        assert.isTrue(yield* fs.exists(`${target}/ssh-launch/test-state`), result.stderr);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.live.skipIf(windowsHost)("a newer client still replaces an older managed server", () =>

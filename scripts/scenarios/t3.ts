@@ -258,15 +258,20 @@ type ScenarioRpcClient = RpcClient.RpcClient<
   RpcClientError.RpcClientError
 >;
 
-/** The typed RPC client of the server on `home` at `origin`, signed in through its own CLI. */
-export const rpcClient = Effect.fn("scenario.rpcClient")(function* (
+type MakeScenarioRpcClient = (
   home: string,
   origin: string,
-): Effect.fn.Return<
+) => Effect.Effect<
   ScenarioRpcClient,
   ScenarioError | HttpClientError.HttpClientError | Schema.SchemaError,
   ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
-> {
+>;
+
+/** The typed RPC client of the server on `home` at `origin`, signed in through its own CLI. */
+export const rpcClient: MakeScenarioRpcClient = Effect.fn("scenario.rpcClient")(function* (
+  home: string,
+  origin: string,
+) {
   const issued = yield* makeState(home).cli(["auth", "session", "issue", "--token-only"]);
   const { ticket } = yield* HttpClient.execute(
     HttpClientRequest.post(`${origin}/api/auth/websocket-ticket`).pipe(
