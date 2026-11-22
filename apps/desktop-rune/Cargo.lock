@@ -3045,6 +3045,7 @@ version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "futures-util",
  "image",
  "pulldown-cmark",
  "qrcodegen",
@@ -3055,9 +3056,11 @@ dependencies = [
  "rune-mac",
  "s5-net",
  "serde_json",
+ "tokio",
  "tungstenite",
  "unicode-normalization",
  "ureq",
+ "zbus 6.2.1",
 ]
 
 [[package]]

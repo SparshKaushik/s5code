@@ -18,6 +18,7 @@ use crate::shell::palette;
 pub mod automations;
 pub mod child_work;
 pub mod cleanup;
+pub mod editor_icons;
 mod git;
 pub mod html_render;
 pub mod items;
@@ -391,10 +392,14 @@ fn vcs<'a>(s: &'a App) -> Option<&'a Value> {
 
 /// Subscribes to the framed checkout's status, as the card's `useVcsStatus` does.
 pub fn watch(s: &mut App) {
-    if let Some(cwd) = cwd(s)
-        && let Some(net) = s.src.net()
-    {
-        net.watch_vcs(&cwd);
+    // The project checkout too (BranchToolbar's `projectStatusQuery`): its root tells a ref's own
+    // worktree from another one while the thread works in a worktree.
+    let project = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).filter(|p| !p.is_empty());
+    let cwd = cwd(s);
+    if let Some(net) = s.src.net() {
+        for path in cwd.iter().chain(project.iter()) {
+            net.watch_vcs(path);
+        }
     }
     scripts::load_file(s, false);
     servers::watch(s);
@@ -1065,6 +1070,24 @@ fn can_open_editor(s: &App) -> bool {
     editor_mode(s) != crate::env::ssh::OpenMode::Unavailable && !editor_denied(s)
 }
 
+/// OpenInPicker's option icon: the editor's brand mark; the file manager is Finder, File
+/// Explorer, or a muted folder elsewhere. `None` for an editor web draws no icon for.
+fn editor_mark(t: &T, id: &str, size: f32) -> Option<El> {
+    let id = match id {
+        "file-manager" if cfg!(target_os = "macos") => "finder",
+        "file-manager" if cfg!(target_os = "windows") => "file-explorer",
+        "file-manager" => return Some(icon(&icons::FOLDER_CLOSED, size).color(t.c.muted_foreground)),
+        "antigravity" => return composer::provider_mark(t, "antigravity", size),
+        id => id,
+    };
+    let layers = editor_icons::layers(id)?;
+    Some(layers.iter().fold(el().size(size, size), |mark, &(glyph, light, dark)| {
+        let hex = if t.dark { dark } else { light };
+        let color = if hex == "currentColor" { t.c.foreground } else { rune::color::hex(hex).unwrap_or(t.c.foreground) };
+        mark.child(icon(glyph, size).color(color).absolute(0.0, 0.0))
+    }))
+}
+
 /// `editorLabelForPlatform`: the file manager takes this machine's name for it.
 fn editor_label(id: &str) -> String {
     match id {
@@ -1218,7 +1241,8 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
         "details-editor-menu",
         {
             let label = preferred.as_ref().map_or_else(|| "Open in editor".to_string(), |(_, name)| format!("Open in {name}"));
-            let open = action(t, "details-editor", icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted), &label, fg);
+            let glyph = preferred.as_ref().and_then(|(id, _)| editor_mark(t, id, 16.0)).unwrap_or_else(|| icon(&icons::SQUARE_ARROW_OUT_UP_RIGHT, 16.0).color(muted));
+            let open = action(t, "details-editor", glyph, &label, fg);
             // No editor found: the button is disabled (opacity-64), the chooser still opens.
             if preferred.is_none() || !can_open_editor(s) { open.opacity(0.64).cursor(Cursor::Default) } else { open.help(with_shortcut(s, &label, "editor.openFavorite")).on_press(|s: &mut App| open_in_editor(s, None)) }
         },
@@ -1367,7 +1391,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             for (id, label) in editors {
                 let mark = (preferred.as_deref() == Some(id.as_str()) && !shortcut.is_empty()).then(|| text(shortcut.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground));
                 list = list.child(
-                    menu_row(t, None, &label, Some(move |s: &mut App| {
+                    menu_row(t, editor_mark(t, &id, 16.0), &label, Some(move |s: &mut App| {
                         s.ui.chat.details.menu = None;
                         set_preferred_editor(s, &id);
                     }), None)
@@ -1901,6 +1925,19 @@ mod tests {
         assert!(ref_disabled(&s, &r(None)), "FAILED: switching needs source-control:write");
         assert!(!ref_disabled(&s, &r(Some("/wt/feature"))), "FAILED: moving to an existing worktree does not");
         assert!(!can_change_branch(&s));
+    }
+
+    #[test]
+    fn every_editor_web_lists_has_its_brand_mark() {
+        // contracts EDITORS, in order.
+        let ids = ["cursor", "trae", "kiro", "vscode", "vscode-insiders", "vscodium", "zed", "antigravity", "idea", "aqua", "clion", "datagrip", "dataspell", "goland", "phpstorm", "pycharm", "rider", "rubymine", "rustrover", "webstorm", "file-manager"];
+        for dark in [false, true] {
+            let t = crate::theme::theme(dark);
+            for id in ids {
+                assert!(super::editor_mark(&t, id, 16.0).is_some(), "FAILED: {id} has no mark");
+            }
+        }
+        assert!(super::editor_mark(&crate::theme::theme(true), "nano", 16.0).is_none());
     }
 
     #[test]

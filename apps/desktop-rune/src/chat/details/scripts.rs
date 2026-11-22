@@ -323,6 +323,17 @@ fn edit_denied(s: &App, changes_keybinding: bool) -> Option<&'static str> {
     }
 }
 
+/// A chat code block's "Run in terminal" (runShellCommand): the project-script terminal, the
+/// command kept in shell history and not remembered as the last action.
+pub fn run_command(s: &mut App, command: &str) {
+    if !can_run(s) {
+        return;
+    }
+    let worktree = composer::ctx(s).thread.map(|t| data::s(t, "worktreePath").to_string()).filter(|p| !p.is_empty());
+    let Some(cwd) = super::cwd(s) else { return };
+    crate::panel::drawer::run(s, &cwd, worktree.as_deref(), format!("{command}\r"));
+}
+
 pub fn run(s: &mut App, script: &Value) {
     if !can_run(s) {
         return;
@@ -560,20 +571,25 @@ pub fn view(s: &App, t: &T) -> El {
     let scripts = scripts(s);
     let Some(script) = preferred(s, &scripts) else {
         if !importable(&scripts, &file_scripts(s)).is_empty() {
-            let main = super::action(t, "details-script-actions", icon(&icons::WRENCH, 16.0).color(muted), "Actions", fg).on_press(|s: &mut App| super::toggle_menu(s, super::Menu::Scripts));
-            return super::split(t, "details-scripts-menu", main, "Choose project action", super::Menu::Scripts);
+            let main = super::action(t, "details-script-actions", icon(&icons::WRENCH, 16.0).color(muted), "Actions", fg).label("Project actions").on_press(|s: &mut App| super::toggle_menu(s, super::Menu::Scripts));
+            return super::split(t, "details-scripts-menu", main, "Choose project action", super::Menu::Scripts).role("group").label("Project actions");
         }
         return super::action(t, "details-script", icon(&icons::PLUS, 14.0).color(fg), "Add project script", fg).gap(12.0).w_full().on_press(|s: &mut App| open_editor(s, None));
     };
     let name = data::s(script, "name");
     let owned = script.clone();
     let can_run = can_run(s);
-    let main = super::action(t, "details-script-run", icon(icon_for(data::s(script, "icon")), 16.0).color(muted), name, fg).help(format!("Run {name}"));
+    let main = super::action(t, "details-script-run", icon(icon_for(data::s(script, "icon")), 16.0).color(muted), name, fg).label(format!("Run {name}")).help(run_help(s, name));
     let main = if can_run { main.on_press(move |s: &mut App| run(s, &owned)) } else { main.opacity(0.64) };
-    super::split(t, "details-scripts-menu", main, "Project scripts", super::Menu::Scripts)
+    super::split(t, "details-scripts-menu", main, "Script actions", super::Menu::Scripts).role("group").label("Project scripts")
 }
 
 /// The scripts menu's rows: each script with its shortcut and edit button, then "Add".
+/// The run button's tooltip: a connection that can't type into terminals is told to pair again.
+fn run_help(s: &App, name: &str) -> String {
+    if super::grants(s, "terminal:operate") { format!("Run {name}") } else { "Pair this client again with permission to run terminal commands.".into() }
+}
+
 pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
     let can_run = can_run(s);
     let mut rows = vec![];
@@ -859,6 +875,7 @@ mod tests {
 
         super::super::set_session(&mut s, session(&["orchestration:read"]));
         assert!(!can_run(&s), "FAILED: running needs terminal:operate");
+        assert_eq!(run_help(&s, "Test"), "Pair this client again with permission to run terminal commands.");
         save(&mut s);
         assert_eq!(s.ui.chat.details.scripts.editor.as_ref().and_then(|e| e.error.as_deref()), Some("This connection cannot change project actions."));
 
