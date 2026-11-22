@@ -219,6 +219,8 @@ pub fn indicator(s: &App, main: Option<[f32; 4]>, t: &T) -> Option<El> {
 /// Render scenes: a swipe `distance` points along, the pointer at mid height.
 pub(crate) fn scene(s: &mut App, back: bool, distance: f32) {
     s.ui.shell.swipe.gesture = Some(Gesture::Tracking { back, distance, deltas: Vec::new(), y: 420.0 });
+    // Never quiet, so `poll` doesn't end the gesture before the scene draws.
+    s.ui.shell.swipe.last = i64::MAX;
 }
 
 #[cfg(test)]
