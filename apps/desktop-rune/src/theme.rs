@@ -21,11 +21,18 @@ pub struct T {
     pub code: f32,
     /// One CSS `px` in layout points: px-literal sizes ignore the interface size, as on web.
     pub px: f32,
+    /// `--chat-content-max-width` under the Chat width setting.
+    pub chat_w: f32,
+    /// The Render math setting.
+    pub math: bool,
+    /// The prompt editor's type under the Prompt font setting.
+    pub prompt: TextStyle,
 }
 
 pub fn theme(dark: bool) -> T {
     use crate::tokens::*;
-    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK, code: 13.0, px: 1.0 } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT, code: 13.0, px: 1.0 } }
+    let (c, sb) = if dark { (DARK, SIDEBAR_DARK) } else { (LIGHT, SIDEBAR_LIGHT) };
+    T { dark, c, sb, code: 13.0, px: 1.0, chat_w: layout::CHAT_MAX_W, math: false, prompt: TEXT_SM.lh(22.75) }
 }
 
 /// Tailwind's `color/NN` opacity modifier: multiplies the token's own alpha.
@@ -37,6 +44,24 @@ impl AlphaMul for Color {
     fn alpha_mul(self, k: f32) -> Color {
         self.alpha(self.a * k)
     }
+}
+
+/// CSS `color-mix(in srgb, a p, b)`: `p` of `a`, interpolated premultiplied in gamma-encoded sRGB.
+pub fn mix_srgb(a: Color, b: Color, p: f32) -> Color {
+    use rune::color::{srgb_decode, srgb_encode};
+    let (wa, wb) = (a.a * p, b.a * (1.0 - p));
+    let alpha = wa + wb;
+    if alpha <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    let ch = |x: f32, y: f32| srgb_decode((srgb_encode(x) * wa + srgb_encode(y) * wb) / alpha);
+    Color { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: alpha }
+}
+
+/// `--guest-surface` (`bg-guest-surface`, a guest's bubble): `color-mix(in srgb, var(--guest)
+/// 14%, var(--message-surface))`, so it follows whatever message surface the theme sets.
+pub fn guest_surface(c: &Tokens) -> Color {
+    mix_srgb(c.guest, c.message_surface, 0.14)
 }
 
 /// `--radius` is 0.5rem; Tailwind's `rounded-*` steps derive from it.
@@ -103,4 +128,18 @@ pub mod layout {
     pub const THREAD_DETAILS_W: f32 = 280.0;
     pub const CONTROL_RADIUS: f32 = 8.0;
     pub const TITLEBAR_CONTROL: f32 = 28.0;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_guest_surface_mixes_like_the_web_app() {
+        // The generated tokens are the browser's own computed `--guest-surface`.
+        for dark in [false, true] {
+            let c = super::theme(dark).c;
+            let mixed = super::guest_surface(&c);
+            let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+            assert!(close(mixed.r, c.guest_surface.r) && close(mixed.g, c.guest_surface.g) && close(mixed.b, c.guest_surface.b) && close(mixed.a, 1.0), "{dark}: {mixed:?}");
+        }
+    }
 }

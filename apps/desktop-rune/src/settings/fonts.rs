@@ -85,24 +85,55 @@ fn terminal_font(values: &Map<String, Value>, installed: impl Fn(&str) -> bool) 
     named(field(values, "fontFamilyTerminal")).into_iter().find(|name| installed(name)).map_or(TerminalFont::Default, TerminalFont::Named)
 }
 
+/// Whether a family's files loaded at launch.
+fn loaded(name: &str) -> bool {
+    LAUNCHED.get().is_some_and(|l| l.iter().any(|(n, ok)| *ok && *n == name.to_lowercase()))
+}
+
+/// `Family::Named` wants a static name; each distinct family leaks once.
+fn leak(name: &str) -> &'static str {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let found = names.iter().copied().find(|n| *n == name);
+    found.unwrap_or_else(|| {
+        let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        names.push(leaked);
+        leaked
+    })
+}
+
 /// The terminal's Rune family for these client settings.
 pub fn terminal_family(values: &Map<String, Value>) -> rune::Family {
-    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let loaded = |name: &str| LAUNCHED.get().is_some_and(|l| l.iter().any(|(n, ok)| *ok && *n == name.to_lowercase()));
     match terminal_font(values, loaded) {
         TerminalFont::Code => rune::Family::Mono,
         TerminalFont::Default => rune::Family::SystemMono,
-        TerminalFont::Named(name) => {
-            let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-            // `Family::Named` wants a static name; each distinct family leaks once.
-            let found = names.iter().copied().find(|n| *n == name);
-            rune::Family::Named(found.unwrap_or_else(|| {
-                let leaked: &'static str = Box::leak(name.into_boxed_str());
-                names.push(leaked);
-                leaked
-            }))
+        TerminalFont::Named(name) => rune::Family::Named(leak(&name)),
+    }
+}
+
+/// The first family of `--font-composer` the app can draw: a generic monospace is the system's,
+/// any other generic and the `var(--font-sans)` fallback the sans slot.
+fn prompt_family(field: &str, installed: impl Fn(&str) -> bool) -> rune::Family {
+    for entry in field.split(',').map(|f| f.trim().trim_matches(['"', '\'']).trim()).filter(|f| !f.is_empty()) {
+        match entry.to_ascii_lowercase().as_str() {
+            "monospace" | "ui-monospace" => return rune::Family::SystemMono,
+            generic if GENERIC.contains(&generic) => return rune::Family::Sans,
+            _ if installed(entry) => return rune::Family::Named(leak(entry)),
+            _ => {}
         }
     }
+    rune::Family::Sans
+}
+
+/// The prompt editor's type (`--font-composer`, `--font-size-prompt`): under separate fonts its
+/// own family and px size, else the interface's `text-sm`; `leading-relaxed` either way.
+pub fn prompt_style(values: &Map<String, Value>) -> rune::tok::TextStyle {
+    let sm = crate::theme::TEXT_SM.lh(22.75);
+    if values.get("typographyAdvanced").and_then(Value::as_bool) != Some(true) {
+        return sm;
+    }
+    let px = size(values, "fontSizePrompt", (12.0, 20.0, 14.0)) / interface_scale(values);
+    rune::tok::TextStyle { family: prompt_family(field(values, "fontFamilyComposer"), loaded), size: px, ..sm }.lh(px * 1.625)
 }
 
 /// The sans and mono slots for these client settings.
@@ -127,7 +158,7 @@ pub fn launch() -> (&'static [&'static [u8]], (&'static str, &'static str)) {
     let (sans, mono) = families(&values);
     let mut fonts: Vec<&'static [u8]> = Vec::new();
     let mut launched: Vec<(String, bool)> = Vec::new();
-    let fields = ["fontFamilySans", "fontFamilyCode", "fontFamilyTerminal"];
+    let fields = ["fontFamilySans", "fontFamilyCode", "fontFamilyTerminal", "fontFamilyComposer"];
     for name in fields.into_iter().flat_map(|key| named(field(&values, key))) {
         if launched.iter().any(|(n, _)| *n == name.to_lowercase()) {
             continue;
@@ -252,5 +283,23 @@ mod tests {
         assert_eq!((interface_scale(&big), code_size(&big), terminal_size(&big)), (1.25, 12.0, 12.0));
         let advanced = values(json!({"fontSizeInterface": 99, "fontSizeCode": 2, "fontSizeTerminal": 10, "typographyAdvanced": true}));
         assert_eq!((interface_scale(&advanced), code_size(&advanced), terminal_size(&advanced)), (1.25, 8.0, 8.0));
+    }
+
+    #[test]
+    fn the_prompt_font_applies_only_under_separate_fonts() {
+        let values = |v: Value| v.as_object().unwrap().clone();
+        let prompt = json!({"fontFamilyComposer": "monospace", "fontSizePrompt": 18});
+        assert_eq!(prompt_style(&values(prompt.clone())), crate::theme::TEXT_SM.lh(22.75));
+        let mut advanced = prompt;
+        advanced["typographyAdvanced"] = json!(true);
+        let style = prompt_style(&values(advanced.clone()));
+        assert_eq!((style.family, style.size, style.line_height), (rune::Family::SystemMono, 18.0, 29.25));
+        advanced["fontSizeInterface"] = json!(20);
+        advanced["fontSizePrompt"] = json!(40);
+        assert_eq!(prompt_style(&values(advanced)).size, 16.0, "clamped to 20px, in layout points");
+        let installed = |name: &str| name == "Iosevka";
+        assert_eq!(prompt_family("Missing, 'Iosevka', serif", installed), rune::Family::Named("Iosevka"));
+        assert_eq!(prompt_family("Missing", installed), rune::Family::Sans);
+        assert_eq!(prompt_family("system-ui, Iosevka", installed), rune::Family::Sans);
     }
 }

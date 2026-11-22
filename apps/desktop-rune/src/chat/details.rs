@@ -296,13 +296,27 @@ pub struct Lane {
 }
 
 pub fn lane(w: f32, h: f32, hidden: bool) -> Lane {
+    lane_max(w, h, hidden, theme::layout::CHAT_MAX_W)
+}
+
+/// [`lane`] with the column at most `max` wide (`--chat-content-max-width`).
+pub fn lane_max(w: f32, h: f32, hidden: bool, max: f32) -> Lane {
     let x = w - WIDTH - GAP;
     let card = !hidden && x - CLEARANCE - LANE_PADDING >= MIN_CHAT && h - 2.0 * GAP >= 160.0;
-    let centered = (w - LANE_PADDING * 2.0).min(theme::layout::CHAT_MAX_W).max(0.0);
+    let centered = (w - LANE_PADDING * 2.0).min(max).max(0.0);
     let right = if card { x - CLEARANCE } else { w - LANE_PADDING };
     let width = centered.min(right - LANE_PADDING).max(0.0);
     let left = ((w - width) / 2.0).min(right - width).max(LANE_PADDING);
     Lane { left, width, card }
+}
+
+/// The Chat width setting's `--chat-content-max-width`: 46rem, 72rem, or the whole chat area.
+pub fn max_width(setting: Option<&str>) -> f32 {
+    match setting {
+        Some("wide") => 1152.0,
+        Some("full") => f32::INFINITY,
+        _ => theme::layout::CHAT_MAX_W,
+    }
 }
 
 /// The card's row type: 13px medium.
@@ -717,6 +731,21 @@ fn move_draft(s: &mut App, project: &str) {
         s.ui.chat.details.drafts.insert(to, run);
     }
     s.navigate(Route::Home { project_id: Some(project.to_string()) });
+}
+
+/// `composer.cycleHost` (ChatView): the draft moves to the next machine holding its project, in
+/// a fixed machine order, as picking that machine under "Run on" does.
+fn cycle_host(s: &mut App) -> bool {
+    let Some(current) = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).filter(|_| draft_run(s).is_some()) else { return false };
+    let rows = &s.state().projects;
+    let mut hosts: Vec<(String, String)> =
+        hosts(s).into_iter().filter_map(|id| rows.iter().find(|p| data::s(p, "id") == id).map(|p| (crate::env::of(s, p), id))).collect();
+    hosts.sort();
+    let Some(i) = hosts.iter().position(|(_, id)| *id == current) else { return false };
+    let next = hosts[(i + 1) % hosts.len()].1.clone();
+    run_on::keep_here(s);
+    move_draft(s, &next);
+    true
 }
 
 fn pick_item(s: &mut App, item: Item) {
@@ -1659,6 +1688,9 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         composer::focus(s, &route);
         return true;
     }
+    if crate::panel::shortcut(s, e, "composer.cycleHost") {
+        return cycle_host(s);
+    }
     if crate::panel::shortcut(s, e, "threadPanel.toggle") {
         let fits = s.ui.chat.details.fits.get();
         toggle(s, fits);
@@ -1891,7 +1923,8 @@ mod tests {
         let project = |id: &str| json!({"id": id, "title": "app", "workspaceRoot": "/src/app", "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
         if let data::Source::Fixture(state) = &mut s.src {
             state.config.get_or_insert_with(|| json!({}))["keybindings"] =
-                json!([{"command": "composer.host", "shortcut": {"key": "h", "modKey": true, "shiftKey": true}}]);
+                json!([{"command": "composer.host", "shortcut": {"key": "h", "modKey": true, "shiftKey": true}},
+                    {"command": "composer.cycleHost", "shortcut": {"key": "j", "modKey": true, "shiftKey": true}}]);
             let mut remote = project("remote-app");
             remote[crate::env::TAG] = json!("box");
             state.projects.extend([project("local-app"), project("local-app-2"), remote]);
@@ -1905,6 +1938,13 @@ mod tests {
         assert_eq!(s.route, Route::Home { project_id: Some("remote-app".into()) });
         assert_eq!(s.ui.chat.composer.drafts[&crate::chat::composer::home_key("remote-app")].edit.text, "carry me", "FAILED: the prompt moves along");
         assert!(!s.ui.chat.composer.drafts.contains_key(&crate::chat::composer::home_key("local-app")));
+
+        // composer.cycleHost steps to the next machine and wraps around.
+        assert!(super::shortcut(&mut s, &chord('j')), "FAILED: the cycle chord moves the draft");
+        assert_eq!(s.route, Route::Home { project_id: Some("local-app".into()) });
+        assert_eq!(s.ui.chat.composer.drafts[&crate::chat::composer::home_key("local-app")].edit.text, "carry me");
+        assert!(super::shortcut(&mut s, &chord('j')));
+        assert_eq!(s.route, Route::Home { project_id: Some("remote-app".into()) }, "FAILED: the cycle wraps");
     }
 
     #[test]
@@ -1991,5 +2031,13 @@ mod tests {
         assert_eq!((l.left, l.width), (223.0, 736.0));
         // Too narrow for the card.
         assert!(!lane(1000.0, 848.0, false).card);
+        // Chat width: wide caps at 72rem, full fills the area inside the padding or the card.
+        let l = lane_max(1600.0, 848.0, true, max_width(Some("wide")));
+        assert_eq!((l.left, l.width), (224.0, 1152.0));
+        let l = lane_max(1600.0, 848.0, true, max_width(Some("full")));
+        assert_eq!((l.left, l.width), (48.0, 1504.0));
+        let l = lane_max(1600.0, 848.0, false, max_width(Some("full")));
+        assert_eq!((l.left, l.width), (48.0, 1228.0));
+        assert_eq!(max_width(Some("comfortable")), max_width(None));
     }
 }

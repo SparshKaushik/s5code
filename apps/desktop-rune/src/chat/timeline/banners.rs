@@ -423,6 +423,11 @@ pub fn poll(app: &mut App) -> bool {
     changed | feedback
 }
 
+/// ConnectionDiagnosisHeadline: what the machine's last failure says, once it has failed.
+fn diagnosis_headline(label: &str, reason: &str) -> Option<String> {
+    crate::settings::connection_diagnosis::present(label, reason.trim(), None, None).map(|d| d.headline)
+}
+
 /// The active machine unavailable: reconnecting or offline, its last failure, Reconnect between
 /// retries, and once it has stayed away a while, "Disconnect server" for a saved one.
 fn offline(app: &App, t: &T) -> Option<Item> {
@@ -443,7 +448,7 @@ fn offline(app: &App, t: &T) -> Option<Item> {
         s5_net::Conn::Closed(reason) => reason.as_str(),
         _ => outage.map_or("", |o| o.reason.as_str()),
     };
-    item.description = Some(reason.to_owned()).filter(|r| !r.trim().is_empty());
+    item.description = diagnosis_headline(&label, reason);
     if phase == Phase::Offline {
         item.actions.push(
             Button::new("Reconnect")
@@ -634,6 +639,10 @@ mod tests {
         assert_eq!(phase(&Conn::Connecting, false, 60_000), None, "the first connect is no outage");
         assert_eq!(phase(&Conn::Closed("x".into()), false, 0), Some(Phase::Offline), "never connected shows at once");
         assert_eq!(phase(&Conn::Open, true, 60_000), None);
+
+        assert_eq!(diagnosis_headline("Studio", "Connection refused (os error 61)").as_deref(), Some("T3 Code on Studio did not answer"));
+        assert_eq!(diagnosis_headline("Studio", "HTTP error: 401 Unauthorized").as_deref(), Some("T3 Code on Studio did not accept this device"));
+        assert_eq!(diagnosis_headline("Studio", " "), None, "no failure yet, so no description");
     }
 
     #[test]

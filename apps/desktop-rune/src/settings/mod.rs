@@ -12,7 +12,7 @@ pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
-mod connection_diagnosis;
+pub(crate) mod connection_diagnosis;
 mod checkout_grouping;
 pub(crate) mod connections;
 mod controls;

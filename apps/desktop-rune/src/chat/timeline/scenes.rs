@@ -232,6 +232,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-header-subagent", header_subagent),
     ("timeline-draft-hero", draft_hero),
     ("timeline-draft-hero-empty", draft_hero_empty),
+    ("chat-triage-hero", crate::chat::home::triage_scene),
     ("timeline-work-history-loading", work_history_loading),
     ("timeline-work-history-error", work_history_error),
     ("timeline-command-output", command_output),
@@ -291,7 +292,38 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-offline-reconnecting", offline_reconnecting),
     ("timeline-offline-disconnect", offline_disconnect),
     ("timeline-guest-share", guest_share),
+    ("timeline-lightbox-zoom", lightbox_zoom),
+    ("timeline-minimap-in-view", minimap_in_view),
+    ("chat-width-wide", |app| chat_width(app, "wide")),
+    ("chat-width-full", |app| chat_width(app, "full")),
+    ("timeline-math", math),
 ];
+
+/// The showcase under a Chat width other than Comfortable: the timeline and composer widen.
+fn chat_width(app: &mut App, width: &str) {
+    showcase(app);
+    app.client_settings.values.insert("chatWidth".into(), serde_json::json!(width));
+}
+/// Render math on: each formula reads as its TeX source; prices stay prose.
+fn math(app: &mut App) {
+    showcase(app);
+    app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
+    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size. It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
+    push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+}
+
+/// The lightbox's middle picture zoomed 2x and panned right and down.
+fn lightbox_zoom(app: &mut App) {
+    lightbox_nav(app);
+    super::attachments::scene_zoom(app, 2.0, [160.0, 90.0]);
+}
+
+/// The minimap with the prompts in view lit (the list rests at the end), the first strip's
+/// preview open so the rail shows.
+fn minimap_in_view(app: &mut App) {
+    timeline_minimap(app);
+    app.ui.chat.timeline.minimap.active = Some(0);
+}
 
 /// Every GitHub alert kind, and a `<details>` folded and one written open.
 fn markdown_alerts(app: &mut App) {

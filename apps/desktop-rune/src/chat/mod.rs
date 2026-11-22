@@ -12,6 +12,7 @@ pub mod subagent_bar;
 pub mod thread_title;
 pub mod timeline;
 pub mod topbar;
+pub mod triage;
 
 use rune::{Cx, El, Key, KeyEvent, Mods, Tx, col, icon, row, text};
 
@@ -104,7 +105,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let shown = details::shown(s, w, h);
-    let lane = details::lane(w, h, shown != details::Shown::Inline);
+    let lane = details::lane_max(w, h, shown != details::Shown::Inline, t.chat_w);
     // Under the settings modal the frame keeps showing the route settings was opened from.
     let body = match s.frame_route() {
         Route::Thread(id) if !timeline::is_empty(s, id) => timeline::view(s, cx, t, id, &lane),
