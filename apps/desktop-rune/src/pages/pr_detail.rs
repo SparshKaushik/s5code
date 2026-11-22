@@ -78,6 +78,8 @@ pub struct Ui {
     pub checkout_menu: bool,
     /// `git.preparePullRequestThread` in flight (startHandoff).
     checkout: Option<Checkout>,
+    /// The environment picked to act on, by pull request key (actingScope).
+    pub(super) acting: Option<(String, String)>,
     /// The detail's error was the host's not-found.
     pub not_found: bool,
     /// A copyable value reading "Copied" until the given time.
@@ -95,6 +97,8 @@ struct Checkout {
     request: u64,
     mode: &'static str,
     project: String,
+    /// The environment preparing it, and whose thread opens on it.
+    env: String,
     /// The prompt and its attached threads for the draft thread, once it opens.
     task: Option<(String, Vec<Value>)>,
     /// startHandoff's kind, so only its own control reads as preparing.
@@ -417,15 +421,87 @@ fn confirm_catcher(s: &App, overlays: &mut Vec<El>) {
     }
 }
 
-/// The checkout's folder: the pull request's workspace, else its project's.
-fn checkout_root(s: &App, d: &Value) -> Option<String> {
-    let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
-    [d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
+/// An environment the checkout and handoffs can run on (PickableEnvironment).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Pickable {
+    pub env: String,
+    pub project: String,
+    pub root: String,
 }
 
-/// usePreparePullRequestThreadAction's grant, and for a worktree the right to operate threads.
-fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
+fn repository_key(project: &Value) -> Option<String> {
+    let identity = &project["repositoryIdentity"];
+    identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str()).filter(|k| !k.is_empty()).map(str::to_lowercase)
+}
+
+/// resolvePickableEnvironments: the pull request's own project, then the same repository on each
+/// other environment; none when no other environment has it.
+pub(super) fn pickable(s: &App, entry: &Value) -> Vec<Pickable> {
     let env = crate::env::of(s, entry);
+    let keys = crate::env::keys(s);
+    let projects = &s.state().projects;
+    let on = |p: &Value, key: &str| crate::env::of(s, p) == key;
+    let pick = |p: &Value| Pickable { env: crate::env::of(s, p), project: field(p, "id").to_string(), root: field(p, "workspaceRoot").to_string() };
+    let Some(own) = projects.iter().find(|p| on(p, &env) && field(p, "id") == field(entry, "projectId")) else { return Vec::new() };
+    let Some(key) = repository_key(own).filter(|_| keys.contains(&env)) else { return Vec::new() };
+    let others: Vec<Pickable> =
+        keys.iter().filter(|k| **k != env).filter_map(|k| projects.iter().find(|p| on(p, k) && repository_key(p).as_deref() == Some(key.as_str()))).map(pick).collect();
+    if others.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(pick(own)).chain(others).collect()
+}
+
+/// The environment picked for this pull request when it is still pickable, else none (the
+/// pull request's own).
+fn acting(s: &App) -> Option<Pickable> {
+    let u = &s.ui.pages.detail;
+    let entry = u.entry.as_ref()?;
+    let key = super::pull_requests::key(entry);
+    let chosen = u.acting.as_ref().filter(|(k, _)| *k == key).map_or_else(|| crate::env::of(s, entry), |(_, env)| env.clone());
+    pickable(s, entry).into_iter().find(|p| p.env == chosen)
+}
+
+fn pick_environment(s: &mut App, env: &str) {
+    let Some(entry) = ui(s).entry.as_ref() else { return };
+    let key = super::pull_requests::key(entry);
+    ui(s).acting = Some((key, env.to_string()));
+}
+
+/// The project a handoff's thread opens in: the picked environment's copy, else the pull request's.
+fn acting_project(s: &App) -> Option<String> {
+    let own = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string());
+    acting(s).map(|a| a.project).or(own).filter(|p| !p.is_empty())
+}
+
+/// ActOnEnvironmentPicker: a radio per pickable environment, after a separator.
+fn environment_picker(s: &App, menu: Menu) -> Menu {
+    let u = &s.ui.pages.detail;
+    let Some(entry) = u.entry.as_ref() else { return menu };
+    let environments = pickable(s, entry);
+    if environments.is_empty() {
+        return menu;
+    }
+    let chosen = acting(s).map_or_else(|| crate::env::of(s, entry), |a| a.env);
+    environments.into_iter().fold(menu.separator(), |menu, p| {
+        let on = p.env == chosen;
+        let item = MenuItem::new(crate::env::label(s, &p.env)).icon(crate::settings::connections::env_machine_icon(s, &p.env)).radio(on).disabled(u.checkout.is_some());
+        menu.item(item.on_select(move |s: &mut App| pick_environment(s, &p.env)))
+    })
+}
+
+/// The checkout's folder: the picked environment's copy, else the pull request's workspace, else
+/// its project's.
+fn checkout_root(s: &App, d: &Value) -> Option<String> {
+    let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
+    let picked = acting(s).map(|a| a.root);
+    [picked.as_deref(), d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
+}
+
+/// usePreparePullRequestThreadAction's grant, and for a worktree the right to operate threads, on
+/// the environment acting.
+fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
+    let env = acting(s).map_or_else(|| crate::env::of(s, entry), |a| a.env);
     let can = |scope: &str| crate::settings::permissions::can_on(s, &env, scope);
     can("source-control:write") && (mode == "local" || can("orchestration:operate"))
 }
@@ -461,17 +537,19 @@ fn start_handoff(s: &mut App, mode: &'static str, kind: &'static str, task: Opti
     let d = u.detail.clone().unwrap_or_else(|| entry.clone());
     let term = super::pr_row::term(&d);
     let Some(root) = checkout_root(s, &d).filter(|_| checkout_allowed(s, &entry, mode)) else { return };
-    let project = field(&d, "projectId").to_string();
+    let picked = acting(s);
+    let project = picked.as_ref().map_or_else(|| field(&d, "projectId").to_string(), |a| a.project.clone());
+    let env = picked.map_or_else(|| crate::env::of(s, &entry), |a| a.env);
     if crate::chat::composer::project_by_id(s, &project).is_none() {
         crate::shell::palette::toast_error_brief(s, "Could not open a thread for the checkout", Some("Try again from the project, or open a thread first."));
         return;
     }
     let thread = crate::panel::drawer::draft_thread(s, &project);
     let input = json!({"cwd": root, "reference": field(&d, "url"), "mode": mode, "threadId": thread});
-    match super::pull_requests::net_for(s, &entry) {
+    match crate::env::net_of(s, &env) {
         Some(net) => {
             let request = net.request("git.preparePullRequestThread", input);
-            ui(s).checkout = Some(Checkout { request, mode, project, task, kind });
+            ui(s).checkout = Some(Checkout { request, mode, project, env, task, kind });
             crate::shell::palette::toast(s, &format!("Preparing the {term} checkout..."), None);
         }
         None => crate::shell::palette::toast_error_brief(s, &format!("Could not prepare the {term} checkout"), Some("Actions need a connected environment.")),
@@ -482,8 +560,8 @@ fn start_handoff(s: &mut App, mode: &'static str, kind: &'static str, task: Opti
 /// toast says why not.
 fn poll_checkout(s: &mut App) -> bool {
     let u = ui(s);
-    let (Some(Checkout { request, mode, project, task, .. }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
-    let Some(reply) = super::pull_requests::net_for(s, &entry).and_then(|net| net.take_reply(request)) else { return false };
+    let (Some(Checkout { request, mode, project, env, task, .. }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
+    let Some(reply) = crate::env::net_of(s, &env).and_then(|net| net.take_reply(request)) else { return false };
     ui(s).checkout = None;
     let term = super::pr_row::term(&entry);
     let prepared = match reply {
@@ -851,7 +929,7 @@ fn asked(text: &str, term: &str) -> String {
 pub(crate) fn ask(s: &mut App, text: String, chips: Vec<Value>) {
     ui(s).menu = false;
     let Some(d) = ui(s).detail.clone() else { return };
-    if crate::chat::composer::project_by_id(s, field(&d, "projectId")).is_none() {
+    if acting_project(s).is_none_or(|p| crate::chat::composer::project_by_id(s, &p).is_none()) {
         crate::shell::palette::toast_error_brief(s, "Could not open a thread", Some("Try again from the project, or open a thread first."));
         return;
     }
@@ -876,7 +954,7 @@ pub(crate) fn resolve_text(d: &Value) -> String {
 
 /// Opens the project's new-thread draft holding `text`, and the PR chip when there is one.
 pub(super) fn handoff(s: &mut App, text: String, chip: Option<Value>) {
-    let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
+    let project = acting_project(s);
     ui(s).menu = false;
     compose(s, Route::Home { project_id: project }, text, chip.into_iter().collect());
 }
@@ -1013,6 +1091,8 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
                 .help(on_host)
                 .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
                 .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
+                // onAuxClick: a middle click opens it too.
+                .pointer_buttons([rune::PointerButton::Middle])
                 .on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&open_url);
                 })
@@ -1112,7 +1192,7 @@ fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El
     // MenuPopup grows to its longest line, and a menu measures its height before a description
     // wraps: the menu holds each one on a line (menu padding, item padding, borders).
     let width = if u.checkout_menu { [WORKTREE, HERE].map(|v| rune::text::measure(v, &[], theme::TEXT_XS, None).0 + 32.0).into_iter().fold(160.0, f32::max) } else { 160.0 };
-    Menu::new("pr-checkout")
+    let menu = Menu::new("pr-checkout")
         .trigger(trigger)
         .placement(Placement::BottomEnd)
         .min_width(width)
@@ -1131,8 +1211,8 @@ fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El
                 .description(HERE)
                 .disabled(!checkout_allowed(s, entry, "local"))
                 .on_select(|s: &mut App| start_checkout(s, "local")),
-        )
-        .build(&kit::theme(t), overlays)
+        );
+    environment_picker(s, menu).build(&kit::theme(t), overlays)
 }
 
 /// PullRequestPrimaryAction: the armed auto-merge badge beside any other control, then the one
@@ -1267,6 +1347,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
     if let Some(item) = super::pr_guide::menu_item(s) {
         menu = menu.item(item);
     }
+    menu = environment_picker(s, menu);
     menu = super::pr_meta::maintainer_entries(s, t, d, menu.separator());
     if open {
         let draft = d["isDraft"] == true;
@@ -2729,6 +2810,46 @@ mod tests {
         let draft = &s.ui.chat.composer.drafts[&crate::chat::composer::home_key(&project)];
         assert!(draft.edit.text.starts_with("Fix it.") && draft.contexts.len() == 1, "the task and its thread land in the draft");
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Checkout ready"));
+    }
+
+    #[test]
+    fn the_checkout_runs_on_the_picked_environment_in_its_copy_of_the_repository() {
+        let mut s = App::new();
+        let mut local = crate::data::empty_state();
+        local.projects = vec![
+            json!({"id": "p1", "workspaceRoot": "/w/app", "repositoryIdentity": {"canonicalKey": "github.com/acme/app"}}),
+            json!({"id": "pb", "workspaceRoot": "/srv/app", "repositoryIdentity": {"canonicalKey": "GitHub.com/Acme/App"}, "_environment": "box"}),
+            json!({"id": "pf", "workspaceRoot": "/srv/other", "repositoryIdentity": {"canonicalKey": "github.com/acme/other"}, "_environment": "far"}),
+        ];
+        s.src = crate::data::Source::Fixture(local);
+        s.ui.env.active = crate::env::LOCAL.into();
+        for id in ["box", "far"] {
+            s.ui.env.saved.push(crate::env::Saved { id: id.into(), label: id.into(), base: format!("https://{id}.test"), bearer: String::new() });
+            crate::env::park(&mut s, id, crate::data::Source::Live(s5_net::Net::offline()));
+        }
+        crate::env::adopt(&mut s, "pb", "box");
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "permissions": ["source-control:write", "orchestration:operate"]}));
+        let entry = |n: u64| json!({"projectId": "p1", "repository": "acme/app", "host": "github.com", "number": n, "url": format!("https://github.com/acme/app/pull/{n}")});
+        s.ui.pages.detail.entry = Some(entry(7));
+        s.ui.pages.detail.detail = Some(entry(7));
+        let p = |env: &str, project: &str, root: &str| Pickable { env: env.into(), project: project.into(), root: root.into() };
+        assert_eq!(pickable(&s, &entry(7)), vec![p(crate::env::LOCAL, "p1", "/w/app"), p("box", "pb", "/srv/app")], "its own first, then the same repository elsewhere");
+        assert_eq!(checkout_root(&s, &entry(7)).as_deref(), Some("/w/app"));
+
+        pick_environment(&mut s, "box");
+        assert_eq!((checkout_root(&s, &entry(7)).as_deref(), acting_project(&s).as_deref()), (Some("/srv/app"), Some("pb")));
+        s.ui.pages.detail.entry = Some(entry(8));
+        assert_eq!(acting(&s).map(|a| a.env).as_deref(), Some(crate::env::LOCAL), "the pick belongs to the pull request it was made on");
+        s.ui.pages.detail.entry = Some(entry(7));
+
+        start_checkout(&mut s, "worktree");
+        let Some(Checkout { request, env, project, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the picked environment prepares the checkout") };
+        assert_eq!((env.as_str(), project.as_str()), ("box", "pb"));
+        let prepared = json!({"branch": "fix", "worktreePath": "/srv/app-pr-7", "isOnPullRequestHead": true});
+        crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(prepared));
+        assert!(poll_checkout(&mut s));
+        assert_eq!(s.ui.chat.home.workspace.as_ref().map(|w| w.0.as_str()), Some("pb"), "the draft opens in the picked environment's project");
+        assert_eq!(s.ui.env.active, "box", "and the window switches to that environment");
     }
 
     #[test]
