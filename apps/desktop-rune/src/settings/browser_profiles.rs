@@ -82,7 +82,7 @@ fn poll_with(s: &mut App, tx: &mut rune::Tx, now: std::time::Instant, granted: i
         p.access = None;
         return false;
     };
-    let changed = matches!(&w.step, Step::Running(job) if *job.lock().unwrap() == Stage::Failed("needsFullDiskAccess"));
+    let mut changed = matches!(&w.step, Step::Running(job) if *job.lock().unwrap() == Stage::Failed("needsFullDiskAccess"));
     if changed {
         w.step = Step::FullDiskAccess { import: true, checked: true };
     }

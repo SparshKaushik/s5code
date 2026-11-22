@@ -92,6 +92,9 @@ pub struct Ui {
     /// The menu asked: its outcome shows in an alert, as Electron's `checkForUpdatesFromMenu`.
     announce: bool,
     pub confirm: bool,
+    /// The release a track switch checked (`setUpdateChannel`'s `minimumVersion`): until the app
+    /// restarts, nothing older is offered, and only through it does a build cross tracks.
+    floor: Option<String>,
     /// A scene's recorded state stands in for a stamped release build.
     fixture: bool,
 }
@@ -220,11 +223,22 @@ fn get_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
-fn fetch(channel: &str) -> Result<Option<Release>, String> {
+/// Electron's `offerable`: a release on the track, never below a track switch's checked
+/// release, and without a switch only a newer one on this build's own track.
+pub fn offerable(candidate: &str, channel: &str, floor: Option<&str>, current: &str) -> bool {
+    let track = |v: &str| if crate::settings::about::release_channel(v) == "nightly" { "nightly" } else { "latest" };
+    track(candidate) == channel
+        && match floor {
+            Some(floor) => !newer(floor, candidate) && candidate != current,
+            None => track(current) == channel && newer(candidate, current),
+        }
+}
+
+fn fetch(channel: &str, floor: Option<&str>) -> Result<Option<Release>, String> {
     let platform = platform().ok_or("No builds for this platform.")?;
     let releases = get_json(&format!("https://api.github.com/repos/{REPO}/releases?per_page=50"))?;
     let Some((latest, manifest)) = pick(&releases, channel) else { return Ok(None) };
-    if !newer(&latest, version()) {
+    if !offerable(&latest, channel, floor, version()) {
         return Ok(None);
     }
     release_from(&get_json(&manifest)?, &latest, platform).map(Some)
@@ -450,8 +464,22 @@ pub fn check(s: &mut App, announce: bool) {
         return;
     }
     ui.status = Status::Checking;
-    let channel = channel();
-    spawn(s, move |send| send(Event::Checked(fetch(&channel))));
+    let (channel, floor) = (channel(), ui.floor.clone());
+    spawn(s, move |send| send(Event::Checked(fetch(&channel, floor.as_deref()))));
+}
+
+/// After the track switch saved `updateChannel`: sets the floor, drops an offer the new track
+/// doesn't make, and checks it.
+pub fn set_channel(s: &mut App, minimum_version: Option<String>) {
+    let ui = &mut s.ui.desktop.updates;
+    ui.floor = minimum_version;
+    let retained = ui.release.as_ref().is_some_and(|r| offerable(&r.version, &channel(), ui.floor.as_deref(), version()));
+    if ui.release.is_some() && !retained && !matches!(ui.status, Status::Downloading(_) | Status::Installing) {
+        ui.release = None;
+        ui.staged = None;
+        ui.status = Status::Idle;
+    }
+    check(s, false);
 }
 
 pub fn download_update(s: &mut App) {
@@ -742,6 +770,18 @@ mod tests {
         assert!(newer("0.1.3-nightly.20261122.10", "0.1.3-nightly.20261122.9"), "numeric parts compare as numbers");
         assert!(newer("v0.2.0", "0.1.0"));
         assert!(!newer("garbage", "0.1.0") && !newer("0.1", "0.0.1"));
+    }
+
+    #[test]
+    fn a_track_switch_offers_nothing_below_its_checked_release() {
+        let nightly = "1.2.4-nightly.20261027.1";
+        assert!(!offerable("1.2.2", "latest", Some("1.2.3"), nightly), "below the switch's checked release");
+        assert!(offerable("1.2.3", "latest", Some("1.2.3"), nightly), "an older Stable, but the one the switch checked");
+        assert!(!offerable("1.2.3", "latest", None, nightly), "a saved Stable track after a restart crosses only through a switch");
+        assert!(!offerable("1.2.5-nightly.20261101.1", "latest", Some("1.2.3"), nightly), "another track's release");
+        assert!(offerable("1.2.5-nightly.20261101.1", "nightly", None, nightly));
+        assert!(!offerable(nightly, "nightly", None, nightly), "the running build");
+        assert!(!offerable("1.2.3", "latest", Some("1.2.3"), "1.2.3"));
     }
 
     #[test]

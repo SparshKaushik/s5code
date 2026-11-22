@@ -760,7 +760,7 @@ fn switch_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 }
             }
             close_switch(s);
-            crate::desktop::updates::check(s, false);
+            crate::desktop::updates::set_channel(s, target["version"].as_str().map(str::to_owned));
         })
         .build(t);
     kit::Dialog::new("update-track-switch", format!("Switch to {label}?"))

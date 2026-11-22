@@ -177,8 +177,44 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
+/// Each environment's origin and bearer: reading media from a server sends its credential, as
+/// Electron's `readMedia` sends the window session's cookies, like an `<img>`.
+static CREDENTIALS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// `scheme://host[:port]`, lowercased, of an http(s) URL.
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host).to_ascii_lowercase();
+    let host = host.strip_suffix(if scheme == "https" { ":443" } else { ":80" }).unwrap_or(&host);
+    (!host.is_empty()).then(|| format!("{scheme}://{host}"))
+}
+
+fn credential_in(credentials: &[(String, String)], url: &str) -> Option<String> {
+    let origin = origin(url)?;
+    credentials.iter().find(|(o, _)| *o == origin).map(|(_, bearer)| bearer.clone())
+}
+
+fn sync_credentials(app: &mut App) {
+    let next: Vec<(String, String)> = crate::env::credentials(app).into_iter().filter_map(|(base, bearer)| Some((origin(&base)?, bearer))).collect();
+    if let Ok(mut current) = CREDENTIALS.lock()
+        && *current != next
+    {
+        *current = next;
+    }
+}
+
 fn request(url: &str) -> Result<ureq::Response, String> {
-    ureq::get(url).call().map_err(|e| match e {
+    let bearer = CREDENTIALS.lock().ok().and_then(|c| credential_in(&c, url));
+    let mut request = ureq::get(url);
+    if let Some(bearer) = bearer {
+        request = request.set("Authorization", &format!("Bearer {bearer}"));
+    }
+    request.call().map_err(|e| match e {
         ureq::Error::Status(code, _) => format!("The file could not be fetched (HTTP {code})."),
         ureq::Error::Transport(_) => "The file could not be fetched. Check the connection and try again.".to_owned(),
     })
@@ -435,6 +471,7 @@ impl State {
 /// Starts loading the media views asked for, folds in signed URLs, and copies the images read.
 /// Called from `attachments::poll`.
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
+    sync_credentials(app);
     let waker = app.ui.panel.waker.clone();
     let wanted = std::mem::take(app.ui.chat.timeline.assets.media.wanted.get_mut());
     let mut net = app.src.net();
@@ -857,6 +894,20 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn media_reads_carry_a_bearer_only_to_its_environments_origin() {
+        let credentials = vec![("https://box.example.ts.net".to_owned(), "remote".to_owned()), ("http://127.0.0.1:3773".to_owned(), "local".to_owned())];
+        let bearer = |url: &str| super::credential_in(&credentials, url);
+        assert_eq!(bearer("https://BOX.example.ts.net:443/api/assets/a.png?sig=1"), Some("remote".into()));
+        assert_eq!(bearer("http://127.0.0.1:3773/attachments/x.png"), Some("local".into()));
+        assert_eq!(bearer("http://127.0.0.1:3774/attachments/x.png"), None, "another port is another origin");
+        assert_eq!(bearer("http://box.example.ts.net/a.png"), None, "another scheme");
+        assert_eq!(bearer("https://box.example.ts.net.evil.test/a.png"), None);
+        assert_eq!(bearer("https://evil.test@box.example.ts.net/a.png"), Some("remote".into()), "userinfo isn't the host");
+        assert_eq!(bearer("https://box.example.ts.net@evil.test/a.png"), None);
+        assert_eq!(bearer("data:image/png;base64,AAAA"), None);
+    }
+
     use super::*;
 
     #[test]

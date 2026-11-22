@@ -280,7 +280,7 @@ fn view(h: &Helper, _: &mut rune::Cx<Helper>) -> El {
         .center_y()
         .child(text(format!("↑ Drag {APP} into the list above")).font(theme::weight(theme::TEXT_SM, theme::SEMIBOLD)).color(fg).grow(1.0))
         .child(close);
-    col().key("permission-helper").w_full().h_full().p(2.0).child(col().hit().w_full().h_full().px(20.0).pt(14.0).radius(24.0).border(1.0, line).fill(base).child(header).child(app))
+    col().key("permission-helper").w_full().h_full().padding(2.0).child(col().hit().w_full().h_full().px(20.0).pt(14.0).radius(24.0).border(1.0, line).fill(base).child(header).child(app))
 }
 
 #[cfg(test)]

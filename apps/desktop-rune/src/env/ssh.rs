@@ -141,6 +141,8 @@ pub struct Ui {
     pub error: Option<String>,
     notes: HashMap<String, String>,
     revived: HashMap<String, Instant>,
+    /// SSH environments from Electron's catalog, paired here one at a time in the background.
+    adopting: Vec<Target>,
 }
 
 fn busy(ui: &Ui, slot: &str) -> bool {
@@ -206,10 +208,35 @@ pub(super) fn start(s: &mut App) {
 
 static EXITED: AtomicBool = AtomicBool::new(false);
 
+/// Each saved SSH environment's id and target, for Electron's catalog.
+pub(super) fn targets(s: &App) -> &[(String, Target)] {
+    &s.ui.env.ssh.targets
+}
+
+/// Queues an SSH environment Electron saved, unless one here reaches the same target.
+pub(super) fn adopt(s: &mut App, target: Target) {
+    let ui = &mut s.ui.env.ssh;
+    let known = ui.targets.iter().map(|(_, t)| t).chain(&ui.adopting).any(|t| t.key() == target.key());
+    if !known {
+        ui.adopting.push(target);
+    }
+}
+
+/// Pairs the next adopted target once the add slot is free, without prompting.
+fn next_adoption(s: &mut App) {
+    if rune::is_headless() || busy(&s.ui.env.ssh, ADD) || s.ui.env.ssh.adopting.is_empty() {
+        return;
+    }
+    let target = s.ui.env.ssh.adopting.remove(0);
+    let job = Job { kind: Kind::Add, target, secret: None, prompts: 0, interactive: false, version: version(s), preferred: None, bearer: None };
+    spawn(s, job);
+}
+
 /// Lands finished SSH jobs and re-ensures tunnels that exited.
 pub(super) fn poll(s: &mut App) -> bool {
     let mut changed = EXITED.swap(false, Ordering::Relaxed) && revive(s);
     changed |= repair(s);
+    next_adoption(s);
     if s.ui.env.ssh.jobs.is_empty() {
         return changed;
     }
@@ -377,6 +404,8 @@ fn fail(s: &mut App, job: &Job, error: String) {
     }
     let ui = &mut s.ui.env.ssh;
     match &job.kind {
+        // An adoption from Electron's catalog fails quietly; Electron still has it.
+        Kind::Add if !job.interactive => {}
         Kind::Add => ui.error = Some(error),
         Kind::Reconnect(id) => {
             ui.notes.insert(id.clone(), error);
@@ -406,9 +435,11 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
                 ui.targets.retain(|(k, _)| *k != id);
                 ui.targets.push((id.clone(), target));
                 ui.notes.remove(&id);
-                ui.host.clear();
-                ui.username.clear();
-                ui.port.clear();
+                if job.interactive {
+                    ui.host.clear();
+                    ui.username.clear();
+                    ui.port.clear();
+                }
                 ui.error = save_targets(&ui.targets).err().map(|e| format!("Could not save SSH environments: {e}"));
             } else {
                 close(&target.key());
