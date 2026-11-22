@@ -587,6 +587,10 @@ fn launch(profile: &str, scale: f32) -> Result<(Child, String, PathBuf), String>
 }
 
 /// Every Chrome's switches but its folder and scale.
+/// Electron's `ALLOWED_PREVIEW_PERMISSIONS` as CDP names (its `fullscreen` needs no grant here):
+/// notifications, camera, microphone and the rest are denied.
+const PREVIEW_PERMISSIONS: [&str; 4] = ["geolocation", "clipboardSanitizedWrite", "pointerLock", "loopbackNetwork"];
+
 const CHROME_ARGS: [&str; 7] = ["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"];
 
 /// Whether Chrome could show a PDF itself, decided from how it was started rather than from
@@ -817,6 +821,11 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
     let dir = downloads_staging();
     let _ = std::fs::create_dir_all(&dir);
     w.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "allowAndName", "downloadPath": dir, "eventsEnabled": true }), None);
+    // A grant denies every permission it leaves out, without a prompt. The short list stands where
+    // an older Chrome refuses a name in the long one, which fails the whole call.
+    for permissions in [&PREVIEW_PERMISSIONS[..2], &PREVIEW_PERMISSIONS[..]] {
+        w.send(None, "Browser.grantPermissions", json!({ "permissions": permissions }), None);
+    }
     for cmd in early {
         w.command(cmd);
     }
@@ -886,11 +895,8 @@ impl Worker {
         }
     }
 
-    /// Without Chrome's own viewer, a PDF page's response is replaced with the bundled one.
-    fn pdf_viewer(&mut self, session: &str, native: bool) {
-        if !native {
-            self.send(Some(session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
-        }
+    fn intercept(&mut self, session: &str, native: bool) {
+        self.send(Some(session), "Fetch.enable", json!({ "patterns": intercepted(native), "handleAuthRequests": true }), None);
     }
 
     fn metrics(&mut self, tab: TabId) {
@@ -1545,6 +1551,11 @@ impl Worker {
                     self.send(Some(&session), "Fetch.continueRequest", json!({ "requestId": p["requestId"] }), None);
                 }
             }
+            // Electron with no `login` handler cancels a sign-in, so the server's own 401 page shows.
+            "Fetch.authRequired" => {
+                let session = v["sessionId"].as_str().unwrap_or_default().to_string();
+                self.send(Some(&session), "Fetch.continueWithAuth", json!({ "requestId": p["requestId"], "authChallengeResponse": { "response": "CancelAuth" } }), None);
+            }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.windowOpen" => {
                 let features: Vec<&str> = p["windowFeatures"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -1722,10 +1733,12 @@ impl Worker {
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Page" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": PAGE_JS, "runImmediately": true }), None);
+                // Headless has no location provider: a granted position fails at once, not never.
+                self.send(Some(&session), "Emulation.setGeolocationOverride", json!({}), None);
                 // A Chrome with its own PDF viewer shows PDFs itself; the headless shell has none,
                 // so there a PDF page arrives as the bundled pdf.js.
                 match self.native_pdf {
-                    Some(native) => self.pdf_viewer(&session, native),
+                    Some(native) => self.intercept(&session, native),
                     None => self.send(Some(&session), "Runtime.evaluate", json!({ "expression": "navigator.pdfViewerEnabled === true", "returnByValue": true }), Some(Reply::PdfViewer(session.clone()))),
                 }
                 self.metrics(tab);
@@ -1922,7 +1935,7 @@ impl Worker {
             Reply::PdfViewer(session) => {
                 let native = r["result"]["value"].as_bool().unwrap_or(false);
                 self.native_pdf = Some(native);
-                self.pdf_viewer(&session, native);
+                self.intercept(&session, native);
             }
             Reply::Enclosed(tab, rect) => {
                 let elements = r["result"]["value"].as_str().and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok()).unwrap_or_default();
@@ -2350,8 +2363,18 @@ const MARKS_JS: &str = r##"window.__s5Marks = window.__s5Marks || (() => {
 })()"##;
 
 /// Whether a paused response is a PDF, by its `Content-Type`.
+/// The document requests paused: each one's request, so a server's sign-in challenge reaches
+/// `Fetch.authRequired`, and without Chrome's own viewer each response, whatever its address, so
+/// a PDF's can be replaced with the bundled one.
+fn intercepted(native_pdf: bool) -> Value {
+    let stage = |stage: &str| json!({ "urlPattern": "*", "resourceType": "Document", "requestStage": stage });
+    Value::Array(if native_pdf { vec![stage("Request")] } else { vec![stage("Request"), stage("Response")] })
+}
+
+/// A PDF shown inline; one sent as an attachment downloads, as Chrome's viewer leaves it.
 fn pdf_response(headers: &Value) -> bool {
-    headers.as_array().into_iter().flatten().any(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("content-type")) && h["value"].as_str().is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("application/pdf")))
+    let header = |name: &str| headers.as_array().into_iter().flatten().find(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))).and_then(|h| h["value"].as_str()).map(|v| v.trim().to_ascii_lowercase());
+    header("content-type").is_some_and(|v| v.starts_with("application/pdf")) && !header("content-disposition").is_some_and(|v| v.starts_with("attachment"))
 }
 
 /// The page a PDF shows as, at the PDF's own address: pdf.js draws each page, fetching the
@@ -2373,13 +2396,19 @@ const PDF_VIEWER: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
 <style>
 html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
+#bar{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:12px;height:40px;padding:0 12px;background:#323639;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+#name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#count{color:#c8c8c8}
+#save{font:inherit;color:#fff;background:transparent;border:1px solid #5f6368;border-radius:4px;padding:4px 10px;cursor:pointer}
+#save:hover{background:#45484b}
 #pages{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
 canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
 #status{padding:16px;text-align:center}
 </style>
 <script>{pdfjs}</script>
 <script type="text/plain" id="pdfjs-worker">{worker}</script>
-</head><body><div id="status">Loading PDF…</div><div id="pages"></div>
+</head><body><div id="bar"><span id="name">{title}</span><span id="count"></span><button id="save" hidden>Download</button></div>
+<div id="status">Loading PDF…</div><div id="pages"></div>
 <script>
 (async () => {
   const status = document.getElementById("status");
@@ -2390,6 +2419,16 @@ canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;heigh
   try {
     const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
     status.remove();
+    document.getElementById("count").textContent = doc.numPages === 1 ? "1 page" : doc.numPages + " pages";
+    // The bytes pdf.js holds, as a blob: fetching the address again would get this page.
+    const save = document.getElementById("save");
+    save.hidden = false;
+    save.onclick = async () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([await doc.getData()], { type: "application/pdf" }));
+      a.download = /\.pdf$/i.test(document.title) ? document.title : (document.title || "document") + ".pdf";
+      a.click();
+    };
     const pages = document.getElementById("pages");
     const ratio = window.devicePixelRatio || 1;
     for (let n = 1; n <= doc.numPages; n++) {
@@ -2843,6 +2882,13 @@ mod tests {
         assert!(pdf_response(&pdf));
         assert!(!pdf_response(&json!([{ "name": "Content-Type", "value": "text/html" }])));
         assert!(!pdf_response(&Value::Null));
+        // An attachment downloads instead; any address is looked at, not only `.pdf` ones.
+        let attachment = json!([{ "name": "Content-Type", "value": "application/pdf" }, { "name": "content-disposition", "value": " Attachment; filename=a.pdf" }]);
+        assert!(!pdf_response(&attachment));
+        assert!(pdf_response(&json!([{ "name": "Content-Type", "value": "application/pdf" }, { "name": "Content-Disposition", "value": "inline" }])));
+        assert_eq!(intercepted(false)[1], json!({ "urlPattern": "*", "resourceType": "Document", "requestStage": "Response" }));
+        // Every document request pauses, so sign-in challenges reach `Fetch.authRequired`.
+        assert_eq!(intercepted(true), json!([{ "urlPattern": "*", "resourceType": "Document", "requestStage": "Request" }]));
         let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
         assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
         assert!(page.contains("getDocument({ url: location.href"));
