@@ -105,42 +105,105 @@ fn oklch(l: f32, c: f32, h: f32) -> String {
     format!("#{:02x}{:02x}{:02x}", gamma(linear[0]), gamma(linear[1]), gamma(linear[2]))
 }
 
-/// The `--stage-*` colours of web's default palette.
-fn colors(variant: Variant, dark: bool) -> Vec<(&'static str, String)> {
-    match variant {
-        Variant::Nightly => vec![
-            ("top", oklch(0.283_792, 0.117_327, 297.201)),
-            ("mid", oklch(0.227_147, 0.086_086, 277.99)),
-            ("bottom", oklch(0.200_528, 0.055_699, 261.216)),
-            ("highlight", oklch(0.707_246, 0.157_418, 252.091)),
-            ("secondary", oklch(0.600_473, 0.182_225, 277.296)),
-            ("tertiary", oklch(0.625_83, 0.210_886, 305.994)),
-            ("line", oklch(0.938_794, 0.029_114, 273.103)),
-            ("glow-highlight", oklch(0.553_749, 0.176_543, 271.958)),
-            ("glow-secondary", oklch(0.345_571, 0.117_466, 273.568)),
-            ("sparkle", oklch(0.880_867, 0.057_747, 269.011)),
-        ],
-        Variant::Dev => {
-            let (top, mid, bottom) = if dark {
-                (oklch(0.581_473, 0.149_124, 256.9), oklch(0.456_509, 0.159_377, 261.945), oklch(0.291_327, 0.136_578, 267.649))
-            } else {
-                (oklch(0.782_169, 0.123_386, 240.226), oklch(0.616_111, 0.195_824, 259.735), oklch(0.441_553, 0.232_394, 265.474))
-            };
-            vec![
-                ("top", top),
-                ("mid", mid),
-                ("bottom", bottom),
-                ("highlight", oklch(0.951_597, 0.037_289, 215.482)),
-                ("secondary", oklch(0.794_668, 0.121_36, 235.46)),
-                ("tertiary", oklch(0.678_991, 0.170_261, 275.365)),
-                ("line", oklch(0.959_666, 0.029_238, 218.179)),
-                ("celeste-highlight", oklch(0.968_763, 0.045_822, 196.42)),
-                ("celeste-secondary", oklch(0.827_395, 0.126_071, 211.26)),
-                ("violet-highlight", oklch(0.895_381, 0.053_248, 286.447)),
-                ("grid-line", oklch(0.966_822, 0.017_57, 239.99)),
-            ]
-        }
+type Lch = (f32, f32, f32);
+
+/// Web's default `--stage-art-*` (light; dark changes only the first three) and
+/// `--stage-night-base-*`, `top, mid, bottom, highlight, secondary, tertiary, line`.
+const ART: [Lch; 7] = [
+    (0.782_169, 0.123_386, 240.226),
+    (0.616_111, 0.195_824, 259.735),
+    (0.441_553, 0.232_394, 265.474),
+    (0.951_597, 0.037_289, 215.482),
+    (0.794_668, 0.121_36, 235.46),
+    (0.678_991, 0.170_261, 275.365),
+    (0.959_666, 0.029_238, 218.179),
+];
+const ART_DARK_TOP: [Lch; 3] = [(0.581_473, 0.149_124, 256.9), (0.456_509, 0.159_377, 261.945), (0.291_327, 0.136_578, 267.649)];
+const NIGHT: [Lch; 7] = [
+    (0.283_792, 0.117_327, 297.201),
+    (0.227_147, 0.086_086, 277.99),
+    (0.200_528, 0.055_699, 261.216),
+    (0.707_246, 0.157_418, 252.091),
+    (0.600_473, 0.182_225, 277.296),
+    (0.625_83, 0.210_886, 305.994),
+    (0.938_794, 0.029_114, 273.103),
+];
+
+/// (art light, art dark, night light, night dark) per built-in theme: `--stage-art-*` and
+/// `--stage-night-*` in web's index.css, as oklch, in `top, mid, bottom, highlight, secondary,
+/// tertiary, line` order.
+const THEMES: [(&str, [Lch; 7], [Lch; 7], Option<([Lch; 7], [Lch; 7])>); 5] = [
+    ("t3-chat", [(0.760675, 0.141361, 348.019), (0.588093, 0.188832, 353.138), (0.383959, 0.135096, 348.656), (0.949689, 0.034241, 339.171), (0.763402, 0.163836, 352.525), (0.70819, 0.180285, 311.949), (0.952158, 0.034194, 336.179)], [(0.540689, 0.143665, 347.587), (0.396586, 0.126592, 347.6), (0.249959, 0.079694, 340.523), (0.921297, 0.051708, 343.229), (0.667398, 0.165674, 352.549), (0.609315, 0.163722, 306.315), (0.945349, 0.036045, 341.433)], None),
+    ("grove", [(0.751465, 0.112731, 157.313), (0.567105, 0.11099, 158.859), (0.367918, 0.067635, 160.558), (0.976387, 0.034353, 161.456), (0.80968, 0.117071, 158.817), (0.784102, 0.108047, 88.516), (0.981098, 0.027812, 158.718)], [(0.58719, 0.09869, 157.426), (0.454979, 0.079031, 159.756), (0.297856, 0.050355, 161.167), (0.952407, 0.053872, 158.44), (0.732591, 0.120606, 155.853), (0.716282, 0.116547, 80.563), (0.961577, 0.035285, 157.03)], Some(([(0.45805, 0.079616, 160.092), (0.368483, 0.065631, 162.719), (0.264797, 0.044397, 168.088), (0.912563, 0.055173, 158.974), (0.665652, 0.109731, 156.599), (0.698651, 0.103024, 89.828), (0.945336, 0.041923, 157.222)], [(0.398632, 0.065534, 158.601), (0.290561, 0.049694, 160.456), (0.210147, 0.03173, 169.818), (0.866303, 0.057526, 156.796), (0.586553, 0.093722, 157.365), (0.6364, 0.101769, 82.985), (0.913292, 0.035718, 156.976)]))),
+    ("ocean", [(0.792993, 0.088072, 220.421), (0.590296, 0.116841, 243.184), (0.409123, 0.093718, 247.98), (0.971217, 0.023008, 213.615), (0.788391, 0.090856, 215.684), (0.76441, 0.099607, 187.893), (0.976025, 0.019647, 212.543)], [(0.59663, 0.089167, 233.427), (0.461094, 0.084904, 243.478), (0.294818, 0.05947, 250.526), (0.952907, 0.032224, 221.27), (0.732079, 0.09296, 224.414), (0.720885, 0.095495, 190.903), (0.961039, 0.027355, 219.756)], None),
+    ("ember", [(0.782439, 0.118806, 52.569), (0.62863, 0.15922, 39.401), (0.404251, 0.117664, 30.424), (0.962469, 0.02774, 70.95), (0.815735, 0.11904, 53.659), (0.69361, 0.159346, 24.787), (0.970313, 0.02052, 67.583)], [(0.597533, 0.120694, 43.455), (0.437763, 0.101287, 34.86), (0.264269, 0.055858, 26.548), (0.929214, 0.042638, 55.801), (0.705592, 0.137369, 43.176), (0.629583, 0.158322, 24.088), (0.945058, 0.033906, 58.824)], Some(([(0.470236, 0.102322, 39.355), (0.345367, 0.080697, 33.217), (0.227386, 0.056077, 27.437), (0.903891, 0.059281, 56.181), (0.641705, 0.126508, 44.376), (0.538694, 0.129931, 25.865), (0.926348, 0.046029, 58.73)], [(0.392352, 0.081287, 36.444), (0.271305, 0.056352, 31.135), (0.182126, 0.028154, 27.774), (0.851007, 0.061294, 53.805), (0.560789, 0.10645, 42.953), (0.476228, 0.106656, 24.165), (0.884931, 0.046607, 56.556)]))),
+    ("iris", [(0.738305, 0.113454, 298.926), (0.551826, 0.159189, 294.531), (0.37147, 0.133317, 289.999), (0.949472, 0.029204, 303.081), (0.745085, 0.125892, 298.647), (0.73066, 0.167815, 340.964), (0.960278, 0.024064, 306.969)], [(0.57297, 0.145973, 295.185), (0.419499, 0.13752, 292.131), (0.274235, 0.095798, 286.608), (0.916698, 0.047206, 300.224), (0.670994, 0.13095, 296.689), (0.679357, 0.165376, 340.439), (0.940582, 0.032921, 299.076)], None),
+];
+
+/// The stage palette's theme: `data-theme-id`, which web sets only for a built-in palette (legacy
+/// `t3-*` ids name the same ones).
+pub fn theme_id(s: &App, dark: bool) -> &str {
+    let id = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(serde_json::Value::as_str).unwrap_or("t3-code");
+    match id {
+        "t3-chat-dark" => "t3-chat",
+        "t3-grove" | "t3-ocean" | "t3-ember" | "t3-iris" => &id[3..],
+        id => id,
     }
+}
+
+/// `color-mix(in oklch, a p, b)`: the shorter hue arc, and an achromatic side takes the other hue.
+fn mix(a: Lch, b: Lch, p: f32) -> Lch {
+    let (ha, hb) = match (a.1 == 0.0, b.1 == 0.0) {
+        (true, _) => (b.2, b.2),
+        (_, true) => (a.2, a.2),
+        _ => (a.2, b.2),
+    };
+    let d = (hb - ha + 540.0).rem_euclid(360.0) - 180.0;
+    let h = (hb - d * p).rem_euclid(360.0);
+    (a.0 * p + b.0 * (1.0 - p), a.1 * p + b.1 * (1.0 - p), h)
+}
+
+/// The `--stage-*` colours for `variant` under `theme` (index.css's `html[data-theme-id]` rules).
+fn colors(variant: Variant, dark: bool, theme: &str) -> Vec<(&'static str, String)> {
+    let hex = |c: Lch| oklch(c.0, c.1, c.2);
+    let builtin = THEMES.iter().find(|(id, ..)| *id == theme);
+    let (art, night) = match builtin {
+        None => {
+            let mut art = ART;
+            if dark {
+                art[..3].copy_from_slice(&ART_DARK_TOP);
+            }
+            (art, NIGHT)
+        }
+        Some((_, light, dark_art, own)) => {
+            let art = if dark { *dark_art } else { *light };
+            let night = match own {
+                Some((light, dark_night)) => if dark { *dark_night } else { *light },
+                None => {
+                    let (top, mid) = (mix(art[0], NIGHT[0], 0.38), mix(art[1], NIGHT[1], 0.38));
+                    [top, mid, mix(art[2], NIGHT[2], 0.38), art[3], mix(art[4], mid, 0.55), mix(art[5], top, 0.6), mix(art[6], (1.0, 0.0, 0.0), 0.82)]
+                }
+            };
+            (art, night)
+        }
+    };
+    let names = ["top", "mid", "bottom", "highlight", "secondary", "tertiary", "line"];
+    let (palette, extra): ([Lch; 7], Vec<(&'static str, Lch)>) = match (variant, builtin) {
+        (Variant::Nightly, None) => (night, vec![
+            ("glow-highlight", (0.553_749, 0.176_543, 271.958)),
+            ("glow-secondary", (0.345_571, 0.117_466, 273.568)),
+            ("sparkle", (0.880_867, 0.057_747, 269.011)),
+        ]),
+        (Variant::Nightly, Some(_)) => (night, vec![("glow-highlight", night[3]), ("glow-secondary", night[4]), ("sparkle", night[6])]),
+        (Variant::Dev, None) => (art, vec![
+            ("celeste-highlight", (0.968_763, 0.045_822, 196.42)),
+            ("celeste-secondary", (0.827_395, 0.126_071, 211.26)),
+            ("violet-highlight", (0.895_381, 0.053_248, 286.447)),
+            ("grid-line", (0.966_822, 0.017_57, 239.99)),
+        ]),
+        (Variant::Dev, Some(_)) => (art, vec![("celeste-highlight", art[3]), ("celeste-secondary", art[4]), ("violet-highlight", art[3]), ("grid-line", art[6])]),
+    };
+    names.iter().zip(palette).map(|(n, c)| (*n, hex(c))).chain(extra.into_iter().map(|(n, c)| (n, hex(c)))).collect()
 }
 
 const NIGHTLY_STARS: [(f32, f32, f32, f32); 17] = [
@@ -202,7 +265,7 @@ const DEV: &str = r##"<defs>
 
 /// The artwork `width` points wide and `HEIGHT` tall: web's 96-unit-tall drawing sliced from
 /// its left edge (`xMinYMin slice`), so its scale follows the height.
-pub fn svg(variant: Variant, dark: bool, width: f32) -> String {
+pub fn svg(variant: Variant, dark: bool, theme: &str, width: f32) -> String {
     let mut body = match variant {
         Variant::Nightly => {
             let stars: String = NIGHTLY_STARS.iter().map(|(x, y, r, o)| format!(r#"<circle cx="{x}" cy="{y}" r="{r}" fill-opacity="{o}"/>"#)).collect();
@@ -214,7 +277,7 @@ pub fn svg(variant: Variant, dark: bool, width: f32) -> String {
         }
         Variant::Dev => DEV.to_owned(),
     };
-    for (name, hex) in colors(variant, dark) {
+    for (name, hex) in colors(variant, dark, theme) {
         body = body.replace(&format!("{{{name}}}"), &hex);
     }
     let view = width * 96.0 / HEIGHT;
@@ -224,13 +287,14 @@ pub fn svg(variant: Variant, dark: bool, width: f32) -> String {
 /// `SidebarStageBackdrop`: the art across the header's top, fading into the sidebar.
 pub fn backdrop(s: &App, t: &T, variant: Variant, width: f32, scale: f32) -> Option<El> {
     let art = &s.ui.shell.sidebar.stage;
-    let key = format!("{variant:?}:{}:{width}:{scale}", t.dark);
+    let theme = theme_id(s, t.dark);
+    let key = format!("{variant:?}:{theme}:{}:{width}:{scale}", t.dark);
     let stale = art.image.borrow().as_ref().is_none_or(|(k, _)| *k != key);
     if stale {
         let waker = s.ui.panel.waker.clone()?;
         let mut cache = art.cache.borrow_mut();
         let cache = cache.get_or_insert_with(|| ImageCache::new(waker));
-        let image = cache.svg(svg(variant, t.dark, width).into_bytes(), width, scale);
+        let image = cache.svg(svg(variant, t.dark, theme, width).into_bytes(), width, scale);
         *art.image.borrow_mut() = Some((key, image));
     }
     let image = art.image.borrow();
@@ -272,10 +336,32 @@ mod tests {
 
     #[test]
     fn the_svg_has_concrete_colours_and_slices_by_height() {
-        let art = svg(Variant::Nightly, true, 258.0);
+        let art = svg(Variant::Nightly, true, "t3-code", 258.0);
         assert!(!art.contains('{'), "every placeholder is filled");
         assert!(art.contains(r#"viewBox="0 0 309.6 96""#));
         assert_eq!(oklch(1.0, 0.0, 0.0), "#ffffff");
-        assert!(!svg(Variant::Dev, false, 258.0).contains('{'));
+        assert!(!svg(Variant::Dev, false, "t3-code", 258.0).contains('{'));
+    }
+
+    #[test]
+    fn built_in_themes_tint_the_art_as_web_s_theme_rules_do() {
+        let get = |variant, dark, theme, name: &str| colors(variant, dark, theme).into_iter().find(|(n, _)| *n == name).unwrap().1;
+        assert_eq!(get(Variant::Nightly, true, "grove", "top"), oklch(0.398_632, 0.065_534, 158.601), "grove's own night");
+        assert_eq!(get(Variant::Dev, false, "ember", "grid-line"), oklch(0.970_313, 0.020_52, 67.583), "a theme's grid is its line");
+        assert_eq!(get(Variant::Dev, true, "custom-theme", "top"), oklch(0.581_473, 0.149_124, 256.9), "other themes keep the default art");
+        // Ocean's night mixes its art 38% into the default night base.
+        let (l, c, h) = mix(THEMES[2].1[0], NIGHT[0], 0.38);
+        assert!((l - 0.477_29).abs() < 1e-4 && (c - 0.106_21).abs() < 1e-4 && (h - 268.025).abs() < 1e-2, "{l} {c} {h}");
+        assert_eq!(get(Variant::Nightly, false, "ocean", "top"), oklch(l, c, h));
+        assert_eq!(mix((0.9, 0.03, 212.0), (1.0, 0.0, 0.0), 0.82).2, 212.0, "white takes the other hue");
+        assert_eq!(mix((0.5, 0.1, 350.0), (0.5, 0.1, 10.0), 0.5).2, 0.0, "the shorter arc");
+    }
+
+    #[test]
+    fn legacy_theme_ids_name_the_built_in_palettes() {
+        let mut s = App::new();
+        s.client_settings.values.insert("themeDark".into(), serde_json::json!("t3-grove"));
+        s.client_settings.values.insert("themeLight".into(), serde_json::json!("t3-chat-dark"));
+        assert_eq!((theme_id(&s, true), theme_id(&s, false)), ("grove", "t3-chat"));
     }
 }

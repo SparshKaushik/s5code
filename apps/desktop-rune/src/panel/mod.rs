@@ -1209,6 +1209,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         diff::tree_fixture(s);
         s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
     }),
+    ("panel-diff-review", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::review_fixture(s);
+    }),
+    ("panel-diff-turns", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::turns_fixture(s);
+    }),
     ("git-commit", crate::chat::details::git::commit_scene),
     ("details-pr-conflict", crate::chat::details::pr::conflict_scene),
     ("panel-diff-split", |s| {
@@ -1374,6 +1382,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("delete-worktree-too", crate::chat::details::cleanup::scene),
     ("script-editor-locked", crate::chat::details::scripts::scene_locked),
     ("details-editor-menu", crate::chat::details::scene_editor_menu),
+    ("details-branch-menu", crate::chat::details::scene_branch_menu),
+    ("details-branch-restore", crate::chat::details::scene_branch_restore),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
         crate::chat::details::pr::scene(s);

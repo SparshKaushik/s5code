@@ -212,6 +212,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-usage-limit-banner", usage_limit_banner),
     ("timeline-child-approval", child_approval),
     ("timeline-worktree-setup", worktree_setup),
+    ("timeline-worktree-handed-off", worktree_handed_off),
     ("timeline-worktree-retry", worktree_retry),
     ("timeline-tool-group", tool_group),
     ("timeline-tool-group-open", tool_group_open),
@@ -659,6 +660,30 @@ fn worktree_setup(app: &mut App) {
             {"id": "setup-script", "status": "running", "startedAt": "2026-03-10T12:00:09Z",
                 "tail": ["Lockfile is up to date", "Progress: resolved 1412, reused 1398, downloaded 14", "Packages: +1412", "node_modules/.pnpm/esbuild postinstall…"]},
             {"id": "agent", "status": "pending"}]});
+    app.ui.chat.timeline.worktree.details.insert(id.clone());
+    app.ui.chat.timeline.worktree.held.insert(id, snapshot);
+}
+/// The agent started from a worktree whose setup script failed: the card is one summary row.
+fn worktree_handed_off(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    patch_shell(app, serde_json::json!({"latestRunStartedAt": "2026-03-10T12:00:31Z"}));
+    // A follow-up would retire the card, so the thread keeps only its first prompt.
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["turnItems"].as_array_mut())
+    {
+        let mut prompts = 0;
+        items.retain(|i| i["type"] != "user_message" || { prompts += 1; prompts == 1 });
+    }
+    let snapshot = serde_json::json!({"threadId": id, "sequence": 9, "phase": "done", "startedAt": "2026-03-10T12:00:00Z", "endedAt": "2026-03-10T12:00:31Z",
+        "branch": "t3/billing-schema", "baseRef": "origin/main", "worktreePath": "/home/dev/.t3/worktrees/app/billing-schema",
+        "setupScript": {"name": "Install dependencies", "command": "pnpm install --frozen-lockfile", "terminalId": "setup-1"},
+        "stages": [
+            {"id": "fetch", "status": "done", "startedAt": "2026-03-10T12:00:00Z", "endedAt": "2026-03-10T12:00:03Z"},
+            {"id": "checkout", "status": "done", "startedAt": "2026-03-10T12:00:03Z", "endedAt": "2026-03-10T12:00:09Z"},
+            {"id": "submodules", "status": "skipped", "detail": "none"},
+            {"id": "setup-script", "status": "failed", "startedAt": "2026-03-10T12:00:09Z", "endedAt": "2026-03-10T12:00:30Z", "tail": ["ERR_PNPM_LOCKFILE_MISSING"]},
+            {"id": "agent", "status": "done", "startedAt": "2026-03-10T12:00:30Z", "endedAt": "2026-03-10T12:00:31Z"}]});
     app.ui.chat.timeline.worktree.details.insert(id.clone());
     app.ui.chat.timeline.worktree.held.insert(id, snapshot);
 }

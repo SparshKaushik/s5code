@@ -7,6 +7,7 @@ use rune::{El, col, row, text};
 pub struct Dialog {
     key: String,
     title: String,
+    title_spans: Vec<rune::Span>,
     description: Option<String>,
     body: Vec<El>,
     open: bool,
@@ -23,6 +24,7 @@ impl Dialog {
         Self {
             key: key.into(),
             title: title.into(),
+            title_spans: vec![],
             description: None,
             body: vec![],
             open: false,
@@ -42,6 +44,11 @@ impl Dialog {
     /// Shown before the title (web `DialogHeader`'s leading icon).
     pub fn title_icon(mut self, glyph: El) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+    /// Runs of the title drawn differently, such as a `<code>` branch name.
+    pub fn title_spans(mut self, spans: Vec<rune::Span>) -> Self {
+        self.title_spans = spans;
         self
     }
     pub fn description(mut self, description: impl Into<String>) -> Self {
@@ -105,6 +112,7 @@ impl Dialog {
         let title = text(&self.title)
             .font(theme::weight(theme::TEXT_LG, 600.))
             .color(t.c.contrast_foreground)
+            .spans(self.title_spans)
             .wrap();
         let mut heading = col().grow(1.).min_w(0.).gap(8.).child(match self.glyph {
             Some(glyph) => row().gap(8.).center_y().child(glyph).child(title.shrink()),

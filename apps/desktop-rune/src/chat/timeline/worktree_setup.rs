@@ -72,6 +72,18 @@ fn visible(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
     }
 }
 
+/// setupHandedOff: the agent has started from the worktree, so the card is history and a finished
+/// one folds to a single summary row.
+fn handed_off(snapshot: &Value, turn_started: bool) -> bool {
+    turn_started && array(snapshot, "stages").iter().any(|st| s(st, "id") == "agent" && s(st, "status") == "done")
+}
+
+/// CollapsedSummaryRow's status: failed when the setup or its script did.
+fn summary_status(snapshot: &Value) -> &'static str {
+    let script_failed = array(snapshot, "stages").iter().any(|st| s(st, "id") == "setup-script" && s(st, "status") == "failed");
+    if matches!(s(snapshot, "phase"), "failed" | "cancelled") || script_failed { "failed" } else { "done" }
+}
+
 /// The setup script's server terminal, once its stage has started.
 fn setup_terminal(snapshot: &Value) -> Option<&str> {
     let started = array(snapshot, "stages").iter().any(|st| s(st, "id") == "setup-script" && s(st, "status") != "pending");
@@ -308,9 +320,10 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         return None;
     }
     let running = s(snapshot, "phase") == "running";
+    let embedded = handed_off(snapshot, turn_started);
     let now = app.now_ms;
     let mut card = col().w_full().label("Worktree setup");
-    if !running && s(snapshot, "phase") != "done" {
+    if !embedded && !running && s(snapshot, "phase") != "done" {
         let tone = if s(snapshot, "phase") == "failed" { t.c.error_foreground } else { t.c.muted_foreground };
         // SetupHeaderRow: a 24px row under a divider, then the stages 6px below.
         card = card.child(
@@ -329,7 +342,25 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         );
     }
     let script = &snapshot["setupScript"];
-    for stage in array(snapshot, "stages") {
+    let stage_row = |status: &str, label: &str, trailing: Option<String>, time: Option<String>| {
+        // WorkLogRow: py-0.5 around a 24px line, px-0.5, a 24px icon lane, gap-1.5.
+        row()
+            .w_full()
+            .h(28.0)
+            .px(2.0)
+            .gap(6.0)
+            .center_y()
+            .child(row().size(24.0, 24.0).center().child(stage_icon(status, t)))
+            .child(text(label.to_owned()).font(theme::TEXT_SM).color(stage_color(status, t)).truncate().shrink().min_w(0.0))
+            .child(rune::spacer())
+            .children(trailing.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0)))
+            .children(time.map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground)))
+    };
+    if embedded && !running {
+        let time = elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now);
+        card = card.child(stage_row(summary_status(snapshot), header_label(snapshot), None, time));
+    }
+    for stage in array(snapshot, "stages").iter().filter(|_| !embedded || running) {
         let status = s(stage, "status");
         let label = if s(stage, "id") == "setup-script" && !s(script, "name").is_empty() { s(script, "name") } else { stage_label(s(stage, "id")) };
         let trailing = match status {
@@ -340,20 +371,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         };
         let ended = if s(stage, "endedAt").is_empty() { s(snapshot, "endedAt") } else { s(stage, "endedAt") };
         let time = (!matches!(status, "pending" | "skipped")).then(|| elapsed(s(stage, "startedAt"), ended, running, now)).flatten();
-        card = card.child(
-            // WorkLogRow: py-0.5 around a 24px line, px-0.5, a 24px icon lane, gap-1.5.
-            row()
-                .w_full()
-                .h(28.0)
-                .px(2.0)
-                .gap(6.0)
-                .center_y()
-                .child(row().size(24.0, 24.0).center().child(stage_icon(status, t)))
-                .child(text(label).font(theme::TEXT_SM).color(stage_color(status, t)).truncate().shrink().min_w(0.0))
-                .child(rune::spacer())
-                .children(trailing.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0)))
-                .children(time.map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
-        );
+        card = card.child(stage_row(status, label, trailing, time));
         if s(stage, "id") == "setup-script"
             && let Some((lines, failed)) = tail(snapshot)
         {
@@ -404,7 +422,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .build(t),
         );
     }
-    if running {
+    if running && !embedded {
         let local_thread = thread.to_owned();
         actions = actions.child(
             Button::new("Work locally")
@@ -428,16 +446,19 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     }
     card = card.child(actions);
     if open {
+        let rows: Vec<(&str, &str)> = [("Branch", s(snapshot, "branch")), ("Base", s(snapshot, "baseRef")), ("Path", s(snapshot, "worktreePath")), ("Setup", s(script, "command"))]
+            .into_iter()
+            .filter(|(_, value)| !value.is_empty())
+            .collect();
+        // The dl's `auto` column: as wide as its widest term.
+        let term_w = rows.iter().map(|(term, _)| rune::text::measure(term, &[], theme::TEXT_XS, None).0.ceil()).fold(0.0, f32::max);
         let mut list = col().ml(32.0).mt(4.0).mb(6.0).gap(2.0);
-        for (term, value) in [("Branch", s(snapshot, "branch")), ("Base", s(snapshot, "baseRef")), ("Path", s(snapshot, "worktreePath")), ("Setup", s(script, "command"))] {
-            if value.is_empty() {
-                continue;
-            }
+        for (term, value) in rows {
             list = list.child(
                 row()
                     .w_full()
                     .gap(12.0)
-                    .child(text(term).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.8)).w(48.0))
+                    .child(text(term).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.8)).w(term_w))
                     .child(text(value.to_owned()).font(theme::MONO_XS).color(t.c.muted_foreground).truncate_middle().shrink().min_w(0.0).selectable(true)),
             );
         }
@@ -464,6 +485,18 @@ mod tests {
         assert!(visible(&snapshot("failed", json!([])), true, false));
         assert_eq!(header_label(&script_failed), "Worktree ready, setup script failed");
         assert_eq!(header_label(&snapshot("cancelled", json!([]))), "Worktree setup cancelled");
+    }
+
+    #[test]
+    fn a_finished_setup_folds_to_one_summary_row_once_the_agent_takes_over() {
+        let with = |phase: &str, script: &str, agent: &str| snapshot(phase, json!([{"id": "setup-script", "status": script}, {"id": "agent", "status": agent}]));
+        let ok = with("done", "done", "done");
+        assert!(handed_off(&ok, true));
+        assert!(!handed_off(&ok, false), "FAILED: the turn has not started yet");
+        assert!(!handed_off(&with("running", "running", "pending"), true), "FAILED: the agent has not started from the worktree");
+        assert_eq!(summary_status(&ok), "done");
+        assert_eq!(summary_status(&with("done", "failed", "done")), "failed");
+        assert_eq!(summary_status(&with("cancelled", "skipped", "pending")), "failed");
     }
 
     #[test]
