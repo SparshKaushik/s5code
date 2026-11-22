@@ -147,7 +147,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .on_drop_hover(|s: &mut App, over, _: &mut Tx| s.ui.chat.drop_over = over)
             .children(s.ui.chat.drop_over.then(|| drop_overlay(t)));
     }
-    main.child(topbar::view(s, cx, t).children(guest::indicator(s, t)))
+    main.child(topbar::view(s, cx, t))
         .child(side::beside(s, cx, t, stack))
         .children(crate::panel::drawer::view(s, cx, t))
 }
