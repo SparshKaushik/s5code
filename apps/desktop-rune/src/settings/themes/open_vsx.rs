@@ -373,7 +373,7 @@ fn open_package(bytes: &[u8]) -> Result<Archive, String> {
         return Err("That extension package has too many files.".into());
     }
     for name in archive.file_names() {
-        normalize(name, "extension/")?;
+        normalize(&name.map_err(|_| "That Open VSX extension package could not be opened.")?, "extension/")?;
     }
     Ok(archive)
 }
