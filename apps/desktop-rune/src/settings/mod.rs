@@ -12,7 +12,7 @@ pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
-mod connection_diagnosis;
+pub(crate) mod connection_diagnosis;
 mod checkout_grouping;
 pub(crate) mod connections;
 mod controls;
@@ -51,6 +51,7 @@ pub(crate) mod tasks;
 pub(crate) mod themes;
 mod vivid;
 pub use themes::apply as apply_theme;
+pub use snooze::sidebar_menu as snooze_menu;
 
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Appearance, Route, icons};
@@ -110,6 +111,8 @@ pub struct Ui {
     pub pulse: Option<(String, i64, bool)>,
     /// Open inheritance popover, by row key.
     pub inheritance: Option<String>,
+    /// The settings row under the pointer, which reveals its inheritance marker.
+    pub hover_row: Option<String>,
     pub edits: HashMap<String, TextEdit>,
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
@@ -248,6 +251,19 @@ fn complete_object(parent: &str, stored: Value) -> Value {
         _ => {}
     }
     object
+}
+
+/// A project-scoped server setting as `resolveProjectSettings` reads it: the project's override,
+/// else the environment's value, else the built-in default.
+pub fn project_value(s: &App, project: &str, key: &str) -> Value {
+    let settings = server_settings(s);
+    settings["projectSettingsOverrides"][project].get(key).or_else(|| settings.get(key)).unwrap_or(&scope::defaults()[key]).clone()
+}
+
+/// `sidebarThreadSortOrder` (no settings row; older web builds wrote it): "created_at" picks a
+/// project's latest thread by creation instead of recent activity.
+pub fn threads_by_creation(s: &App) -> bool {
+    value(s, "sidebarThreadSortOrder") == "created_at"
 }
 
 pub fn value(s: &App, key: &str) -> Value {
@@ -1275,6 +1291,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.settings.open_select = Some("defaultRuntimeMode".into());
     }),
     ("settings-general", |s| scene(s, "general")),
+    ("settings-search", |s| {
+        scene(s, "general");
+        s.ui.settings.search = TextEdit::new("theme");
+    }),
     ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),
     ("settings-providers", |s| scene(s, "providers")),
@@ -1359,6 +1379,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-connections-route-remove", |s| {
         scene(s, "connections");
         connections::scene(s, "route-remove");
+    }),
+    ("settings-connections-outdated", |s| {
+        scene(s, "connections");
+        connections::scene(s, "outdated");
     }),
     ("settings-connections-machines", |s| {
         scene(s, "connections");
@@ -1695,6 +1719,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         if s.ui.settings.open_select.take().is_some() || background::escape(s) {
             return true;
         }
+        if themes::open_vsx::escape(s) {
+            return true;
+        }
         if s.ui.settings.theme_import_open {
             s.ui.settings.theme_import_open = false;
             return true;
@@ -1714,7 +1741,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             return true;
         }
         if s.ui.settings.update_version.take().is_some()
-            || s.ui.settings.theme_editor.take().is_some()
+            || themes::editor_escape(s)
             || s.ui.settings.archive_menu.take().is_some()
         {
             return true;

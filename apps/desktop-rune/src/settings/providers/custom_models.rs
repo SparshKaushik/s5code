@@ -93,6 +93,8 @@ pub struct Draft {
     error: Option<String>,
     /// Takes keystrokes aimed at a row removed since the frame was built.
     scratch: TextEdit,
+    /// The option whose preset list is open.
+    preset_open: Option<usize>,
 }
 
 fn from_preset(preset: &Preset) -> Descriptor {
@@ -144,6 +146,7 @@ pub fn draft_from_entry(entry: &Value) -> Draft {
         slug,
         error: None,
         scratch: TextEdit::default(),
+        preset_open: None,
     }
 }
 
@@ -329,6 +332,24 @@ fn edit_option(s: &mut App, i: usize, f: impl FnOnce(&mut Descriptor)) {
     });
 }
 
+/// Web's `applyPresetId`: a preset replaces the option outright; "Custom…" clears its id.
+fn apply_preset(o: &mut Descriptor, preset: Option<&Preset>) {
+    *o = match preset {
+        Some(preset) => from_preset(preset),
+        None => Descriptor { id: TextEdit::default(), ..o.clone() },
+    };
+}
+
+/// Closes the open preset list, else the editor, as Escape does.
+pub fn escape(s: &mut App) -> bool {
+    let editing = &mut s.ui.settings.providers_ui.editing;
+    if let Some(d) = editing.as_mut().filter(|d| d.preset_open.is_some()) {
+        d.preset_open = None;
+        return true;
+    }
+    editing.take().is_some()
+}
+
 fn micro_remove(t: &T, label: String, press: impl Fn(&mut App) + 'static) -> El {
     kit::Button::new(label).variant("ghost-muted").size("icon-micro").icon(&icons::X).on_press(press).build(t)
 }
@@ -403,8 +424,29 @@ pub fn editor(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, slug
             .gap(8.0)
             .center_y()
             .flex_wrap()
-            .child(text(format!("Option {}", i + 1)).font(theme::TEXT_2XS).color(muted).w(56.0))
-            .child(small_input(&d.id, &format!("custom-model-{slug}-option-{i}-id"), "optionId", t, true).w(144.0).label("Option id").on_edit(move |s: &mut App| slot(s, Slot::Id(i))))
+            .child(text(format!("Option {}", i + 1)).font(theme::TEXT_2XS).color(muted).w(56.0));
+        let preset = available.iter().position(|p| p.id == d.id.text);
+        let header = if available.is_empty() {
+            header
+        } else {
+            header.child(
+                kit::Button::new(preset.map_or("Custom…", |p| available[p].id))
+                    .variant("outline")
+                    .size("xs")
+                    .icon(&icons::CHEVRON_DOWN)
+                    .on_press(move |s: &mut App| edit(s, |d| d.preset_open = if d.preset_open == Some(i) { None } else { Some(i) }))
+                    .build(t)
+                    .w(160.0)
+                    .label("Option id")
+                    .expanded(draft.preset_open == Some(i)),
+            )
+        };
+        let header = if preset.is_none() {
+            header.child(small_input(&d.id, &format!("custom-model-{slug}-option-{i}-id"), "optionId", t, true).w(144.0).label("Option id").on_edit(move |s: &mut App| slot(s, Slot::Id(i))))
+        } else {
+            header
+        };
+        let header = header
             .child(
                 small_input(&d.label, &format!("custom-model-{slug}-option-{i}-label"), "Label", t, false)
                     .grow(1.0)
@@ -421,6 +463,40 @@ pub fn editor(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, slug
                 })
             }));
         let mut block = col().w_full().px(10.0).py(10.0).gap(8.0).radius(theme::radius::MD).border(1.0, t.c.border.alpha_mul(0.6)).fill(t.c.background.alpha_mul(0.4)).child(header);
+        if draft.preset_open == Some(i) {
+            let mut list = col().w(240.0).ml(64.0).gap(2.0).padding(4.0).radius(8.0).border(1.0, t.c.border).fill(t.c.popover).role("listbox").label("Option id");
+            for p in (0..available.len()).map(Some).chain([None]) {
+                let chosen = p == preset;
+                let owned = driver.to_owned();
+                let mut item = row()
+                    .w_full()
+                    .px(8.0)
+                    .py(6.0)
+                    .gap(8.0)
+                    .center_y()
+                    .radius(6.0)
+                    .role("option")
+                    .checked(chosen)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(t.c.muted)
+                    .on_press(move |s: &mut App| {
+                        let preset = p.map(|p| &presets(&owned)[p]);
+                        edit_option(s, i, |o| apply_preset(o, preset));
+                        edit(s, |d| d.preset_open = None);
+                    });
+                item = match p {
+                    Some(p) => item
+                        .child(text(available[p].id).font(theme::MONO_SM).color(t.c.foreground))
+                        .child(text(available[p].label).font(theme::TEXT_XS).color(muted).grow(1.0)),
+                    None => item.child(text("Custom…").font(theme::TEXT_SM).color(t.c.foreground).grow(1.0)),
+                };
+                if chosen {
+                    item = item.child(rune::icon(&icons::CHECK, 14.0).color(t.c.foreground));
+                }
+                list = list.child(item);
+            }
+            block = block.child(list);
+        }
         if !d.boolean {
             let mut choices = col().w_full().pl(64.0).gap(6.0);
             for (j, c) in d.choices.iter().enumerate() {
@@ -561,6 +637,16 @@ mod tests {
         let copied = from_capabilities(&json!({"optionDescriptors": [{"id": "contextWindow", "label": "Context", "type": "select", "options": []}]}), "claudeAgent");
         assert!(copied.is_empty(), "Claude context choices are not copied");
         assert_eq!(from_preset(&CODEX[1]).choices.iter().filter(|c| c.default).count(), 1);
+    }
+
+    #[test]
+    fn a_preset_replaces_the_option_and_custom_clears_its_id() {
+        let mut option = from_preset(&CODEX[1]);
+        option.label = TextEdit::new("Renamed");
+        apply_preset(&mut option, Some(&CODEX[0]));
+        assert_eq!((option.id.text.as_str(), option.label.text.as_str(), option.choices.len()), ("reasoningEffort", "Reasoning", 4));
+        apply_preset(&mut option, None);
+        assert_eq!((option.id.text.as_str(), option.label.text.as_str(), option.choices.len()), ("", "Reasoning", 4), "FAILED: Custom keeps the label and choices");
     }
 
     #[test]

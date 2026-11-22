@@ -58,6 +58,8 @@ fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize
 
 /// `key` names this run of prose within its message, for the blocks' own keys.
 fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
+    let source = if t.math { super::math::literal(source) } else { Cow::Borrowed(source) };
+    let source: &str = &source;
     let mut out = col().w_full().gap(10.4);
     let parents = md_links::parent_suffixes(source);
     for (index, block) in source
@@ -216,7 +218,7 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color, run: boo
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source), run);
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source), run, t.math);
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink, run))
 }
 
@@ -306,7 +308,12 @@ fn render(cx: &Cx, source: &str, scope: &str) -> El {
             Part::Prose { start, text } => prose(app, &text, &format!("{id}-{scope}{start}"), t, cx.marks, cx.ink),
             Part::Fence { language, code, closed } => {
                 fences += 1;
-                fence(cx, &language, &code, closed, format!("{id}-fence-{scope}{}", fences - 1))
+                if t.math && closed && language == "math" {
+                    // Already literal: `math: false` keeps prose from reading it again.
+                    prose(app, &super::math::display(&code), &format!("{id}-{scope}math{fences}"), &T { math: false, ..*t }, cx.marks, cx.ink)
+                } else {
+                    fence(cx, &language, &code, closed, format!("{id}-fence-{scope}{}", fences - 1))
+                }
             }
             Part::Alert { kind, body } => {
                 nested += 1;

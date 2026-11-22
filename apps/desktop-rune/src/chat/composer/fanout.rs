@@ -136,7 +136,7 @@ pub(super) fn send(s: &mut App) -> bool {
     }
     let Some(d) = draft(s) else { return true };
     let snapshot = stored_draft(d);
-    let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
+    let (text, contexts) = super::outgoing(d);
     let text = text.trim().to_string();
     let paths: Vec<String> = d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).cloned().collect();
     if text.is_empty() && paths.is_empty() && contexts.is_empty() {

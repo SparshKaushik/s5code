@@ -3,7 +3,7 @@
 use super::super::{controls as c, permissions};
 use crate::kit;
 use crate::theme::{self, AlphaMul, T};
-use crate::App;
+use crate::{App, icons};
 use rune::{El, TextEdit, col, el, row, text};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct Ui {
     loading_providers: Option<(u64, Option<String>)>,
     /// A provider being saved or (with `true`) disabled.
     saving: Option<(u64, String, bool)>,
+    /// The provider whose protocol list is open.
+    protocol_open: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -455,23 +457,49 @@ fn provider_row(s: &App, t: &T, id: &str, provider: &Value, read_only: bool) -> 
                 .build(t),
         );
     }
-    // Web's protocol select, as a row of choices: `supported` is short.
-    let mut protocols = row().gap(4.0).center_y().role("radiogroup").label(format!("{key} protocol"));
-    for protocol in provider["supported"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-        let (owned, choice, chosen) = (key.clone(), protocol.to_owned(), draft.api_type == protocol);
-        protocols = protocols.child(
-            kit::Button::new(protocol)
-                .variant(if chosen { "secondary" } else { "ghost-muted" })
-                .size("xs")
-                .disabled(read_only || saving)
+    // Web's protocol select: a trigger, and its options listed under the row while open.
+    let open = ui.protocol_open.as_deref() == Some(key.as_str());
+    let toggle_key = key.clone();
+    let protocols = kit::Button::new(if draft.api_type.is_empty() { "Protocol" } else { draft.api_type.as_str() })
+        .variant("outline")
+        .size("sm")
+        .icon(&icons::CHEVRON_DOWN)
+        .disabled(read_only || saving)
+        .on_press(move |s: &mut App| {
+            let open = &mut ui_mut(s).protocol_open;
+            *open = if open.as_deref() == Some(toggle_key.as_str()) { None } else { Some(toggle_key.clone()) };
+        })
+        .build(t)
+        .label(format!("{key} protocol"))
+        .expanded(open);
+    let mut protocol_list = None;
+    if open {
+        let mut list = col().w(200.0).gap(2.0).padding(4.0).radius(8.0).border(1.0, t.c.border).fill(t.c.popover).role("listbox").label(format!("{key} protocol"));
+        for protocol in provider["supported"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let (owned, choice, chosen) = (key.clone(), protocol.to_owned(), draft.api_type == protocol);
+            let mut item = row()
+                .w_full()
+                .px(8.0)
+                .py(6.0)
+                .gap(8.0)
+                .center_y()
+                .radius(6.0)
+                .role("option")
+                .checked(chosen)
+                .cursor(rune::Cursor::Pointer)
+                .hover(t.c.muted)
                 .on_press(move |s: &mut App| {
-                    let draft = ui_mut(s).drafts.entry(owned.clone()).or_default();
-                    draft.api_type = choice.clone();
+                    let ui = ui_mut(s);
+                    ui.drafts.entry(owned.clone()).or_default().api_type = choice.clone();
+                    ui.protocol_open = None;
                 })
-                .build(t)
-                .role("radio")
-                .checked(chosen),
-        );
+                .child(text(protocol.to_owned()).font(theme::TEXT_SM).color(t.c.foreground).grow(1.0));
+            if chosen {
+                item = item.child(rune::icon(&icons::CHECK, 14.0).color(t.c.foreground));
+            }
+            list = list.child(item);
+        }
+        protocol_list = Some(list);
     }
     let (url_key, headers_key) = (key.clone(), key.clone());
     let base_url = kit::Input::new(&draft.base_url)
@@ -516,6 +544,7 @@ fn provider_row(s: &App, t: &T, id: &str, provider: &Value, read_only: bool) -> 
                 .child(actions),
         )
         .child(row().w_full().gap(8.0).center_y().child(protocols).child(base_url))
+        .children(protocol_list)
         .child(headers)
 }
 

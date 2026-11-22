@@ -29,11 +29,21 @@ pub struct NewThread {
     provider: Option<String>,
     model: Option<String>,
     pull_request: Option<u64>,
+    /// Hidden characters dropped from the prompt, which web warns about.
+    hidden: usize,
+}
+
+/// A thread deep link: the thread, and the prompt it carries for its composer.
+#[derive(Debug, PartialEq)]
+struct ThreadLink {
+    thread: String,
+    prompt: Option<Result<(String, usize), String>>,
 }
 
 #[derive(Default)]
 pub struct Ui {
     pending: Option<Result<NewThread, String>>,
+    pending_thread: Option<ThreadLink>,
     /// A pairing link waiting for the person to confirm its backend: (pairing URL, origin).
     pair: Option<(String, String)>,
     /// Pairing URLs already used; their one-time token is spent.
@@ -213,7 +223,7 @@ fn is_web_page_file(path: &str) -> bool {
 /// Prompt, pairing, ChatGPT handoff and sign-in return links: what a second launch hands to
 /// the running app.
 pub fn is_app_link(url: &str) -> bool {
-    parse(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || resume_route(url).is_some()
+    parse(url).is_some() || thread_link(url).is_some() || pairing_link(url).is_some() || codex_callback::read_handoff(url).is_some() || resume_route(url).is_some()
 }
 
 /// `resumeProviderAuth`: a sign-in page sending the person back to the app's settings.
@@ -241,17 +251,10 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
     }
     let param = |k: &str| parsed.query_pairs().find(|(key, _)| key == k).map(|(_, v)| v.into_owned());
     Some((|| {
-        let raw = param("prompt").unwrap_or_default();
-        if raw.chars().count() > MAX_PROMPT {
-            return Err(format!("This prompt is longer than {} characters, so T3 Code did not open it.", "8,000"));
-        }
-        let (prompt, dropped) = sanitize(&raw);
-        if prompt.is_empty() && dropped > 0 {
-            return Err("This prompt had only hidden characters, so it may be malicious. T3 Code did not open it.".into());
-        }
+        let (prompt, hidden) = read_prompt(param("prompt"))?.unwrap_or_default();
         if let Some(pr) = param("pr") {
             let (repository, number) = pull_request(&pr).ok_or("This link names a pull request T3 Code cannot read.")?;
-            return Ok(NewThread { prompt, repository: Some(repository), provider: None, model: None, pull_request: Some(number) });
+            return Ok(NewThread { prompt, repository: Some(repository), provider: None, model: None, pull_request: Some(number), hidden });
         }
         if prompt.is_empty() {
             return Err("This link has no prompt.".into());
@@ -262,8 +265,52 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
         };
         let provider = param("provider").map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty());
         let model = param("model").map(|m| m.trim().to_owned()).filter(|m| !m.is_empty() && provider.is_some());
-        Ok(NewThread { prompt, repository, provider, model, pull_request: None })
+        Ok(NewThread { prompt, repository, provider, model, pull_request: None, hidden })
     })())
+}
+
+/// `readPrompt`: a link's visible prompt and the hidden characters dropped from it.
+fn read_prompt(raw: Option<String>) -> Result<Option<(String, usize)>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.encode_utf16().count() > MAX_PROMPT {
+        return Err(format!("This prompt is longer than {} characters, so T3 Code did not open it.", "8,000"));
+    }
+    let (prompt, dropped) = sanitize(&raw);
+    if prompt.is_empty() && dropped > 0 {
+        return Err("This prompt had only hidden characters, so it may be malicious. T3 Code did not open it.".into());
+    }
+    Ok((!prompt.is_empty()).then_some((prompt, dropped)))
+}
+
+/// `promptLinkAppPath` for thread links: `s5code://threads/<env>/<thread>`, the hosted app's
+/// `/threads/<env>/<thread>`, or its `/<env>/<thread>` when it carries a prompt.
+fn thread_link(url: &str) -> Option<ThreadLink> {
+    let parsed = s5_net::url::Url::parse(url.trim()).ok()?;
+    let has_prompt = parsed.query_pairs().any(|(k, _)| k == "prompt");
+    let path = parsed.path();
+    let rest = if app_scheme(parsed.scheme()) {
+        (parsed.host_str() == Some("threads")).then_some(path)?
+    } else if parsed.origin().ascii_serialization() != HOSTED_APP {
+        return None;
+    } else if let Some(rest) = path.strip_prefix("/threads/") {
+        rest
+    } else if has_prompt {
+        path.strip_prefix('/')?
+    } else {
+        return None;
+    };
+    let mut segments = rest.trim_start_matches('/').strip_suffix('/').unwrap_or(rest.trim_start_matches('/')).split('/');
+    let (Some(env), Some(thread), None) = (segments.next(), segments.next(), segments.next()) else { return None };
+    if env.is_empty() || thread.is_empty() {
+        return None;
+    }
+    let prompt = has_prompt.then(|| read_prompt(parsed.query_pairs().find(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned())));
+    let prompt = match prompt {
+        Some(Ok(None)) | None => None,
+        Some(Ok(Some(found))) => Some(Ok(found)),
+        Some(Err(e)) => Some(Err(e)),
+    };
+    Some(ThreadLink { thread: crate::chat::timeline::md_links::percent_decode(thread), prompt })
 }
 
 /// `resolvePromptLinkModelSelection`: the first ready (else warning) enabled instance of the
@@ -309,6 +356,11 @@ pub fn open(s: &mut App, url: &str) -> bool {
             Ok((origin, _)) => s.ui.links.pair = Some((pairing_url, origin)),
             Err(e) => crate::shell::palette::toast(s, "Could not add backend", Some(&e)),
         }
+        return true;
+    }
+    if let Some(link) = thread_link(url) {
+        s.ui.links.pending_thread = Some(link);
+        poll(s);
         return true;
     }
     let Some(link) = parse(url) else {
@@ -601,7 +653,7 @@ fn poll_landing(s: &mut App) -> bool {
                     false
                 }
                 Some(Some(thread)) => {
-                    open_thread(s, &thread, &link.prompt);
+                    open_thread(s, &thread, &link.prompt, link.hidden);
                     true
                 }
                 Some(None) => {
@@ -745,22 +797,49 @@ fn pick_linked_thread(lookups: &[(String, u64, Option<s5_net::Reply>)]) -> Optio
 }
 
 /// Opens a thread the link points at, with the link's prompt in its composer.
-fn open_thread(s: &mut App, thread: &str, prompt: &str) {
+fn open_thread(s: &mut App, thread: &str, prompt: &str, hidden: usize) {
     crate::shell::sidebar::open_thread(s, thread);
     if !prompt.is_empty() {
-        crate::chat::composer::append_to_draft(s, prompt);
+        place_prompt(s, prompt, hidden, None);
     }
 }
 
 /// `openDraft`: the link's prompt (and `extra`) and model on the draft the window now shows.
 fn land_draft(s: &mut App, link: &NewThread, extra: Option<String>) {
     let text = [Some(link.prompt.as_str()).filter(|p| !p.is_empty()), extra.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    let note = link.provider.as_deref().and_then(|provider| apply_link_model(s, provider, link.model.as_deref()));
     if !text.is_empty() {
-        crate::chat::composer::append_to_draft(s, &text);
+        place_prompt(s, &text, link.hidden, note);
+    } else if let Some(note) = note {
+        crate::shell::palette::toast(s, "Prompt added from a link", Some(&format!("Read it before you send. {note}")));
     }
-    if let Some(provider) = &link.provider {
-        apply_link_model(s, provider, link.model.as_deref());
+}
+
+/// `placeLinkedPrompt`: the prompt fills the draft the window shows, asking first before it
+/// replaces a different one. Hidden characters it dropped warn until dismissed.
+fn place_prompt(s: &mut App, prompt: &str, hidden: usize, note: Option<String>) {
+    let key = crate::chat::composer::draft_key(s, s.frame_route());
+    let existing = s.ui.chat.composer.drafts.get(&key).map(|d| d.edit.text.clone()).unwrap_or_default();
+    let replaces = !existing.trim().is_empty() && existing != prompt;
+    let text = prompt.to_owned();
+    if hidden > 0 {
+        let plural = if hidden == 1 { "" } else { "s" };
+        let description = format!("T3 Code removed {hidden} hidden character{plural}. Read the prompt before you send it.");
+        crate::shell::palette::toast_warning_sticky(s, "This prompt had hidden characters, it may be malicious", Some(&description));
     }
+    let place = std::rc::Rc::new(move |s: &mut App| {
+        crate::shell::toast::close_titled(s, "Linked prompt ready");
+        let draft = s.ui.chat.composer.drafts.entry(key.clone()).or_default();
+        draft.edit.replace_text(&text);
+        draft.edit.set_caret(text.len());
+        let description = ["Read it before you send.", note.as_deref().unwrap_or_default()].join(" ");
+        crate::shell::palette::toast(s, "Prompt added from a link", Some(description.trim_end()));
+    });
+    if !replaces {
+        return place(s);
+    }
+    let action: crate::shell::palette::ToastAction = ("Replace draft".into(), true, std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| place(s)));
+    crate::shell::palette::toast_sticky_with(s, "Linked prompt ready", Some("This thread already has a draft. Replace it with the linked prompt?"), vec![action]);
 }
 
 /// `PullRequestLinkCheckout`'s button: the handoff runs on the project's draft.
@@ -779,7 +858,7 @@ fn check_out(s: &mut App) {
 fn open_link(s: &mut App, link: NewThread) {
     let Some(repository) = link.repository.clone() else { return start_scratch(s, link) };
     if let Some(thread) = link.pull_request.and_then(|number| pull_request_thread(s, &repository, number)) {
-        return open_thread(s, &thread, &link.prompt);
+        return open_thread(s, &thread, &link.prompt, link.hidden);
     }
     let projects = projects_for(s, &repository);
     let Some(project) = projects.first().cloned() else {
@@ -805,8 +884,8 @@ fn open_link(s: &mut App, link: NewThread) {
     poll_landing(s);
 }
 
-/// A link's `provider` and `model` pick the open draft's model, with a note when they can't.
-fn apply_link_model(s: &mut App, provider: &str, model: Option<&str>) {
+/// A link's `provider` and `model` pick the open draft's model, and the note when they can't.
+fn apply_link_model(s: &mut App, provider: &str, model: Option<&str>) -> Option<String> {
     let resolved = link_model(s, provider, model);
     if let Some((selection, _)) = &resolved {
         let key = crate::chat::composer::draft_key(s, s.frame_route());
@@ -814,19 +893,29 @@ fn apply_link_model(s: &mut App, provider: &str, model: Option<&str>) {
         draft.model = Some(selection.clone());
         draft.effort = None;
     }
-    let note = match resolved {
+    match resolved {
         None => Some(format!("The link asked for {provider}, which is not set up here, so your default model is used.")),
         Some((_, false)) => Some(format!("The link asked for {}, which {provider} does not offer here, so its default model is used.", model.unwrap_or_default())),
         Some(_) => None,
-    };
-    if let Some(note) = note {
-        crate::shell::palette::toast(s, "Prompt added from a link", Some(&format!("Read it before you send. {note}")));
     }
 }
 
 pub fn poll(s: &mut App) -> bool {
     let paired = poll_pairing(s) | poll_web(s) | poll_landing(s);
-    if s.ui.links.pending.is_none() || !s.state().shell_ready {
+    if !s.state().shell_ready {
+        return paired;
+    }
+    // `ThreadLinkPrompt`: the thread opens, and its prompt lands in the composer.
+    if let Some(link) = s.ui.links.pending_thread.take() {
+        crate::shell::sidebar::open_thread(s, &link.thread);
+        match link.prompt {
+            Some(Err(message)) => crate::shell::palette::toast_error(s, "Could not open the linked prompt", Some(&message)),
+            Some(Ok((prompt, hidden))) => place_prompt(s, &prompt, hidden, None),
+            None => {}
+        }
+        return true;
+    }
+    if s.ui.links.pending.is_none() {
         return paired;
     }
     match s.ui.links.pending.take().expect("checked above") {
@@ -843,13 +932,13 @@ fn scene_missing_repository(s: &mut App) {
         s.navigate(Route::Thread(id));
     }
     let repository = Some(("acme".to_owned(), "widgets".to_owned()));
-    s.ui.links.landing = Some(Landing::Missing(NewThread { prompt: "Fix the flaky tests".into(), repository, provider: None, model: None, pull_request: None }));
+    s.ui.links.landing = Some(Landing::Missing(NewThread { prompt: "Fix the flaky tests".into(), repository, provider: None, model: None, pull_request: None, hidden: 0 }));
 }
 
 /// A pull request link with no thread on it yet: the checkout offer.
 fn scene_pull_request_checkout(s: &mut App) {
     scene_missing_repository(s);
-    let link = NewThread { prompt: String::new(), repository: Some(("acme".into(), "widgets".into())), provider: None, model: None, pull_request: Some(128) };
+    let link = NewThread { prompt: String::new(), repository: Some(("acme".into(), "widgets".into())), provider: None, model: None, pull_request: Some(128), hidden: 0 };
     s.ui.links.landing = Some(Landing::Checkout { link, project: String::new(), started: false });
 }
 
@@ -869,12 +958,14 @@ mod tests {
         }
         let model = |s: &App| s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(s, s.frame_route())).and_then(|d| d.model.clone());
         let toast = |s: &App| crate::shell::palette::toast_title(s).map(str::to_owned);
+        let description = |s: &App| crate::shell::palette::toast_description(s).map(str::to_owned);
         assert!(open(&mut s, "s5code://new?prompt=hi&repo=acme/app&provider=OpenCode&model=opencode%2Fbig-pickle"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/big-pickle".into())), "FAILED: the named model is picked");
-        assert_eq!(toast(&s), None, "FAILED: an exact match needs no note");
+        assert_eq!((toast(&s).as_deref(), description(&s).as_deref()), (Some("Prompt added from a link"), Some("Read it before you send.")), "FAILED: an exact match needs no note");
+        s.ui.chat.composer.drafts.clear();
         assert!(open(&mut s, "s5code://new?prompt=again&repo=acme/app&provider=opencode&model=nope"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: an unknown model falls back to the instance's first");
-        assert_eq!(toast(&s).as_deref(), Some("Prompt added from a link"));
+        assert!(description(&s).is_some_and(|d| d.contains("does not offer here")), "FAILED: the model note joins the toast");
         assert!(open(&mut s, "s5code://new?prompt=more&repo=acme/app&provider=claude&model=claude-opus-5-5"));
         assert_eq!(model(&s), Some(("opencode".into(), "opencode/beam-free".into())), "FAILED: a provider not ready here leaves the model alone");
     }
@@ -907,7 +998,7 @@ mod tests {
     fn prompt_links_parse_like_the_web() {
         let ok = |url: &str| parse(url).expect("a prompt link").expect("valid");
         let link = ok("t3code://new?prompt=Fix%20the%20tests&repo=pingdotgg/t3code");
-        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())), provider: None, model: None, pull_request: None });
+        assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())), provider: None, model: None, pull_request: None, hidden: 0 });
         assert_eq!(ok("https://app.s5code.touchtech.club/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
         assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
@@ -934,7 +1025,7 @@ mod tests {
         // `parsePromptLinkPullRequest`: the prompt is optional and provider/model don't apply.
         let acme = Some(("acme".to_string(), "app".to_string()));
         let pr = ok("s5code://new?pr=https://github.com/acme/app/pull/12/files&provider=codex");
-        assert_eq!(pr, NewThread { prompt: String::new(), repository: acme.clone(), provider: None, model: None, pull_request: Some(12) });
+        assert_eq!(pr, NewThread { prompt: String::new(), repository: acme.clone(), provider: None, model: None, pull_request: Some(12), hidden: 0 });
         assert_eq!(pull_request_url(&pr).as_deref(), Some("https://github.com/acme/app/pull/12"));
         let short = ok("s5code://new?pr=acme/app%237&prompt=Review%20it");
         assert_eq!((short.repository, short.pull_request, short.prompt.as_str()), (acme.clone(), Some(7), "Review it"));
@@ -998,6 +1089,40 @@ mod tests {
     }
 
     #[test]
+    fn thread_links_open_the_thread_and_place_the_prompt_like_web() {
+        use serde_json::json;
+        let link = |url: &str| thread_link(url);
+        let thread = |id: &str, prompt: Option<Result<(String, usize), String>>| Some(ThreadLink { thread: id.into(), prompt });
+        assert_eq!(link("s5code://threads/env-1/t-1"), thread("t-1", None));
+        assert_eq!(link("t3code-dev://threads/env-1/t-1/?prompt=hi"), thread("t-1", Some(Ok(("hi".into(), 0)))));
+        assert_eq!(link("https://app.s5code.touchtech.club/threads/env%201/t%3A1"), thread("t:1", None), "FAILED: Copy thread's hosted link does not open in Rune");
+        assert_eq!(link("https://app.s5code.touchtech.club/env-1/t-1?prompt=a%E2%80%8Bb"), thread("t-1", Some(Ok(("ab".into(), 1)))));
+        assert_eq!(link("https://app.s5code.touchtech.club/env-1/t-1"), None, "a hosted thread route is a link only with a prompt");
+        assert!(matches!(link("s5code://threads/env-1/t-1?prompt=%E2%80%8B"), Some(ThreadLink { prompt: Some(Err(_)), .. })));
+        for other in ["s5code://threads/env-1", "s5code://threads/a/b/c", "https://example.com/threads/a/b", "s5code://other/a/b"] {
+            assert_eq!(link(other), None, "{other}");
+        }
+        assert!(is_app_link("s5code://threads/env-1/t-1"));
+
+        let mut s = ready(vec![json!({"id": "p1"})], vec![json!({"id": "t1", "projectId": "p1"})]);
+        let text = |s: &App| s.ui.chat.composer.drafts.get("t1").map(|d| d.edit.text.clone()).unwrap_or_default();
+        assert!(open(&mut s, "s5code://threads/env/t1?prompt=Fix%20it"));
+        assert_eq!((s.route.clone(), text(&s)), (Route::Thread("t1".into()), "Fix it".into()));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Prompt added from a link"));
+        // `placeLinkedPrompt`: a different draft is replaced only when asked, never appended to.
+        assert!(open(&mut s, "s5code://threads/env/t1?prompt=Other%E2%80%8B"));
+        assert_eq!((crate::shell::palette::toast_title(&s), text(&s).as_str()), (Some("Linked prompt ready"), "Fix it"), "FAILED: the draft changed before the person chose");
+        let warning = ("This prompt had hidden characters, it may be malicious".to_owned(), Some("T3 Code removed 1 hidden character. Read the prompt before you send it.".to_owned()));
+        assert!(crate::shell::toast::titles(&s).contains(&warning), "FAILED: no warning about the hidden character");
+        crate::shell::palette::press_toast_action(&mut s, "Replace draft");
+        assert_eq!(text(&s), "Other");
+        let titles: Vec<String> = crate::shell::toast::titles(&s).into_iter().map(|(title, _)| title).collect();
+        assert!(titles.contains(&"Prompt added from a link".to_owned()) && !titles.contains(&"Linked prompt ready".to_owned()), "{titles:?}");
+        assert!(open(&mut s, "s5code://threads/env/t1?prompt=%E2%80%8B"));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not open the linked prompt"));
+    }
+
+    #[test]
     fn a_cloned_project_lands_the_draft_or_times_out() {
         let link = |url: &str| parse(url).unwrap().unwrap();
         let awaiting = |url: &str, deadline| Some(Landing::Awaiting { project: "p9".into(), link: link(url), deadline });
@@ -1020,7 +1145,7 @@ mod tests {
         assert_eq!(s.route, Route::Home { project_id: Some("p9".into()) });
         let draft = s.ui.chat.composer.drafts.get(&crate::chat::composer::draft_key(&s, s.frame_route())).map(|d| d.edit.text.clone());
         assert_eq!(draft.as_deref(), Some("hi"));
-        assert_eq!(crate::shell::palette::toast_title(&s), Some("Prompt added from a link"), "FAILED: the link's provider is applied on this path too");
+        assert!(crate::shell::palette::toast_description(&s).is_some_and(|d| d.contains("not set up here")), "FAILED: the link's provider is applied on this path too");
     }
 
     #[test]
@@ -1032,7 +1157,7 @@ mod tests {
         s.ui.links.pending = parse("s5code://new?prompt=hi&repo=acme/app");
         assert!(poll(&mut s));
         let repository = ("acme".to_string(), "app".to_string());
-        assert_eq!(s.ui.links.landing, Some(Landing::Missing(NewThread { prompt: "hi".into(), repository: Some(repository.clone()), provider: None, model: None, pull_request: None })));
+        assert_eq!(s.ui.links.landing, Some(Landing::Missing(NewThread { prompt: "hi".into(), repository: Some(repository.clone()), provider: None, model: None, pull_request: None, hidden: 0 })));
         clone_repository(&mut s);
         assert_eq!(s.ui.links.landing, None, "a machine without newProjectsRoot cannot clone from a link");
         let payload = clone_payload(&repository, "~/code", "p1");
@@ -1068,7 +1193,7 @@ mod tests {
         assert_eq!(link, "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests+%26+ship&repo=acme%2Fapp&provider=claudeAgent&model=claude-haiku-5-5");
         assert_eq!(
             parse(&link).unwrap().unwrap(),
-            NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo), provider: Some("claudeagent".into()), model: Some("claude-haiku-5-5".into()), pull_request: None }
+            NewThread { prompt: "Fix the tests & ship".into(), repository: Some(repo), provider: Some("claudeagent".into()), model: Some("claude-haiku-5-5".into()), pull_request: None, hidden: 0 }
         );
         assert_eq!(new_thread_link("hi", None, None, Some("ignored")).unwrap(), "https://app.s5code.touchtech.club/new?prompt=hi");
         assert_eq!(new_thread_link("   ", None, None, None), None);

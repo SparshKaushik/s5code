@@ -86,15 +86,15 @@ fn desktop_name(kind: Kind) -> Option<&'static str> {
     }
 }
 
-/// `snapShotFeedbackUnavailableMessage`: GNOME's extension and Hyprland (one monitor) draw them.
-/// KWin's capture names no window frame, so KDE has none.
+/// `snapShotFeedbackUnavailableMessage`: GNOME's extension draws them; on Hyprland and KDE
+/// (one output) the app does.
 fn effects_status(state: &State) -> Option<&'static str> {
     match kind(state) {
-        Kind::Direct | Kind::Hyprland => None,
+        Kind::Direct | Kind::Hyprland | Kind::Kde => None,
         Kind::Niri => Some("Capture effects aren't available on Niri."),
         Kind::Gnome if extension(state).map(|(status, _)| status) == Some(Ext::Enabled) => None,
         Kind::Gnome => Some("Finish extension setup to enable effects."),
-        Kind::Portal | Kind::Picker | Kind::Kde => Some(NO_EFFECTS),
+        Kind::Portal | Kind::Picker => Some(NO_EFFECTS),
     }
 }
 
@@ -491,7 +491,7 @@ fn locked_switch(t: &T, label: &str) -> El {
 
 /// `snapShotAccessibilityUnavailableMessage`: only backends that name the window can read its text.
 fn linux_text_status(state: &State) -> Option<&'static str> {
-    matches!(kind(state), Kind::Portal | Kind::Picker | Kind::Kde).then_some("This desktop only provides a screenshot.")
+    matches!(kind(state), Kind::Portal | Kind::Picker).then_some("This desktop only provides a screenshot.")
 }
 
 fn switch(t: &T, on: bool, label: &str, f: impl Fn(&mut App) + 'static) -> El {
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!(effects_status(&enabled), None, "the extension draws them");
         let kde = linux_state(Backend::Kde, None);
         assert_eq!((kind(&kde), access_ready(&kde), desktop_name(Kind::Kde)), (Kind::Kde, true, Some("KDE Plasma")), "registration waits for the first capture");
-        assert_eq!((effects_status(&kde), linux_text_status(&kde)), (Some(NO_EFFECTS), Some("This desktop only provides a screenshot.")), "KWin names no window or frame");
+        assert_eq!((effects_status(&kde), linux_text_status(&kde)), (None, None), "the KWin script names the window and its frame");
         assert_eq!(setup_label(&State { message: Some("x".into()), ..kde.clone() }), "Set up KDE Plasma capture");
         assert_eq!(linux_access_copy(&kde, true).0, "Capture is ready");
         let portal = linux_state(Backend::ScreenshotPortal, None);

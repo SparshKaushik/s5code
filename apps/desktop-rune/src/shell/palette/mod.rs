@@ -482,6 +482,15 @@ pub(crate) fn toast_warning(s: &mut App, title: &str, description: Option<&str>,
 pub(crate) fn toast_title(s: &App) -> Option<&str> {
     stack::newest(s).map(|n| n.title.as_str())
 }
+#[cfg(test)]
+pub(crate) fn toast_description(s: &App) -> Option<&str> {
+    stack::newest(s).and_then(|n| n.description.as_deref())
+}
+#[cfg(test)]
+pub(crate) fn press_toast_action(s: &mut App, label: &str) {
+    let action = stack::newest(s).and_then(|n| n.actions.iter().find(|a| a.0 == label)).map(|a| a.2.clone()).expect("the toast offers that action");
+    action(s, &mut Tx::default());
+}
 /// The newest toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
     if let Some(id) = stack::newest(s).map(|t| t.id) {
@@ -494,6 +503,13 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Error, Vec::new(), None);
 }
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
+pub(crate) fn toast_warning_sticky(s: &mut App, title: &str, description: Option<&str>) {
+    raise(s, title, description, Kind::Warning, Vec::new(), None);
+}
+/// `toast_with` that stays until dismissed (`timeout: 0` on web).
+pub(crate) fn toast_sticky_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
+    raise(s, title, description, kind_of(title), actions, None);
+}
 pub(crate) fn toast_sticky(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, kind_of(title), Vec::new(), None);
 }
@@ -1709,6 +1725,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             crate::shell::workspace::focus(s, forward);
         }
         Action::OpenProject(project) => {
+            let by_creation = crate::settings::threads_by_creation(s);
             let thread = s
                 .state()
                 .threads
@@ -1718,7 +1735,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                         && v["archivedAt"].is_null()
                         && v["lineage"]["parentThreadId"].is_null()
                 })
-                .max_by_key(|v| recent_use(v))
+                .max_by_key(|v| if by_creation { data::ts(v, "createdAt").unwrap_or(0) } else { recent_use(v) })
                 .map(|v| data::s(v, "id").to_owned());
             let route = thread.map(Route::Thread).unwrap_or(Route::Home {
                 project_id: Some(project),
@@ -2200,8 +2217,14 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         Action::OpenProject(id) | Action::Navigate(Route::Home { project_id: Some(id) }) => s.state().projects.iter().find(|p| p["id"] == *id),
         _ => None,
     };
+    // Web `ProjectFilePicker` shows each file's type icon.
+    let file = match &v.action {
+        Action::OpenFile(path) => Some(crate::panel::diff::file_icon(path, 16., t.dark)),
+        _ => None,
+    };
     let glyph = project
         .map(|p| crate::shell::sidebar::favicon::view(s, t, p, 16.))
+        .or(file)
         .or_else(|| v.brand.and_then(|b| add_project::brand(b, 16., t.c.contrast_icon_muted)))
         .unwrap_or_else(|| icon(v.glyph, 16.).color(t.c.contrast_icon_muted));
     let selected = ui.selected == i && (!raw || ui.picked);

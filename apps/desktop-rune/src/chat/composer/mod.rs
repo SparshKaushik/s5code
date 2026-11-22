@@ -6,6 +6,7 @@
 pub(crate) mod attachments;
 pub mod banners;
 pub mod chips;
+mod code_block;
 mod context;
 pub mod fanout;
 mod lists;
@@ -71,6 +72,8 @@ pub struct Draft {
     pub options: Vec<Value>,
     /// When the draft began (`DraftSessionState.createdAt`), ms; the sidebar lists newest first.
     pub created_at: i64,
+    /// Each code block's info string (its language first), in block order (`code_block`).
+    pub code_langs: Vec<String>,
 }
 
 impl Default for Draft {
@@ -85,6 +88,7 @@ impl Default for Draft {
             contexts: Vec::new(),
             options: Vec::new(),
             created_at: data::now_ms(),
+            code_langs: Vec::new(),
         }
     }
 }
@@ -104,6 +108,8 @@ pub struct Ui {
     pub more_open: bool,
     /// The usage limits panel `/usage-limits` opened.
     pub usage: usage_limits::Panel,
+    /// The code block language picker is open.
+    pub code_menu: bool,
     /// Threads whose send (composer.sendAndNewThread) opens their project's new-thread draft once
     /// it lands: the thread and its project.
     mention: menu::Mention,
@@ -534,9 +540,29 @@ const REASONING_IDS: [&str; 7] = ["reasoningEffort", "effort", "reasoning", "var
 /// The selected model's option descriptors.
 pub fn descriptors(s: &App) -> Vec<Value> {
     let Some((instance, slug)) = selection(s) else { return Vec::new() };
-    provider(s, &instance)
+    let all = provider(s, &instance)
         .and_then(|p| p["models"].as_array()?.iter().find(|m| data::s(m, "slug") == slug)?["capabilities"]["optionDescriptors"].as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if crate::settings::value(s, "planModeEnabled") == true { all } else { without_plan_agent(all) }
+}
+
+/// `withoutPlanAgentOption`: with plan mode off, an `agent` select loses its Plan option.
+fn without_plan_agent(descriptors: Vec<Value>) -> Vec<Value> {
+    descriptors
+        .into_iter()
+        .filter_map(|mut d| {
+            if d["type"] != "select" || d["id"] != "agent" {
+                return Some(d);
+            }
+            let options: Vec<Value> = d["options"].as_array()?.iter().filter(|o| o["id"] != "plan").cloned().collect();
+            if !options.iter().any(|o| o["id"] == d["currentValue"]) {
+                let fallback = options.iter().find(|o| o["isDefault"] == true).or(options.first()).map(|o| o["id"].clone())?;
+                d["currentValue"] = fallback;
+            }
+            d["options"] = Value::Array(options);
+            Some(d)
+        })
+        .collect()
 }
 
 /// isReasoningControl.
@@ -728,7 +754,7 @@ pub fn selection(s: &App) -> Option<(String, String)> {
         return Some(m);
     }
     providers(s).iter().find(|p| data::s(p, "status") == "ready").and_then(|p| {
-        let model = p["models"].as_array()?.first()?;
+        let model = *picker::listed(s, p).first()?;
         Some((data::s(p, "instanceId").to_string(), data::s(model, "slug").to_string()))
     })
 }
@@ -750,7 +776,11 @@ pub fn runtime_mode(s: &App) -> String {
     default_runtime_mode(s)
 }
 
+/// `resolveComposerInteractionMode`: Chat whenever plan mode is off or the provider has no toggle.
 pub fn interaction_mode(s: &App) -> String {
+    if !supports_plan(s) {
+        return "default".into();
+    }
     if let Some(m) = draft(s).and_then(|d| d.interaction_mode.clone()) {
         return m;
     }
@@ -833,6 +863,8 @@ fn send_block(s: &App) -> Option<String> {
         Some("Sending feedback")
     } else if messages_loading(s) {
         Some("Messages loading")
+    } else if matches!(route(s), Route::Thread(id) if crate::chat::timeline::worktree_setup::blocks_send(s, &id)) {
+        Some("Preparing worktree")
     } else {
         crate::add_to_machine::send_block(s).or_else(|| attachment_block(s))
     };
@@ -1013,7 +1045,15 @@ fn length_error(s: &App) -> Option<String> {
         return None;
     }
     let d = draft(s)?;
-    prompt_length_message(&chips::outgoing(&d.edit, &d.contexts).0)
+    prompt_length_message(&outgoing(d).0)
+}
+
+/// The draft as it is sent: chips as links with their records, code blocks fenced.
+pub(crate) fn outgoing(d: &Draft) -> (String, Vec<Value>) {
+    match code_block::fenced(&d.edit, &d.code_langs) {
+        Some(edit) => chips::outgoing(&edit, &d.contexts),
+        None => chips::outgoing(&d.edit, &d.contexts),
+    }
 }
 
 /// parseStandaloneComposerSlashCommand: `/plan` or `/default` sent alone switches the mode.
@@ -1079,7 +1119,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     let resume_compaction = context::resume_compaction(s).filter(|_| !keeps_full_history(s));
     let Some(d) = draft(s) else { return };
     let snapshot = stored_draft(d);
-    let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
+    let (text, contexts) = outgoing(d);
     let mut text = text.trim().to_string();
     if prompt_length_message(&text).is_some() {
         s.ui.chat.composer.length_error = Some(key);
@@ -1279,6 +1319,14 @@ fn on_paste(s: &mut App, content: &rune::ClipboardContent, tx: &mut Tx) -> bool 
         return true;
     }
     if content.image().is_none() || !content.text().trim().is_empty() {
+        // Inside a code block the text goes in verbatim, as web's editor pastes into fences.
+        let in_code = draft(s).is_some_and(|d| code_block::in_block(&d.edit));
+        if !in_code
+            && let Some(fragment) = content.html().and_then(crate::chat::timeline::actions::decode_context_html)
+            && paste_context(s, content.text(), &fragment)
+        {
+            return true;
+        }
         // The key that pasted is still held: Shift is isPasteAsTextShortcut.
         let mods = tx.mods();
         return fold_paste(s, content.text(), mods.shift && !mods.alt);
@@ -1563,6 +1611,7 @@ fn stored_draft(d: &Draft) -> Value {
         "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
         "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
         "options": d.options, "createdAt": d.created_at,
+        "codeLines": code_block::lines(&d.edit), "codeLangs": d.code_langs,
     })
 }
 
@@ -1624,6 +1673,8 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
         for (a, b, id) in pills {
             edit.replace_with_pill(a..b, id, &prompt[a..b]);
         }
+        let code: Vec<usize> = d["codeLines"].as_array().into_iter().flatten().filter_map(|i| Some(i.as_u64()? as usize)).collect();
+        code_block::restore(&mut edit, &code);
         edit.set_caret(edit.text.len());
         edit.focused = false;
         let model = strings(&d["model"]);
@@ -1640,6 +1691,7 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 options: d["options"].as_array().cloned().unwrap_or_default(),
                 // Drafts stored before timestamps sort as the oldest.
                 created_at: d["createdAt"].as_i64().unwrap_or(0),
+                code_langs: strings(&d["codeLangs"]),
             },
         );
     }
@@ -1752,6 +1804,9 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         _ => {}
     }
+    if !answering && let Some(taken) = code_key(s, e) {
+        return taken;
+    }
     match e.key {
         Key::Enter if !answering && !e.mods.shift && !e.mods.alt && (e.mods.cmd || plain) => {
             let text = draft(s).map(|d| d.edit.text.as_str()).unwrap_or("");
@@ -1784,6 +1839,30 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Tab if plain && !answering => list_edit(s, lists::indent),
         _ => false,
     }
+}
+
+/// Code block keys (ComposerPromptEditorTiptap's handleKeyDown): inside a block Enter ends it
+/// after a closing fence, keeps the indent, or leaves the rest to the editor, and Tab indents;
+/// Enter on a "```lang" line opens one when the composer is rich. Mod+Enter still sends. `None`
+/// passes the key on.
+fn code_key(s: &mut App, e: &KeyEvent) -> Option<bool> {
+    if e.mods.cmd || e.mods.ctrl || !matches!(e.key, Key::Enter | Key::Tab) {
+        return None;
+    }
+    // The plain editor (`richText` off) has no code blocks to open or edit.
+    if !rich_text(s) {
+        return None;
+    }
+    let d = draft_mut(s);
+    if code_block::in_block(&d.edit) {
+        return Some(if e.key == Key::Tab { code_block::indent(&mut d.edit, e.mods.shift) } else { code_block::close(&mut d.edit) || code_block::indented_newline(&mut d.edit) });
+    }
+    (e.key == Key::Enter && code_block::open(&mut d.edit, &mut d.code_langs)).then_some(true)
+}
+
+/// The Rich text composer setting.
+fn rich_text(s: &App) -> bool {
+    crate::settings::value(s, "composerRichTextEnabled") != false
 }
 
 /// Applies a list edit (`lists`) at the draft's caret; false when the caret is not in a list.
@@ -1895,8 +1974,10 @@ fn placeholder(s: &App) -> &'static str {
     }
 }
 
+/// The Labs "Plan mode" setting is on and the provider shows the toggle.
 fn supports_plan(s: &App) -> bool {
-    selection(s).and_then(|(i, _)| provider(s, &i).map(|p| p["showInteractionModeToggle"] == true)).unwrap_or(false)
+    crate::settings::value(s, "planModeEnabled") == true
+        && selection(s).and_then(|(i, _)| provider(s, &i).map(|p| p["showInteractionModeToggle"] == true)).unwrap_or(false)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
@@ -1906,12 +1987,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     // A pending question takes the editor for its own answer (ChatComposer's pending input).
     let field = if let Some(q) = question_editor(s).filter(|q| q.choice_only) {
         // The web disables the field; with nothing to type into, digits pick the options.
-        text(q.placeholder).font(theme::TEXT_SM.lh(22.75)).color(t.c.placeholder).w_full()
+        text(q.placeholder).font(t.prompt).color(t.c.placeholder).w_full()
     } else if project_required(s) {
-        text(placeholder(s)).font(theme::TEXT_SM.lh(22.75)).color(t.c.placeholder).opacity(0.64).w_full().key("composer-editor")
+        text(placeholder(s)).font(t.prompt).color(t.c.placeholder).opacity(0.64).w_full().key("composer-editor")
     } else if let Some(q) = question_editor(s) {
         let key = q.key.clone();
-        text_input(&q.edit, theme::TEXT_SM.lh(22.75))
+        text_input(&q.edit, t.prompt)
             .key("composer-editor")
             .w_full()
             .color(t.c.foreground)
@@ -1922,7 +2003,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .on_input_key(act_key(s, on_key))
             .on_input_change(act_tx(s, |s: &mut App, _: &mut Tx| question::on_editor_change(s)))
     } else {
-        text_input(&d.edit, theme::TEXT_SM.lh(22.75))
+        text_input(&d.edit, t.prompt)
             .key("composer-editor")
             .w_full()
             .color(t.c.foreground)
@@ -1949,7 +2030,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
                 menu::refresh(s);
             }))
     };
-    let mut editor = col().w_full().px(16.0).pt(16.0).child(auto_grow(field, 2, 8));
+    let code = code_block::header(s, t, d).filter(|_| rich_text(s) && question_editor(s).is_none() && !project_required(s));
+    let mut editor = col().w_full().px(16.0).pt(if code.is_some() { 4.0 } else { 16.0 }).child(auto_grow(field, 2, 8));
     if let Some(message) = length_error(s) {
         editor = editor.child(text(message).font(theme::TEXT_XS).color(t.c.destructive).wrap().w_full().pt(8.0).role("alert"));
     }
@@ -1976,7 +2058,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         body = body.child(attachment_chips(s, t, &d.attachments));
     }
     let folded = controls_folded(s, cx);
-    let body = body.child(editor).child(footer(s, t, folded));
+    let body = body.children(code).child(editor).child(footer(s, t, folded));
 
     // The @ menu wins over the stash drawer (isStashMenuOpen && !composerMenuOpen).
     let menu = if asking(s) { None } else { menu::view(s, cx, t) };
@@ -2059,6 +2141,7 @@ fn overlay_layers(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     }
     layers.extend(chip_details(s, t));
     layers.extend(context::popover(s, t));
+    layers.extend(code_block::menu(s, t));
     layers
 }
 
@@ -2667,28 +2750,78 @@ pub fn restore_rewound(s: &mut App, key: &str, text: &str, records: &[Value], fi
 }
 
 fn append_chips_to(d: &mut Draft, text: &str, records: &[Value], gap: &str) {
-    let (shown_text, shown) = chips::editable(text);
     d.edit.set_caret(d.edit.text.len());
     if !d.edit.text.trim().is_empty() && !d.edit.text.ends_with(gap) {
         d.edit.insert(gap);
     }
+    insert_chips(d, text, |id| records.iter().find(|r| data::s(r, "contextId") == id).cloned());
+    d.edit.focused = true;
+}
+
+/// Sent-form text in place of the selection: file links become mentions, quotes their chips,
+/// and context links chips when `record` has their record (by context id), else their labels.
+fn insert_chips(d: &mut Draft, text: &str, record: impl Fn(&str) -> Option<Value>) {
+    let (shown_text, shown) = chips::editable(text);
     let mut at = 0;
     for c in &shown {
         d.edit.insert(&shown_text[at..c.range.start]);
         let label = &shown_text[c.range.clone()];
-        match records.iter().find(|r| data::s(r, "contextId") == c.id) {
+        match record(&c.id) {
             _ if c.kind == "mention" => d.edit.insert_pill(c.id.clone(), label),
             _ if c.kind == "citation" => d.edit.insert_pill(chips::citation_pill(&c.id), label),
             Some(record) => {
-                d.edit.insert_pill(chips::pill_id(record), &chips::sanitize_label(data::s(record, "label"), data::s(record, "kind")));
-                d.contexts.push(record.clone());
+                d.edit.insert_pill(chips::pill_id(&record), &chips::sanitize_label(data::s(&record, "label"), data::s(&record, "kind")));
+                if !d.contexts.contains(&record) {
+                    d.contexts.push(record);
+                }
             }
             None => d.edit.insert(label),
         }
         at = c.range.end;
     }
     d.edit.insert(&shown_text[at..]);
+}
+
+/// readPastedComposerContext with useComposerContextImport: pasted text whose HTML carries copied
+/// context (a message's copy) brings its chips back with their records. Terminal excerpts and
+/// review comments that clash with a different record here take a fresh id; a thread on a machine
+/// this one does not link is dropped, as are kinds that need their files imported. False to
+/// paste the text as it is.
+fn paste_context(s: &mut App, text: &str, fragment: &Value) -> bool {
+    let (_, shown) = chips::editable(text);
+    let own = s.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_owned()).unwrap_or_default();
+    let links = s.ui.settings.results.get("peerLinks.list").and_then(|r| r["links"].as_array());
+    let reachable = |env: &str| env == own || links.is_some_and(|l| l.iter().any(|link| data::s(link, "environmentId") == env));
+    let records: Vec<Value> = fragment["records"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| shown.iter().any(|c| c.id == data::s(r, "contextId")))
+        .filter(|r| match data::s(r, "kind") {
+            "terminal" | "review-comment" | "environment" => true,
+            "thread" => reachable(data::s(r, "environmentId")),
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    if records.is_empty() {
+        return false;
+    }
+    let d = draft_mut(s);
+    let imported: Vec<(String, Value)> = records
+        .into_iter()
+        .map(|mut r| {
+            let (id, kind) = (data::s(&r, "contextId").to_owned(), data::s(&r, "kind").to_owned());
+            let clash = d.contexts.iter().any(|c| data::s(c, "contextId") == id && data::s(c, "kind") == kind && *c != r);
+            if clash && matches!(kind.as_str(), "terminal" | "review-comment") {
+                r["contextId"] = json!(chips::context_id(&kind, &s5_net::uuid()));
+            }
+            (id, r)
+        })
+        .collect();
+    insert_chips(d, text, |id| imported.iter().find(|(from, _)| from == id).map(|(_, r)| r.clone()));
     d.edit.focused = true;
+    true
 }
 
 pub fn append_to_draft(s: &mut App, text: &str) {
@@ -2861,6 +2994,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         let d = draft_mut(s);
         d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
         d.effort = Some("medium".into());
+    }),
+    ("composer-prompt-font", |s| {
+        on_replay_showcase(s);
+        for (key, value) in [("typographyAdvanced", json!(true)), ("fontFamilyComposer", json!("monospace")), ("fontSizePrompt", json!(17))] {
+            s.client_settings.values.insert(key.into(), value);
+        }
+        set_text(s, "Rename `fetchUser` to `loadUser` and update the call sites.");
     }),
     ("composer-context", |s| context_scene(s, 42_400.0)),
     ("composer-context-full", |s| context_scene(s, 186_000.0)),
@@ -3065,6 +3205,33 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_text(s, "Plan:\n1. Reproduce the drop\n2. Add a retry");
         list_edit(s, lists::enter);
     }),
+    // A new worktree still setting up: Send waits with "Preparing worktree".
+    ("composer-send-preparing-worktree", |s| {
+        on_replay_showcase(s);
+        let Route::Thread(id) = s.route.clone() else { return };
+        s.now_ms = data::iso_ms("2026-12-01T00:00:14.000Z").unwrap_or(s.now_ms);
+        let at = |sec: u32| format!("2026-12-01T00:00:{sec:02}.000Z");
+        let setup = json!({
+            "threadId": id, "sequence": 3, "phase": "running", "startedAt": at(0),
+            "stages": [
+                {"id": "fetch", "status": "done", "startedAt": at(0), "endedAt": at(4)},
+                {"id": "checkout", "status": "running", "percent": 62, "startedAt": at(4)},
+                {"id": "setup-script", "status": "pending"},
+                {"id": "agent", "status": "pending"},
+            ],
+        });
+        crate::chat::timeline::worktree_setup::hold(s, &id, setup);
+        set_text(s, "Add a retry to the reconnect loop");
+    }),
+    // A fenced block typed into the prompt, its language picker open.
+    ("composer-code-block", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Why does this panic?\n```rust");
+        let d = draft_mut(s);
+        code_block::open(&mut d.edit, &mut d.code_langs);
+        d.edit.insert("fn main() {\n    let v: Vec<u8> = Vec::new();\n    v[0];\n}");
+        s.ui.chat.composer.code_menu = true;
+    }),
     ("topbar-rename", |s| {
         on_replay_showcase(s);
         crate::chat::topbar::start_rename(s);
@@ -3115,6 +3282,27 @@ mod tests {
         assert_eq!(stepped(&ids, None, 1), None);
         assert!(mentions_ultrathink("Ultrathink: fix it") && mentions_ultrathink("please ultrathink."));
         assert!(!mentions_ultrathink("ultrathinking") && !mentions_ultrathink("no_ultrathink"));
+    }
+
+    #[test]
+    fn plan_mode_follows_the_labs_setting() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        let d = draft_mut(&mut s);
+        d.model = Some(("codex".into(), "gpt-5.5".into()));
+        d.interaction_mode = Some("plan".into());
+        s.client_settings.values.insert("planModeEnabled".into(), json!(false));
+        assert!(!supports_plan(&s));
+        assert_eq!(interaction_mode(&s), "default", "FAILED: plan mode off sends Chat");
+        s.client_settings.values.insert("planModeEnabled".into(), json!(true));
+        assert!(supports_plan(&s));
+        assert_eq!(interaction_mode(&s), "plan");
+        let agent = json!({"type": "select", "id": "agent", "currentValue": "plan", "options": [{"id": "build", "isDefault": true}, {"id": "plan"}]});
+        assert_eq!(
+            without_plan_agent(vec![agent, json!({"type": "boolean", "id": "fastMode"})]),
+            [json!({"type": "select", "id": "agent", "currentValue": "build", "options": [{"id": "build", "isDefault": true}]}), json!({"type": "boolean", "id": "fastMode"})]
+        );
+        assert!(without_plan_agent(vec![json!({"type": "select", "id": "agent", "options": [{"id": "plan"}]})]).is_empty());
     }
 
     #[test]
@@ -3226,6 +3414,67 @@ mod tests {
         let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
         assert_eq!(text, format!("draft\n\n{sent}"));
         assert_eq!(contexts.len(), 1);
+    }
+
+    #[test]
+    fn a_copied_message_pastes_back_as_chips_at_the_caret() {
+        use crate::chat::timeline::actions::{context_fragment, context_html, decode_context_html};
+        let mut s = App::new();
+        on_replay_showcase(&mut s);
+        let own = s.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_owned()).unwrap_or_default();
+        let terminal = chips::terminal("main", "Main", 1, 2, "cargo test");
+        let far = chips::thread("elsewhere", "t-9", "Far thread");
+        let near = chips::thread(&own, "t-8", "Near thread");
+        let machine = chips::environment("box", "Build box");
+        let link = |r: &Value| format!("[{}](t3-context://v1/{}/{})", data::s(r, "label"), data::s(r, "kind"), data::s(r, "contextId"));
+        let copied = format!("See {} from {} and {} on {}", link(&terminal), link(&far), link(&near), link(&machine));
+        let records = [terminal.clone(), far.clone(), near.clone(), machine.clone()];
+        let html = context_html(&copied, &context_fragment("env-1", Some("t-1"), Some("m-1"), &records).unwrap());
+        let fragment = decode_context_html(&html).unwrap();
+        set_text(&mut s, "before  after");
+        draft_mut(&mut s).edit.set_caret(7);
+        assert!(paste_context(&mut s, &copied, &fragment), "FAILED: the paste carries context");
+        let d = draft(&s).unwrap();
+        assert_eq!(d.edit.pills().count(), 3, "FAILED: a thread on an unlinked machine stays its label");
+        assert_eq!(d.contexts, vec![terminal.clone(), near.clone(), machine.clone()]);
+        let (text, sent) = outgoing(d);
+        assert_eq!(text, format!("before See {} from Far thread and {} on {} after", link(&terminal), link(&near), link(&machine)));
+        assert_eq!(sent.len(), 3);
+
+        // The same copy again reuses its records; a clashing excerpt takes a fresh id.
+        set_text(&mut s, "");
+        draft_mut(&mut s).contexts.clear();
+        assert!(paste_context(&mut s, &copied, &fragment));
+        assert!(paste_context(&mut s, &copied, &fragment));
+        assert_eq!(draft(&s).unwrap().contexts.len(), 3, "FAILED: an identical paste adds no records");
+        draft_mut(&mut s).contexts[0]["text"] = json!("edited");
+        assert!(paste_context(&mut s, &copied, &fragment));
+        let d = draft(&s).unwrap();
+        let ids: Vec<&str> = d.contexts.iter().filter(|r| data::s(r, "kind") == "terminal").map(|r| data::s(r, "contextId")).collect();
+        assert!(ids.len() == 2 && ids[0] != ids[1], "FAILED: a clashing terminal excerpt is re-minted");
+        assert!(!paste_context(&mut s, "no links", &fragment), "FAILED: records the text does not name are not pasted");
+    }
+
+    #[test]
+    fn a_code_block_draft_sends_fenced_and_survives_a_restore() {
+        let mut s = App::new();
+        on_replay_showcase(&mut s);
+        set_text(&mut s, "Fix this:\n```ts");
+        let enter = KeyEvent::from(Key::Enter);
+        assert_eq!(code_key(&mut s, &enter), Some(true), "FAILED: Enter on a fence opens a block");
+        draft_mut(&mut s).edit.insert("const x = 1;");
+        assert_eq!(code_key(&mut s, &enter), Some(false), "FAILED: Enter inside a block is the editor's");
+        assert_eq!(outgoing(draft(&s).unwrap()).0, "Fix this:\n```ts\nconst x = 1;\n```");
+        let back = restored(&json!({"d": stored_draft(draft(&s).unwrap())})).remove("d").unwrap();
+        assert_eq!(outgoing(&back).0, "Fix this:\n```ts\nconst x = 1;\n```", "FAILED: a stored draft keeps its block");
+        s.client_settings.values.insert("composerRichTextEnabled".into(), json!(false));
+        set_text(&mut s, "```ts");
+        assert_eq!(code_key(&mut s, &enter), None, "FAILED: a plain composer leaves fences as text");
+        s.client_settings.values.insert("composerRichTextEnabled".into(), json!(true));
+        set_text(&mut s, "```ts");
+        assert_eq!(code_key(&mut s, &enter), Some(true));
+        s.client_settings.values.insert("composerRichTextEnabled".into(), json!(false));
+        assert_eq!(code_key(&mut s, &KeyEvent::from(Key::Tab)), None, "FAILED: a plain composer has no block keys");
     }
 
     #[test]
@@ -3510,6 +3759,19 @@ mod tests {
         assert_eq!(draft(&s).unwrap().edit.text, "hi", "FAILED: nothing was sent");
         crate::chat::details::set_session(&mut s, None);
         let Route::Thread(id) = s.route.clone() else { panic!("a thread") };
+        // A worktree still setting up holds Send until the agent starts or the run queues it.
+        let setup = |agent: &str| json!({"threadId": id, "sequence": 1, "phase": "running", "stages": [{"id": "checkout", "status": "done"}, {"id": "agent", "status": agent}]});
+        crate::chat::timeline::worktree_setup::hold(&mut s, &id, setup("pending"));
+        assert_eq!(send_block(&s).as_deref(), Some("Preparing worktree"), "FAILED: a running setup holds Send");
+        crate::chat::timeline::worktree_setup::hold(&mut s, &id, setup("done"));
+        assert_eq!(send_block(&s), None, "FAILED: the agent started");
+        crate::chat::timeline::worktree_setup::hold(&mut s, &id, setup("pending"));
+        if let data::Source::Fixture(state) = &mut s.src
+            && let Some(row) = state.threads.iter_mut().find(|t| data::s(t, "id") == id)
+        {
+            row["activityRunStatus"] = json!("preparing");
+        }
+        assert_eq!(send_block(&s), None, "FAILED: a preparing run queues the send behind setup");
         if let data::Source::Fixture(state) = &mut s.src {
             state.thread_views.remove(&id);
         }

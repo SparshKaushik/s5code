@@ -6,10 +6,12 @@ use super::rows::{self, Row};
 use crate::App;
 use crate::chat::details::Lane;
 use crate::data::s;
+use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, text};
 use serde_json::Value;
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 /// TIMELINE_MINIMAP_MIN_ITEMS.
@@ -21,15 +23,19 @@ const PERSISTENT_GUTTER: f32 = 48.0;
 /// TIMELINE_MINIMAP_HIT_STRIP_LEFT and _MAX_WIDTH.
 const STRIP_LEFT: f32 = 12.0;
 const STRIP_MAX_W: f32 = 40.0;
+/// TIMELINE_MINIMAP_NAVIGATION_REACH: a strip this wide can reach Previous and Next turn.
+const NAVIGATION_REACH: f32 = 14.0;
 /// The preview reads this much of a reply (resolveTimelineMinimapPreview).
 const PREVIEW_CHARS: usize = 1_500;
 const BOOTSTRAP_PROMPT: &str =
     "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
-/// TimelineMinimapItem: a prompt's row key, its text in one line, and its turn's final reply.
+/// TimelineMinimapItem: a prompt's row key and index, its text in one line, and its turn's final
+/// reply.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Item {
     pub key: String,
+    pub row: usize,
     pub user: Option<String>,
     pub reply: Option<String>,
 }
@@ -43,6 +49,9 @@ pub struct State {
     /// The strip under the pointer or the keyboard, whose turn the preview shows.
     pub active: Option<usize>,
     cache: RefCell<Option<(Stamp, Rc<[Item]>)>>,
+    /// The items whose prompts are in the timeline's viewport, by thread; set from the list's
+    /// visible rows only when it changes.
+    pub(super) in_view: Option<(String, Range<usize>)>,
 }
 
 /// isAttachmentOnlyBootstrapPrompt, `Ultrathink:` prefix allowed.
@@ -63,11 +72,11 @@ fn compact(text: &str) -> Option<String> {
 /// deriveTimelineMinimapItems: each user row, with the last reply before the next one.
 pub(super) fn derive(rows: &[Row], keys: &[String]) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
-    for (row, key) in rows.iter().zip(keys) {
+    for (index, (row, key)) in rows.iter().zip(keys).enumerate() {
         match row {
             Row::User(item) => {
                 let text = s(item, "text");
-                items.push(Item { key: key.clone(), user: if bootstrap(text) { None } else { compact(text) }, reply: None });
+                items.push(Item { key: key.clone(), row: index, user: if bootstrap(text) { None } else { compact(text) }, reply: None });
             }
             Row::Assistant(item) => {
                 if let Some(last) = items.last_mut() {
@@ -182,6 +191,32 @@ fn top(index: usize, n: usize, rail_h: f32) -> f32 {
     if n <= 1 { 0.0 } else { index.min(n - 1) as f32 / (n - 1) as f32 * rail_h }
 }
 
+/// isTimelineMinimapRowVisible for every item at once: the items whose prompt rows are among the
+/// visible `rows`. Items are in row order.
+fn visible_items(items: &[Item], rows: Range<usize>) -> Range<usize> {
+    let start = items.partition_point(|i| i.row < rows.start);
+    start..items.partition_point(|i| i.row < rows.end).max(start)
+}
+
+/// resolveTimelineMinimapCurrentIndex: the first prompt in view, else the turn being read (the
+/// last prompt above the viewport).
+fn reading(in_view: &Range<usize>) -> Option<usize> {
+    if in_view.is_empty() { in_view.start.checked_sub(1) } else { Some(in_view.start) }
+}
+
+/// The routed timeline's visible rows (its `on_visible_rows`, as timeline row indexes): keeps
+/// the prompts in view, asking for a view run only when they change.
+pub(super) fn seen(app: &mut App, thread: &str, rows: Range<usize>) -> bool {
+    let Some(items) = items(app, thread) else { return false };
+    let range = visible_items(&items, rows);
+    let state = &mut app.ui.chat.timeline.minimap;
+    if state.in_view.as_ref().is_some_and(|(at, r)| at == thread && *r == range) {
+        return false;
+    }
+    state.in_view = Some((thread.to_owned(), range));
+    true
+}
+
 fn jump(app: &mut App, tx: &mut Tx, list: &str, items: &[Item]) {
     let state = &mut app.ui.chat.timeline.minimap;
     if let Some(item) = state.active.and_then(|i| items.get(i)) {
@@ -206,6 +241,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
     let rail_h = ((n - 1) as f32 * SPACING).max(1.0).min((body_h - 240.0).max(SPACING));
     let active = app.ui.chat.timeline.minimap.active.filter(|&i| i < n);
     let list = format!("timeline-{thread}");
+    let in_view = app.ui.chat.timeline.minimap.in_view.as_ref().filter(|(at, _)| at == thread).map_or(0..0, |(_, r)| r.clone());
+    let current = reading(&in_view).filter(|&i| i < n);
 
     let mut strips = el().w(hit).h(rail_h).child(el().absolute(STRIP_LEFT, 0.0).w(1.0).h(rail_h).fill(t.c.border.alpha_mul(0.15)));
     for index in 0..n {
@@ -217,7 +254,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
             _ => 8.0,
         };
         let tone = if distance == Some(0) { 0.6 } else { 0.25 };
-        strips = strips.child(el().absolute(0.0, top(index, n, rail_h) - 1.0).w(w).h(2.0).radius(radius::FULL).fill(t.c.muted_foreground.alpha_mul(tone)));
+        let strip = el().absolute(0.0, top(index, n, rail_h) - 1.0).w(w).h(2.0).radius(radius::FULL).fill(t.c.muted_foreground.alpha_mul(tone));
+        // A prompt in view brightens its strip (`data-in-view`).
+        let lit = in_view.contains(&index).then(|| el().w_full().h_full().radius(radius::FULL).fill(t.c.foreground.alpha_mul(0.55)));
+        strips = strips.child(strip.children(lit));
     }
     if !persistent && active.is_none() {
         strips = strips.group_opacity(0.0, 1.0);
@@ -243,7 +283,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
         .on_press_tx(move |app: &mut App, tx| jump(app, tx, &press_list, &press_items))
         .on_key(move |app: &mut App, e: &KeyEvent, _: &mut Tx| {
             let state = &mut app.ui.chat.timeline.minimap;
-            let base = state.active.unwrap_or(0);
+            let base = state.active.or(current).unwrap_or(0);
             state.active = Some(match e.key {
                 Key::Down => (base + 1).min(n - 1),
                 Key::Up => base.saturating_sub(1),
@@ -265,6 +305,21 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
             }
         })
         .child(rail);
+    // TimelineMinimapNavigationButton: above and below the rail, shown while hovered.
+    if hit >= NAVIGATION_REACH {
+        let turns = [
+            ("timeline-minimap-previous", "Previous turn", &icons::CHEVRON_UP, current.and_then(|c| c.checked_sub(1)), -22.0),
+            ("timeline-minimap-next", "Next turn", &icons::CHEVRON_DOWN, current.map(|c| c + 1).filter(|&i| i < n), rail_h + 2.0),
+        ];
+        for (key, label, glyph, target, y) in turns {
+            let mut button = crate::kit::button::Button::new(label).icon(glyph).size("icon-micro").variant("ghost-muted").disabled(target.is_none()).build(t).help(label);
+            if let Some(index) = target {
+                let (list, row) = (list.clone(), items[index].key.clone());
+                button = button.on_press_tx(move |_: &mut App, tx| tx.scroll_center_in(list.clone(), row.clone()));
+            }
+            root = root.child(el().key(key).absolute(-6.0, y).hover_group().child(button.group_opacity(0.0, 1.0)));
+        }
+    }
     if let Some(index) = active {
         let item = &items[index];
         let reply = item
@@ -294,7 +349,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Item, bootstrap, derive, index_at, plain, strip_tags, top};
+    use super::{Item, bootstrap, derive, index_at, plain, reading, strip_tags, top, visible_items};
     use crate::chat::timeline::rows::Row;
     use serde_json::json;
 
@@ -309,8 +364,8 @@ mod tests {
         );
         let rows = vec![Row::User(&u1), Row::Assistant(&a1), Row::Thinking { id: "x".into() }, Row::Assistant(&a2), Row::User(&u2), Row::User(&u3)];
         let keys: Vec<String> = ["k1", "k2", "k3", "k4", "k5", "k6"].map(String::from).to_vec();
-        let item = |key: &str, user: Option<&str>, reply: Option<&str>| Item { key: key.into(), user: user.map(Into::into), reply: reply.map(Into::into) };
-        assert_eq!(derive(&rows, &keys), vec![item("k1", Some("Fix the retry loop"), Some("a2")), item("k5", None, None), item("k6", None, None)]);
+        let item = |key: &str, row: usize, user: Option<&str>, reply: Option<&str>| Item { key: key.into(), row, user: user.map(Into::into), reply: reply.map(Into::into) };
+        assert_eq!(derive(&rows, &keys), vec![item("k1", 0, Some("Fix the retry loop"), Some("a2")), item("k5", 4, None, None), item("k6", 5, None, None)]);
         assert!(bootstrap(super::BOOTSTRAP_PROMPT) && !bootstrap("Ultrathink: hi"));
     }
 
@@ -320,6 +375,22 @@ mod tests {
         let threads = plain("Started <t3-thread://v2/env-1/thread-1> and [Fix CI](t3-thread://v2/env-1/t2).");
         assert_eq!(threads.trim(), "Started a thread and Fix CI.");
         assert_eq!(strip_tags("a<!-- note -->b<div>c</div><span>d</span> 1 < 2"), "ab c d 1 < 2");
+    }
+
+    #[test]
+    fn prompts_in_view_light_up_and_pick_the_turn_being_read() {
+        // Prompts at rows 2, 6 and 10.
+        let items: Vec<Item> = [2, 6, 10].into_iter().map(|row| Item { key: format!("k{row}"), row, user: None, reply: None }).collect();
+        let at = |rows: std::ops::Range<usize>| {
+            let range = visible_items(&items, rows);
+            (range.clone(), reading(&range))
+        };
+        assert_eq!(at(0..3), (0..1, Some(0)), "the first prompt in view");
+        assert_eq!(at(5..11), (1..3, Some(1)));
+        assert_eq!(at(3..6), (1..1, Some(0)), "between prompts, the turn above is being read");
+        assert_eq!(at(11..14), (3..3, Some(2)));
+        assert_eq!(at(0..2), (0..0, None), "above the first prompt, no turn yet");
+        assert_eq!(at(0..0), (0..0, None));
     }
 
     #[test]

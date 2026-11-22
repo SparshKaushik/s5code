@@ -64,7 +64,7 @@ pub fn page_not_found(t: &T) -> El {
             .items_center()
             .child(text("Page not found").font(theme::weight(theme::TEXT_LG, 500.0)).color(t.c.foreground))
             .child(
-                text("This link doesn't point to a page in T3 Code. Go home to choose a project or start a thread.")
+                text(format!("This link doesn't point to a page in {}. Go home to choose a project or start a thread.", crate::onboarding::app_display_name()))
                     .font(theme::TEXT_SM)
                     .color(t.c.muted_foreground)
                     .wrap(),
