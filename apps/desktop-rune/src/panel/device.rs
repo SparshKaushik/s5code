@@ -4,6 +4,7 @@
 
 mod h264;
 mod input;
+mod inspect;
 mod video;
 
 use std::io::Read;
@@ -44,6 +45,8 @@ pub struct Ui {
     tools: Option<Tools>,
     /// The device floating over the chat (web's mini player).
     float: Option<Float>,
+    /// Discovery warnings dismissed this session, by host and detail.
+    dismissed: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +65,8 @@ struct Tools {
     permission_app: TextEdit,
     permission: usize,
     push: TextEdit,
+    /// Scenes open the panel scrolled to its end, where the event log is.
+    to_end: bool,
 }
 
 struct Float {
@@ -89,6 +94,11 @@ struct Stream {
     /// `device.detail`, then each `device.action`, in flight; the newest `DeviceDetail`.
     detail: Option<u64>,
     info: Option<Value>,
+    /// Web's "Overlay element frames": the screen's accessibility elements while on.
+    ax: Option<inspect::Feed<Option<Vec<inspect::AxElement>>>>,
+    /// The iOS event log, streaming while its section is open.
+    log: Option<inspect::Feed<Vec<inspect::LogEntry>>>,
+    feeds_seen: u64,
 }
 
 #[derive(Default)]
@@ -298,6 +308,9 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         input: None,
         detail: None,
         info: None,
+        ax: None,
+        log: None,
+        feeds_seen: 0,
     };
     let wake = app.ui.panel.waker.clone();
     let wake = move || {
@@ -347,6 +360,9 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         input: None,
         detail: None,
         info: Some(json!({"settings": {"appearance": "light", "textSize": "default", "reduceMotion": false, "increaseContrast": true, "networkEnabled": true, "liquidGlass": "clear", "colorFilter": "none"}, "foregroundApp": foreground})),
+        ax: None,
+        log: None,
+        feeds_seen: 0,
     }
 }
 
@@ -429,6 +445,61 @@ fn power_off(app: &mut App) {
     let Some((host, device)) = app.ui.panel.device.stream.as_ref().and_then(|s| s.key.split_once('\u{0}')).map(|(h, d)| (h.to_owned(), d.to_owned())) else { return };
     app.ui.panel.device.menu = None;
     app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}));
+}
+
+/// The hub connection a readout thread uses: base URL, bearer, the device's host and id, and the wake.
+fn hub(app: &App) -> Option<(String, String, String, String, impl Fn() + Send + 'static)> {
+    let net = app.src.net_ref()?;
+    let (host, device) = app.ui.panel.device.stream.as_ref()?.key.split_once('\u{0}')?;
+    let wake = app.ui.panel.waker.clone();
+    Some((net.base_url().to_owned(), net.bearer().to_owned(), host.to_owned(), device.to_owned(), move || {
+        if let Some(wake) = &wake {
+            wake();
+        }
+    }))
+}
+
+/// Web's `fetchDeviceAxTree` endpoints: serve-sim's helper on iOS, serve-emu on Android.
+fn ax_endpoint(android: bool, host: &str, device: &str) -> (String, String) {
+    if android {
+        ("/api/device-hub/vendor/serve-emu/api/accessibility".into(), format!("device={}&hostId={}", encode(device), encode(host)))
+    } else {
+        (format!("/api/device-hub/vendor/serve-sim/helper/{}/ax", encode(device)), format!("hostId={}", encode(host)))
+    }
+}
+
+fn toggle_ax(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    if stream.ax.take().is_some() {
+        return;
+    }
+    let android = stream.android;
+    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let (path, query) = ax_endpoint(android, &host, &device);
+    if let Some(stream) = app.ui.panel.device.stream.as_mut() {
+        stream.ax = Some(inspect::spawn_ax(base, bearer, path, query, android, wake));
+    }
+}
+
+fn toggle_log(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    if stream.log.take().is_some() {
+        return;
+    }
+    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let query = format!("device={}&limit={}&hostId={}", encode(&device), inspect::LOG_LIMIT, encode(&host));
+    if let Some(stream) = app.ui.panel.device.stream.as_mut() {
+        stream.log = Some(inspect::spawn_log(base, bearer, "/api/device-hub/vendor/serve-sim/api/event-log/events".into(), query, wake));
+    }
+}
+
+/// Web `DevicePanel`'s host diagnostics: the detail a ready host reports about discovery.
+fn host_diagnostics<'a>(state: &'a Value, host_id: &str) -> Option<&'a str> {
+    let host = host(state, host_id)?;
+    let status = &state["hostStatuses"][host_id];
+    let local = (data::s(host, "kind") == "local").then(|| state["hostStatusDetail"].as_str()).flatten();
+    let detail = status["detail"].as_str().or(local)?;
+    (status["status"].as_str().or(state["hostStatus"].as_str()) == Some("ready")).then_some(detail)
 }
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
@@ -526,6 +597,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     let seen = shared.frames * 4 + u64::from(shared.failed.is_some()) * 2 + u64::from(shared.capturing);
     drop(shared);
+    let feeds = stream.ax.as_ref().map_or(0, |f| f.rev()) + stream.log.as_ref().map_or(0, |f| f.rev());
+    if feeds != stream.feeds_seen {
+        stream.feeds_seen = feeds;
+        changed = true;
+    }
     if seen != stream.seen {
         stream.seen = seen;
         changed = true;
@@ -659,12 +735,29 @@ fn screen_el(stream: &Stream, (w, h): (f32, f32), key: &str) -> El {
         })
 }
 
+/// Web's accessibility overlay: each element's frame over the screen, labeled above.
+fn ax_overlay(elements: &[inspect::AxElement], (w, h): (f32, f32), t: &T) -> Vec<El> {
+    elements
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let frame = el().key(format!("device-ax-{i}-{}", e.id)).pin(Some(e.x * w), Some(e.y * h), None, None).size(e.width * w, e.height * h).border(1., t.c.info.alpha_mul(0.8)).fill(t.c.info.alpha_mul(0.1));
+            if e.label.is_empty() {
+                return frame;
+            }
+            let label = text(e.label.clone()).font(theme::TEXT_3XS).color(rune::Color::WHITE).single_line().truncate().shrink();
+            frame.child(row().pin(Some(0.), Some(-14.), None, None).h(14.).max_w((e.width * w).max(24.)).px(4.).radius(2.).center_y().fill(t.c.info).child(label))
+        })
+        .collect()
+}
+
 /// The screen at its fitted size once the stage is laid out.
-fn screen(stream: &Stream, stage: Option<(f32, f32)>, name: &str) -> El {
+fn screen(stream: &Stream, stage: Option<(f32, f32)>, name: &str, t: &T) -> El {
     let (iw, ih) = stream.pixels.size();
     let fitted = stage.filter(|_| iw > 0 && ih > 0).map(|(w, h)| fit((w - 32., h - 32.), (iw as f32, ih as f32))).filter(|(w, h)| *w >= 1. && *h >= 1.);
+    let elements = stream.ax.as_ref().and_then(|f| f.data.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
     let screen = match fitted {
-        Some(size) => screen_el(stream, size, "device-screen"),
+        Some(size) => screen_el(stream, size, "device-screen").children(ax_overlay(&elements, size, t)),
         None => el().w_full().grow(1.).min_h(0.).pixels_fit(&stream.pixels, rune::SurfaceFit::Fit),
     };
     col().key("device-stage").grow(1.).min_h(0.).min_w(0.).padding(16.).center().role("img").label(format!("{name} screen")).child(screen)
@@ -945,8 +1038,47 @@ fn tool_field(field: fn(&mut Tools) -> &mut TextEdit, edit: &TextEdit, placehold
 
 const PERMISSIONS: [&str; 11] = ["camera", "microphone", "photos", "contacts", "calendar", "reminders", "location", "notifications", "motion", "media-library", "faceid"];
 
-/// `DeviceToolsPanel`: the app, the device's settings, location, permissions and push.
-fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
+/// Web `EventLogSection`: collapsed by default; the log streams only while it is open.
+fn event_log(stream: Option<&Stream>, t: &T) -> El {
+    let log = stream.and_then(|s| s.log.as_ref());
+    let trigger = row()
+        .key("device-event-log")
+        .w_full()
+        .px(12.)
+        .py(10.)
+        .gap(6.)
+        .center_y()
+        .cursor(rune::Cursor::Pointer)
+        .role("button")
+        .label("Event log")
+        .checked(log.is_some())
+        .on_press(toggle_log)
+        .child(text("Event log").font(theme::XS_MEDIUM).color(t.c.muted_foreground))
+        .child(el().grow(1.))
+        .child(icon(if log.is_some() { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN }, 14.).color(t.c.muted_foreground));
+    let Some(log) = log else { return col().w_full().child(el().h(1.).w_full().fill(t.c.border)).child(trigger) };
+    let entries = log.data.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let style = theme::mono(theme::TEXT_2XS);
+    let rows: Vec<El> = if entries.is_empty() {
+        vec![text("No events yet.").font(style).color(t.c.muted_foreground)]
+    } else {
+        entries
+            .iter()
+            .map(|e| {
+                row().key(format!("device-event-{}", e.id)).w_full().gap(8.).child(text(inspect::log_time(&e.timestamp).to_owned()).font(style).color(t.c.muted_foreground)).child(text(e.summary.clone()).font(style).color(t.c.foreground).single_line().truncate().shrink())
+            })
+            .collect()
+    };
+    col()
+        .w_full()
+        .child(el().h(1.).w_full().fill(t.c.border))
+        .child(trigger)
+        .child(col().key("device-event-log-entries").w_full().max_h(256.).px(12.).pb(8.).gap(2.).scroll(rune::ScrollSpec { stick_bottom: true }).children(rows))
+}
+
+/// `DeviceToolsPanel`: host diagnostics, the app, the device's settings, accessibility,
+/// location, permissions, push and the event log.
+fn tools_panel(stream: Option<&Stream>, tools: &Tools, diagnostics: Option<&str>, hub_ready: bool, t: &T) -> El {
     let android = stream.is_some_and(|s| s.android);
     let settings = settings(stream);
     let disabled = stream.is_none_or(|s| s.detail.is_some() || s.info.is_none());
@@ -1053,10 +1185,20 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
             .child(kit::Button::new("Reset").variant("ghost").size("xs").disabled(disabled).on_press(decide("reset")).build(t)),
     ];
 
-    let mut body = col()
-        .w_full()
+    let overlay = kit::Switch::new(stream.is_some_and(|s| s.ax.is_some()))
+        .label("Overlay element frames")
+        .hide_label()
+        .disabled(!hub_ready)
+        .on_toggle(toggle_ax)
+        .build(&kit::theme(t));
+    let mut body = col().w_full();
+    if let Some(detail) = diagnostics {
+        body = body.child(tool_section("Host diagnostics", vec![text(detail.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()], t));
+    }
+    body = body
         .child(tool_section("App", app, t))
         .child(tool_section(if android { "Emulator" } else { "Simulator" }, device, t))
+        .child(tool_section("Accessibility", vec![tool_row("Overlay element frames", overlay, t)], t))
         .child(tool_section("Location", location, t))
         .child(tool_section("Permissions", permissions, t));
     if !android {
@@ -1070,6 +1212,10 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
         };
         let push = kit::Input::new(&tools.push).placeholder("Alert text").size("sm").disabled(push_disabled).on_edit(|s: &mut App| tools_edit(s, |t| &mut t.push)).on_submit(move |s: &mut App, _: &mut Tx| send(s)).build(t);
         body = body.child(tool_section("Push notification", vec![push, kit::Button::new("Send to foreground app").variant("outline").size("xs").disabled(push_disabled).on_press(send).build(t)], t));
+        // Web streams serve-sim's log; serve-emu has none.
+        if hub_ready {
+            body = body.child(event_log(stream, t));
+        }
     }
     let close = kit::Button::new("Close tools").icon(&icons::X).variant("ghost-muted").size("icon-xs").on_press(|s: &mut App| s.ui.panel.device.tools = None).build(t).help("Close tools");
     col()
@@ -1082,7 +1228,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, t: &T) -> El {
         .border(1., t.c.border)
         .child(header(text("Device tools").font(theme::SM_MEDIUM).color(t.c.foreground), vec![close]))
         .child(el().h(1.).w_full().fill(t.c.border))
-        .child(col().grow(1.).min_h(0.).scroll(rune::ScrollSpec { stick_bottom: false }).child(body))
+        .child(col().grow(1.).min_h(0.).scroll(rune::ScrollSpec { stick_bottom: tools.to_end }).child(body))
 }
 
 fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>) -> El {
@@ -1112,7 +1258,7 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
                 } else if shared.frames == 0 {
                     centered(vec![spinner(t), note("Connecting video\u{2026}", t)])
                 } else {
-                    screen(stream, stage, &name)
+                    screen(stream, stage, &name, t)
                 }
             }
             None => centered(vec![spinner(t), note("Connecting video\u{2026}", t)]),
@@ -1124,7 +1270,8 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
         if let Some(tools) = &app.ui.panel.device.tools
             && stream.is_some_and(|s| runs_host_commands(&s.kind))
         {
-            body = body.child(tools_panel(stream, tools, t));
+            let hub_ready = app.ui.panel.device.fixture.is_some() || app.src.net_ref().is_some();
+            body = body.child(tools_panel(stream, tools, host_diagnostics(state, data::s(session, "hostId")), hub_ready, t));
         }
         body
     } else {
@@ -1159,7 +1306,39 @@ pub fn view(app: &App, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>)
     if !booting.is_empty() {
         notices.push(row().w_full().px(12.).py(6.).child(text(format!("Starting {}\u{2026} This can take a minute.", booting.join(", "))).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.)));
     }
-    let content = if let Some(session) = session(state, &thread, ui.selected.as_deref()).filter(|_| !ui.browsing) {
+    let showing = session(state, &thread, ui.selected.as_deref()).filter(|_| !ui.browsing);
+    // Web's `DeviceDiscoveryWarning`s, over the list only.
+    if showing.is_none() {
+        for host in hosts(state) {
+            let id = data::s(host, "id");
+            let Some(detail) = host_diagnostics(state, id) else { continue };
+            let tag = format!("{id}\u{0}{detail}");
+            if ui.dismissed.contains(&tag) {
+                continue;
+            }
+            let dismiss = kit::Button::new("Dismiss").icon(&icons::X).variant("ghost-muted").size("icon-xs").on_press(move |s: &mut App| s.ui.panel.device.dismissed.push(tag.clone())).build(t).help("Dismiss");
+            let lines = col()
+                .grow(1.)
+                .min_w(0.)
+                .gap(2.)
+                .child(text(format!("Device discovery warning \u{b7} {}", data::s(host, "label"))).font(theme::XS_MEDIUM).color(t.c.foreground).wrap())
+                .child(text(detail.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
+            notices.push(
+                row()
+                    .key(format!("device-discovery-{id}"))
+                    .role("status")
+                    .w_full()
+                    .px(12.)
+                    .py(8.)
+                    .gap(8.)
+                    .fill(t.c.warning.alpha_mul(0.1))
+                    .child(icon(&icons::TRIANGLE_ALERT, 14.).color(t.c.warning_foreground))
+                    .child(lines)
+                    .child(dismiss),
+            );
+        }
+    }
+    let content = if let Some(session) = showing {
         stream_view(app, state, session, t, stage, overlays)
     } else if state["devices"].as_array().is_some_and(|d| !d.is_empty()) {
         list(app, state, t)
@@ -1191,6 +1370,35 @@ pub fn open_menu(app: &mut App) {
 /// Device tools, open, for its scene.
 pub fn open_tools(app: &mut App) {
     app.ui.panel.device.tools = Some(Tools::default());
+}
+
+/// Device tools with everything web adds past the settings: host diagnostics, element frames
+/// over the screen and an open event log, scrolled to its end.
+pub fn tools_more_fixture(app: &mut App) {
+    if let Some(state) = app.ui.panel.device.fixture.as_mut() {
+        state["hostStatuses"] = json!({"local": {"status": "ready", "detail": "Android emulators: adb is not on PATH, so only iOS simulators are listed. Install Android platform-tools to add emulators."}});
+    }
+    app.ui.panel.device.tools = Some(Tools { to_end: true, ..Tools::default() });
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    let ax = |id: &str, label: &str, [x, y, width, height]: [f32; 4]| inspect::AxElement { id: id.into(), label: label.into(), x, y, width, height };
+    stream.ax = Some(inspect::Feed::fixed(Some(vec![
+        ax("title", "Welcome back", [0.08, 0.12, 0.6, 0.05]),
+        ax("email", "Email", [0.08, 0.24, 0.84, 0.06]),
+        ax("password", "Password", [0.08, 0.33, 0.84, 0.06]),
+        ax("sign-in", "Sign in", [0.08, 0.44, 0.84, 0.065]),
+        ax("forgot", "", [0.3, 0.53, 0.4, 0.035]),
+        ax("tab-home", "Home", [0.04, 0.9, 0.28, 0.07]),
+        ax("tab-settings", "Settings", [0.68, 0.9, 0.28, 0.07]),
+    ])));
+    let entry = |id: i64, time: &str, summary: &str| inspect::LogEntry { id, timestamp: format!("2026-11-22T{time}.000Z"), summary: summary.into() };
+    stream.log = Some(inspect::Feed::fixed(vec![
+        entry(1, "10:14:02", "Launched com.example.app"),
+        entry(2, "10:14:05", "Tap (196, 380) on \"Email\""),
+        entry(3, "10:14:09", "Typed 18 characters"),
+        entry(4, "10:14:12", "Tap (196, 456) on \"Sign in\""),
+        entry(5, "10:14:13", "Alert: \"Wrong password\""),
+        entry(6, "10:14:15", "Tap (196, 520) on \"OK\""),
+    ]));
 }
 
 /// The device floating over the chat, for its scene.
@@ -1277,5 +1485,23 @@ mod tests {
         let names: Vec<(&str, Vec<&str>)> = groups.iter().map(|(t, l)| (*t, l.iter().map(|d| data::s(d, "name")).collect())).collect();
         assert_eq!(names, vec![("iOS Simulators", vec!["iPad", "iPhone SE"]), ("Android Emulators", vec!["Pixel"])]);
         assert_eq!(subtitle(&devices, &devices["devices"][2]), "This Mac · iOS 18 · Running");
+    }
+
+    #[test]
+    fn host_diagnostics_come_from_ready_hosts_and_the_hubs_own_endpoints() {
+        let state = json!({
+            "hostStatus": "ready", "hostStatusDetail": "adb is not on PATH",
+            "hosts": [{"id": "local", "kind": "local"}, {"id": "box", "kind": "ssh"}, {"id": "mini", "kind": "ssh"}],
+            "hostStatuses": {"box": {"status": "ready", "detail": "Xcode is missing"}, "mini": {"status": "installing", "detail": "Downloading"}}
+        });
+        assert_eq!(host_diagnostics(&state, "local"), Some("adb is not on PATH"), "the local host falls back to the hub's detail");
+        assert_eq!(host_diagnostics(&state, "box"), Some("Xcode is missing"));
+        assert_eq!(host_diagnostics(&state, "mini"), None, "only a ready host reports diagnostics");
+        assert_eq!(host_diagnostics(&state, "gone"), None);
+        assert_eq!(
+            ax_endpoint(false, "box", "A B"),
+            ("/api/device-hub/vendor/serve-sim/helper/A%20B/ax".to_owned(), "hostId=box".to_owned())
+        );
+        assert_eq!(ax_endpoint(true, "box", "emulator-5554"), ("/api/device-hub/vendor/serve-emu/api/accessibility".to_owned(), "device=emulator-5554&hostId=box".to_owned()));
     }
 }

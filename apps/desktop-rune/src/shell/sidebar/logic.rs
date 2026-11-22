@@ -936,6 +936,30 @@ pub fn project_color(name: &str) -> usize {
 /// Search: case-insensitive title or branch matches, title-prefix matches first, then recency.
 /// Title and branch hits, then the threads listed only because the server found the query in
 /// their messages (`content`, in its order), as `searchSidebarThreads`.
+/// `findSearchTokenRanges`: the snippet's byte ranges of the query's words of three or more
+/// characters, merged; a word under four characters only where a word starts.
+pub fn excerpt_ranges(snippet: &str, query: &str) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = vec![];
+    for word in query.split_whitespace().map(|w| w.trim_matches(|c| c == '"' || c == '\'')).filter(|w| w.chars().count() >= 3) {
+        let starts_word = word.chars().count() < 4 && word.starts_with(char::is_alphanumeric);
+        for r in crate::chat::timeline::find::find_plain(snippet, word) {
+            if starts_word && snippet[..r.start].chars().next_back().is_some_and(char::is_alphanumeric) {
+                continue;
+            }
+            ranges.push((r.start, r.end));
+        }
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = vec![];
+    for (a, b) in ranges {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
 pub fn search(threads: &[Thread], query: &str, content: &[String]) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -1849,6 +1873,14 @@ mod tests {
         assert_eq!((monogram("server").as_str(), c("server")), ("SR", "amber"));
         assert_eq!(monogram("  --  "), "PR");
         assert_eq!(monogram("a"), "AA");
+    }
+
+    #[test]
+    fn excerpts_mark_each_long_word_and_short_ones_only_at_a_word_start() {
+        assert_eq!(excerpt_ranges("Fix the sidebar search bar", "SEARCH bar"), [(16, 22), (23, 26)]);
+        assert_eq!(excerpt_ranges("a crowbar and a bar", "bar"), [(16, 19)]);
+        assert_eq!(excerpt_ranges("needles, Needle", "needle ne"), [(0, 6), (9, 15)]);
+        assert!(excerpt_ranges("anything", "  ").is_empty());
     }
 
     #[test]

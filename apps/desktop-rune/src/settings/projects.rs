@@ -355,6 +355,37 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
     );
 }
 pub const ARCHIVED_SNAPSHOT: &str = "orchestration.getArchivedShellSnapshot";
+/// The environment a row of the merged archive came from.
+const ENV: &str = "_env";
+
+/// The pending-request and result name of one environment's archive snapshot.
+pub(super) fn archive_key(env: &str) -> String {
+    format!("{ARCHIVED_SNAPSHOT}@{env}")
+}
+
+/// Web `useArchivedThreadSnapshots`: asks every environment for its archive.
+pub(super) fn request_archives(s: &mut App) {
+    for key in crate::env::keys(s) {
+        if let Some(net) = crate::env::net_of(s, &key) {
+            let id = net.request(ARCHIVED_SNAPSHOT, json!({}));
+            s.ui.settings.pending.insert(id, archive_key(&key));
+        }
+    }
+}
+
+/// An environment's archive arrived: its threads' commands go back to that environment.
+pub(super) fn archive_fetched(s: &mut App, method: &str, result: &Value) {
+    let Some(env) = method.strip_prefix(ARCHIVED_SNAPSHOT).and_then(|m| m.strip_prefix('@')) else { return };
+    for thread in result["threads"].as_array().into_iter().flatten() {
+        crate::env::adopt(s, crate::data::s(thread, "id"), env);
+    }
+}
+
+fn tagged(row: &Value, env: &str) -> Value {
+    let mut row = row.clone();
+    row[ENV] = json!(env);
+    row
+}
 
 /// The shell stream's snapshot never carries archived threads, so the page fetches them and lets
 /// this session's archive/restore events win over the fetched copy.
@@ -377,9 +408,9 @@ fn archive_groups(projects: &[Value], threads: &[Value]) -> Vec<(Value, Vec<Valu
     let mut seen = std::collections::HashSet::new();
     projects
         .iter()
-        .filter(|p| seen.insert(crate::data::s(p, "id").to_owned()))
+        .filter(|p| seen.insert((crate::data::s(p, ENV).to_owned(), crate::data::s(p, "id").to_owned())))
         .filter_map(|project| {
-            let mut rows: Vec<Value> = threads.iter().filter(|t| t["projectId"] == project["id"]).cloned().collect();
+            let mut rows: Vec<Value> = threads.iter().filter(|t| t["projectId"] == project["id"] && t[ENV] == project[ENV]).cloned().collect();
             rows.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| crate::data::s(b, "id").cmp(crate::data::s(a, "id"))));
             (!rows.is_empty()).then(|| (project.clone(), rows))
         })
@@ -387,22 +418,24 @@ fn archive_groups(projects: &[Value], threads: &[Value]) -> Vec<(Value, Vec<Valu
 }
 
 pub fn archived(s: &App, t: &T) -> El {
-    let result = s.ui.settings.results.get(ARCHIVED_SNAPSHOT);
-    let fetched = result.and_then(|r| r["threads"].as_array()).map(Vec::as_slice).unwrap_or_default();
-    // The archive snapshot names the projects; live ones cover threads archived since it was fetched.
-    let projects: Vec<Value> = result
-        .and_then(|r| r["projects"].as_array())
-        .into_iter()
-        .flatten()
-        .chain(&s.state().projects)
+    let snapshots: Vec<(String, &Value)> =
+        crate::env::keys(s).into_iter().filter_map(|key| s.ui.settings.results.get(&archive_key(&key)).map(|r| (key, r))).collect();
+    let fetched: Vec<Value> = snapshots.iter().flat_map(|(key, r)| r["threads"].as_array().into_iter().flatten().map(|row| tagged(row, key))).collect();
+    let live = |rows: &[Value]| rows.iter().map(|row| tagged(row, &crate::env::of(s, row))).collect::<Vec<_>>();
+    // Each archive snapshot names its projects; live ones cover threads archived since the fetch.
+    let projects: Vec<Value> = snapshots
+        .iter()
+        .flat_map(|(key, r)| r["projects"].as_array().into_iter().flatten().map(|row| tagged(row, key)))
+        .chain(live(&s.state().projects))
         .filter(|p| s.ui.settings.project.as_ref().is_none_or(|id| p["id"] == *id))
-        .cloned()
         .collect();
-    let threads = archived_rows(fetched, &s.state().archived, &s.state().threads);
+    let threads = archived_rows(&fetched, &live(&s.state().archived), &s.state().threads);
     let groups = archive_groups(&projects, &threads);
+    // `hasMultipleEnvironments`: rows then name their environment.
+    let several = groups.iter().flat_map(|(_, rows)| rows).map(|row| crate::data::s(row, ENV)).collect::<std::collections::HashSet<_>>().len() > 1;
     if groups.is_empty() {
-        let loading = result.is_none() && s.ui.settings.pending.values().any(|m| m == ARCHIVED_SNAPSHOT);
-        let error = result.and_then(|r| r[super::LOAD_ERROR].as_str());
+        let loading = s.ui.settings.pending.values().any(|m| m.starts_with(ARCHIVED_SNAPSHOT));
+        let error = snapshots.iter().find_map(|(_, r)| r[super::LOAD_ERROR].as_str());
         let (glyph, title, description) = if loading {
             (crate::kit::Spinner::new().size("sm").tone("muted").build(&crate::kit::theme(t)), "Loading archived threads", "Checking connected environments.")
         } else if let Some(error) = error {
@@ -433,7 +466,7 @@ pub fn archived(s: &App, t: &T) -> El {
                     .truncate()
                     .min_w(0.0),
             );
-        let rows = threads.iter().map(|thread| archived_row(s, t, thread)).collect();
+        let rows = threads.iter().map(|thread| archived_row(s, t, thread, several)).collect();
         page = page.child(col().w_full().gap(10.0).child(header).child(c::card(rows, t)));
     }
     page
@@ -441,13 +474,14 @@ pub fn archived(s: &App, t: &T) -> El {
 
 /// Web's archived `SettingsRow`: when it was archived and created, Unarchive, and a right-click
 /// menu.
-fn archived_row(s: &App, t: &T, thread: &Value) -> El {
+fn archived_row(s: &App, t: &T, thread: &Value, several: bool) -> El {
     let id = crate::data::s(thread, "id").to_owned();
     let title = crate::data::s(thread, "title").to_owned();
     let created = crate::data::s(thread, "createdAt");
     let archived_at = thread["archivedAt"].as_str().unwrap_or(created);
+    let place = if several { format!("{} \u{b7} ", crate::env::label(s, crate::data::s(thread, ENV))) } else { String::new() };
     let description = format!(
-        "Archived {} \u{b7} Created {}",
+        "{place}Archived {} \u{b7} Created {}",
         super::storage::relative(archived_at, s.now_ms),
         super::storage::relative(created, s.now_ms)
     );
@@ -530,7 +564,7 @@ pub fn archive_menu(s: &App, t: &T, layers: &mut Vec<El>) {
         .overlay(&crate::kit::theme(t), layers);
 }
 fn dispatch(s: &mut App, command: Value, action: &str) {
-    if let Some(net) = s.src.net() {
+    if let Some(net) = crate::env::net_for(s, command["threadId"].as_str().unwrap_or_default()) {
         let id = net.dispatch(command);
         s.ui.settings.pending.insert(id, action.into());
     }
@@ -558,12 +592,12 @@ pub(super) fn scene_archive(s: &mut App, menu: bool) {
         }
     }
     let projects = s.state().projects.clone();
-    s.ui.settings.results.insert(ARCHIVED_SNAPSHOT.into(), json!({"projects": projects, "threads": threads}));
+    s.ui.settings.results.insert(archive_key(crate::env::LOCAL), json!({"projects": projects, "threads": threads}));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_groups, archived_rows, removal_message, request_delete};
+    use super::{archive_fetched, archive_groups, archive_key, archived_rows, removal_message, request_delete};
     use crate::App;
     use serde_json::json;
 
@@ -576,6 +610,21 @@ mod tests {
             "Path: /src/api\nEnvironment: Mac\nThose threads and any archived threads are deleted from T3 Code. Provider sessions are kept.\nThis removes only the project entries, not the files on disk.\nThis action cannot be undone."
         );
         assert_eq!(removal_message("api", "/a", None, 0).0, "Remove project \"api\"?");
+    }
+
+    #[test]
+    fn each_environments_archive_groups_under_its_own_projects_and_unarchives_there() {
+        let projects = [json!({"id": "p", "title": "api", "_env": "local"}), json!({"id": "p", "title": "api", "_env": "box"})];
+        let threads = [
+            json!({"id": "a", "projectId": "p", "_env": "local", "archivedAt": "2026-11-02T00:00:00Z"}),
+            json!({"id": "b", "projectId": "p", "_env": "box", "archivedAt": "2026-11-03T00:00:00Z"}),
+        ];
+        let groups = archive_groups(&projects, &threads);
+        assert_eq!(groups.len(), 2, "the same project id on two machines stays two groups");
+        assert_eq!(groups[1].1[0]["id"], "b");
+        let mut s = App::new();
+        archive_fetched(&mut s, &archive_key("box"), &json!({"threads": [{"id": "b"}]}));
+        assert_eq!(crate::env::owner(&s, "b"), "box");
     }
 
     #[test]
