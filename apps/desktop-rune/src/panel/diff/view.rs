@@ -11,7 +11,7 @@ use rune::{Color, Cursor, Drag, El, GrowthSpec, Icon, Phase, ScrollSpec, Span, T
 use rune_kit::diff::{FileDiff, FileStatus, LineKind, Side};
 use rune_kit::syntax::SyntaxTheme;
 
-use super::state::{DiffMode, DiffState, GAP, HEADER_H, LINE_H, LineRef, NOTE_H, Row, SEP_H};
+use super::state::{DiffMode, DiffState, GAP, HEADER_H, LINE_H, LineRef, Row, SEP_H};
 use crate::{App, icons, kit, theme, theme::T};
 
 /// The change-type marks pierre draws before a file's name.
@@ -34,6 +34,12 @@ static RENAMED: Icon = Icon {
     name: "diff-renamed",
     view: 24.0,
     body: r#"<rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" stroke-width="2" fill="none"/><path d="M8 12h8m-3.5-3.5L16 12l-3.5 3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+/// Pierre's `diffs-icon-arrow-right-short`, between a rename's old and new names.
+static RENAME_ARROW: Icon = Icon {
+    name: "diffs-arrow-right-short",
+    view: 16.0,
+    body: r#"<path d="M8.47 4.22a.75.75 0 0 0 0 1.06l1.97 1.97H3.75a.75.75 0 0 0 0 1.5h6.69l-1.97 1.97a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06L9.53 4.22a.75.75 0 0 0-1.06 0" fill="currentColor"/>"#,
 };
 
 /// Width of the bar marking an added, removed or selected line.
@@ -260,7 +266,6 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
     let vw = st.view_width().to_bits();
     match r {
         Row::File(f) => file_header(s, l, f as usize, false),
-        Row::Note(f) => memo(key, (l.version, st.rev, vw), || note(st, l, f as usize)),
         Row::Sep { f, h } => memo(key, (l.version, st.rev, vw), || separator(st, l, f as usize, h as usize)),
         Row::Comment { n, .. } => {
             let mut inner = super::comments::view(s, l, n as usize).key("inner");
@@ -511,7 +516,7 @@ fn segments(len: usize, syntax: &[(Range<usize>, Color)], hits: &[(Range<usize>,
         .collect()
 }
 
-fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
+pub(super) fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
     l.number_w(st.digits(f))
 }
 
@@ -569,27 +574,6 @@ pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
     };
     let (top, bottom) = super::state::sep_margins(h, st.files()[f].hunks.len());
     col().w_full().pt(top).pb(bottom).child(row().w_full().h(SEP_H).fill(l.bg).role("separator").label(label).child(inner))
-}
-
-/// A file with no lines to show.
-pub(crate) fn note(st: &DiffState, l: &Look, f: usize) -> El {
-    let file = &st.files()[f];
-    let msg = if file.binary {
-        "Binary file not shown"
-    } else if matches!(file.status, FileStatus::Renamed | FileStatus::Copied) {
-        "File renamed without changes"
-    } else if file.old_mode != file.new_mode {
-        "File mode changed"
-    } else if matches!(file.status, FileStatus::Added | FileStatus::Deleted) {
-        "Empty file"
-    } else {
-        "No changes"
-    };
-    let mut inner = row().key("inner").h(NOTE_H).items_center().pl(gutter_w(st, l, f) + CODE_PAD.0).child(text(msg).font(l.small).color(l.sep_fg));
-    if let Some(w) = view_w(st) {
-        inner = inner.w(w).sticky_left(0.0);
-    }
-    row().w_full().h(NOTE_H).fill(l.bg).role("note").label(msg).child(inner)
 }
 
 pub(crate) fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
@@ -666,8 +650,9 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     let mut name = row().key("name").items_center().gap(6.0).min_w(0.0).shrink();
     if let (FileStatus::Renamed | FileStatus::Copied, Some(old)) = (file.status, file.old_path.as_deref()) {
         name = name
-            .child(text(old.to_owned()).font(l.title).color(l.muted).truncate_head().min_w(0.0).shrink().key("prev"))
-            .child(icon(&icons::ARROW_RIGHT, 12.0).color(l.muted).key("arrow"));
+            // `[data-prev-name]` is the header's colour at 70%; the arrow keeps it whole.
+            .child(text(old.to_owned()).font(l.title).color(l.fg.alpha(l.fg.a * 0.7)).truncate_head().min_w(0.0).shrink().key("prev"))
+            .child(icon(&RENAME_ARROW, 16.0).color(l.fg).key("arrow"));
     }
     name = name.child(title);
     let done = s.ui.panel.diff.copied.as_ref().is_some_and(|(p, at)| *p == path && crate::data::now_ms() - at < COPIED_MS);
@@ -696,11 +681,9 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     }
     inner = inner.child(el().key("space").grow(1.0).a11y_hidden());
     let (adds, dels) = super::counts(ui, file);
-    if adds > 0 {
-        inner = inner.child(text(format!("+{adds}")).font(l.count).color(l.add.count).key("adds"));
-    }
-    if dels > 0 {
-        inner = inner.child(text(format!("-{dels}")).font(l.count).color(l.del.count).key("dels"));
+    for (add, count) in super::header_counts(ui, adds, dels) {
+        let (color, key) = if add { (l.add.count, "adds") } else { (l.del.count, "dels") };
+        inner = inner.child(text(count).font(l.count).color(color).key(key));
     }
     let edge = el().key("edge").absolute(0.0, 0.0).size(3.0, HEADER_H).fill(l.header_bar).group_opacity(0.0, 1.0).a11y_hidden();
     let mut label = file.path().to_owned();
