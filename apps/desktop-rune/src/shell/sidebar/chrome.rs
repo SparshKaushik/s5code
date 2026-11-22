@@ -588,11 +588,11 @@ pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Ton
 }
 
 /// `SidebarDragBoundary`: the "Pinned" / "Active" label a drag reveals over a section's top.
-pub fn boundary(t: &T, label: &str, target: bool) -> El {
+pub fn boundary(t: &T, label: &str, target: bool, width: f32) -> El {
     let (fg, line) = if target { (t.sb.primary, t.sb.primary.alpha_mul(0.5)) } else { (t.sb.sidebar_foreground.alpha_mul(0.8), t.sb.sidebar_foreground.alpha_mul(0.25)) };
     row()
         .absolute(8.0, 4.0)
-        .w(layout::SIDEBAR_W - 1.0 - 16.0 - 16.0 - 4.0)
+        .w(width - 1.0 - 16.0 - 16.0 - 4.0)
         .h(16.0)
         .gap(8.0)
         .center_y()
@@ -601,14 +601,14 @@ pub fn boundary(t: &T, label: &str, target: bool) -> El {
 }
 
 /// `SidebarSectionPlaceholder`: the dashed drop box for an empty section.
-pub fn placeholder(t: &T, label: &str, target: bool) -> El {
+pub fn placeholder(t: &T, label: &str, target: bool, width: f32) -> El {
     let (border, fill, fg) = if target {
         (t.sb.primary.alpha_mul(0.4), t.sb.primary.alpha_mul(0.05), t.sb.primary)
     } else {
         (t.sb.sidebar_foreground.alpha_mul(0.25), Color::TRANSPARENT, t.sb.sidebar_foreground.alpha_mul(0.8))
     };
     el().absolute(0.0, 0.0)
-        .w(layout::SIDEBAR_W - 1.0 - 16.0 - 4.0)
+        .w(width - 1.0 - 16.0 - 4.0)
         .h(36.0)
         .radius(radius::MD)
         .border(1.0, border)

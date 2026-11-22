@@ -134,6 +134,8 @@ pub struct Ui {
     pub content: (String, Vec<String>),
     /// Since when the thread-jump modifiers have been held alone (`useThreadJumpHintsVisible`).
     jump_held: Option<i64>,
+    /// The width the rail set, read from the window prefs on first use.
+    width: std::cell::Cell<Option<f32>>,
     /// Each matched thread's first message match (`threadId`, `snippet`, `source`), by `content`.
     content_matches: Vec<serde_json::Value>,
     content_due: Option<(i64, String)>,
@@ -1328,6 +1330,67 @@ fn bound_key(s: &mut App, e: &KeyEvent, editable: bool) -> bool {
     true
 }
 
+/// Window prefs key for the dragged width (web's `chat_thread_sidebar_width`).
+const WIDTH_KEY: &str = "threadSidebarWidth";
+const MIN_W: f32 = 208.0;
+/// The main area keeps 40rem beside the sidebar.
+const MAIN_MIN_W: f32 = 640.0;
+
+/// `clampThreadSidebarWidth`: at least 13rem, and no wider than leaves the main area 40rem.
+fn clamp_width(width: f32, viewport: Option<f32>) -> f32 {
+    let max = viewport.map_or(f32::MAX, |v| (v.floor() - MAIN_MIN_W).max(MIN_W));
+    width.max(MIN_W).min(max).round()
+}
+
+/// The sidebar's content width.
+pub fn width(s: &App, viewport: Option<f32>) -> f32 {
+    let ui = &s.ui.shell.sidebar;
+    let stored = ui.width.get().unwrap_or_else(|| {
+        let saved = crate::desktop::prefs().get::<f32>(WIDTH_KEY).filter(|w| w.is_finite()).unwrap_or(layout::SIDEBAR_W);
+        ui.width.set(Some(saved));
+        saved
+    });
+    clamp_width(stored, viewport)
+}
+
+fn save_width(width: Option<f32>) {
+    let prefs = crate::desktop::prefs();
+    if let Some(w) = width {
+        let _ = prefs.set(WIDTH_KEY, &w);
+    } else {
+        let _ = prefs.remove(WIDTH_KEY);
+    }
+}
+
+/// `SidebarRail`: drag to resize, double-click for the default width, both kept across launches.
+fn rail(viewport: Option<f32>) -> El {
+    el().key("sb-rail")
+        .role("separator")
+        .label("Resize Sidebar")
+        .help("Drag to resize sidebar")
+        .pin(None, Some(0.0), Some(0.0), Some(0.0))
+        .w(6.0)
+        .cursor(rune::Cursor::ResizeColumn)
+        .on_drag(move |s: &mut App, d, _| {
+            if d.phase == rune::Phase::Down {
+                d.data = width(s, viewport);
+                if d.clicks == 2 {
+                    s.ui.shell.sidebar.width.set(Some(layout::SIDEBAR_W));
+                    save_width(None);
+                }
+                return;
+            }
+            if d.cancelled() || d.clicks == 2 {
+                return;
+            }
+            let next = clamp_width(d.data + d.dx, viewport);
+            s.ui.shell.sidebar.width.set(Some(next));
+            if d.phase == rune::Phase::Up {
+                save_width(Some(next));
+            }
+        })
+}
+
 /// Jump hints wait this long after the modifiers go down, so a quick shortcut never flashes them.
 const JUMP_HINT_DELAY_MS: i64 = 200;
 
@@ -1541,9 +1604,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     chrome::scope_menu(s, &model, t, overlays);
     folders::menu(s, t, overlays);
     drafts::menu(s, t, overlays);
-    // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
+    // The width plus 1pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
+    let viewport = cx.layout_with("shell", |r| r[2]);
+    let w = width(s, viewport);
     let content = col()
-        .w(layout::SIDEBAR_W + 1.0)
+        .w(w + 1.0)
         .h_full()
         .child(chrome::header(s, t, inset))
         .child(chrome::search_bar(s, t))
@@ -1551,11 +1616,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .child(chrome::footer(s, &model, t));
     row()
         .key("sidebar")
-        .w(layout::SIDEBAR_W + 2.0)
+        .w(w + 2.0)
         .h_full()
         .fill(t.sb.sidebar)
         .child(content)
         .child(el().w(1.0).h_full().fill(t.sb.contrast_sidebar_border))
+        .child(rail(viewport))
 }
 
 impl Shelf {
@@ -1628,6 +1694,16 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn the_width_stays_between_13rem_and_what_leaves_the_main_area_40rem() {
+        assert_eq!(clamp_width(100.0, None), MIN_W);
+        assert_eq!(clamp_width(300.4, Some(1400.0)), 300.0);
+        assert_eq!(clamp_width(900.0, Some(1200.0)), 560.0);
+        assert_eq!(clamp_width(300.0, Some(700.0)), MIN_W, "a narrow window still keeps the minimum");
+        let s = App::new();
+        assert_eq!(width(&s, Some(1400.0)), layout::SIDEBAR_W, "headless prefs start at the default");
     }
 
     #[test]

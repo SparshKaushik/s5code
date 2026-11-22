@@ -982,6 +982,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let items = model.items(ui);
     let jumps = super::jump_labels(s, model);
+    let width = super::width(s, cx.layout_with("shell", |r| r[2]));
     if let Some(h) = &ui.hover {
         ui.hover_rect.set(cx.layout(&format!("sb-row-{h}")).map(|r| [r[0], r[1], r[2], r[3]]));
     }
@@ -1104,7 +1105,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                     Marker::PinnedHeader | Marker::PinnedDivider => {
                         let (label, section) = if *m == Marker::PinnedHeader { ("Pinned", Section::Pinned) } else { ("Active", Section::Active) };
                         let e = base(0.0);
-                        if dragging { e.child(chrome::boundary(t, label, target_section == Some(section))) } else { e }
+                        if dragging { e.child(chrome::boundary(t, label, target_section == Some(section), width)) } else { e }
                     }
                     Marker::ActivePlaceholder if !model.folders.is_empty() => {
                         let row_of = |i: usize| {
@@ -1123,7 +1124,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                         let from_here = drag.is_some_and(|d| d.section == section);
                         let hint = dragging && (rows.is_empty() || (from_here && rows.len() == 1 && target_section.is_some_and(|ts| ts != section)));
                         let e = base(0.0);
-                        if hint { e.child(chrome::placeholder(t, label, target_section == Some(section))) } else { e }
+                        if hint { e.child(chrome::placeholder(t, label, target_section == Some(section), width)) } else { e }
                     }
                     Marker::WorkingHeader | Marker::SnoozedHeader | Marker::SettledHeader => {
                         let (shelf, count) = match m {
