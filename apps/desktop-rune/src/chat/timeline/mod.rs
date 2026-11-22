@@ -22,7 +22,7 @@ mod worktree_setup;
 mod inspector;
 mod history;
 mod md_links;
-mod citation;
+pub(crate) mod citation;
 mod media;
 mod work;
 mod lifecycle;

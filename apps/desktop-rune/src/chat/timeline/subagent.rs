@@ -235,7 +235,9 @@ fn is_script_text(text: &str) -> bool {
             break;
         }
     }
-    let word = |rest: &str, w: &str| rest.strip_prefix(w).filter(|r| r.starts_with(char::is_whitespace)).map(str::trim_start);
+    fn word<'a>(rest: &'a str, w: &str) -> Option<&'a str> {
+        rest.strip_prefix(w).filter(|r| r.starts_with(char::is_whitespace)).map(str::trim_start)
+    }
     let Some(rest) = word(rest, "export").and_then(|r| word(r, "const")) else { return false };
     rest.strip_prefix("meta").is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
 }

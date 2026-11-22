@@ -289,7 +289,7 @@ struct Cx<'a> {
     app: &'a App,
     id: &'a str,
     t: &'a T,
-    marks: Option<&'a Marks>,
+    marks: Option<&'a Marks<'a>>,
     ink: rune::Color,
     /// A finished reply: its shell fences can run in the terminal.
     run: bool,

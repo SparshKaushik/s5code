@@ -3,7 +3,7 @@
 //! Drafts are kept per thread (and one for the home draft), as the web composer draft store does.
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
-mod attachments;
+pub(crate) mod attachments;
 pub mod banners;
 pub mod chips;
 mod context;
