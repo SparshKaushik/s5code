@@ -131,7 +131,7 @@ fn unique<'a>(values: impl Iterator<Item = Option<&'a str>>) -> Vec<&'a str> {
 }
 
 /// `deriveProjectGroupLabel`: a shared title, else the repository's display name, else its name.
-fn label(members: &[&Value]) -> String {
+pub(crate) fn label(members: &[&Value]) -> String {
     let titles = unique(members.iter().map(|p| p["title"].as_str()));
     let display = unique(members.iter().map(|p| {
         let identity = &p["repositoryIdentity"];
