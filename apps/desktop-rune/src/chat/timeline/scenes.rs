@@ -1358,7 +1358,7 @@ fn stopped_replies(app: &mut App) {
     ]);
 }
 
-/// A finished turn's open fold holding an `html_render` page's card.
+/// A finished turn's open fold holding an `html_render` page, its picture seeded.
 fn html_render(app: &mut App) {
     use serde_json::json;
     showcase(app);
@@ -1374,6 +1374,7 @@ fn html_render(app: &mut App) {
         item("scene-html-reply", "assistant_message", 20, json!({"text": "The chart is above. EMEA led the quarter."})),
     ]);
     app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
+    crate::panel::html_frame::scene_seed(app, "scene-html-page", 420.);
 }
 
 /// A delegated task running in a linked environment, named after its row title.

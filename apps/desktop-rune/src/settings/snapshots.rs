@@ -72,6 +72,7 @@ enum Kind {
     Picker,
     Hyprland,
     Niri,
+    Kde,
 }
 
 /// `captureSetupDesktopName`.
@@ -80,18 +81,20 @@ fn desktop_name(kind: Kind) -> Option<&'static str> {
         Kind::Gnome => Some("GNOME"),
         Kind::Hyprland => Some("Hyprland"),
         Kind::Niri => Some("Niri"),
+        Kind::Kde => Some("KDE Plasma"),
         _ => None,
     }
 }
 
 /// `snapShotFeedbackUnavailableMessage`: GNOME's extension and Hyprland (one monitor) draw them.
+/// KWin's capture names no window frame, so KDE has none.
 fn effects_status(state: &State) -> Option<&'static str> {
     match kind(state) {
         Kind::Direct | Kind::Hyprland => None,
         Kind::Niri => Some("Capture effects aren't available on Niri."),
         Kind::Gnome if extension(state).map(|(status, _)| status) == Some(Ext::Enabled) => None,
         Kind::Gnome => Some("Finish extension setup to enable effects."),
-        Kind::Portal | Kind::Picker => Some(NO_EFFECTS),
+        Kind::Portal | Kind::Picker | Kind::Kde => Some(NO_EFFECTS),
     }
 }
 
@@ -113,6 +116,7 @@ fn kind(state: &State) -> Kind {
     match setup.backend {
         Backend::Hyprland => Kind::Hyprland,
         Backend::Niri => Kind::Niri,
+        Backend::Kde => Kind::Kde,
         Backend::ScreenshotPortal => Kind::Portal,
         Backend::Picker if ext == Some(Ext::Unsupported) => Kind::Picker,
         Backend::GnomeExtension => Kind::Gnome,
@@ -192,7 +196,8 @@ fn setup_label(state: &State) -> &'static str {
         _ if access_ready(state) => "Manage capture",
         Some("GNOME") => "Set up GNOME capture",
         Some("Hyprland") => "Set up Hyprland capture",
-        Some(_) => "Set up Niri capture",
+        Some("Niri") => "Set up Niri capture",
+        Some(_) => "Set up KDE Plasma capture",
         None => "Continue setup",
     }
 }
@@ -486,7 +491,7 @@ fn locked_switch(t: &T, label: &str) -> El {
 
 /// `snapShotAccessibilityUnavailableMessage`: only backends that name the window can read its text.
 fn linux_text_status(state: &State) -> Option<&'static str> {
-    matches!(kind(state), Kind::Portal | Kind::Picker).then_some("This desktop only provides a screenshot.")
+    matches!(kind(state), Kind::Portal | Kind::Picker | Kind::Kde).then_some("This desktop only provides a screenshot.")
 }
 
 fn switch(t: &T, on: bool, label: &str, f: impl Fn(&mut App) + 'static) -> El {
@@ -718,6 +723,7 @@ fn linux_access_copy(state: &State, ready: bool) -> (&'static str, &'static str)
             Ext::Error => ("Couldn't set up the extension", "Check T3 Code SnapShots in GNOME Extensions, then try again."),
         },
         (Kind::Hyprland | Kind::Niri, _) => ("Capture is ready", "Next, choose your shortcut."),
+        (Kind::Kde, _) => ("Capture is ready", "T3 Code registers with KDE Plasma on your first snapshot. Next, choose your shortcut."),
         (Kind::Picker, _) if state.linux.is_some() => ("Choose a window each time", "Your desktop doesn't support automatic capture. You'll choose the window to capture instead."),
         _ => ("Allow snapshots", "Your desktop may ask for permission when you first capture."),
     }
@@ -923,6 +929,10 @@ pub(crate) const SCENES: &[(&str, fn(&mut App))] = &[
         mac_scene(s, false, linux_state(Backend::Niri, None));
         s.ui.settings.snapshots.wizard = Some(Wizard { step: Step::Access, was_enabled: false });
     }),
+    ("settings-snap-shot-wizard-kde", |s| {
+        mac_scene(s, false, linux_state(Backend::Kde, None));
+        s.ui.settings.snapshots.wizard = Some(Wizard { step: Step::Access, was_enabled: false });
+    }),
     ("settings-snap-shot-linux-picker", |s| mac_scene(s, true, State { shortcut_message: Some(linux::MODIFIER_PAIR_UNAVAILABLE.into()), ..linux_state(Backend::Picker, None) })),
     ("settings-snap-shot-wizard-gnome", |s| {
         mac_scene(s, false, linux_state(Backend::Picker, Some(Ext::NotInstalled)));
@@ -1016,6 +1026,11 @@ mod tests {
         assert_eq!(setup_label(&State { message: Some("x".into()), ..niri }), "Set up Niri capture");
         assert_eq!(effects_status(&installing), Some("Finish extension setup to enable effects."));
         assert_eq!(effects_status(&enabled), None, "the extension draws them");
+        let kde = linux_state(Backend::Kde, None);
+        assert_eq!((kind(&kde), access_ready(&kde), desktop_name(Kind::Kde)), (Kind::Kde, true, Some("KDE Plasma")), "registration waits for the first capture");
+        assert_eq!((effects_status(&kde), linux_text_status(&kde)), (Some(NO_EFFECTS), Some("This desktop only provides a screenshot.")), "KWin names no window or frame");
+        assert_eq!(setup_label(&State { message: Some("x".into()), ..kde.clone() }), "Set up KDE Plasma capture");
+        assert_eq!(linux_access_copy(&kde, true).0, "Capture is ready");
         let portal = linux_state(Backend::ScreenshotPortal, None);
         assert_eq!(effects_status(&portal), Some(NO_EFFECTS));
         assert_eq!((kind(&portal), linux_text_status(&portal)), (Kind::Portal, Some("This desktop only provides a screenshot.")));

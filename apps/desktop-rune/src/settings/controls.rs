@@ -264,12 +264,17 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     });
     let project_description = spec["projectDescription"].as_str().filter(|_| s.ui.settings.project.is_some());
     let description = dynamic.as_deref().or(project_description).unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
-    let mut heading = row().gap(6.0).center_y().child(
-        text(title.to_owned())
-            .key(super::title_key(spec["searchTitle"].as_str().unwrap_or(title)))
-            .font(theme::SM_MEDIUM)
-            .color(t.c.foreground),
-    );
+    let search_title = spec["searchTitle"].as_str().unwrap_or(title);
+    let mut heading = row()
+        .gap(6.0)
+        .center_y()
+        .child(
+            text(title.to_owned())
+                .key(super::title_key(search_title))
+                .font(theme::SM_MEDIUM)
+                .color(t.c.foreground),
+        )
+        .children(super::scope::marker(s, t, key));
     // Web resets the auto-settle day count from its switch row only, and has no reset for the
     // Separate fonts switch or a dedicated model, whose own switch turns it off; a font row
     // resets its family and size together.
@@ -370,22 +375,26 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some("snooze") => super::snooze::parts(s, t),
         Some("profiles") => super::browser_profiles::parts(s, t),
         Some("textarea") => (el(), Some(textarea(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")))),
+        Some("font") => (font(s, t, key, title, spec), super::fonts::preview(s, t, key)),
         kind => (match kind {
         Some("switch") => row()
             .w(160.0)
             .child(el().grow(1.0))
             .child(switch(s, t, key, title)),
         Some("select") => {
-            let options: Vec<_> = spec["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
-                .collect();
+            let options: Vec<_> = if key == "browserDefaultViewport" {
+                super::browser_profiles::viewport_options(&value(s, key))
+            } else {
+                spec["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
+                    .collect()
+            };
             select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
-        Some("font") => font(s, t, key, title, spec),
         Some("model") => super::models::control(s, t, key),
         Some("secret") => super::providers::secret_control(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")),
         _ => input(
@@ -412,23 +421,13 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         })
     });
     let ctrl = super::permissions::gate(key, ctrl, lock);
-    if s.ui.settings.project.is_some() && super::scope::project_key(key) {
-        copy = copy.child(
-            text(if super::scope::customized(s, key) {
-                "Overridden for this project"
-            } else {
-                "Inherited from environment"
-            })
-            .font(theme::TEXT_XS)
-            .color(t.c.muted_foreground),
-        );
-    }
     let line = row().w_full().gap(32.0).center_y().child(copy).child(ctrl);
     // `SettingsRow` children sit under the copy and control: `pt-3 pb-1` instead of `py-3`.
-    match children {
+    let row = match children {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
-    }
+    };
+    super::pulsed(s, t, search_title, row)
 }
 
 /// Web `FontFamilySettingsRow`'s control: the family field (`w-44`, placeholder the default
@@ -597,8 +596,9 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         "glassOpacity" => (40.0, 100.0, 5.0),
         _ => (0.0, 400.0, 25.0),
     };
+    let preview = (key == "panelAnimationDurationMs").then(|| panel_preview(s, t, n));
     let key = key.to_owned();
-    row()
+    let slider = row()
         .w(208.0)
         .center_y()
         .gap(12.0)
@@ -622,7 +622,56 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                 .label(title)
                 .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
                 .build(t),
+        );
+    match preview {
+        Some(preview) => row().gap(16.0).center_y().child(preview).child(slider),
+        None => slider,
+    }
+}
+
+const PANEL_PREVIEW: &str = "form.panelPreviewClosed";
+
+/// Web `PanelAnimationsPreview`: a press opens or closes its sketch's panels once, at the chosen
+/// duration with CSS `ease-out`.
+fn panel_preview(s: &App, t: &T, ms: f32) -> El {
+    let open = value(s, PANEL_PREVIEW) != true;
+    let bar = |w: f32, alpha: f32| el().h(2.0).w_frac(w).radius(1.0).fill(t.c.muted_foreground.alpha_mul(alpha));
+    let mut footer = row().key("panel-preview-footer").w_full().h(if open { 8.0 } else { 0.0 }).px(8.0).center_y().fill(t.c.foreground.alpha_mul(0.05));
+    if open {
+        footer = footer.child(el().h(1.0).w_frac(0.66).radius(1.0).fill(t.c.muted_foreground.alpha_mul(0.25)));
+    }
+    row()
+        .key("panel-animation-preview")
+        .w(112.0)
+        .h(40.0)
+        .padding(4.0)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .border(1.0, t.c.border)
+        .fill(t.c.background)
+        .focusable(true)
+        .role("button")
+        .label("Replay panel animation preview")
+        .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+            if ms > 0.0 {
+                tx.motion_curve(rune::Curve::tween(ms / 1000.0, rune::Easing::cubic(0.0, 0.0, 0.58, 1.0)));
+            } else {
+                tx.instant();
+            }
+            let closed = value(s, PANEL_PREVIEW) == true;
+            update(s, PANEL_PREVIEW, json!(!closed));
+        })
+        .child(el().key("panel-preview-sidebar").h_full().w(if open { 16.0 } else { 0.0 }).radius(6.0).fill(t.c.sidebar))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .px(4.0)
+                .child(col().w_full().grow(1.0).min_h(0.0).gap(4.0).pt(4.0).child(bar(1.0, 0.25)).child(bar(0.8, 0.2)).child(bar(0.6, 0.15)))
+                .child(footer),
         )
+        .child(el().key("panel-preview-side").h_full().w(if open { 20.0 } else { 0.0 }).radius(6.0).fill(t.c.muted))
 }
 
 /// Web `SettingsRow`'s `status` line under the description.

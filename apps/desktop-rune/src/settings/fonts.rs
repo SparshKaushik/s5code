@@ -2,6 +2,8 @@
 //! the fonts an app registers at launch, so the chosen families' system files load then, and
 //! the sans and mono slots switch to them at run time once they are loaded.
 use crate::App;
+use crate::theme::{self, AlphaMul, T};
+use rune::{El, col, el, row, text};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -186,6 +188,121 @@ pub fn follow(s: &mut App, tx: &mut rune::Tx) {
         tx.set_font_families(want.0.clone(), want.1.clone());
         s.ui.settings.fonts_applied = Some(want);
     }
+    follow_smoothing(&s.client_settings.values, tx);
+}
+
+/// Web's macOS-only `-webkit-font-smoothing: antialiased`, which Rune's `Off` mode matches.
+fn follow_smoothing(values: &Map<String, Value>, tx: &mut rune::Tx) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static APPLIED: AtomicU8 = AtomicU8::new(0);
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let thin = values.get("fontSmoothing").or_else(|| super::client::defaults().get("fontSmoothing")).and_then(Value::as_bool) != Some(false);
+    let want = if thin { 2 } else { 1 };
+    if APPLIED.swap(want, Ordering::Relaxed) != want {
+        tx.set_font_smoothing(if thin { rune::FontSmoothing::Off } else { rune::FontSmoothing::On });
+    }
+}
+
+const PROMPT_PREVIEW: &str = "Use $frontend-design to fix the flaky test in surface.test.ts and align the header with SettingsPanels.tsx before shipping.";
+const DIFF_PREVIEW: [(char, &str); 4] = [
+    (' ', "export function formatUser(user: User) {"),
+    ('-', "  return user.name.toUpperCase();"),
+    ('+', "  return `${user.name} <${user.email}>`; // 0O 1lI"),
+    (' ', "}"),
+];
+
+/// Web's `SettingsFontPreviews`, as static samples under the font rows. Rune's composer draws
+/// in the interface font, so the prompt sample sits under that row.
+pub fn preview(s: &App, t: &T, key: &str) -> Option<El> {
+    let values = &s.client_settings.values;
+    let advanced = values.get("typographyAdvanced").and_then(Value::as_bool) == Some(true);
+    match key {
+        "fontFamilySans" => Some(prompt_preview(t)),
+        "fontFamilyCode" if advanced => Some(code_preview(t)),
+        "fontFamilyCode" => Some(col().w_full().child(code_preview(t)).child(terminal_preview(values, t))),
+        "fontFamilyTerminal" => Some(terminal_preview(values, t)),
+        _ => None,
+    }
+}
+
+fn prompt_preview(t: &T) -> El {
+    col().w_full().mt(4.0).mb(8.0).px(12.0).py(8.0).radius(8.0).border(1.0, t.c.border).fill(t.c.background).child(
+        text(PROMPT_PREVIEW).font(theme::TEXT_SM.lh(20.0)).color(t.c.foreground).wrap(),
+    )
+}
+
+fn code_preview(t: &T) -> El {
+    let font = theme::mono(rune::TextStyle::new(t.code, 400.0).lh((t.code * 1.6).round()));
+    let mut lines = col().w_full().py(4.0);
+    for (sign, code) in DIFF_PREVIEW {
+        let tint = match sign {
+            '+' => Some(t.c.diff_addition),
+            '-' => Some(t.c.diff_deletion),
+            _ => None,
+        };
+        let mut line = row()
+            .w_full()
+            .px(12.0)
+            .gap(12.0)
+            .child(text(sign.to_string()).font(font).color(tint.unwrap_or(t.c.code_foreground)).w(8.0))
+            .child(text(code).font(font).color(t.c.code_foreground));
+        if let Some(tint) = tint {
+            line = line.fill(tint.alpha_mul(0.18));
+        }
+        lines = lines.child(line);
+    }
+    col()
+        .w_full()
+        .mt(4.0)
+        .mb(8.0)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .border(1.0, t.c.border)
+        .fill(t.c.code_background)
+        .child(row().w_full().h(32.0).px(12.0).center_y().child(text("src/formatUser.ts").font(theme::XS_MEDIUM).color(t.c.code_foreground)))
+        .child(el().w_full().h(1.0).fill(t.c.border))
+        .child(lines)
+}
+
+/// The terminal sample in the terminal's own family and size, colored like its ANSI palette.
+fn terminal_preview(values: &Map<String, Value>, t: &T) -> El {
+    let size = terminal_size(values);
+    let font = rune::TextStyle::new(size, 400.0).family(terminal_family(values)).lh((size * 1.35).round().max(1.0));
+    let bold = theme::weight(font, 700.0);
+    let ansi = |i: usize| {
+        let [r, g, b] = if t.dark { crate::panel::vt::DARK_ANSI[i] } else { crate::panel::vt::LIGHT_ANSI[i] };
+        rune::color::hex(&format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or(t.c.terminal_foreground)
+    };
+    let (fg, dim) = (t.c.terminal_foreground, t.c.terminal_foreground.alpha_mul(0.6));
+    let prompt = [("\u{2192} ", ansi(2), bold), ("t3code ", ansi(6), bold), ("git:(", ansi(4), bold), ("main", ansi(1), bold), (") ", ansi(4), bold), ("\u{2717} ", ansi(3), bold)];
+    let mut first = prompt.to_vec();
+    first.push(("vpr dev", fg, font));
+    let lines: Vec<Vec<(&str, rune::Color, rune::TextStyle)>> = vec![
+        first,
+        vec![],
+        vec![("  VITE", ansi(2), bold), (" v7.1.1", ansi(2), font), ("  ready in ", dim, font), ("1.24s", fg, bold)],
+        vec![],
+        vec![("  \u{2192}  ", ansi(2), font), ("Local:    ", dim, font), ("http://127.0.0.1:5173/", ansi(6), font)],
+        vec![("  \u{2192}  ", ansi(2), font), ("Network:  ", dim, font), ("http://192.168.1.24:5173/", ansi(6), font)],
+        vec![],
+        vec![("  \u{2713} 85 passed", ansi(2), font), ("   \u{25b3} 2 warnings", ansi(3), font), ("   \u{2717} 0 failed", ansi(1), font)],
+        vec![],
+        vec![("  ", fg, font), (" READY ", ansi(0), font), (" watching for changes, press ", dim, font), ("q", fg, bold), (" to quit", dim, font)],
+        vec![],
+        prompt.to_vec(),
+    ];
+    let mut out = col().w_full().mt(4.0).mb(8.0).padding(12.0).radius(8.0).fill(t.c.terminal_background);
+    for spans in lines {
+        let mut line = row().w_full().h(font.line_height);
+        for (span, color, style) in spans {
+            let piece = text(span).font(style).color(color);
+            line = line.child(if span == " READY " { el().fill(ansi(2)).child(piece) } else { piece });
+        }
+        out = out.child(line);
+    }
+    out
 }
 
 fn squash(s: &str) -> String {

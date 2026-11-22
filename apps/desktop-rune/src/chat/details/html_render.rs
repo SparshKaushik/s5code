@@ -1,11 +1,12 @@
 //! HtmlRenderFrame's "Open full screen" (HtmlRenderDialog). Rune draws no HTML in-process, so the
 //! page opens in the browser panel, whose own title, zoom and close stand in for the dialog's.
+//! The inline frame is the page's picture (`panel::html_frame`).
 
-use rune::{El, col, icon, row, text};
+use rune::El;
 use serde_json::{Value, json};
 
-use crate::theme::{self, T};
-use crate::{App, data, icons, kit};
+use crate::theme::T;
+use crate::{App, data};
 
 #[derive(Default)]
 pub struct State {
@@ -106,32 +107,11 @@ pub fn reference(item: &Value) -> Option<(String, String)> {
     Some((id.to_owned(), if title.is_empty() { "HTML".to_owned() } else { title }))
 }
 
-/// HtmlRenderTimelineRow. Rune cannot embed the page, so the frame is a card naming it, with the
-/// frame's "Open full screen" button.
-pub fn row_view(item: &Value, t: &T) -> Option<El> {
+/// HtmlRenderTimelineRow: the page inline at its frame height, with "Open full screen".
+pub fn row_view(app: &App, item: &Value, t: &T) -> Option<El> {
     let (id, title) = reference(item)?;
-    let name = title.clone();
-    let expand = kit::Button::new("Open full screen")
-        .icon(&icons::MAXIMIZE_2)
-        .variant("glass")
-        .size("icon-xs")
-        .on_press(move |s: &mut App| open(s, &id, &name))
-        .build(t)
-        .help("Open full screen");
-    let card = row()
-        .w_full()
-        .gap(8.0)
-        .py(10.0)
-        .pl(12.0)
-        .pr(8.0)
-        .center_y()
-        .radius(theme::radius::LG)
-        .border(1.0, t.c.border)
-        .label(title.clone())
-        .child(icon(&icons::CODE_XML, 16.0).color(t.c.icon_muted))
-        .child(text(title).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).min_w(0.0))
-        .child(expand);
-    Some(col().w_full().min_w(0.0).px(4.0).child(card))
+    let page = read_result(&item["output"], 0).0?;
+    Some(crate::panel::html_frame::view(app, &id, &title, &page, t))
 }
 
 pub fn poll(s: &mut App) -> bool {

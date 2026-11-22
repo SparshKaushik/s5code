@@ -462,22 +462,11 @@ fn notice_view(app: &App, item: &Value, t: &T) -> El {
         .children(worktree_setup::retry_button(app, item, t).map(|b| row().ml(28.0).pb(4.0).child(b)))
 }
 
-/// The inline frame slot for a page row (HtmlRenderTimelineRow, McpAppTimelineRow): a frame host
-/// returns the live page for the timeline item (`item["id"]`, its `html_render` output or MCP
-/// app reference), drawn as the row's whole body. None keeps the row's own view, such as the
-/// HTML render card with "Open full screen".
-pub fn inline_frame(_app: &App, _item: &Value, _t: &T) -> Option<El> {
-    None
-}
-
 fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
-    if let Some(frame) = inline_frame(app, item, t) {
-        return frame;
-    }
-    if let Some(page) = crate::chat::details::html_render::row_view(item, t) {
+    if let Some(page) = crate::chat::details::html_render::row_view(app, item, t) {
         return page;
     }
     if kind == "assistant_message" {
