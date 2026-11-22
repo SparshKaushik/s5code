@@ -950,6 +950,8 @@ mod tests {
     fn slash_lists_skills_and_offers_compact_only_alone() {
         let labels = |model: &str, text: &str| {
             let mut s = App::new();
+            // Compacting needs a thread with history (compactSlashCommandAvailable).
+            super::super::on_replay_showcase(&mut s);
             let d = draft_mut(&mut s);
             d.model = Some((model.into(), "m".into()));
             d.edit = rune::TextEdit::new(text);

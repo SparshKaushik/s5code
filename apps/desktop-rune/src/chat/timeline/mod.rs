@@ -999,14 +999,16 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     folded_message(app, item, who, words, open, open_key, marks.as_ref(), t)
                 } else {
                     let mut content = col().gap(8.0);
+                    // A guest's own words, not the text stored for the agent.
+                    let said = if matches!(who, lifecycle::Attribution::Guest) { words } else { s(item, "text") };
                     // A picked element's crop shows in its chip's details, not as an image (TimelineUserMessageRow).
                     for attachment in array(item, "attachments").iter().filter(|a| !s(a, "name").starts_with("preview-annotation-")) {
                         content = content.child(attachments::view(app, attachment, t));
                     }
-                    if !s(item, "text").is_empty() {
+                    if !said.is_empty() {
                         use crate::chat::composer::chips;
                         // Context links read as their chips (ContextChip inline in the bubble).
-                        let (shown, links) = chips::display(s(item, "text"));
+                        let (shown, links) = chips::display(said);
                         // `$skill` tokens read as skill chips (SkillInlineText).
                         let (shown, links, skilled) = chips::with_skills(shown, links, &skills);
                         // Text without chips renders as Markdown, as web's ChatMarkdown does.
@@ -1025,7 +1027,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         let fold_key = format!("user-full:{}", s(item, "id"));
                         let foldable = collapses(&shown);
                         let folded = foldable && !found && !app.ui.chat.timeline.expanded.contains(&fold_key);
-                        let rendered = rich.then(|| markdown::user(app, s(item, "text"), s(item, "id"), t, marks.as_ref()));
+                        let rendered = rich.then(|| markdown::user(app, said, s(item, "id"), t, marks.as_ref()));
                         // whitespace-pre-wrap wrap-break-word: `text` alone never wraps.
                         let mut body = text(shown)
                             .font(theme::TEXT_SM.lh(22.75))
