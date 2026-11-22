@@ -1309,6 +1309,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "appearance");
         themes::scene_remove(s);
     }),
+    ("settings-appearance-theme-import", |s| {
+        scene(s, "appearance");
+        s.ui.settings.theme_import_open = true;
+    }),
     ("settings-appearance-thread-details", |s| {
         scene(s, "appearance");
         s.ui.settings.thread_details_open = true;
