@@ -194,7 +194,7 @@ fn track_move(config: &Value, same_track: bool) -> Result<&str, &'static str> {
 }
 
 /// `managedMachineUpdateDenial`: the server refuses these with the same message.
-fn managed_denial(config: &Value, target: &str) -> Option<String> {
+fn server_managed_denial(config: &Value, target: &str) -> Option<String> {
     let policy = &config["managedPolicy"];
     updates_denial(Some(policy)).or_else(|| {
         (policy["limits"]["updates"]["allowNightly"] == false && release_channel(target) != "stable")
@@ -250,7 +250,7 @@ fn plan_switch(config: Option<&Value>, unavailable: Option<&str>, channel: &str,
     {
         // A desktop host already current still saves the track, which may differ.
         return match track_move(config, true) {
-            Ok("desktop-managed") if unavailable.is_none() && managed_denial(config, version).is_none() => {
+            Ok("desktop-managed") if unavailable.is_none() && server_managed_denial(config, version).is_none() => {
                 Switch::Move { input: input("desktop-managed", server), desktop: true, track_only: true }
             }
             _ => Switch::Stay,
@@ -259,7 +259,7 @@ fn plan_switch(config: Option<&Value>, unavailable: Option<&str>, channel: &str,
     let (Some(config), Some(server), None) = (config, server, unavailable) else {
         return Switch::Skip(unavailable.unwrap_or("not connected").to_owned());
     };
-    if let Some(denial) = managed_denial(config, version) {
+    if let Some(denial) = server_managed_denial(config, version) {
         return Switch::Skip(denial);
     }
     let method = match track_move(config, same_track) {
