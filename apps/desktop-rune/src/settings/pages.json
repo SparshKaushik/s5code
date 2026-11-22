@@ -1119,7 +1119,8 @@
           "key": "threadTitleInstructions",
           "title": "Thread title instructions",
           "description": "Appended to the prompt for new and regenerated thread titles.",
-          "kind": "input",
+          "kind": "textarea",
+          "placeholder": "Keep titles to a few words. Lead with the main subject.",
           "options": []
         },
         {

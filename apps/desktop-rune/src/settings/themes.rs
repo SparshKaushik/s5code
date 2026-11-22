@@ -887,6 +887,17 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
+/// `getThemeModes`: the theme's own appearance, then any other mode its variants cover.
+fn imported_modes(theme: &Value) -> Vec<&'static str> {
+    let mut modes: Vec<&'static str> = ["light", "dark"].into_iter().filter(|m| theme["appearance"] == *m).collect();
+    for mode in ["light", "dark"] {
+        if theme["variants"].get(mode).is_some() && !modes.contains(&mode) {
+            modes.push(mode);
+        }
+    }
+    modes
+}
+
 pub fn import_theme(raw: &str) -> Result<Value, String> {
     let mut theme: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let appearance = theme["appearance"]
@@ -940,7 +951,10 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .open(true)
         .width(640.0)
         .description("Paste a theme JSON file.")
-        .on_close(|s: &mut App| s.ui.settings.theme_import_open = false)
+        .on_close(|s: &mut App| {
+            s.ui.settings.theme_import_open = false;
+            s.ui.settings.theme_import_error = None;
+        })
         .child(
             rune::text_input(&s.ui.settings.theme_import, theme::MONO_XS)
                 .w_full()
@@ -955,25 +969,36 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .on_edit(|s: &mut App| &mut s.ui.settings.theme_import),
         )
         .child(
+            text(s.ui.settings.theme_import_error.clone().unwrap_or_default())
+                .role("alert")
+                .font(theme::TEXT_XS.lh(18.0))
+                .color(t.c.destructive)
+                .wrap(),
+        )
+        .child(
             crate::kit::Button::new("Import theme")
-                .on_press(
-                    |s: &mut App| match import_theme(&s.ui.settings.theme_import.text) {
-                        Ok(theme) => {
-                            let mut library = s
-                                .client_settings
-                                .values
-                                .get("customThemes")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            library.push(theme);
-                            super::update(s, "customThemes", json!(library));
-                            s.ui.settings.theme_import_open = false;
-                            s.ui.settings.theme_import.clear();
+                .on_press(|s: &mut App| match import_theme(&s.ui.settings.theme_import.text) {
+                    Ok(theme) => {
+                        let mut library = s.client_settings.values.get("customThemes").and_then(Value::as_array).cloned().unwrap_or_default();
+                        let (id, label) = (theme["id"].clone(), theme["label"].as_str().unwrap_or("Theme").to_owned());
+                        let modes = imported_modes(&theme);
+                        library.push(theme);
+                        super::update(s, "customThemes", json!(library));
+                        // `onImported`: a one-mode theme becomes that half; one with both takes both.
+                        for mode in &modes {
+                            super::update(s, if *mode == "dark" { "themeDark" } else { "themeLight" }, id.clone());
                         }
-                        Err(error) => s.ui.settings.error = Some(error),
-                    },
-                )
+                        let description = match modes.as_slice() {
+                            [mode] => format!("It\u{2019}s now your {mode} theme."),
+                            _ => "It\u{2019}s now active.".to_owned(),
+                        };
+                        crate::shell::palette::toast(s, &format!("{label} added"), Some(&description));
+                        s.ui.settings.theme_import_open = false;
+                        s.ui.settings.theme_import_error = None;
+                        s.ui.settings.theme_import.clear();
+                    }
+                    Err(error) => s.ui.settings.theme_import_error = Some(error),
+                })
                 .build(t),
         )
         .build(t, layers);
@@ -1007,6 +1032,9 @@ mod tests {
         .unwrap();
         assert_eq!(theme["colors"]["accent"], "#123456");
         assert!(theme["colors"].get("canvas").is_some());
+        assert_eq!(imported_modes(&theme), ["dark"], "a one-mode theme becomes that half");
+        let both = json!({"appearance": "light", "variants": {"dark": {}}});
+        assert_eq!(imported_modes(&both), ["light", "dark"]);
         assert!(
             import_theme(
                 r#"{"name":"Bad","appearance":"dark","colors":{"accent":"url(example)"}}"#

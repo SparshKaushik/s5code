@@ -99,7 +99,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|spec| !(project && spec["key"] == "fallbackModelSelection"))
+                // Environment-wide rows web leaves off project pages.
+                .filter(|spec| !(project && matches!(spec["key"].as_str(), Some("fallbackModelSelection" | "worktreesDirectory"))))
                 .filter(|spec| c::visible(s, spec))
                 .filter(|spec| spec["macOnly"] != true || cfg!(target_os = "macos"))
                 .map(|spec| c::setting_row(s, cx, t, spec));
