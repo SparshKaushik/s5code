@@ -948,10 +948,12 @@ mod tests {
 
     #[test]
     fn slash_lists_skills_and_offers_compact_only_alone() {
-        let labels = |model: &str, text: &str| {
+        let labels = |model: &str, text: &str, thread: bool| {
             let mut s = App::new();
             // Compacting needs a thread with history (compactSlashCommandAvailable).
-            super::super::on_replay_showcase(&mut s);
+            if thread {
+                super::super::on_replay_showcase(&mut s);
+            }
             let d = draft_mut(&mut s);
             d.model = Some((model.into(), "m".into()));
             d.edit = rune::TextEdit::new(text);
@@ -959,8 +961,9 @@ mod tests {
             let m = open_menu(&s).unwrap();
             items(&s, &m).into_iter().map(|i| i.label).collect::<Vec<_>>()
         };
-        assert!(labels("codex", "/").contains(&"/compact".to_owned()));
-        assert!(!labels("codex", "/ and more").contains(&"/compact".to_owned()));
-        assert!(labels("opencode", "/").contains(&"/skill:contribution-triage".to_owned()));
+        assert!(labels("codex", "/", true).contains(&"/compact".to_owned()));
+        assert!(!labels("codex", "/ and more", true).contains(&"/compact".to_owned()));
+        assert!(!labels("codex", "/", false).contains(&"/compact".to_owned()), "FAILED: a draft has nothing to compact");
+        assert!(labels("opencode", "/", false).contains(&"/skill:contribution-triage".to_owned()));
     }
 }
