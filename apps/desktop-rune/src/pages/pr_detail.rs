@@ -281,6 +281,8 @@ pub fn poll(s: &mut App) -> bool {
                     s.ui.pages.code.fresh = true;
                     s.ui.pages.code.next = d["nextCursor"].as_str().map(str::to_owned);
                     s.ui.pages.code.first_mark = Some(super::pr_code::page_mark(&d));
+                    s.ui.pages.code.omitted.clear();
+                    super::pr_code::absorb_omitted(&mut s.ui.pages.code, &d);
                     s.ui.pages.code.raw = super::pr_code::unparsed(d["patch"].as_str().unwrap_or(""), u.files.as_deref().unwrap_or(&[]));
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),

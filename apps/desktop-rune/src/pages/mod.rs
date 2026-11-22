@@ -417,6 +417,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "tree-resized");
     }),
+    ("pull-requests-detail-code-withheld", |s| {
+        open_detail(s, 2, |_| {});
+        pr_code::scene(s, "withheld");
+    }),
     ("pull-requests-detail-code-more-files", |s| {
         open_detail(s, 2, |_| {});
         pr_code::scene(s, "more-files");
@@ -666,6 +670,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-checkout-menu-environments", scene_checkout_environments),
     ("pull-requests-detail-condensed", |s| open_detail(s, 0, |u| u.condense.set(0, true))),
     ("pull-requests-detail-code-condensed", |s| open_detail(s, 2, |u| u.condense.set(2, true))),
+    ("pull-requests-detail-closed", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["state"] = json!("closed"); d["autoMergeEnabled"] = json!(false); })),
+    ("pull-requests-detail-draft", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["isDraft"] = json!(true); d["autoMergeEnabled"] = json!(false); })),
     ("pull-requests-detail-app-access", |s| open_detail(s, 0, |u| u.app_access.2 = Some("not-covered".into()))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
