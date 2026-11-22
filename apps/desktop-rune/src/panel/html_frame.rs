@@ -2,10 +2,11 @@
 //! it. Rune embeds no web view, so the Default profile's Chrome shoots the page once at the row's
 //! width and theme (`browser::Shot`) and the row shows that picture. Pressing it brings the page
 //! live in place (`browser::Live`): Chrome paints it only when it changes and the row forwards
-//! its pointer and keys. A row asks for its shot only while on screen and lets it, and its live
-//! page, go once scrolled away; at most `KEEP` pictures and one live page stay alive.
+//! its pointer, keys and wheel, and refits to the page's height as it changes (`REFIT`). A row
+//! asks for its shot only while on screen and lets it, and its live page, go once scrolled away;
+//! at most `KEEP` pictures and one live page stay alive.
 
-use rune::{Color, Cursor, El, Key, Phase, Tx, col, el, text};
+use rune::{Color, Cursor, El, Key, Phase, col, el, text};
 use serde_json::{Map, Value, json};
 
 use super::browser::{Cmd, Live, LiveInput, Shot};
@@ -16,6 +17,35 @@ use crate::{App, icons, kit};
 /// HTML_RENDER_COLUMN_WIDTH: the width a row has before its first layout.
 const COLUMN_WIDTH: f32 = 728.;
 const KEEP: usize = 3;
+/// The tallest live page in CSS pixels; a taller one scrolls inside its row.
+const LIVE_MAX_HEIGHT: f32 = 4000.;
+
+/// Posts the page's height through `__s5Frame` whenever it resizes or changes, as
+/// `{"s5":"height","value":…}`; `window.__s5Measure()` posts it again on demand.
+const REFIT: &str = r#"(() => {
+  let timer = 0, last = -1;
+  const measure = (force) => {
+    timer = 0;
+    const e = document.documentElement;
+    if (!e || typeof __s5Frame !== "function") return;
+    const value = Math.ceil(e.scrollHeight > e.clientHeight ? e.scrollHeight : e.getBoundingClientRect().height);
+    if (value === last && force !== true) return;
+    last = value;
+    __s5Frame(JSON.stringify({ s5: "height", value }));
+  };
+  const queue = () => { if (!timer) timer = setTimeout(measure, 50); };
+  Object.defineProperty(window, "__s5Measure", { value: () => measure(true) });
+  const watch = () => {
+    const observer = new ResizeObserver(queue);
+    observer.observe(document.documentElement);
+    if (document.body) observer.observe(document.body);
+    new MutationObserver(queue).observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    queue();
+  };
+  if (document.readyState === "loading") addEventListener("DOMContentLoaded", watch, { once: true }); else watch();
+  addEventListener("load", queue);
+})();"#;
+const MEASURE: &str = "window.__s5Measure && window.__s5Measure()";
 
 #[derive(Default)]
 pub struct Frames {
@@ -23,6 +53,9 @@ pub struct Frames {
     frames: Vec<Frame>,
     /// Live pages let go, for `poll` to close in Chrome.
     closing: Vec<u64>,
+    /// The live page last pressed, which takes the wheel until Escape or the pointer leaves it,
+    /// as a focused frame scrolls its page rather than the timeline.
+    pub(super) engaged: Option<u64>,
 }
 
 #[derive(Default)]
@@ -151,6 +184,7 @@ fn layout(s: &mut App, id: &str, title: &str, theme: &str, dark: bool, [_, y, w,
     close_released(s);
     if let Some(live) = s.ui.panel.html_frames.get(id).and_then(|f| f.live.clone()).filter(|l| changed && l.width != w.round() as u32) {
         super::preview::inline_frame_cmd(s, Cmd::LiveResize(live.id, w.round() as u32, live.height));
+        super::preview::inline_frame_cmd(s, Cmd::LiveEval(live.id, MEASURE.to_owned()));
     }
     changed || want
 }
@@ -168,21 +202,14 @@ fn press(s: &mut App, id: &str) {
     close_released(s);
 }
 
-fn input(s: &mut App, id: &str, input: LiveInput) {
-    if let Some(live) = s.ui.panel.html_frames.get(id).and_then(|f| f.live.as_ref()) {
-        let live = live.id;
-        super::preview::inline_frame_cmd(s, Cmd::LiveInput(live, input));
-    }
+fn input(s: &mut App, live: u64, input: LiveInput) {
+    super::preview::inline_frame_cmd(s, Cmd::LiveInput(live, input));
 }
 
-/// The page's keys, as the browser panel types them; Escape hands focus back to the app.
-fn page_key(s: &mut App, id: &str, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
-    let typed = match &e.key {
-        Key::Escape => {
-            tx.blur();
-            return true;
-        }
-        _ if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) => return false,
+/// The page's keys, as the browser panel types them; none for Escape and the app's shortcuts.
+fn page_key(e: &rune::KeyEvent) -> Option<LiveInput> {
+    Some(match &e.key {
+        _ if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) => return None,
         Key::Text(v) => LiveInput::Text(v.clone()),
         Key::Enter => LiveInput::Key("Enter"),
         Key::Backspace => LiveInput::Key("Backspace"),
@@ -194,10 +221,62 @@ fn page_key(s: &mut App, id: &str, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         Key::Down => LiveInput::Key("ArrowDown"),
         Key::Home => LiveInput::Key("Home"),
         Key::End => LiveInput::Key("End"),
-        _ => return false,
-    };
-    input(s, id, typed);
-    true
+        _ => return None,
+    })
+}
+
+/// A live page over its row: its picture, taking the pointer and keys, and the wheel once
+/// pressed. Escape hands focus back to the app and runs `escape`.
+pub(super) fn surface(live: &Live, key: String, on_down: impl Fn(&mut App) + 'static, escape: impl Fn(&mut App) + 'static) -> El {
+    let id = live.id;
+    el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .pixels(&live.pixels)
+        .focusable(true)
+        .key(key)
+        .pointer_buttons([rune::PointerButton::Middle])
+        .on_drag(move |s: &mut App, d, tx| {
+            let button = match tx.button() {
+                rune::PointerButton::Primary => "left",
+                rune::PointerButton::Middle => "middle",
+                _ => return,
+            };
+            let kind = match d.phase {
+                Phase::Down => {
+                    s.ui.panel.html_frames.engaged = Some(id);
+                    on_down(s);
+                    "mousePressed"
+                }
+                Phase::Up => "mouseReleased",
+                _ => "mouseMoved",
+            };
+            let m = tx.mods();
+            let modifiers = u32::from(m.alt) | u32::from(m.ctrl) << 1 | u32::from(m.logo || (m.cmd && !m.ctrl)) << 2 | u32::from(m.shift) << 3;
+            input(s, id, LiveInput::Mouse { kind, x: d.x, y: d.y, button, clicks: d.clicks, modifiers });
+        })
+        .on_pointer_move_local(move |s: &mut App, p, _| input(s, id, LiveInput::Mouse { kind: "mouseMoved", x: p.x, y: p.y, button: "none", clicks: 0, modifiers: 0 }))
+        .on_hover_change(move |s: &mut App, inside, _| {
+            if !inside && s.ui.panel.html_frames.engaged == Some(id) {
+                s.ui.panel.html_frames.engaged = None;
+            }
+        })
+        .on_wheel(move |s: &mut App, w, _| {
+            if s.ui.panel.html_frames.engaged != Some(id) {
+                return false;
+            }
+            input(s, id, LiveInput::Wheel { x: w.x, y: w.y, dx: w.dx, dy: w.dy });
+            true
+        })
+        .on_key(move |s: &mut App, e, tx| {
+            if matches!(e.key, Key::Escape) {
+                s.ui.panel.html_frames.engaged = None;
+                tx.blur();
+                escape(s);
+                return true;
+            }
+            let Some(typed) = page_key(e) else { return false };
+            input(s, id, typed);
+            true
+        })
 }
 
 /// Starts shots whose URL arrived and takes finished ones; a shot whose Chrome went away (a
@@ -205,6 +284,7 @@ fn page_key(s: &mut App, id: &str, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     let mut ready = Vec::new();
+    let mut resized = Vec::new();
     let base = s.src.net().map(|net| net.base_url().trim_end_matches('/').to_owned());
     for index in 0..s.ui.panel.html_frames.frames.len() {
         let frame = &mut s.ui.panel.html_frames.frames[index];
@@ -224,6 +304,14 @@ pub fn poll(s: &mut App) -> bool {
             frame.live = None;
             changed = true;
         }
+        let heights: Vec<f32> = frame.live.as_ref().map(Live::messages).unwrap_or_default().iter().filter_map(|m| refit_height(m)).collect();
+        if let (Some(&height), Some(live)) = (heights.last(), frame.live.as_ref()) {
+            if frame.content.is_none_or(|c| (c - height).abs() >= 1.) {
+                frame.content = Some(height);
+                resized.push((live.id, frame.width as u32, height.min(LIVE_MAX_HEIGHT) as u32));
+                changed = true;
+            }
+        }
         if let Some(result) = frame.pending.as_ref().and_then(|(shot, _)| shot.result()) {
             let pending = frame.pending.take();
             changed = true;
@@ -237,13 +325,16 @@ pub fn poll(s: &mut App) -> bool {
             }
         }
     }
+    for (live, width, height) in resized {
+        super::preview::inline_frame_cmd(s, Cmd::LiveResize(live, width, height));
+    }
     for (id, url, live) in ready {
         let Some(frame) = s.ui.panel.html_frames.get(&id) else { continue };
         let (theme, dark, width) = (frame.theme.clone(), frame.dark, frame.width as u32);
         let url = format!("{url}#t3-theme={}", encode_component(&theme));
         if live {
-            let height = frame.content.unwrap_or(COLUMN_WIDTH).ceil() as u32;
-            let live = super::preview::live(s, url, width, height, dark);
+            let height = frame.content.unwrap_or(COLUMN_WIDTH).min(LIVE_MAX_HEIGHT).ceil() as u32;
+            let live = super::preview::live(s, url, width, height, dark, Some(REFIT));
             if let Some(frame) = s.ui.panel.html_frames.frames.iter_mut().find(|f| f.id == id) {
                 frame.live = live;
             }
@@ -319,35 +410,18 @@ pub fn view(app: &App, id: &str, title: &str, page: &Value, t: &T) -> El {
     }
     // The live page over its picture, which shows until Chrome paints.
     if let Some(live) = frame.and_then(|f| f.live.as_ref()) {
-        let (drag, hover, typed) = (id.to_owned(), id.to_owned(), id.to_owned());
-        body = body.child(
-            el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                .pixels(&live.pixels)
-                .focusable(true)
-                .key(format!("html-render-live-{id}"))
-                .pointer_buttons([rune::PointerButton::Middle])
-                .on_drag(move |s: &mut App, d, tx| {
-                    let button = match tx.button() {
-                        rune::PointerButton::Primary => "left",
-                        rune::PointerButton::Middle => "middle",
-                        _ => return,
-                    };
-                    let kind = match d.phase {
-                        Phase::Down => "mousePressed",
-                        Phase::Up => "mouseReleased",
-                        _ => "mouseMoved",
-                    };
-                    let m = tx.mods();
-                    let modifiers = u32::from(m.alt) | u32::from(m.ctrl) << 1 | u32::from(m.logo || (m.cmd && !m.ctrl)) << 2 | u32::from(m.shift) << 3;
-                    input(s, &drag, LiveInput::Mouse { kind, x: d.x, y: d.y, button, clicks: d.clicks, modifiers });
-                })
-                .on_pointer_move_local(move |s: &mut App, p, _| input(s, &hover, LiveInput::Mouse { kind: "mouseMoved", x: p.x, y: p.y, button: "none", clicks: 0, modifiers: 0 }))
-                .on_key(move |s: &mut App, e, tx| page_key(s, &typed, e, tx)),
-        );
+        body = body.child(surface(live, format!("html-render-live-{id}"), |_: &mut App| {}, |_: &mut App| {}));
     }
     let expand = kit::Button::new("Open full screen").icon(&icons::MAXIMIZE_2).variant("glass").size("icon-xs").on_press(open(id, title)).build(t).help("Open full screen");
     body = body.child(el().pin(None, Some(8.0), Some(8.0), None).group_opacity(0.0, 1.0).child(expand));
     col().w_full().min_w(0.0).px(4.0).child(body)
+}
+
+/// A height `REFIT` posted, fitted between 80 and 20000.
+fn refit_height(message: &str) -> Option<f32> {
+    let value: Value = serde_json::from_str(message).ok()?;
+    let height = value["value"].as_f64().filter(|h| value["s5"] == "height" && h.is_finite())?;
+    Some((height.ceil() as f32).clamp(80., 20_000.))
 }
 
 /// readMeasuredHeights: 1 to 24 `[width, height]` pairs, sorted by width, each height clamped;
@@ -392,6 +466,11 @@ fn frame_height(page: &Value, width: f32, content: Option<f32>) -> f32 {
 /// htmlRenderTheme with the app's tokens and web's default font stacks: `--accent` is the brand
 /// colour, and the neutral hover surface is `--accent-surface`.
 fn theme_json(t: &T) -> String {
+    json!({ "appearance": if t.dark { "dark" } else { "light" }, "variables": theme_variables(t) }).to_string()
+}
+
+/// htmlRenderTheme's variables.
+pub(super) fn theme_variables(t: &T) -> Map<String, Value> {
     let c = &t.c;
     let colors: [(&str, Color); 27] = [
         ("--background", c.background),
@@ -438,7 +517,7 @@ fn theme_json(t: &T) -> String {
     variables.insert("--radius".into(), json!("0.625rem"));
     variables.insert("--font-sans".into(), json!("-apple-system, BlinkMacSystemFont, \"Segoe UI\", system-ui, sans-serif"));
     variables.insert("--font-mono".into(), json!("\"SF Mono\", \"SFMono-Regular\", Menlo, Consolas, \"Liberation Mono\", monospace"));
-    json!({ "appearance": if t.dark { "dark" } else { "light" }, "variables": variables }).to_string()
+    variables
 }
 
 /// `#rrggbb`, or `#rrggbbaa` for a translucent token.
@@ -522,6 +601,17 @@ mod tests {
         assert_eq!(frames.seen("b", "B", 700., false, "dark", true).0, true);
         assert_eq!(frames.closing, [b.id]);
         assert!(!frames.get("b").unwrap().wants_live);
+    }
+
+    #[test]
+    fn a_live_page_refits_to_the_heights_it_posts() {
+        assert_eq!(refit_height(r#"{"s5":"height","value":612.2}"#), Some(613.));
+        assert_eq!(refit_height(r#"{"s5":"height","value":12}"#), Some(80.));
+        assert_eq!(refit_height(r#"{"s5":"height","value":90000}"#), Some(20_000.));
+        // Loads, other messages and malformed heights are not heights.
+        assert_eq!(refit_height(super::super::browser::LIVE_LOAD), None);
+        assert_eq!(refit_height(r#"{"s5":"height","value":"tall"}"#), None);
+        assert_eq!(refit_height(r#"{"jsonrpc":"2.0","method":"ping","id":1}"#), None);
     }
 
     #[test]

@@ -99,6 +99,8 @@ pub struct Ui {
     live: Live,
     /// The filters and search a close sweep runs under; changing either ends it.
     swept_under: Option<(Filters, String)>,
+    /// The preferences last read or written; `None` until the page first shows and reads them.
+    saved: Option<Value>,
 }
 
 /// What the list's scroll callback, which runs without the app, leaves for `poll`: whether the
@@ -325,6 +327,113 @@ const CHECKS: &[(&str, &str, &rune::Icon)] = &[("all", "All", &i::LAYERS), ("pas
 
 fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.pull_requests
+}
+
+// ---- preferences ------------------------------------------------------------------------
+
+/// PULL_REQUEST_LIST_PREFERENCES_STORAGE_KEY, in the desktop's own UI store (web's localStorage).
+const PREFERENCES_KEY: &str = "t3.pullRequests.preferences";
+/// BoundedPreference: the longest stored host, search, author or label.
+const PREFERENCE_MAX: usize = 200;
+
+fn preferences_store() -> rune::prefs::Prefs {
+    if cfg!(test) || rune::is_headless() {
+        return rune::prefs::Prefs::memory();
+    }
+    rune::prefs::Prefs::at(crate::host::t3_home().join("userdata").join("desktop-rune-ui.json"))
+}
+
+/// pullRequestListPreferences: the list's scope, filters, sort and search, defaults left out.
+fn preferences(f: &Filters, q: &str) -> Value {
+    let mut v = json!({"involvement": f.involvement, "state": f.state});
+    let narrowed = |value: &'static str, unset: &str| Some(value).filter(|v| *v != unset);
+    // The Server filter is kept by its key in `env`, where this machine's own is "".
+    if let Some(env) = &f.environment {
+        v["environmentId"] = json!(env);
+    }
+    let optional = [
+        ("projectId", f.project.as_deref()),
+        ("host", f.host.as_deref()),
+        ("q", Some(q)),
+        ("draft", narrowed(f.draft, "all")),
+        ("review", narrowed(f.review, "all")),
+        ("checks", narrowed(f.checks, "all")),
+        ("author", f.author.as_deref()),
+        ("sort", narrowed(f.sort, "ready")),
+    ];
+    for (key, value) in optional {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            v[key] = json!(value);
+        }
+    }
+    if !f.labels.is_empty() {
+        v["labels"] = json!(f.labels);
+    }
+    v
+}
+
+/// readPullRequestListPreferences' decode: the stored filters and search, or `None` when any
+/// field is out of its schema, which drops the whole record for the defaults.
+fn restored(v: &Value) -> Option<(Filters, String)> {
+    type Options = &'static [(&'static str, &'static str, &'static rune::Icon)];
+    let o = v.as_object()?;
+    // `unset` is what a missing key means; "all" is how the menus spell a filter left unset.
+    let one_of = |key: &str, options: Options, unset: Option<&'static str>| -> Option<&'static str> {
+        match o.get(key) {
+            None => unset,
+            Some(Value::String(id)) => options.iter().map(|x| x.0).find(|x| *x == id.as_str() && !(unset == Some("all") && *x == "all")),
+            Some(_) => None,
+        }
+    };
+    let text = |key: &str, max: usize| -> Option<Option<String>> {
+        match o.get(key) {
+            None => Some(None),
+            Some(Value::String(t)) if t.encode_utf16().count() <= max => Some(Some(t.clone()).filter(|t| !t.is_empty())),
+            Some(_) => None,
+        }
+    };
+    let labels = match o.get("labels") {
+        None => Vec::new(),
+        Some(Value::Array(rows)) if rows.len() <= 10 => rows.iter().map(|l| l.as_str().filter(|l| l.encode_utf16().count() <= PREFERENCE_MAX).map(str::to_string)).collect::<Option<Vec<_>>>()?,
+        Some(_) => return None,
+    };
+    let filters = Filters {
+        state: one_of("state", STATES, None)?,
+        involvement: one_of("involvement", INVOLVEMENTS, None)?,
+        sort: one_of("sort", SORTS, Some("ready"))?,
+        draft: one_of("draft", DRAFTS, Some("all"))?,
+        review: one_of("review", REVIEWS, Some("all"))?,
+        checks: one_of("checks", CHECKS, Some("all"))?,
+        author: text("author", PREFERENCE_MAX)?,
+        labels,
+        project: text("projectId", usize::MAX)?,
+        host: text("host", PREFERENCE_MAX)?,
+        environment: match o.get("environmentId") {
+            None => None,
+            Some(Value::String(env)) => Some(env.clone()),
+            Some(_) => return None,
+        },
+    };
+    Some((filters, text("q", PREFERENCE_MAX)?.unwrap_or_default()))
+}
+
+/// The page opens on the scope it was last left in (the sidebar's readPullRequestListPreferences),
+/// and every later change is kept (writePullRequestListPreferences).
+fn keep_preferences(u: &mut Ui) {
+    if u.saved.is_none() {
+        if let Some((filters, q)) = preferences_store().get::<Value>(PREFERENCES_KEY).as_ref().and_then(restored) {
+            u.filters = filters;
+            u.query.replace_text(&q);
+            submit(u);
+        }
+        u.saved = Some(preferences(&u.filters, &u.sent_query));
+        return;
+    }
+    let now = preferences(&u.filters, &u.sent_query);
+    if u.saved.as_ref() != Some(&now) {
+        let _ = preferences_store().set(PREFERENCES_KEY, &now);
+        u.saved = Some(now);
+    }
 }
 
 // ---- query ------------------------------------------------------------------------------
@@ -740,12 +849,28 @@ fn query_environments(envs: Vec<String>, projects: &[Value], project: Option<&st
     envs.into_iter().filter(|env| holders.contains(&env.as_str())).collect()
 }
 
+/// usePullRequestScope's environmentIds: the Server filter's environment while it can list pull
+/// requests (scopedEnvironmentId), else every one that can.
+fn scoped_environments(s: &App) -> Vec<String> {
+    let capable = capable(s);
+    let scoped = s.ui.pages.pull_requests.filters.environment.clone().filter(|env| capable.contains(env));
+    capable.into_iter().filter(|env| scoped.as_ref().is_none_or(|e| e == env)).collect()
+}
+
+/// The empty state's hasProjects: a project, scratch ones aside, on a scoped environment, or
+/// projects not all known yet.
+fn has_projects(s: &App) -> bool {
+    let envs = scoped_environments(s);
+    let known = envs.iter().all(|env| crate::env::source(s, env).is_some_and(|src| src.state().shell_ready));
+    !known || !env_projects(s, &envs).is_empty()
+}
+
 /// usePullRequestScope's environmentQueries: the environments the Server and Project filters
 /// keep, each reading only the repositories no environment before it reads; one holding no
 /// projects is not read.
 pub(super) fn targets(s: &App) -> Vec<Target> {
     let f = &s.ui.pages.pull_requests.filters;
-    let envs: Vec<String> = capable(s).into_iter().filter(|env| f.environment.as_ref().is_none_or(|e| e == env)).collect();
+    let envs = scoped_environments(s);
     let projects = env_projects(s, &envs);
     let known = envs.iter().all(|env| crate::env::source(s, env).is_some_and(|src| src.state().shell_ready));
     let project = super::pr_filters::project_scope(f.project.as_deref(), &projects, known);
@@ -782,6 +907,7 @@ pub fn poll(s: &mut App) -> bool {
     if !on {
         return changed;
     }
+    keep_preferences(ui(s));
     settle_panel(ui(s));
     changed |= super::pr_tabs::sync(s);
     let u = ui(s);
@@ -942,6 +1068,7 @@ fn watch_refreshes(s: &mut App, on: bool) -> bool {
     after_turn(ui(s), &moved, &active);
     if s.ui.pages.detail.entry.as_ref().is_some_and(|e| moved.iter().any(|env| env.as_str() == origin(e, &active))) {
         super::pr_detail::refresh(s);
+        super::pr_code::turn_finished(s);
     }
     true
 }
@@ -1315,8 +1442,8 @@ fn settle_sweep(u: &mut Ui) -> bool {
 }
 
 /// Escape ends a sweep or closes a menu, and otherwise leaves the page with its tabs kept
-/// (registerPullRequestsEscapeCommand) unless a shell overlay is open.
-fn escape(s: &mut App) -> bool {
+/// (registerPullRequestsEscapeCommand) unless a shell overlay is open or the key is held.
+fn escape(s: &mut App, repeat: bool) -> bool {
     let u = ui(s);
     if super::pr_row::cancel_sweep(&mut u.row) {
         return true;
@@ -1326,7 +1453,7 @@ fn escape(s: &mut App) -> bool {
         return true;
     }
     let shell = &s.ui.shell;
-    if shell.palette.open || shell.sidebar.menu.is_some() || shell.confirm.is_open() {
+    if repeat || shell.palette.open || shell.sidebar.menu.is_some() || shell.confirm.is_open() {
         return false;
     }
     super::back(s);
@@ -1339,7 +1466,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     note_input(s, crate::data::now_ms());
     if matches!(e.key, rune::Key::Escape) {
-        return escape(s);
+        return escape(s, tx.key_repeat());
     }
     if s.ui.shell.palette.open {
         return false;
@@ -1975,7 +2102,7 @@ fn top_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.pull_requests;
     let title = || text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0);
     let bar = row().key("pr-header").w_full().h(layout::TOPBAR_H).shrink().px(20.0).gap(8.0).center_y().window_drag();
-    let panel = u.selected.is_none().then(|| panel_control(s, t));
+    let panel = (u.selected.is_none() && supported(s)).then(|| panel_control(s, t));
     let crumbs = |label: &str| row().role("navigation").label(label).gap(12.0).center_y().shrink().min_w(0.0);
     if !u.condensed {
         return bar.child(crumbs("Pull requests breadcrumb").child(title())).child(spacer()).children(panel);
@@ -2506,8 +2633,10 @@ fn context_menu(t: &T, e: &Value, hosts: &[Value], x: f32, y: f32, overlays: &mu
             ui(s).context = None;
         }))
         .item(MenuItem::new(open_label).on_select_tx(move |s: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&open_url);
             ui(s).context = None;
+            if tx.open_url(&open_url).is_err() {
+                crate::shell::palette::toast_error(s, "Could not open the link", None);
+            }
         }))
         .overlay(&kit::theme(t), overlays);
 }
@@ -2569,21 +2698,23 @@ const META_W: [f32; 7] = [0.4, 0.333, 0.4, 0.25, 0.333, 0.4, 0.333];
 /// PullRequestGhosts: static placeholder rows while the first page loads or a search travels.
 fn ghost(t: &T, count: usize, caption: Option<String>) -> El {
     let bar = t.c.muted_foreground.alpha_mul(0.15);
-    let mut rows = col().w_full().gap(2.0);
+    let mut rows = col().w_full().gap(2.0).role("status").label(caption.clone().unwrap_or_else(|| "Loading pull requests".into()));
     if let Some(caption) = caption {
         rows = rows.child(row().px(12.0).pb(4.0).child(text(caption).font(theme::XS_MEDIUM).color(t.c.muted_foreground)));
     }
     for n in 0..count.min(TITLE_W.len()) {
         let line = |h: f32, frac: f32| row().w_full().child(el().h(h).w_frac(frac).radius(4.0).fill(bar));
+        let stub = |w: f32| el().w(w).h(12.0).radius(4.0).fill(bar);
         rows = rows.child(
             row()
                 .w_full()
                 .px(12.0)
                 .py(10.0)
                 .gap(8.0)
-                .child(el().size(16.0, 16.0).radius(radius::FULL).fill(bar).mt(2.0).self_start())
+                .center_y()
+                .child(el().size(16.0, 16.0).radius(radius::FULL).fill(bar))
                 .child(col().grow(1.0).shrink().min_w(0.0).gap(6.0).child(line(16.0, TITLE_W[n])).child(line(14.0, META_W[n])))
-                .child(el().w(if n % 2 == 0 { 48.0 } else { 64.0 }).h(14.0).radius(4.0).fill(bar).mt(3.0).self_start()),
+                .child(col().items_end().gap(6.0).child(stub(48.0)).child(stub(64.0))),
         );
     }
     rows
@@ -2652,7 +2783,7 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
     let query = u.query.text.as_str();
     let shown = quoted_query(query);
     let mark = el().w(128.0).h(80.0).clip_rounded(0.0).mb(8.0).child(icon(&BRANCH_MARK, 128.0).color(t.c.muted_foreground.alpha_mul(0.6)).absolute(0.0, 1.6));
-    if s.state().projects.iter().all(|p| !p["archivedAt"].is_null()) {
+    if !has_projects(s) {
         let add = kit::Button::new("Add project").size("sm").icon(&i::PLUS).on_press(crate::shell::palette::open_add_project).build(t);
         return state_block(t, mark, "No projects in this workspace", "Add a project, and the pull requests from its repository appear here.", row().child(add));
     }
@@ -2812,8 +2943,9 @@ mod tests {
         s.ui.pages.main_route = Some(Route::Thread("t1".into()));
         s.ui.pages.pull_requests.selected = Some("https://github.com/acme/app/pull/7".into());
         s.ui.pages.pull_requests.tabs.menu = Some(("https://github.com/acme/app/pull/7".into(), 0.0, 0.0));
-        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "an open tab menu closes first");
-        assert!(escape(&mut s));
+        assert!(escape(&mut s, true) && matches!(s.route, Route::PullRequests), "an open tab menu closes first, even while the key is held");
+        assert!(!escape(&mut s, true) && matches!(s.route, Route::PullRequests), "a held Escape does not go on to leave the page");
+        assert!(escape(&mut s, false));
         assert!(matches!(&s.route, Route::Thread(id) if id == "t1"), "then Escape leaves for the page it was opened over");
         assert_eq!(s.ui.pages.pull_requests.selected.as_deref(), Some("https://github.com/acme/app/pull/7"));
     }
@@ -3142,6 +3274,56 @@ mod tests {
         ui(&mut s).filters.project = Some("deleted".into());
         assert_eq!(targets(&s), [studio, (String::new(), Some(vec!["api".to_string()]))], "a project no environment holds leaves the scope");
         assert_eq!(assign(&env_projects(&s, &capable(&s)), &capable(&s))["studio"], ["web-copy", "docs"]);
+
+        ui(&mut s).filters.project = None;
+        pick_server(ui(&mut s), Some("gone".into()));
+        assert_eq!(targets(&s), [("studio".to_string(), None), (String::new(), Some(vec!["api".to_string()]))], "a server that can't list falls back to every one");
+    }
+
+    #[test]
+    fn the_empty_state_offers_a_project_only_when_no_scoped_server_holds_one() {
+        let mut s = two_environments();
+        assert!(has_projects(&s));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.projects = vec![json!({"id": "scratch", "title": "Scratch", "isScratch": true})];
+        }
+        assert!(has_projects(&s), "the other server still holds projects");
+        pick_server(ui(&mut s), Some(String::new()));
+        assert!(!has_projects(&s), "a scratch project is no project");
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.shell_ready = false;
+        }
+        assert!(has_projects(&s), "until the projects are known");
+    }
+
+    #[test]
+    fn the_list_scope_is_kept_without_defaults_and_an_out_of_bounds_record_is_dropped() {
+        let mut f = Filters::default();
+        assert_eq!(preferences(&f, ""), json!({"involvement": "all", "state": "open"}));
+        f.state = "merged";
+        f.sort = "largest";
+        f.review = "approved";
+        f.labels = vec!["bug".into()];
+        f.project = Some("web".into());
+        f.environment = Some("studio".into());
+        let kept = preferences(&f, "crash label:ui");
+        assert_eq!(kept, json!({"involvement": "all", "state": "merged", "environmentId": "studio", "projectId": "web", "q": "crash label:ui", "review": "approved", "sort": "largest", "labels": ["bug"]}));
+        assert!(restored(&kept) == Some((f, "crash label:ui".to_string())));
+        let with = |patch: Value| {
+            let mut v = kept.clone();
+            if let (Some(v), Some(patch)) = (v.as_object_mut(), patch.as_object()) {
+                v.extend(patch.clone());
+            }
+            restored(&v)
+        };
+        assert!(with(json!({"draft": "all"})).is_none(), "the menus' All is never stored");
+        assert!(with(json!({"q": "x".repeat(201)})).is_none());
+        assert!(with(json!({"labels": vec!["l"; 11]})).is_none());
+        assert!(with(json!({"state": "draft"})).is_none());
+        assert!(with(json!({"draft": "hide"})).is_some_and(|(f, _)| f.draft == "hide"));
+        assert!(restored(&json!({"state": "open"})).is_none(), "involvement is required");
+        let local = Filters { environment: Some(String::new()), ..Filters::default() };
+        assert!(restored(&preferences(&local, "")).is_some_and(|(f, _)| f.environment.as_deref() == Some("")), "this machine's own server is kept too");
     }
 
     #[test]

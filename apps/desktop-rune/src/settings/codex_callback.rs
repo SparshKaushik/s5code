@@ -299,6 +299,10 @@ pub fn poll(s: &mut App) -> bool {
     let finished = std::mem::take(&mut *FINISHED.lock().unwrap());
     let changed = !finished.is_empty();
     for (environment, instance, flow, outcome) in finished {
+        // As Electron's `receiveProviderAuthCallback`, the window comes back from the browser.
+        if outcome.is_ok() {
+            crate::notify::reveal_window();
+        }
         match outcome {
             Ok(callback) if environment == s.ui.env.active => {
                 super::request(s, "provider.auth.complete", json!({"instanceId": instance, "flowId": flow, "callbackUrl": callback}));
