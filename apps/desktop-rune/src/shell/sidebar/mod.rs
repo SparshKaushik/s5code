@@ -1553,8 +1553,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.shell.sidebar.menu.is_some() {
         return menu::on_key(s, e, tx);
     }
-    // The window hears a key first only while nothing has focus.
-    if bound_key(s, e, tx.focused().is_some()) {
+    if bound_key(s, e, tx.focused_editable()) {
         return true;
     }
     // The server's keybindings decide; the defaults stand in until its config arrives.

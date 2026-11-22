@@ -380,7 +380,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         Some("switch") => row()
             .w(160.0)
             .child(el().grow(1.0))
-            .child(switch(s, t, key, title)),
+            .child(switch(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title))),
         Some("select") => {
             let options: Vec<_> = if key == "browserDefaultViewport" {
                 super::browser_profiles::viewport_options(&value(s, key))
@@ -394,7 +394,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             };
             select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key))
         }
-        Some("slider") => slider(s, t, key, title),
+        Some("slider") => slider(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title)),
         Some("model") => super::models::control(s, t, key),
         Some("secret") => super::providers::secret_control(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")),
         _ => input(

@@ -22,13 +22,55 @@ pub struct Ui {
     picker: Option<(String, String)>,
     help_open: bool,
     callback: TextEdit,
+    /// Web's `handoff`: the instance and the input of a sign-in run on the primary environment.
+    handoff: Option<(String, Value)>,
+    /// The handoff's authorization page was opened.
+    handoff_opened: bool,
+    /// The attempt whose finished profile was sent to the environment.
+    imported: Option<String>,
+    transfer_failed: bool,
 }
 
 #[derive(Clone)]
 enum Step {
     Install(String),
     SignIn,
+    /// `chatGptReconnectProfile` before a handoff.
+    Reconnect,
+    /// `chatGptImportProfile` after one.
+    Import,
     Other,
+}
+
+const HANDOFF: &str = "provider.chatgpt.handoff.subscribe";
+/// `CHATGPT_USAGE_URL`.
+const USAGE_URL: &str = "https://chatgpt.com/#settings/Usage";
+const HANDOFF_INTERRUPTED: &str = "ChatGPT sign-in on the primary environment was interrupted. Try again.";
+
+/// `readSignInRouting`'s `primaryAuthEnvironmentId`: a remote environment signs in through this
+/// machine's server, which can receive the provider's callback.
+fn via_primary(s: &App) -> bool {
+    let active = &s.ui.env.active;
+    active != crate::env::LOCAL && !s.ui.desktop.local_off && !crate::settings::machines::loopback(s, active) && crate::env::connected(s, crate::env::LOCAL)
+}
+
+/// The handoff stream's latest state, for `id`.
+fn handoff_state<'a>(s: &'a App, id: &str) -> Option<&'a Value> {
+    let (_, input) = s.ui.settings.providers_ui.codex.handoff.as_ref().filter(|(owner, _)| owner == id)?;
+    crate::env::source(s, crate::env::LOCAL)?.net_ref()?.resource(HANDOFF, input.clone())
+}
+
+fn end_handoff(s: &mut App) {
+    if let Some((_, input)) = s.ui.settings.providers_ui.codex.handoff.take()
+        && let Some(net) = crate::env::net_of(s, crate::env::LOCAL)
+    {
+        net.unwatch_resource(HANDOFF, input);
+    }
+}
+
+/// The input that starts sign-in on the primary environment with the remote one's saved profile.
+fn handoff_input(id: &str, environment: &str, attempt: &str, profile: Value) -> Value {
+    json!({"instanceId": id, "environmentId": environment, "attemptId": attempt, "returnUrl": format!("s5code://app/settings/providers?instanceId={id}"), "profile": profile})
 }
 
 const RUNNING: [&str; 3] = ["downloading", "extracting", "verifying"];
@@ -99,6 +141,11 @@ fn send(s: &mut App, id: &str, step: Step, method: &str, payload: Value) {
 
 fn sign_in(s: &mut App, id: &str, method: &str) {
     s.ui.settings.providers_ui.codex.after_install = None;
+    s.ui.settings.providers_ui.codex.transfer_failed = false;
+    if via_primary(s) {
+        send(s, id, Step::Reconnect, "provider.chatgpt.reconnect-profile", json!({"instanceId": id, "methodId": method}));
+        return;
+    }
     send(s, id, Step::SignIn, "provider.auth.start", json!({"instanceId": id, "methodId": method, "callbackMode": "client"}));
 }
 
@@ -140,10 +187,31 @@ pub fn poll(s: &mut App) -> bool {
                     }
                 }
             }
+            (Ok(profile), Step::Reconnect) => {
+                let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or_default().to_owned();
+                let input = handoff_input(&id, &environment, &format!("rune:{}", s5_net::uuid()), profile);
+                match crate::env::net_of(s, crate::env::LOCAL) {
+                    Some(net) => {
+                        net.watch_resource(HANDOFF, input.clone());
+                        let ui = &mut s.ui.settings.providers_ui.codex;
+                        (ui.handoff, ui.handoff_opened) = (Some((id, input)), false);
+                    }
+                    None => s.ui.settings.providers_ui.codex.error = Some((id, HANDOFF_INTERRUPTED.into())),
+                }
+            }
+            (Ok(_), Step::Import) => {
+                end_handoff(s);
+                let ui = &mut s.ui.settings.providers_ui.codex;
+                (ui.awaiting, ui.transfer_failed) = (Some(id), false);
+            }
             (Ok(_), Step::Other) => {}
-            (Err(error), _) => ui.error = Some((id, failure_detail(&error).unwrap_or_else(|| "Codex setup failed. Try again.".into()))),
+            (Err(error), step) => {
+                ui.transfer_failed = matches!(step, Step::Import);
+                ui.error = Some((id, failure_detail(&error).unwrap_or_else(|| "Codex setup failed. Try again.".into())));
+            }
         }
     }
+    changed |= poll_handoff(s);
     if let Some((id, started, method)) = s.ui.settings.providers_ui.codex.after_install.clone() {
         let current = resource(s, "provider.install.subscribe", json!({"instanceId": id})).cloned();
         match settle_install(&started, current.as_ref()) {
@@ -186,6 +254,42 @@ pub fn poll(s: &mut App) -> bool {
     changed
 }
 
+/// Follows a primary-environment sign-in: opens its page once, and hands the finished profile to
+/// the remote environment once per attempt. A dropped connection ends it rather than replaying it.
+fn poll_handoff(s: &mut App) -> bool {
+    let Some((id, input)) = s.ui.settings.providers_ui.codex.handoff.clone() else { return false };
+    let state = handoff_state(s, &id).cloned();
+    let failure = if !crate::env::connected(s, crate::env::LOCAL) || state.as_ref().is_some_and(|v| v.get("error").is_some()) {
+        Some(HANDOFF_INTERRUPTED.to_owned())
+    } else {
+        state.as_ref().filter(|v| v["phase"] == "auth" && matches!(v["state"]["phase"].as_str(), Some("failed" | "cancelled"))).map(|v| v["state"]["message"].as_str().unwrap_or("ChatGPT sign-in could not finish. Try again.").to_owned())
+    };
+    if let Some(message) = failure {
+        end_handoff(s);
+        s.ui.settings.providers_ui.codex.error = Some((id, message));
+        return true;
+    }
+    let Some(state) = state else { return false };
+    if state["phase"] == "auth" && !s.ui.settings.providers_ui.codex.handoff_opened {
+        if let Some(Some(url)) = settle_page(Some(&state["state"]), None) {
+            s.ui.settings.providers_ui.codex.handoff_opened = true;
+            super::super::auth::open_url(s, &url);
+            return true;
+        }
+    }
+    let attempt = input["attemptId"].as_str().map(str::to_owned);
+    if state["phase"] == "finished" && s.ui.settings.providers_ui.codex.imported != attempt {
+        s.ui.settings.providers_ui.codex.imported = attempt;
+        import(s, &id, state["profile"].clone());
+        return true;
+    }
+    false
+}
+
+fn import(s: &mut App, id: &str, profile: Value) {
+    send(s, id, Step::Import, "provider.chatgpt.import-profile", json!({"instanceId": id, "profile": profile}));
+}
+
 /// Web's `onModeChange`: enables the instance with `setupMode` set.
 fn set_mode(s: &mut App, id: &str, mode: &str) {
     let mut instance = super::instance_of(s, id, "codex");
@@ -205,7 +309,10 @@ fn button(t: &T, label: &str, variant: &str, disabled: bool, press: impl Fn(&mut
 
 pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool) -> Vec<El> {
     let target = json!({"instanceId": id});
-    let auth = resource(s, "provider.auth.subscribe", target.clone());
+    let handoff = handoff_state(s, id);
+    let handing_off = s.ui.settings.providers_ui.codex.handoff.as_ref().is_some_and(|(owner, _)| owner == id);
+    let finished_profile = handoff.filter(|h| h["phase"] == "finished").map(|h| h["profile"].clone());
+    let auth = handoff.filter(|h| h["phase"] == "auth").map(|h| &h["state"]).or_else(|| resource(s, "provider.auth.subscribe", target.clone()));
     let installation = resource(s, "provider.install.subscribe", target);
     let ui = &s.ui.settings.providers_ui.codex;
     let mine = |owner: &str| owner == id;
@@ -215,7 +322,7 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
     let awaiting = ui.awaiting.as_deref().is_some_and(mine);
     let finishing = awaiting && !authenticated && phase == Some("succeeded");
     let waiting_for_state = awaiting && !authenticated && matches!(phase, None | Some("idle"));
-    let auth_in_progress = finishing || waiting_for_state || matches!(phase, Some("starting" | "waiting" | "verifying"));
+    let auth_in_progress = finishing || waiting_for_state || handing_off || matches!(phase, Some("starting" | "waiting" | "verifying"));
     let install_active = installation.is_some_and(|i| RUNNING.contains(&i["phase"].as_str().unwrap_or("")));
     let pending = ui.pending.as_ref().is_some_and(|(owner, ..)| mine(owner)) || ui.after_install.as_ref().is_some_and(|(owner, ..)| mine(owner));
     let auth_active = auth_in_progress || (pending && !install_active);
@@ -252,15 +359,28 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
         let (page_id, page_flow, page_url) = (owned.clone(), flow.clone().unwrap_or_default(), url.clone().unwrap_or_default());
         let label = if finishing {
             "Finishing sign-in..."
+        } else if finished_profile.is_some() {
+            if ui.transfer_failed { "Retry connection" } else { "Finishing sign-in..." }
         } else if phase == Some("waiting") {
             "Open sign-in page"
         } else {
             "Signing in..."
         };
-        controls = controls.child(button(t, label, "outline", url.is_none() || phase != Some("waiting"), move |s: &mut App| open_page(s, &page_id, &page_flow, &page_url)));
+        let disabled = if finished_profile.is_some() { pending || !ui.transfer_failed } else { url.is_none() || phase != Some("waiting") };
+        let retry = finished_profile.clone();
+        controls = controls.child(button(t, label, "outline", disabled, move |s: &mut App| match &retry {
+            Some(profile) => import(s, &page_id, profile.clone()),
+            None if handing_off => super::super::auth::open_url(s, &page_url),
+            None => open_page(s, &page_id, &page_flow, &page_url),
+        }));
         if !finishing {
             let (cancel_id, cancel_flow) = (owned.clone(), flow.clone());
             controls = controls.child(button(t, "Cancel", "ghost", pending || read_only, move |s: &mut App| {
+                if handing_off {
+                    end_handoff(s);
+                    s.ui.settings.providers_ui.codex.awaiting = None;
+                    return;
+                }
                 let Some(flow) = cancel_flow.clone() else { return };
                 let ui = &mut s.ui.settings.providers_ui.codex;
                 (ui.after_install, ui.open_flow, ui.awaiting) = (None, None, None);
@@ -322,11 +442,15 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
         )
         .child(controls.max_w(352.0).justify_end());
     let mut rows = vec![account];
+    if authenticated {
+        let usage = kit::Button::new("Manage usage").variant("ghost-muted").size("sm").icon(&icons::EXTERNAL_LINK).on_press(|s: &mut App| super::super::auth::open_url(s, USAGE_URL));
+        rows.push(row().key(format!("row-codex-usage-{id}")).w_full().px(16.0).py(4.0).justify_end().child(usage.build(t)));
+    }
 
     if let Some(warning) = auth.filter(|_| phase == Some("idle")).and_then(|a| a["message"].as_str()).filter(|m| m.starts_with("Signed out locally.")) {
         rows.push(text(warning.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().role("alert").px(16.0).py(8.0));
     }
-    if let (Some(url), Some(flow)) = (url.clone().filter(|_| phase == Some("waiting")), flow.clone()) {
+    if let (Some(url), Some(flow)) = (url.clone().filter(|_| phase == Some("waiting") && !handing_off), flow.clone()) {
         let mut help = col().w_full().px(16.0).py(12.0).gap(12.0).child(
             row()
                 .gap(6.0)
@@ -528,6 +652,10 @@ mod tests {
         assert_eq!(settle_page(Some(&json!({"flowId": "f", "phase": "starting"})), Some("f")), None);
         assert_eq!(settle_page(Some(&json!({"flowId": "f", "phase": "failed"})), Some("f")), Some(None));
         assert_eq!(settle_page(Some(&json!({"flowId": null, "phase": "idle"})), None), None);
+
+        let input = handoff_input("work", "env-2", "rune:1", Value::Null);
+        assert_eq!(input["returnUrl"], "s5code://app/settings/providers?instanceId=work", "providerAuthReturnUrl accepts s5code://app/settings/…");
+        assert_eq!((input["environmentId"].as_str(), input["profile"].is_null()), (Some("env-2"), true), "a first sign-in has no profile");
     }
 
     #[test]

@@ -368,6 +368,21 @@ pub struct Ui {
     menu: bool,
     /// Each connected environment's session, read again every time the table opens.
     sessions: HashMap<String, Session>,
+    /// The model ID and "Map to" fields' suggestions, by cell.
+    hints: HashMap<(String, usize), kit::ComboboxState>,
+}
+
+/// The `usage-price-models` and `usage-alias-models` datalists: the saved custom models and the
+/// models the selected environments' usage names. A new model's ID leaves out the custom ones,
+/// and "Map to" leaves out models mapped on any selected environment.
+pub(super) fn hints(targets: &[Target], scanned: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let custom = custom_models(targets);
+    let mut models: Vec<String> = custom.iter().cloned().chain(scanned).collect();
+    models.sort();
+    models.dedup();
+    let ids = models.iter().filter(|m| !custom.contains(m)).cloned().collect();
+    let aliases = models.into_iter().filter(|m| targets.iter().all(|t| !t.aliases.as_ref().is_some_and(|a| a.contains_key(m)))).collect();
+    (ids, aliases)
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -699,6 +714,16 @@ pub(super) fn checking_scene(s: &mut App) {
 
 /// The `usage-prices-read-only` scene: this machine's session lacks `settings:write`, so saving a
 /// new price fails there.
+/// Scenes: the new row's model ID being typed, its suggestions open.
+pub(super) fn suggestions_scene(s: &mut App) {
+    let u = ui(s);
+    let key = ("new:0".to_string(), MODEL);
+    if let Some(c) = u.cells.get_mut(&key) {
+        c.edit.focused = true;
+    }
+    u.hints.entry(key).or_default().open = true;
+}
+
 pub(super) fn read_only_scene(s: &mut App) {
     open(s, None);
     let u = ui(s);
@@ -723,6 +748,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         return;
     }
     let k = kit::theme(t);
+    // Popups anchor to earlier elements, so the dialog's own go after the dialog.
+    let mut popups = Vec::new();
     let all = targets(s);
     let selected = chosen(u, &all);
     let muted = t.c.muted_foreground;
@@ -786,7 +813,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
                 .gap(8.0)
                 .center_y()
                 .child(text("Apply to").font(theme::SM_MEDIUM).color(t.c.foreground))
-                .child(apply.build(&k, overlays))
+                .child(apply.build(&k, &mut popups))
                 .child(spacer())
                 .child(text("USD / million tokens").font(theme::TEXT_XS).color(muted)),
         );
@@ -795,7 +822,9 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         body = body.child(text(line).font(theme::TEXT_SM).color(muted));
     } else {
         let mixed = if selected.len() > 1 { " Mixed cells keep each environment\u{2019}s rate until you edit them." } else { "" };
-        body = body.child(table(t, u, &selected, &staged, &errors, locked)).child(
+        let keys: Vec<String> = selected.iter().map(|t| t.key.clone()).collect();
+        let hints = hints(&selected, super::usage::scanned_models(&s.ui.pages.usage, &keys));
+        body = body.child(table(t, u, &selected, &staged, &errors, locked, &hints, &mut popups)).child(
             text(format!("Blank cache rates use the input price. Enter 0 for free tokens. A mapped model\u{2019}s usage counts as the model it maps to.{mixed}"))
                 .font(theme::TEXT_XS)
                 .color(muted)
@@ -853,13 +882,16 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         .open(true)
         .on_close(close)
         .build(t, overlays);
+    overlays.extend(popups);
 }
 
 const MODEL_W: f32 = 180.0;
 const ALIAS_W: f32 = 150.0;
 const ACTION_W: f32 = 28.0;
 
-fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<String, String>, locked: bool) -> El {
+#[allow(clippy::too_many_arguments)]
+fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<String, String>, locked: bool, (model_hints, alias_hints): &(Vec<String>, Vec<String>), overlays: &mut Vec<El>) -> El {
+    let k = kit::theme(t);
     let muted = t.c.muted_foreground;
     let head = |label: &str| text(label.to_string()).font(theme::XS_MEDIUM).color(muted);
     let mut header = row()
@@ -900,11 +932,11 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
         let draft = staged.iter().find(|d| &d.id == id);
         let removed = draft.is_some_and(|d| d.removed);
         let model = saved.clone().unwrap_or_else(|| text_of(u, id, MODEL));
-        let cell = |slot: usize, placeholder: &str, label: String, mono: bool, invalid: bool| -> El {
+        let mut cell = |slot: usize, placeholder: &str, label: String, mono: bool, invalid: bool| -> El {
             let key = (id.clone(), slot);
             let Some(c) = u.cells.get(&key) else { return el().w_full().h(28.0) };
             let (edit_key, change_key) = (key.clone(), key.clone());
-            kit::Input::new(&c.edit)
+            let input = kit::Input::new(&c.edit)
                 .size("compact")
                 .placeholder(placeholder)
                 .font(if mono { "mono" } else { "sans" })
@@ -915,7 +947,20 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                 .build(t)
                 .key(format!("usage-price-{}-{slot}", id))
                 .single_line()
-                .label(label)
+                .label(label);
+            let values = match slot {
+                MODEL => model_hints,
+                ALIAS => alias_hints,
+                _ => return input,
+            };
+            if locked {
+                return input;
+            }
+            let (hint_key, edit_key, pick_key) = (key.clone(), key.clone(), key.clone());
+            let state = u.hints.get(&key).cloned().unwrap_or_default();
+            kit::Suggestions::new(format!("usage-price-hints-{id}-{slot}"), &state, &c.edit, values, move |s: &mut App| ui(s).hints.entry(hint_key.clone()).or_default(), move |s: &mut App| &mut ui(s).cells.entry(edit_key.clone()).or_default().edit)
+                .on_pick(move |s: &mut App, _: &str, _: &mut Tx| edited(s, &pick_key))
+                .build(input, &k, overlays)
         };
         let error = errors.get(id).filter(|_| !model.trim().is_empty() || draft.is_some_and(|d| d.values.iter().flatten().any(|v| !v.is_empty())));
         let mut model_col = col().w(MODEL_W).gap(4.0);
@@ -1016,6 +1061,15 @@ mod tests {
 
     fn draft(id: &str, model: &str, new: bool) -> Draft {
         Draft { id: id.into(), model: model.into(), new, ..Draft::default() }
+    }
+
+    #[test]
+    fn suggestions_offer_used_models_and_leave_out_the_taken_ones() {
+        let t = target(json!({"custom-a": {"input": 1}}), Some(json!({"old-name": "gpt-5"})));
+        let scanned = vec!["gpt-5".into(), "claude-haiku-4-5".into(), "gpt-5".into(), "old-name".into()];
+        let (ids, aliases) = hints(&[t], scanned);
+        assert_eq!(ids, ["claude-haiku-4-5", "gpt-5"], "a new model ID skips the custom models");
+        assert_eq!(aliases, ["claude-haiku-4-5", "custom-a", "gpt-5"], "\"Map to\" skips models already mapped");
     }
 
     #[test]

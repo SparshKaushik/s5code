@@ -2753,6 +2753,25 @@ pub fn insert_at_end(s: &mut App, text: &str) -> bool {
     })
 }
 
+/// usePasteToFocusComposer: a stray paste lands at the end of the prompt with its copied context,
+/// or folded as `pasted-text.txt` when long, unless Mod+Shift+V (`as_text`) pasted it.
+pub fn paste_at_end(s: &mut App, text: &str, html: Option<&str>, as_text: bool) -> bool {
+    acting(s, None, |s| {
+        if text.is_empty() || editing_run(s).is_some() || question_editor(s).is_some() || project_required(s) {
+            return false;
+        }
+        let d = draft_mut(s);
+        d.edit.set_caret(d.edit.text.len());
+        let fragment = html.and_then(crate::chat::timeline::actions::decode_context_html);
+        if !fragment.is_some_and(|f| paste_context(s, text, &f)) && !fold_paste(s, text, as_text) {
+            draft_mut(s).edit.insert(text);
+        }
+        draft_mut(s).edit.focused = true;
+        menu::refresh(s);
+        true
+    })
+}
+
 /// The draft's files as its optimistic message shows them while they upload.
 fn pending_attachments(s: &App, contexts: &[Value]) -> Value {
     let Some(d) = draft(s) else { return json!([]) };

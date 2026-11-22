@@ -36,9 +36,9 @@ enum AppSignIn {
     Failed(String),
 }
 
-const APP_NAME: &str = "T3 Code for GitHub";
+pub(crate) const APP_NAME: &str = "T3 Code for GitHub";
 const APP_HOST: &str = "github.com";
-const APP_INSTALL: &str = "https://github.com/apps/t3-code-for-github/installations/new";
+pub(crate) const APP_INSTALL: &str = "https://github.com/apps/t3-code-for-github/installations/new";
 const APP_REVOKE: &str = "https://github.com/settings/apps/authorizations";
 
 fn app_input() -> Value {

@@ -702,6 +702,13 @@ pub(super) fn send_settings(s: &mut App, payload: Value) -> Option<u64> {
     Some(id)
 }
 
+/// Scenes: the custom model editor on `slug` with option `open`'s preset menu open.
+pub(super) fn scene_custom_model(s: &mut App, slug: &str, open: usize) {
+    let id = s.ui.settings.provider.clone().unwrap_or_default();
+    custom_models::toggle(s, &id, slug);
+    custom_models::scene_open_preset(s, open);
+}
+
 /// Whether this session may add, edit, or remove provider instances.
 pub(super) fn can_manage(s: &App) -> bool {
     !usage::read_only(s)
@@ -1817,6 +1824,7 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                 preference(s, json!({"setModelFavorites": [{"provider": fav_id, "model": fav_slug, "favorite": !is_favorite}]}));
             })
             .build(t)
+            .help(if is_favorite { "Remove from favorites" } else { "Add to favorites" })
             .child(if is_favorite {
                 icon(&STAR_FILLED, 12.0).color(t.c.warning)
             } else {
@@ -1827,6 +1835,7 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
             .min_w(0.0)
             .gap(8.0)
             .center_y()
+            .help(if m.name != m.slug { format!("{}\n{}", m.name, m.slug) } else { m.name.clone() })
             .child(text(m.name.clone()).font(theme::TEXT_XS).color(if is_hidden { t.c.muted_foreground } else { t.c.foreground.alpha_mul(0.9) }).truncate());
         if m.name != m.slug {
             name = name.child(text(m.slug.clone()).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground.alpha_mul(0.7)).truncate().shrink().min_w(0.0));
@@ -1850,7 +1859,8 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                             next.swap(i, j);
                             preference(s, json!({"setProviderModelOrder": {"provider": owned, "modelOrder": next}}));
                         })
-                        .build(t),
+                        .build(t)
+                        .help(if up { "Move up" } else { "Move down" }),
                 );
             }
         }
@@ -1873,7 +1883,8 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                     .size("icon-micro")
                     .icon(&icons::X)
                     .on_press(move |s: &mut App| remove_custom_model(s, &owned, &slug))
-                    .build(t),
+                    .build(t)
+                    .help("Remove custom model"),
             );
         }
         let (show_id, show_slug) = (id.to_owned(), m.slug.clone());
@@ -1901,7 +1912,8 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                         .on_toggle(move |s: &mut App| {
                             preference(s, json!({"setModelsHidden": [{"provider": show_id, "model": show_slug, "hidden": !is_hidden}]}));
                         })
-                        .build(&kit::theme(t)),
+                        .build(&kit::theme(t))
+                        .help(if m.custom { "Custom models are always shown in the picker" } else if is_hidden { "Hidden from picker" } else { "Shown in picker" }),
                 ),
         );
         if m.custom && !read_only && let Some(editor) = custom_models::editor(s, t, id, driver, live, &m.slug) {

@@ -95,6 +95,8 @@ pub struct Draft {
     scratch: TextEdit,
     /// The option whose preset list is open.
     preset_open: Option<usize>,
+    /// Web's "Copy from…" select is open.
+    copy_open: bool,
 }
 
 fn from_preset(preset: &Preset) -> Descriptor {
@@ -147,6 +149,7 @@ pub fn draft_from_entry(entry: &Value) -> Draft {
         error: None,
         scratch: TextEdit::default(),
         preset_open: None,
+        copy_open: false,
     }
 }
 
@@ -258,6 +261,12 @@ fn same_slug(raw: &Value, slug: &str) -> bool {
     raw.as_str().or(raw["slug"].as_str()).map(str::trim) == Some(slug)
 }
 
+pub fn scene_open_preset(s: &mut App, option: usize) {
+    if let Some(draft) = s.ui.settings.providers_ui.editing.as_mut() {
+        draft.preset_open = Some(option);
+    }
+}
+
 /// The pencil: opens the editor on a custom model, or closes it when it is already open there.
 pub fn toggle(s: &mut App, id: &str, slug: &str) {
     if s.ui.settings.providers_ui.editing.as_ref().is_some_and(|d| d.slug == slug) {
@@ -343,8 +352,8 @@ fn apply_preset(o: &mut Descriptor, preset: Option<&Preset>) {
 /// Closes the open preset list, else the editor, as Escape does.
 pub fn escape(s: &mut App) -> bool {
     let editing = &mut s.ui.settings.providers_ui.editing;
-    if let Some(d) = editing.as_mut().filter(|d| d.preset_open.is_some()) {
-        d.preset_open = None;
+    if let Some(d) = editing.as_mut().filter(|d| d.preset_open.is_some() || d.copy_open) {
+        (d.preset_open, d.copy_open) = (None, false);
         return true;
     }
     editing.take().is_some()
@@ -386,23 +395,46 @@ pub fn editor(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, slug
         .flatten()
         .filter(|m| m["isCustom"] != true && m["capabilities"]["optionDescriptors"].as_array().is_some_and(|d| !d.is_empty()))
         .collect();
+    let mut copy_list = None;
     if !candidates.is_empty() {
-        let mut copy = row().gap(4.0).center_y().flex_wrap().child(text("Copy from").font(theme::TEXT_2XS).color(muted));
-        for model in candidates {
-            let (capabilities, owned_driver) = (model["capabilities"].clone(), driver.to_owned());
-            let name = model["name"].as_str().or(model["slug"].as_str()).unwrap_or("").to_owned();
-            copy = copy.child(
-                kit::Button::new(name.clone())
-                    .variant("ghost-muted")
-                    .size("xs")
-                    .on_press(move |s: &mut App| edit(s, |d| d.descriptors = from_capabilities(&capabilities, &owned_driver)))
-                    .build(t)
-                    .help(format!("Copy options from {name}")),
-            );
+        heading = heading.child(
+            kit::Button::new("Copy from…")
+                .variant("outline")
+                .size("xs")
+                .icon(&icons::CHEVRON_DOWN)
+                .on_press(|s: &mut App| edit(s, |d| d.copy_open ^= true))
+                .build(t)
+                .w(176.0)
+                .label("Copy options from a built-in model")
+                .expanded(draft.copy_open),
+        );
+        if draft.copy_open {
+            let mut list = col().w(176.0).self_end().gap(2.0).padding(4.0).radius(8.0).border(1.0, t.c.border).fill(t.c.popover).role("listbox").label("Copy options from a built-in model");
+            for model in candidates {
+                let (capabilities, owned_driver) = (model["capabilities"].clone(), driver.to_owned());
+                let name = model["name"].as_str().or(model["slug"].as_str()).unwrap_or("").to_owned();
+                list = list.child(
+                    row()
+                        .w_full()
+                        .px(8.0)
+                        .py(6.0)
+                        .radius(6.0)
+                        .role("option")
+                        .cursor(rune::Cursor::Pointer)
+                        .hover(t.c.muted)
+                        .on_press(move |s: &mut App| {
+                            edit(s, |d| {
+                                d.descriptors = from_capabilities(&capabilities, &owned_driver);
+                                d.copy_open = false;
+                            })
+                        })
+                        .child(text(name).font(theme::TEXT_SM).color(t.c.foreground).truncate()),
+                );
+            }
+            copy_list = Some(list);
         }
-        heading = heading.child(copy);
     }
-    let mut options = col().w_full().gap(8.0).child(heading);
+    let mut options = col().w_full().gap(8.0).child(heading).children(copy_list);
     if draft.descriptors.is_empty() {
         options = options.child(text("No custom options. The composer uses the provider's default options.").font(theme::TEXT_XS).color(muted.alpha_mul(0.7)).wrap());
     }

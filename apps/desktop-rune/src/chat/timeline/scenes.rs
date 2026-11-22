@@ -279,6 +279,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
     ("timeline-mcp-app", mcp_app),
+    ("timeline-html-render-chrome", html_render_chrome),
+    ("timeline-mcp-app-chrome", mcp_app_chrome),
     ("timeline-subagent-remote", subagent_remote),
     ("composer-subagent-bar", subagent_bar),
     ("composer-subagent-bar-instance", subagent_bar_instance),
@@ -1446,6 +1448,18 @@ fn mcp_app(app: &mut App) {
     ]);
     app.ui.chat.timeline.expanded.insert(format!("work:{run}"));
     crate::panel::mcp_app::scene_seed(app, &tool, 360.);
+}
+
+/// `timeline-html-render` with its page shot by real Chrome (`S5_CHROME`).
+fn html_render_chrome(app: &mut App) {
+    html_render(app);
+    crate::panel::html_frame::scene_shoot(app, "scene-html-page");
+}
+
+/// `timeline-mcp-app` with its app run live in real Chrome through the host protocol.
+fn mcp_app_chrome(app: &mut App) {
+    mcp_app(app);
+    crate::panel::mcp_app::scene_live(app, "scene-mcp-tool");
 }
 
 /// A delegated task running in a linked environment, named after its row title.

@@ -88,6 +88,8 @@ pub struct Ui {
     pub(crate) mcp_apps: mcp_app::Apps,
     proactive: proactive::Watch,
     history: history::History,
+    /// Threads whose panel fills the chat column's room (`rightPanelState.maximized`).
+    maximized: std::collections::HashSet<String>,
 }
 #[derive(Default)]
 struct Stash {
@@ -123,6 +125,7 @@ impl Default for Ui {
             mcp_apps: Default::default(),
             proactive: Default::default(),
             history: Default::default(),
+            maximized: Default::default(),
         }
     }
 }
@@ -651,7 +654,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | drawer::poll(app)
         | preview::poll(app, tx)
         | html_frame::poll(app)
-        | mcp_app::poll(app);
+        | mcp_app::poll(app, tx);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
@@ -710,14 +713,14 @@ pub(crate) fn terminal_focused(app: &App) -> bool {
 
 thread_local! {
     /// What a key handler's `Tx` knew about the key the window is handling: the key, its
-    /// physical code (winit's name, "KeyA") and whether a control had focus.
+    /// physical code (winit's name, "KeyA") and whether a text field had focus.
     static KEY_CONTEXT: std::cell::RefCell<Option<(Key, Option<String>, bool)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Records the key's physical code and focus for the shortcut matcher, which handlers call
 /// without their `Tx`.
 pub fn note_key(e: &KeyEvent, tx: &Tx) {
-    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused().is_some());
+    let context = (e.key.clone(), tx.physical_key().map(|code| format!("{code:?}")), tx.focused_editable());
     KEY_CONTEXT.with(|c| *c.borrow_mut() = Some(context));
 }
 
@@ -726,8 +729,7 @@ fn physical_code(e: &KeyEvent) -> Option<String> {
     KEY_CONTEXT.with(|c| c.borrow().as_ref().filter(|(key, _, _)| *key == e.key).and_then(|(_, code, _)| code.clone()))
 }
 
-/// `editableFocus`. Rune names only the focused element, not whether it edits text, so a control
-/// having focus stands in, as the sidebar's undo key already reads it.
+/// `editableFocus` (`isEditableFocused`): a text field has focus.
 fn editable_focus() -> bool {
     KEY_CONTEXT.with(|c| c.borrow().as_ref().is_some_and(|(_, _, focused)| *focused))
 }
@@ -817,6 +819,12 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if shortcut(app, e, "rightPanel.toggle") {
         app.ui.shell.panel_open = !app.ui.shell.panel_open;
+        return true;
+    }
+    if app.ui.shell.panel_open && matches!(app.frame_route(), Route::Thread(_)) && shortcut(app, e, "rightPanel.toggleMaximized") {
+        if !tx.key_repeat() {
+            toggle_maximized(app);
+        }
         return true;
     }
     if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.new") {
@@ -993,6 +1001,22 @@ fn sheet_width(viewport: f32) -> Option<f32> {
     }
 }
 
+/// `rightPanelMaximized`: the thread's open panel, inline (not the narrow window's sheet),
+/// maximized over the chat column.
+pub fn maximized(app: &App, viewport: Option<f32>) -> bool {
+    app.ui.shell.panel_open
+        && viewport.and_then(sheet_width).is_none()
+        && matches!(app.frame_route(), Route::Thread(id) if app.ui.panel.maximized.contains(id))
+}
+
+/// `toggleRightPanelMaximized`: only an open panel on a thread maximizes.
+fn toggle_maximized(app: &mut App) {
+    let Route::Thread(id) = app.frame_route().clone() else { return };
+    if app.ui.shell.panel_open && !app.ui.panel.maximized.remove(&id) {
+        app.ui.panel.maximized.insert(id);
+    }
+}
+
 fn close_panel(s: &mut App) {
     s.ui.shell.panel_open = false;
 }
@@ -1098,6 +1122,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             ),
         )
         .child(el().grow(1.))
+        .children(sheet.is_none().then(|| {
+            // RightPanelMaximizeControl.
+            let (glyph, label) = if maximized(app, viewport) { (&icons::MINIMIZE_2, "Restore panel size") } else { (&icons::MAXIMIZE_2, "Maximize panel") };
+            action(t, label, glyph).on_press(toggle_maximized).build(t)
+        }))
         .child(
             action(t, "Close right panel", &icons::PANEL_RIGHT)
                 .on_press(close_panel)
@@ -1129,9 +1158,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             }
         })
     };
-    let panel = row()
-        .key("right-panel")
-        .w(width)
+    let panel = row().key("right-panel");
+    let panel = if maximized(app, viewport) { panel.grow(1.).min_w(0.) } else { panel.w(width) };
+    let panel = panel
         .h_full()
         .fill(t.c.background)
         .child(edge)
@@ -1207,6 +1236,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-diff-tree", |s| {
         scene(s, Some(Surface::Diff));
         diff::tree_fixture(s);
+    }),
+    ("panel-diff-maximized", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::fixture(s);
+        toggle_maximized(s);
     }),
     ("panel-diff-tree-split", |s| {
         scene(s, Some(Surface::Diff));
@@ -1698,6 +1732,7 @@ mod tests {
             {"command": "terminal.split", "shortcut": d, "whenAst": id("terminalFocus")},
             {"command": "diff.toggle", "shortcut": d, "whenAst": not(id("terminalFocus"))},
             {"command": "rightPanel.new", "shortcut": {"key": "t", "modKey": true}, "whenAst": {"type": "and", "left": id("rightPanelOpen"), "right": not(id("terminalFocus"))}},
+            {"command": "rightPanel.toggleMaximized", "shortcut": {"key": "m", "modKey": true, "shiftKey": true}},
         ]}));
         app.src = data::Source::Fixture(state);
         let press = |key: char| {
@@ -1711,6 +1746,23 @@ mod tests {
         assert!(!shortcut(&app, &press('t'), "rightPanel.new"), "the panel is closed");
         app.ui.shell.panel_open = true;
         assert!(shortcut(&app, &press('t'), "rightPanel.new"));
+        // rightPanel.toggleMaximized, which has no default: per thread, and only for an open inline panel.
+        let mut max = press('m');
+        max.mods.shift = true;
+        assert!(shortcut(&app, &max, "rightPanel.toggleMaximized"));
+        app.route = crate::Route::Thread("t1".into());
+        toggle_maximized(&mut app);
+        assert!(maximized(&app, Some(1440.)) && !maximized(&app, Some(700.)), "a narrow window's sheet never maximizes");
+        app.route = crate::Route::Thread("t2".into());
+        assert!(!maximized(&app, Some(1440.)), "each thread keeps its own");
+        app.route = crate::Route::Thread("t1".into());
+        app.ui.shell.panel_open = false;
+        toggle_maximized(&mut app);
+        assert!(!maximized(&app, Some(1440.)), "a closed panel is never maximized");
+        app.ui.shell.panel_open = true;
+        assert!(maximized(&app, Some(1440.)), "reopening restores it, as web's flag outlives the close");
+        toggle_maximized(&mut app);
+        assert!(!maximized(&app, Some(1440.)));
         let context = |name: &str| name == "terminalFocus";
         let bindings = app.state().config.as_ref().unwrap()["keybindings"].as_array().unwrap().clone();
         assert_eq!(resolve(&bindings, &press('d'), &context), Some("terminal.split"));
@@ -1750,7 +1802,25 @@ mod tests {
         assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), None, "without a physical code only the typed key counts");
         KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), Some("Digit7".into()), true)));
         assert_eq!(resolve(bindings.as_array().unwrap(), &e, &context), Some("seven"));
-        assert!(editable_focus());
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn editable_focus_is_a_focused_text_field_unless_the_undo_notice_claims_the_key() {
+        let app = App::new();
+        let e = KeyEvent::from(Key::Command('z'));
+        for (editable, expected) in [(false, false), (true, true)] {
+            KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), None, editable)));
+            assert_eq!(when_context(&app, "editableFocus"), expected, "a focused button is not a text field");
+        }
+        let bindings = serde_json::json!([{"command": "thread.undo", "shortcut": {"key": "z", "modKey": true}, "whenAst": {"type": "not", "node": {"type": "identifier", "name": "editableFocus"}}}]);
+        let mut cmd_z = e.clone();
+        cmd_z.mods.cmd = true;
+        cmd_z.mods.ctrl = !cfg!(target_os = "macos");
+        let context = |name: &str| when_context(&app, name);
+        assert_eq!(resolve(bindings.as_array().unwrap(), &cmd_z, &context), None, "the field keeps its own undo");
+        KEY_CONTEXT.with(|c| *c.borrow_mut() = Some((e.key.clone(), None, false)));
+        assert_eq!(resolve(bindings.as_array().unwrap(), &cmd_z, &context), Some("thread.undo"));
         KEY_CONTEXT.with(|c| *c.borrow_mut() = None);
     }
 

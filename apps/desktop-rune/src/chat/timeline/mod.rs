@@ -467,6 +467,16 @@ fn notice_view(app: &App, item: &Value, t: &T) -> El {
         .children(worktree_setup::retry_button(app, item, t).map(|b| row().ml(28.0).pb(4.0).child(b)))
 }
 
+/// The turn items a row draws.
+fn row_items<'a>(row: &Row<'a>) -> Vec<&'a Value> {
+    match row {
+        Row::Work { items, .. } | Row::Tools { items, .. } | Row::Attempt { items, .. } | Row::Subagents { items, .. } => items.clone(),
+        Row::Item(item) | Row::User(item) | Row::Assistant(item) => vec![*item],
+        Row::Request { item, .. } => item.iter().copied().collect(),
+        _ => vec![],
+    }
+}
+
 fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
@@ -993,11 +1003,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         stack = stack.child(col().key("timeline-row-parent").w_full().child(parent));
         lead += 1;
     }
-    // The minimap lights the prompts in view and finds the turn being read.
+    // The minimap lights the prompts in view and finds the turn being read; MCP apps whose rows
+    // leave the virtual list let their pages go.
     if routed {
         let thread = thread_id.to_owned();
+        let apps: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(index, r)| row_items(r).into_iter().filter(|item| crate::panel::mcp_app::reference(item).is_some()).map(move |item| (index + lead, s(item, "id").to_owned())))
+            .collect();
         stack = stack.on_visible_rows(move |app: &mut App, r: std::ops::Range<usize>| {
-            minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead))
+            let apps_changed = crate::panel::mcp_app::in_view(app, &apps, r.clone());
+            minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead)) | apps_changed
         });
     }
     for (index, r) in rows.into_iter().enumerate() {
