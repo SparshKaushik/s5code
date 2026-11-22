@@ -213,6 +213,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    panel::note_key(e, tx);
     // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
     // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
     if matches!(e.key, rune::Key::Modifier { .. }) {
