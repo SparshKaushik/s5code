@@ -2,7 +2,7 @@
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 pub(crate) mod comments;
 pub(crate) mod file_menu;
-mod file_icons;
+pub(crate) mod file_icons;
 pub(crate) mod find;
 pub(crate) mod state;
 pub(crate) mod view;

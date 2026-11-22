@@ -2243,6 +2243,13 @@ fn annotation(s: &App, l: &Look, n: usize) -> El {
 
 /// DiffFileTree: the files by folder; pressing one opens it and scrolls to it. `width` waits on
 /// the row's first layout.
+/// DiffFileTree's per-type icon (T3_PIERRE_ICONS), the layers the diff panel draws.
+fn file_mark(t: &T, path: &str) -> El {
+    crate::panel::diff::file_icons::for_path(path).iter().fold(el().size(16.0, 16.0), |mark, &(glyph, light, dark)| {
+        mark.child(icon(glyph, 16.0).color(rune::color::hex(if t.dark { dark } else { light }).unwrap_or(t.c.muted_foreground)).absolute(0.0, 0.0))
+    })
+}
+
 fn tree(s: &App, t: &T, width: Option<f32>) -> El {
     let c = &s.ui.pages.code;
     let st = &c.diff;
@@ -2316,7 +2323,7 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
                 .fill(if selected { t.c.foreground.alpha(0.12) } else { Color::TRANSPARENT })
                 .hover(t.c.foreground.alpha(if selected { 0.12 } else { 0.07 }))
                 .label(path.clone())
-                .child(icon(&i::FILE, 14.0).color(t.c.muted_foreground))
+                .child(file_mark(t, &path))
                 .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
                 .on_press_tx(move |s: &mut App, tx: &mut Tx| reveal(s, &path, tx))
         };
