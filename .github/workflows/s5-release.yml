@@ -249,7 +249,7 @@ jobs:
         run: vp check
 
       - name: Typecheck
-        run: vp run typecheck
+        run: vp run -r --cache --concurrency-limit 1 typecheck
 
   # Keep tests on their own runners, using the same package split and server
   # shards as CI (test, test_web, test_server in s5-ci.yml). Keep the two in sync.

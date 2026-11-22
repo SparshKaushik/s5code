@@ -104,7 +104,7 @@ jobs:
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Typecheck
-        run: vpr typecheck
+        run: vp run -r --cache --concurrency-limit 1 typecheck
 
   build:
     name: Build
