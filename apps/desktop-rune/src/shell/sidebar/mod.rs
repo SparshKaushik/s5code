@@ -132,6 +132,8 @@ pub struct Ui {
     pub drafts: drafts::Ui,
     /// The server's message matches for a search: (query, thread ids).
     pub content: (String, Vec<String>),
+    /// Since when the thread-jump modifiers have been held alone (`useThreadJumpHintsVisible`).
+    jump_held: Option<i64>,
     /// Each matched thread's first message match (`threadId`, `snippet`, `source`), by `content`.
     content_matches: Vec<serde_json::Value>,
     content_due: Option<(i64, String)>,
@@ -1326,6 +1328,73 @@ fn bound_key(s: &mut App, e: &KeyEvent, editable: bool) -> bool {
     true
 }
 
+/// Jump hints wait this long after the modifiers go down, so a quick shortcut never flashes them.
+const JUMP_HINT_DELAY_MS: i64 = 200;
+
+/// `shouldShowThreadJumpHintsForModifiers`: the held modifiers are exactly those of a
+/// `thread.jump.N` shortcut, and the terminal does not have focus.
+fn jump_modifiers(s: &App, mods: rune::Mods) -> bool {
+    if s.ui.panel.terminal.focused() {
+        return false;
+    }
+    let bindings = s.state().config.as_ref().and_then(|c| c["keybindings"].as_array().cloned());
+    let Some(bindings) = bindings else { return crate::panel::modifiers_match(&json!({"modKey": true}), mods) };
+    bindings
+        .iter()
+        .filter(|b| b["command"].as_str().is_some_and(|c| c.starts_with("thread.jump.")))
+        .any(|b| crate::panel::modifiers_match(&b["shortcut"], mods))
+}
+
+/// Tracks the jump modifiers held alone; true when the hints' state changes.
+pub fn on_modifier(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    let changed = hold_jump(s, e.mods);
+    if changed && s.ui.shell.sidebar.jump_held.is_some() {
+        tx.wake_after(std::time::Duration::from_millis(JUMP_HINT_DELAY_MS as u64));
+    }
+    changed
+}
+
+pub fn release_jump(s: &mut App) {
+    s.ui.shell.sidebar.jump_held = None;
+}
+
+fn hold_jump(s: &mut App, mods: rune::Mods) -> bool {
+    let held = jump_modifiers(s, mods);
+    let ui = &mut s.ui.shell.sidebar;
+    if held == ui.jump_held.is_some() {
+        return false;
+    }
+    ui.jump_held = held.then(crate::data::now_ms);
+    true
+}
+
+/// The shortcut each of the first nine visible threads jumps by, while the hints show.
+pub(crate) fn jump_labels(s: &App, model: &Model) -> HashMap<String, String> {
+    let ui = &s.ui.shell.sidebar;
+    let shown = ui.jump_held.is_some_and(|at| crate::data::now_ms() >= at + JUMP_HINT_DELAY_MS) && !s.ui.notify.background;
+    if !shown {
+        return HashMap::new();
+    }
+    let mac = cfg!(target_os = "macos");
+    let configured = s.state().config.as_ref().is_some_and(|c| c["keybindings"].is_array());
+    model
+        .visible_ids(ui)
+        .into_iter()
+        .take(9)
+        .enumerate()
+        .filter_map(|(i, id)| {
+            let label = if configured {
+                crate::shell::palette::shortcut_label(s, &format!("thread.jump.{}", i + 1))
+            } else if mac {
+                format!("⌘{}", i + 1)
+            } else {
+                format!("Ctrl+{}", i + 1)
+            };
+            (!label.is_empty()).then_some((id, label))
+        })
+        .collect()
+}
+
 /// `selectThreadSearchResult`: opens the thread, and find on its message match as the palette does.
 pub(crate) fn open_result(s: &mut App, id: &str) {
     let ui = &s.ui.shell.sidebar;
@@ -1559,6 +1628,23 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn jump_hints_follow_the_jump_shortcuts_modifiers_after_a_moment() {
+        let mut s = App::new();
+        let mods = |cmd: bool, ctrl: bool, shift: bool| rune::Mods { cmd, ctrl, shift, ..Default::default() };
+        let (cmd, ctrl) = if cfg!(target_os = "macos") { (true, false) } else { (true, true) };
+        assert!(!hold_jump(&mut s, mods(false, false, true)), "Shift alone is not the jump modifier");
+        assert!(hold_jump(&mut s, mods(cmd, ctrl, false)));
+        let model = Model::build(&s);
+        assert!(jump_labels(&s, &model).is_empty(), "not before the delay");
+        s.ui.shell.sidebar.jump_held = Some(crate::data::now_ms() - JUMP_HINT_DELAY_MS);
+        let labels = jump_labels(&s, &model);
+        let first = model.visible_ids(&s.ui.shell.sidebar)[0].clone();
+        assert_eq!(labels.get(&first).map(String::as_str), Some(if cfg!(target_os = "macos") { "⌘1" } else { "Ctrl+1" }));
+        assert!(hold_jump(&mut s, mods(cmd, ctrl, true)), "adding Shift hides them");
+        assert!(jump_labels(&s, &model).is_empty());
     }
 
     #[test]

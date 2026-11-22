@@ -691,12 +691,18 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
             let yes = |name: &str| k[name].as_bool().unwrap_or(false);
             (v["whenAst"].is_null() || when(&v["whenAst"], context))
                 && k["key"].as_str().is_some_and(|v| v.eq_ignore_ascii_case(&key))
-                && e.mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
-                && e.mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
-                && e.mods.shift == yes("shiftKey")
-                && e.mods.alt == yes("altKey")
+                && modifiers_match(k, e.mods)
         })
         .and_then(|v| v["command"].as_str())
+}
+
+/// `matchesKeybindingShortcutModifiers`: exactly the shortcut's modifiers are held.
+pub(crate) fn modifiers_match(k: &serde_json::Value, mods: rune::Mods) -> bool {
+    let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
+        && mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
+        && mods.shift == yes("shiftKey")
+        && mods.alt == yes("altKey")
 }
 
 /// `evaluateWhenNode`: unknown identifiers are false.

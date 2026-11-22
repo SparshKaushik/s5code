@@ -116,6 +116,8 @@ fn has_desktop(mode: &str) -> bool {
 
 pub fn window_focus(s: &mut App, focused: bool) {
     s.ui.notify.background = !focused;
+    // A modifier released in another app never reaches this window.
+    crate::shell::sidebar::release_jump(s);
     if focused {
         clear_pending(s);
     }

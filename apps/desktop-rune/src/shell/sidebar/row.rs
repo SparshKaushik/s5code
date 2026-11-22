@@ -141,6 +141,8 @@ pub struct RowCtx<'a> {
     pub shift: Option<f32>,
     /// A row under a boring-sidebar project folder: indented, without a favicon.
     pub folder: bool,
+    /// The jump shortcut shown in place of the time while its modifiers are held.
+    pub jump: Option<String>,
 }
 
 /// Applies the drag: the dragged row follows the pointer above the rest, peers slide to their
@@ -498,7 +500,11 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             }
             None => row().child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label)),
         };
-        let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered { 0.0 } else { 1.0 }));
+        let rest = match &rc.jump {
+            Some(label) => crate::kit::kbd(label, t),
+            None => rest,
+        };
+        let mut slot = row().ml(4.0).h(20.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && rc.jump.is_none() { 0.0 } else { 1.0 }));
         if hovered {
             let mut actions = row().h_full();
             if draft {
@@ -697,7 +703,11 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let at = if settled { th.settled_time() } else { th.card_time() };
             row().child(text(logic::relative_label(at, model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))
         };
-        let mut slot = row().ml(4.0).h(24.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && !woke { 0.0 } else { 1.0 }));
+        let rest = match &rc.jump {
+            Some(label) => crate::kit::kbd(label, t),
+            None => rest,
+        };
+        let mut slot = row().ml(4.0).h(24.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && !woke && rc.jump.is_none() { 0.0 } else { 1.0 }));
         if hovered {
             let id = th.id.clone();
             let action = match rc.section {
@@ -971,6 +981,7 @@ pub fn project(p: &Projection) -> Vec<Option<f32>> {
 pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let items = model.items(ui);
+    let jumps = super::jump_labels(s, model);
     if let Some(h) = &ui.hover {
         ui.hover_rect.set(cx.layout(&format!("sb-row-{h}")).map(|r| [r[0], r[1], r[2], r[3]]));
     }
@@ -1079,7 +1090,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
             Item::Thread { key, section } => {
                 let Some(th) = model.thread(key) else { continue };
                 let dragging = drag.filter(|d| &d.key == key).map(|d| (min_dy.map_or(d.dy, |m| d.dy.max(m)), verb));
-                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift, folder: false };
+                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift, folder: false, jump: jumps.get(key.as_str()).cloned() };
                 let e = if matches!(section, Section::Snoozed | Section::Settled) { slim(s, model, th, t, &rc) } else { card(s, model, th, t, &rc) };
                 let e = if first { e } else { e.mt(1.0) };
                 first = false;
@@ -1098,7 +1109,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                     Marker::ActivePlaceholder if !model.folders.is_empty() => {
                         let row_of = |i: usize| {
                             let th = &model.threads[i];
-                            let rc = RowCtx { section: Section::Active, hovered: ui.hover.as_deref() == Some(th.id.as_str()), dragging: None, over: None, shift: Some(0.0), folder: true };
+                            let rc = RowCtx { section: Section::Active, hovered: ui.hover.as_deref() == Some(th.id.as_str()), dragging: None, over: None, shift: Some(0.0), folder: true, jump: jumps.get(th.id.as_str()).cloned() };
                             slim(s, model, th, t, &rc).mt(1.0)
                         };
                         let e = el().key(key.clone()).w_full().child(super::folders::view(s, t, model, &row_of));

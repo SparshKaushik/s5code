@@ -216,7 +216,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
     // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
     if matches!(e.key, rune::Key::Modifier { .. }) {
-        return settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
+        return shell::sidebar::on_modifier(s, e, tx) | settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
     }
     panel::preview::note_focus(s, tx);
     shell::quit::on_key(s, e, tx)
