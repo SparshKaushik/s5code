@@ -36,6 +36,10 @@ image = (
         "fonts-liberation",
         "fonts-noto-color-emoji",
     )
+    # Chrome for the `*-chrome` scenes' real pages (S5_CHROME below); the .deb brings its libraries.
+    .run_commands("apt-get update && apt-get install -y curl ca-certificates"
+                  " && curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+                  " && apt-get install -y /tmp/chrome.deb && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*")
 )
 
 app = modal.App("s5code-rune-render", image=image)
@@ -52,6 +56,7 @@ def render(bundle: bytes, jobs: list, files: dict) -> dict:
         os.environ,
         VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/lvp_icd.json",
         S5_FIXTURES="/work/fixtures",
+        S5_CHROME="/usr/bin/google-chrome-stable",
     )
     out, logs = {}, []
     for name, scene, theme, extra in jobs:

@@ -651,7 +651,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | drawer::poll(app)
         | preview::poll(app, tx)
         | html_frame::poll(app)
-        | mcp_app::poll(app);
+        | mcp_app::poll(app, tx);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
