@@ -1191,6 +1191,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
         device::float_fixture(s);
     }),
+    ("panel-device-tools-more", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+        device::tools_more_fixture(s);
+    }),
     ("panel-files-edit", |s| {
         scene(s, Some(Surface::Files));
         files::edit_fixture(s, None, false);
