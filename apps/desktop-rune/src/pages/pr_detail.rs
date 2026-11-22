@@ -1862,32 +1862,6 @@ fn checks_popover(s: &App, t: &T, checks: &[Value], stale: bool, (glyph, ink, la
     popover.build(&kit::theme(t), overlays)
 }
 
-fn check_glyph(t: &T, status: Option<&str>) -> (&'static rune::Icon, Color) {
-    match status {
-        Some("success") => (&i::CIRCLE_CHECK, success(t)),
-        Some("failure") | Some("cancelled") => (&i::CIRCLE_X, t.c.destructive),
-        Some("pending") => (&i::CIRCLE_DOT, amber(t)),
-        Some("action-required") => (&i::CIRCLE_ALERT, amber(t)),
-        Some("skipped") => (&i::CIRCLE_SLASH, t.c.muted_foreground.alpha_mul(0.7)),
-        Some(_) => (&i::CIRCLE_DASHED, t.c.muted_foreground),
-        None => (&i::CIRCLE_DOT, t.c.muted_foreground),
-    }
-}
-
-/// pullRequestCheckStatusLabel.
-fn check_label(c: &Value) -> &'static str {
-    match field(c, "status") {
-        "pending" => "Running",
-        "action-required" if super::pr_row::workflow_approval(c) => "Awaiting approval",
-        "action-required" => "Awaiting action",
-        "success" => "Passed",
-        "failure" => "Failed",
-        "cancelled" => "Cancelled",
-        "skipped" => "Skipped",
-        _ => "Neutral",
-    }
-}
-
 // ---- summary ----------------------------------------------------------------------------
 
 fn meta_row(t: &T, glyph: &'static rune::Icon, label: &str, value: El) -> El {
@@ -1981,8 +1955,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         }
         let mut list = col().w_full();
         for c in &checks {
-            let status = field(c, "status");
-            let (glyph, ink) = check_glyph(t, Some(status));
+            let (glyph, ink, label) = super::pr_row::check_status(t, c);
             let mut r = row()
                 .w_full()
                 .px(8.0)
@@ -1993,7 +1966,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
                 .child(icon(glyph, 14.0).color(ink))
                 .child(text(field(c, "name").to_string()).font(theme::TEXT_XS).color(t.c.foreground).truncate().shrink().min_w(0.0))
                 .child(spacer())
-                .child(text(check_label(c)).font(theme::TEXT_XS).color(t.c.muted_foreground));
+                .child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground));
             if let Some(url) = c["url"].as_str().map(str::to_string) {
                 r = r.key(format!("pr-check-{}", field(c, "name"))).hover(t.c.accent.alpha_mul(0.6)).cursor(Cursor::Pointer).on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&url);
@@ -2659,9 +2632,9 @@ mod tests {
 
     #[test]
     fn a_workflow_run_waiting_on_approval_says_so() {
-        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://github.com/o/r/actions/runs/12/job/3"})), "Awaiting approval");
-        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://ci.example/build/12"})), "Awaiting action");
-        assert_eq!(check_label(&json!({"status": "action-required", "url": null})), "Awaiting action");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": "https://github.com/o/r/actions/runs/12/job/3"})), "Awaiting approval");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": "https://ci.example/build/12"})), "Awaiting action");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": null})), "Awaiting action");
     }
 
     #[test]
