@@ -497,7 +497,7 @@ fn persist(s: &mut App, next: Vec<Value>, command: String, keybinding: Option<Op
     };
     let Some(net) = s.src.net() else { return };
     let waiting = net.request("server.updateSettings", json!({"patch": patch}));
-    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted });
+    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted, imported: None });
 }
 
 fn save(s: &mut App) {
