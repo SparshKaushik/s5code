@@ -1134,6 +1134,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
     }),
     ("git-commit", crate::chat::details::git::commit_scene),
+    ("details-pr-conflict", crate::chat::details::pr::conflict_scene),
     ("panel-diff-split", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);

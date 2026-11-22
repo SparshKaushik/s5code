@@ -117,6 +117,24 @@ pub fn scene(s: &mut App) {
     }
 }
 
+/// The branch's draft pull request conflicting with its base: the row offers Resolve.
+pub fn conflict_scene(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    let url = "https://github.com/acme/demo/pull/42";
+    let pr = json!({"number": 42, "title": "Queue keystrokes until the terminal attaches", "url": url, "headBranch": "fix/terminal-first-key", "baseBranch": "main", "state": "open", "isDraft": true});
+    if let Some(cwd) = super::cwd(s)
+        && let crate::data::Source::Fixture(state) = &mut s.src
+    {
+        let local = json!({"isRepo": true, "refName": "fix/terminal-first-key", "isDefaultRef": false, "hasWorkingTreeChanges": false});
+        state.vcs.insert(cwd, json!({"local": local, "remote": {"hasUpstream": true, "aheadCount": 0, "behindCount": 0, "pr": pr}}));
+    }
+    let mut detail = pr;
+    for (key, value) in [("mergeability", json!("conflicting")), ("checks", json!([])), ("changedFiles", json!(3)), ("additions", json!(41)), ("deletions", json!(7))] {
+        detail[key] = value;
+    }
+    s.ui.chat.details.prs.insert(url.to_owned(), Live { detail: Some(detail), ..Live::default() });
+}
+
 fn close(s: &mut App) {
     if s.ui.chat.details.checkout.as_ref().is_some_and(|c| c.preparing.is_none()) {
         s.ui.chat.details.checkout = None;
@@ -879,7 +897,12 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
             _ => ("Merge", pending_action, false, false, format!("Merge this {singular} ({method})")),
         };
         let shown_label = if pending { match action { "ready" => "Marking...", "merge" => "Merging...", _ => "Preparing..." } } else { label };
-        let tone = if destructive { t.c.destructive_foreground } else { t.c.primary };
+        // ThreadDetailsControl's meta pill: destructive on a 10% tint, otherwise solid primary.
+        let (tone, fill, hover) = if destructive {
+            (t.c.destructive, t.c.destructive.alpha_mul(0.10), t.c.destructive.alpha_mul(0.16))
+        } else {
+            (t.c.primary_foreground, t.c.primary, t.c.primary.alpha_mul(0.85))
+        };
         let (url, detail) = (pr.url.clone(), d.clone());
         let mut button = row()
             .key("action")
@@ -887,7 +910,8 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
             .px(6.0)
             .gap(4.0)
             .center_y()
-            .radius(4.0)
+            .radius(6.0)
+            .fill(fill)
             .role("button")
             .label(shown_label)
             .help(tip)
@@ -899,7 +923,7 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
         if busy {
             button = button.opacity(0.64);
         } else {
-            button = button.cursor(Cursor::Pointer).hover(t.c.accent).on_press(move |s: &mut App| match action {
+            button = button.cursor(Cursor::Pointer).hover(hover).on_press(move |s: &mut App| match action {
                 "resolve" => start_handoff(s, "conflicts", &detail),
                 "fix" => start_handoff(s, "findings", &detail),
                 "ready" => run_action(s, &url, "ready", None),

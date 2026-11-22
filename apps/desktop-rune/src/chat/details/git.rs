@@ -893,8 +893,8 @@ fn confirm_dialog(s: &App, t: &T, out: &mut Vec<El>) {
         .center_y()
         .child(kit::Button::new("Abort").variant("outline").size("sm").on_press(|s: &mut App| s.ui.chat.details.git.confirm = None).build(t))
         .child(el().grow(1.0))
-        .child(kit::Button::new(continue_label).variant("outline").size("sm-multiline").on_press(resume(false)).build(t))
-        .child(kit::Button::new("Check out feature branch & continue").size("sm-multiline").disabled(unavailable.is_some()).on_press(resume(true)).build(t));
+        .child(kit::Button::new(continue_label).variant("outline").size("sm-multiline").disabled(!writable(s)).on_press(resume(false)).build(t))
+        .child(kit::Button::new("Check out feature branch & continue").size("sm-multiline").disabled(!super::can_change_branch(s) || unavailable.is_some()).on_press(resume(true)).build(t));
     kit::Dialog::new("git-default-branch", title)
         .open(true)
         .width(576.0)

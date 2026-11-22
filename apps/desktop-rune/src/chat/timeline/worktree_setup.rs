@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rune::{El, col, icon, row, text};
+use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use super::rows::{array, duration};
@@ -262,15 +262,15 @@ fn stage_icon(status: &str, t: &T) -> El {
         "skipped" => &icons::MINUS,
         _ => &icons::CIRCLE,
     };
-    icon(glyph, 14.0).color(t.c.icon_muted.alpha_mul(if status == "pending" { 0.4 } else { 1.0 }))
+    icon(glyph, 16.0).color(t.c.icon_muted.alpha_mul(if status == "pending" { 0.4 } else { 1.0 }))
 }
 
 fn stage_color(status: &str, t: &T) -> rune::Color {
     match status {
         "failed" => t.c.error_foreground,
         "warning" => t.c.warning_foreground,
-        "pending" => t.c.muted_foreground.alpha_mul(0.4),
-        _ => t.c.muted_foreground,
+        "pending" => t.c.contrast_secondary_label.alpha_mul(0.4),
+        _ => t.c.contrast_secondary_label,
     }
 }
 
@@ -287,17 +287,20 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     let mut card = col().w_full().label("Worktree setup");
     if !running && s(snapshot, "phase") != "done" {
         let tone = if s(snapshot, "phase") == "failed" { t.c.error_foreground } else { t.c.muted_foreground };
+        // SetupHeaderRow: a 24px row under a divider, then the stages 6px below.
         card = card.child(
-            row()
-                .w_full()
-                .h(24.0)
-                .px(4.0)
-                .mb(6.0)
-                .gap(8.0)
-                .center_y()
-                .child(text(header_label(snapshot)).font(theme::TEXT_SM).color(tone).truncate().shrink().min_w(0.0))
-                .child(rune::spacer())
-                .children(elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now).map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
+            col().w_full().pt(4.0).mb(6.0).child(
+                row()
+                    .w_full()
+                    .h(24.0)
+                    .px(4.0)
+                    .gap(8.0)
+                    .center_y()
+                    .child(text(header_label(snapshot)).font(theme::TEXT_SM).color(tone).truncate().shrink().min_w(0.0))
+                    .child(rune::spacer())
+                    .children(elapsed(s(snapshot, "startedAt"), s(snapshot, "endedAt"), false, now).map(|e| text(e).font(theme::TEXT_XS).color(t.c.muted_foreground))),
+            )
+            .child(el().w_full().h(1.0).mt(8.0).fill(t.c.border.alpha_mul(0.6))),
         );
     }
     let script = &snapshot["setupScript"];
@@ -313,13 +316,14 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         let ended = if s(stage, "endedAt").is_empty() { s(snapshot, "endedAt") } else { s(stage, "endedAt") };
         let time = (!matches!(status, "pending" | "skipped")).then(|| elapsed(s(stage, "startedAt"), ended, running, now)).flatten();
         card = card.child(
+            // WorkLogRow: py-0.5 around a 24px line, px-0.5, a 24px icon lane, gap-1.5.
             row()
                 .w_full()
                 .h(28.0)
-                .px(4.0)
-                .gap(12.0)
+                .px(2.0)
+                .gap(6.0)
                 .center_y()
-                .child(row().w(16.0).center().child(stage_icon(status, t)))
+                .child(row().size(24.0, 24.0).center().child(stage_icon(status, t)))
                 .child(text(label).font(theme::TEXT_SM).color(stage_color(status, t)).truncate().shrink().min_w(0.0))
                 .child(rune::spacer())
                 .children(trailing.map(|d| text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().shrink().min_w(0.0)))
@@ -329,9 +333,9 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
             && let Some((lines, failed)) = tail(snapshot)
         {
             let (border, fill, fg) = if failed {
-                (t.c.destructive.alpha_mul(0.2), t.c.destructive.alpha_mul(0.06), t.c.error_foreground)
+                (t.c.destructive.alpha_mul(0.2), t.c.error_surface, t.c.error_foreground)
             } else {
-                (t.c.border, t.c.secondary, t.c.muted_foreground)
+                (t.c.border, t.c.code_background, t.c.muted_foreground)
             };
             card = card.child(
                 col()
@@ -351,7 +355,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     }
     let open = app.ui.chat.timeline.worktree.details.contains(thread);
     let details_thread = thread.to_owned();
-    let mut actions = row().ml(18.0).mt(2.0).gap(2.0).center_y().flex_wrap().child(
+    let mut actions = row().ml(19.0).mt(2.0).gap(2.0).center_y().flex_wrap().child(
         Button::new("Details")
             .variant("ghost-muted")
             .size("xs")
@@ -376,16 +380,6 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         );
     }
     if running {
-        let cancel_thread = thread.to_owned();
-        actions = actions.child(
-            Button::new("Cancel")
-                .variant("ghost-muted")
-                .size("xs")
-                .icon(&icons::X)
-                .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
-                .on_press(move |app: &mut App| cancel(app, &cancel_thread))
-                .build(t),
-        );
         let local_thread = thread.to_owned();
         actions = actions.child(
             Button::new("Work locally")
@@ -394,6 +388,16 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
                 .icon(&icons::LAPTOP)
                 .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
                 .on_press(move |app: &mut App| work_locally(app, &local_thread))
+                .build(t),
+        );
+        let cancel_thread = thread.to_owned();
+        actions = actions.child(
+            Button::new("Cancel")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::X)
+                .disabled(app.ui.chat.timeline.worktree.cancelling.contains_key(thread))
+                .on_press(move |app: &mut App| cancel(app, &cancel_thread))
                 .build(t),
         );
     }
