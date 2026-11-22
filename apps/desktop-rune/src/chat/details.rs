@@ -26,6 +26,7 @@ pub mod pr;
 pub mod run_on;
 pub mod scripts;
 pub mod servers;
+pub(crate) mod strip;
 
 #[derive(Default)]
 pub struct Ui {
@@ -34,6 +35,8 @@ pub struct Ui {
     /// The thread whose card is open as a popover, when the lane is too narrow for it inline.
     popover: Option<String>,
     pub menu: Option<Menu>,
+    /// The context strip control the open run context or branch menu opened from.
+    strip: Option<&'static str>,
     /// Refs from `vcs.listRefs` for `refs_query`, page after page; `None` while the first loads.
     refs: Option<Vec<Ref>>,
     refs_query: String,
@@ -474,6 +477,7 @@ fn menu_row(t: &T, glyph: Option<El>, label: &str, on_press: Option<impl Fn(&mut
 
 fn toggle_menu(s: &mut App, menu: Menu) {
     let ui = &mut s.ui.chat.details;
+    ui.strip = None;
     ui.menu = if ui.menu == Some(menu) { None } else { Some(menu) };
     if ui.menu == Some(Menu::Git) {
         git::refresh(s);
@@ -1467,7 +1471,12 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             ("details-editor-menu", list)
         }
     };
-    Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, close))
+    // From the context strip the run context and branch menus open upward, as BranchToolbar's do.
+    let list = match s.ui.chat.details.strip.filter(|_| matches!(which, Menu::Branch | Menu::RunContext)) {
+        Some(at) => list.anchored(at, Side::Top, if at == strip::BRANCH { Align::End } else { Align::Start }, 4.0),
+        None => list.anchored(anchor, Side::Bottom, Align::End, 4.0),
+    };
+    Some(list.modal(true, close))
 }
 
 fn group_label(t: &T, label: &str) -> El {
