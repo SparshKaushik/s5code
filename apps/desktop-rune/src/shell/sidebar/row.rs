@@ -159,9 +159,8 @@ fn place(li: El, rc: &RowCtx) -> El {
 /// The press/drag/menu wiring every row shares: a click opens (Cmd toggles, Shift extends the
 /// selection), a drag past `DRAG_DISTANCE` moves it, a secondary press opens the menu.
 fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>) -> El {
-    let (id, hid, mid, fid) = (th.id.clone(), th.id.clone(), th.id.clone(), th.id.clone());
-    e.key(format!("sb-row-{}", th.id))
-        .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| super::drop_files(s, &fid, files))
+    let (id, hid, mid) = (th.id.clone(), th.id.clone(), th.id.clone());
+    super::drop_target(e.key(format!("sb-row-{}", th.id)), &th.id)
         .cursor(Cursor::Pointer)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.sb.ring)
@@ -426,7 +425,8 @@ fn surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: 
         let e = e.fill(t.sb.sidebar_row_active);
         if t.dark { e } else { e.border(1.0, t.sb.sidebar_border.alpha_mul(0.7)) }
     } else if selected {
-        e.fill(t.sb.sidebar_row_selected)
+        let e = e.fill(t.sb.sidebar_row_selected);
+        if t.dark { e } else { e.border(1.0, t.sb.sidebar_border.alpha_mul(0.7)) }
     } else if hovered {
         e.fill(t.sb.sidebar_row_hover)
     } else {
@@ -561,7 +561,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             body = body.child(line2);
         }
     }
-    let mut e = row_surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some(), draft);
+    let file_over = ui.drop_over.as_deref() == Some(th.id.as_str());
+    let mut e = super::drop_ring(row_surface(body.w_full(), t, active, selected, hovered || file_over, rc.dragging.is_some(), draft), t, file_over);
     if receded && status == Status::Working && !hovered {
         e = e.opacity(0.7);
     }
@@ -725,7 +726,8 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         None if two_line => col().px(10.0).py(6.0).pl(36.0).child(r.w_full()),
         None => r,
     };
-    let e = row_surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some(), draft);
+    let file_over = ui.drop_over.as_deref() == Some(th.id.as_str());
+    let e = super::drop_ring(row_surface(body.w_full(), t, active, selected, hovered || file_over, rc.dragging.is_some(), draft), t, file_over);
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
