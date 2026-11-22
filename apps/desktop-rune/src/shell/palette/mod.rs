@@ -1069,7 +1069,7 @@ fn listed(thread: &serde_json::Value) -> bool {
 
 /// `findForMessageMatch`: the snippet's own spelling of the whole query when it appears there,
 /// else of its longest word, preferring a whole-word occurrence.
-fn find_query(snippet: &str, query: &str) -> String {
+pub(crate) fn find_query(snippet: &str, query: &str) -> String {
     use crate::chat::timeline::find::find_plain;
     let phrase = query.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Some(r) = find_plain(snippet, &phrase).into_iter().next().filter(|_| phrase.contains(' ')) {
@@ -1080,6 +1080,14 @@ fn find_query(snippet: &str, query: &str) -> String {
     let ranges = find_plain(snippet, word);
     let whole = ranges.iter().find(|r| !snippet[r.end..].chars().next().is_some_and(char::is_alphanumeric)).or(ranges.first());
     whole.map_or_else(|| word.to_string(), |r| snippet[r.clone()].to_string())
+}
+
+/// `openThreadFindOnQuery` on the open thread.
+pub(crate) fn open_find(s: &mut App, query: String) {
+    let find = &mut s.ui.chat.timeline.find;
+    find.edit = rune::TextEdit::new(query);
+    find.active = 0;
+    crate::chat::timeline::find::open(s);
 }
 
 /// `isThreadSearchPending`: message search is debouncing or in flight for a root query.
@@ -1670,10 +1678,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         }
         Action::FindMessage(thread, query) => {
             execute(s, Action::Navigate(Route::Thread(thread)), tx);
-            let find = &mut s.ui.chat.timeline.find;
-            find.edit = rune::TextEdit::new(query);
-            find.active = 0;
-            crate::chat::timeline::find::open(s);
+            open_find(s, query);
         }
         Action::ProjectSettings(project) => {
             s.ui.settings.project = Some(project);

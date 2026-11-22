@@ -132,6 +132,8 @@ pub struct Ui {
     pub drafts: drafts::Ui,
     /// The server's message matches for a search: (query, thread ids).
     pub content: (String, Vec<String>),
+    /// Each matched thread's first message match (`threadId`, `snippet`, `source`), by `content`.
+    content_matches: Vec<serde_json::Value>,
     content_due: Option<(i64, String)>,
     /// One request per connected environment, and the query they answer.
     content_req: Option<(Vec<u64>, String)>,
@@ -143,10 +145,35 @@ impl Ui {
     pub fn content_hits(&self) -> &[String] {
         if self.content.0 == self.search.text.trim() { &self.content.1 } else { &[] }
     }
+
+    /// The message match a result row shows and opens find on, for the current query.
+    pub fn content_match(&self, thread: &str) -> Option<&serde_json::Value> {
+        (self.content.0 == self.search.text.trim()).then_some(())?;
+        self.content_matches.iter().find(|m| m["threadId"] == thread)
+    }
+
+    /// `threadSearch.isPending`: message search is debouncing or in flight for the query.
+    pub fn content_pending(&self) -> bool {
+        let query = self.search.text.trim();
+        self.content_due.as_ref().is_some_and(|d| d.1 == query) || self.content_req.as_ref().is_some_and(|r| r.1 == query)
+    }
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("sidebar-home", scene_home),
+    // Search with message matches: a title hit with its excerpt, and a thread found only by one.
+    ("sidebar-search-excerpts", |s| {
+        scene_home(s);
+        let hit = |s: &App, title: &str| thread_titled(s, title).unwrap_or_default();
+        let (showcase, todo) = (hit(s, "Replay showcase"), hit(s, "New thread"));
+        let ui = &mut s.ui.shell.sidebar;
+        ui.search = TextEdit::new("replay turn");
+        ui.content = ("replay turn".into(), vec![showcase.clone(), todo.clone()]);
+        ui.content_matches = vec![
+            json!({"threadId": showcase, "source": "assistant", "snippet": "…the replay finished its last turn without errors"}),
+            json!({"threadId": todo, "source": "user", "snippet": "Can you replay the previous turn?"}),
+        ];
+    }),
     ("sidebar-selected", |s| {
         scene_home(s);
         if let Some(id) = thread_titled(s, "Replay showcase") {
@@ -1040,10 +1067,12 @@ fn poll_content(s: &mut App) -> bool {
     let changed = !answered.is_empty();
     if changed && ui.content.0 != q {
         ui.content = (q.clone(), vec![]);
+        ui.content_matches.clear();
     }
     for reply in answered {
         let matches = reply.ok().and_then(|v| v["matches"].as_array().cloned()).unwrap_or_default();
         ui.content.1.extend(matches.iter().filter_map(|m| m["threadId"].as_str().map(str::to_string)));
+        ui.content_matches.extend(matches);
     }
     if !waiting.is_empty() {
         ui.content_req = Some((waiting, q));
@@ -1297,6 +1326,17 @@ fn bound_key(s: &mut App, e: &KeyEvent, editable: bool) -> bool {
     true
 }
 
+/// `selectThreadSearchResult`: opens the thread, and find on its message match as the palette does.
+pub(crate) fn open_result(s: &mut App, id: &str) {
+    let ui = &s.ui.shell.sidebar;
+    let find = ui.content_match(id).map(|m| crate::shell::palette::find_query(crate::data::s(m, "snippet"), ui.search.text.trim()));
+    clear_search(s);
+    open_thread(s, id);
+    if let Some(query) = find {
+        crate::shell::palette::open_find(s, query);
+    }
+}
+
 fn clear_search(s: &mut App) {
     let ui = &mut s.ui.shell.sidebar;
     ui.search = TextEdit::default();
@@ -1380,8 +1420,7 @@ fn search_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Up => ui.highlight = ui.highlight.saturating_sub(1),
         Key::Enter => {
             if let Some(id) = hits.get(ui.highlight).cloned() {
-                clear_search(s);
-                open_thread(s, &id);
+                open_result(s, &id);
             }
         }
         _ => return false,
@@ -1520,6 +1559,20 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn enter_on_a_message_match_opens_find_on_the_snippets_spelling() {
+        let mut s = App::new();
+        let id = crate::data::s(&s.state().threads[0], "id").to_string();
+        s.ui.shell.sidebar.search = TextEdit::new("needle");
+        s.ui.shell.sidebar.content = ("needle".into(), vec![id.clone()]);
+        s.ui.shell.sidebar.content_matches = vec![json!({"threadId": id, "snippet": "a Needle here", "source": "user"})];
+        assert!(!s.ui.shell.sidebar.content_pending());
+        open_result(&mut s, &id);
+        assert!(matches!(&s.route, Route::Thread(open) if *open == id));
+        assert!(s.ui.shell.sidebar.search.text.is_empty());
+        assert_eq!(s.ui.chat.timeline.find.edit.text, "Needle");
     }
 
     #[test]
