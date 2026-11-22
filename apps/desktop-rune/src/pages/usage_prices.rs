@@ -714,6 +714,11 @@ pub(super) fn checking_scene(s: &mut App) {
 
 /// The `usage-prices-read-only` scene: this machine's session lacks `settings:write`, so saving a
 /// new price fails there.
+/// Scenes: the "Apply to" menu open.
+pub(super) fn apply_menu_scene(s: &mut App) {
+    ui(s).menu = true;
+}
+
 /// Scenes: the new row's model ID being typed, its suggestions open.
 pub(super) fn suggestions_scene(s: &mut App) {
     let u = ui(s);

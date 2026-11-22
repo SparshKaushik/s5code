@@ -1068,6 +1068,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         usage_prices::open(s, Some("kimi"));
         usage_prices::suggestions_scene(s);
     }),
+    ("usage-prices-apply-menu", |s| {
+        open_usage(s, "cost");
+        usage_prices::open(s, None);
+        usage_prices::apply_menu_scene(s);
+    }),
     ("usage-prices-read-only", |s| {
         open_usage(s, "cost");
         usage_prices::read_only_scene(s);
