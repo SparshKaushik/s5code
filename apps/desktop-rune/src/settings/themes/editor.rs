@@ -152,6 +152,26 @@ pub fn create(s: &mut App, dark: bool) {
     open(s, template, dark, false);
 }
 
+/// Scenes: the editor open on a builtin's copy, picking from the app, or moved and resized with
+/// the accent field selected.
+pub(crate) fn scene(s: &mut App, state: &str) {
+    let template = builtins().first().cloned().unwrap_or_else(|| json!({}));
+    edit(s, template, true);
+    let session = session_mut(s);
+    match state {
+        "inspecting" => {
+            session["inspecting"] = json!(true);
+            session["pointer"] = json!([180.0, 220.0]);
+        }
+        "resized" => {
+            session["pos"] = json!([420.0, 48.0]);
+            session["size"] = json!([560.0, 600.0]);
+            session["selected"] = json!("accent");
+        }
+        _ => {}
+    }
+}
+
 fn close(s: &mut App) {
     s.ui.settings.theme_editor = None;
 }

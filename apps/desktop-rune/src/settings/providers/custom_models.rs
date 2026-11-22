@@ -258,6 +258,12 @@ fn same_slug(raw: &Value, slug: &str) -> bool {
     raw.as_str().or(raw["slug"].as_str()).map(str::trim) == Some(slug)
 }
 
+pub fn scene_open_preset(s: &mut App, option: usize) {
+    if let Some(draft) = s.ui.settings.providers_ui.editing.as_mut() {
+        draft.preset_open = Some(option);
+    }
+}
+
 /// The pencil: opens the editor on a custom model, or closes it when it is already open there.
 pub fn toggle(s: &mut App, id: &str, slug: &str) {
     if s.ui.settings.providers_ui.editing.as_ref().is_some_and(|d| d.slug == slug) {

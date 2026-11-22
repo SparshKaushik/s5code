@@ -702,6 +702,13 @@ pub(super) fn send_settings(s: &mut App, payload: Value) -> Option<u64> {
     Some(id)
 }
 
+/// Scenes: the custom model editor on `slug` with option `open`'s preset menu open.
+pub(super) fn scene_custom_model(s: &mut App, slug: &str, open: usize) {
+    let id = s.ui.settings.provider.clone().unwrap_or_default();
+    custom_models::toggle(s, &id, slug);
+    custom_models::scene_open_preset(s, open);
+}
+
 /// Whether this session may add, edit, or remove provider instances.
 pub(super) fn can_manage(s: &App) -> bool {
     !usage::read_only(s)

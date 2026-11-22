@@ -1538,7 +1538,43 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-providers-secrets-light", |s| providers_secrets(s, true, "codex_work")),
     ("settings-providers-password", |s| providers_secrets(s, false, "opencode")),
     ("settings-providers-password-light", |s| providers_secrets(s, true, "opencode")),
+    ("settings-theme-editor", |s| theme_editor_scene(s, "open")),
+    ("settings-theme-editor-inspecting", |s| theme_editor_scene(s, "inspecting")),
+    ("settings-theme-editor-resized", |s| theme_editor_scene(s, "resized")),
+    ("settings-providers-codex-managed", providers_codex_managed),
+    ("settings-providers-custom-model-options", providers_custom_model_options),
 ];
+
+fn theme_editor_scene(s: &mut App, state: &str) {
+    scene(s, "appearance");
+    themes::editor_scene(s, state);
+}
+
+/// A managed Codex instance signed in with ChatGPT: the account row and Manage usage.
+fn providers_codex_managed(s: &mut App) {
+    providers_scene(s, false, "codex");
+    stage_settings(s, json!({"providerInstances": {"codex": {"driver": "codex", "enabled": true, "config": {"enabled": true, "setupMode": "managed"}}}}));
+    if let crate::data::Source::Fixture(st) = &mut s.src
+        && let Some(providers) = st.config.as_mut().and_then(|c| c["providers"].as_array_mut())
+        && let Some(codex) = providers.iter_mut().find(|p| p["instanceId"] == "codex")
+    {
+        codex["auth"] = json!({"status": "authenticated", "email": "you@example.com"});
+        codex["setup"] = json!({"canAuthenticate": true, "canInstall": true});
+    }
+}
+
+/// A custom model with options: each option's preset menu, the second one open.
+fn providers_custom_model_options(s: &mut App) {
+    providers_scene(s, false, "claudeAgent");
+    let entry = json!({"slug": "claude-sonnet-5-preview", "name": "Sonnet 5 preview", "capabilities": {"optionDescriptors": [
+        {"id": "thinking", "label": "Thinking", "type": "boolean", "currentValue": true},
+        {"id": "effort", "label": "Effort", "type": "select", "options": [{"id": "low", "label": "Low"}, {"id": "high", "label": "High", "isDefault": true}]}
+    ]}});
+    stage_settings(s, json!({"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "config": {"customModels": [entry]}}}}));
+    let ui = &mut s.ui.settings.providers_ui;
+    ui.scene_bottom = true;
+    providers::scene_custom_model(s, "claude-sonnet-5-preview", 1);
+}
 
 /// The providers page with model preferences and a second Codex instance staged.
 fn providers_scene(s: &mut App, light: bool, selected: &str) {
