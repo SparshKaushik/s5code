@@ -40,7 +40,7 @@ mod scope;
 pub mod search;
 pub(crate) mod snapshots;
 mod snooze;
-mod source_control;
+pub(crate) mod source_control;
 pub(crate) mod storage;
 pub(crate) mod browser_profiles;
 mod diagnostics;

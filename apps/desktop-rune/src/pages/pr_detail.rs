@@ -92,6 +92,8 @@ pub struct Ui {
     pub meta: super::pr_meta::Ui,
     /// The header's condensed state per tab, which the scrollers set (condensedByTab).
     pub(super) condense: Arc<Condense>,
+    /// `sourceControl.appAccess` for the repository: what was asked, the request, the status.
+    app_access: (String, Option<u64>, Option<String>),
 }
 
 /// Bits by tab, and the offset that keeps the content still once a header condenses.
@@ -209,6 +211,7 @@ pub fn poll(s: &mut App) -> bool {
     let mut changed = release_confirms(ui(s), crate::data::now_ms(), blurred);
     changed |= poll_checkout(s);
     changed |= live_refresh(s, on);
+    changed |= sync_app_access(s);
     if !on {
         return changed;
     }
@@ -491,6 +494,75 @@ fn confirm_catcher(s: &App, overlays: &mut Vec<El>) {
         let hole = el().key("pr-confirm-hole").size(w, h).anchored(key, rune::Side::Bottom, rune::Align::Start, -h).cursor(Cursor::Pointer);
         overlays.push(hole.on_press_tx(move |s: &mut App, tx: &mut Tx| arm_or_run(s, action, tx)));
     }
+}
+
+/// SourceControlAppAccessNotice's query: asked once the environment has the GitHub app signed in
+/// on the pull request's host, else nothing (the env, host and repository it reads).
+fn app_access_input(s: &App, entry: &Value) -> Option<(String, Value)> {
+    let host = entry["host"].as_str().unwrap_or("github.com").to_lowercase();
+    let github = crate::panel::pull_requests::provider(field(entry, "url")) == "github" || entry["provider"] == "github";
+    if !github || host != "github.com" || field(entry, "repository").is_empty() {
+        return None;
+    }
+    let env = crate::env::of(s, entry);
+    let settings = crate::env::source(s, &env).and_then(|src| src.state().config.as_ref()).map(|c| &c["settings"]);
+    let signed_in = settings.and_then(|v| v["sourceControlHosts"]["github"]["signIns"][host.as_str()].as_str()).is_some_and(|v| !v.is_empty());
+    signed_in.then(|| (env, json!({"provider": "github", "host": host, "repository": field(entry, "repository")})))
+}
+
+fn sync_app_access(s: &mut App) -> bool {
+    let wanted = s.ui.pages.detail.entry.as_ref().and_then(|e| app_access_input(s, e));
+    let asked = wanted.as_ref().map(|(env, input)| format!("{env}\0{input}")).unwrap_or_default();
+    if ui(s).app_access.0 != asked {
+        let id = wanted.as_ref().and_then(|(env, input)| crate::env::net_of(s, env).map(|net| net.request("sourceControl.appAccess", input.clone())));
+        ui(s).app_access = (asked, id, None);
+        return true;
+    }
+    let (Some(id), Some((env, _))) = (ui(s).app_access.1, wanted) else { return false };
+    let Some(reply) = crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) else { return false };
+    let u = ui(s);
+    u.app_access.1 = None;
+    u.app_access.2 = reply.ok().and_then(|v| v["status"].as_str().map(str::to_string));
+    true
+}
+
+/// The app isn't installed on the repository's owner, so its requests use the user's own login.
+fn app_access_notice(s: &App, t: &T, d: &Value) -> Option<El> {
+    if s.ui.pages.detail.app_access.2.as_deref() != Some("not-covered") {
+        return None;
+    }
+    let repository = field(d, "repository");
+    let owner = repository.split('/').next().unwrap_or(repository).to_string();
+    let muted = t.c.muted_foreground;
+    let app = crate::settings::source_control::APP_NAME;
+    let lead = format!("{app} isn\u{2019}t installed on ");
+    let start = lead.len();
+    let line = text(format!("{lead}{owner}, so requests here use your own GitHub login and its lower rate limit."))
+        .color(muted)
+        .spans(vec![rune::Span::new(start, start + owner.len()).color(t.c.foreground)]);
+    let install = kit::Button::new(format!("Install on {owner}"))
+        .variant("link")
+        .size("xs")
+        .build(t)
+        .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.foreground))
+        .role("link")
+        .on_press_tx(|_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(crate::settings::source_control::APP_INSTALL);
+        });
+    Some(
+        row()
+            .key("pr-app-access")
+            .role("note")
+            .w_full()
+            .px(16.0)
+            .py(8.0)
+            .gap(10.0)
+            .center_y()
+            .fill(t.c.muted.alpha_mul(0.4))
+            .child(icon(&i::INFO, 16.0).color(muted))
+            .child(line.font(theme::TEXT_XS).grow(1.0).shrink().min_w(0.0).wrap())
+            .child(install),
+    )
 }
 
 /// An environment the checkout and handoffs can run on (PickableEnvironment).
@@ -1114,6 +1186,9 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let d = u.detail.as_ref().unwrap_or(entry);
     let header = if u.condense.on(u.tab) { condensed_header(s, t, d, overlays) } else { header_body(s, t, d, overlays).key(FOLD) };
     panel = panel.child(header).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
+    if let Some(notice) = app_access_notice(s, t, d) {
+        panel = panel.child(notice).child(rule(t));
+    }
     if u.tab == 2 {
         let panel = panel.child(code(s, t, overlays)).children(super::pr_edit::composer(s, t, d, overlays));
         confirm_catcher(s, overlays);
@@ -2964,6 +3039,23 @@ mod tests {
         assert!(poll_checkout(&mut s));
         assert_eq!(s.ui.chat.home.workspace.as_ref().map(|w| w.0.as_str()), Some("pb"), "the draft opens in the picked environment's project");
         assert_eq!(s.ui.env.active, "box", "and the window switches to that environment");
+    }
+
+    #[test]
+    fn app_access_is_asked_only_where_the_github_app_is_signed_in() {
+        let mut s = App::new();
+        let mut remote = crate::data::empty_state();
+        remote.config = Some(json!({"settings": {"sourceControlHosts": {"github": {"signIns": {"github.com": "redacted"}}}}}));
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(remote));
+        let entry = |url: &str, host: &str| json!({"url": url, "host": host, "repository": "acme/app", "_environment": "box"});
+        let pr = "https://github.com/acme/app/pull/7";
+        assert_eq!(app_access_input(&s, &entry(pr, "GitHub.com")), Some(("box".into(), json!({"provider": "github", "host": "github.com", "repository": "acme/app"}))));
+        assert_eq!(app_access_input(&s, &entry(pr, "github.example.com")), None, "the app reaches github.com only");
+        assert_eq!(app_access_input(&s, &entry("https://gitlab.com/acme/app/-/merge_requests/7", "gitlab.com")), None);
+        if let Some(crate::data::Source::Fixture(st)) = crate::env::source_mut(&mut s, "box") {
+            st.config = Some(json!({"settings": {"sourceControlHosts": {"github": {"signIns": {"github.com": ""}}}}}));
+        }
+        assert_eq!(app_access_input(&s, &entry(pr, "github.com")), None, "signed out, there is nothing to ask");
     }
 
     #[test]
