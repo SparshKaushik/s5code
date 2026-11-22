@@ -534,7 +534,8 @@ fn stepped(position: Option<usize>, len: usize, delta: isize) -> usize {
 /// below the focused field once it is typed in or Down is pressed, and picking one replaces the
 /// text. `Suggestions::new("models", &s.hints, &s.edit, &values, |s| &mut s.hints, |s| &mut s.edit)
 /// .on_pick(|s, value, tx| ...).build(field, &kit, &mut layer)`, where `field` is the input that
-/// edits `s.edit`; its own Enter still submits while nothing is highlighted.
+/// edits `s.edit`; its own Enter still submits while nothing is highlighted. The list anchors
+/// to the field, so `layer` must land after the field's own layer (a dialog's included).
 pub struct Suggestions<S> {
     key: String,
     state: ComboboxState,

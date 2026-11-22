@@ -748,6 +748,8 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         return;
     }
     let k = kit::theme(t);
+    // Popups anchor to earlier elements, so the dialog's own go after the dialog.
+    let mut popups = Vec::new();
     let all = targets(s);
     let selected = chosen(u, &all);
     let muted = t.c.muted_foreground;
@@ -811,7 +813,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
                 .gap(8.0)
                 .center_y()
                 .child(text("Apply to").font(theme::SM_MEDIUM).color(t.c.foreground))
-                .child(apply.build(&k, overlays))
+                .child(apply.build(&k, &mut popups))
                 .child(spacer())
                 .child(text("USD / million tokens").font(theme::TEXT_XS).color(muted)),
         );
@@ -822,7 +824,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         let mixed = if selected.len() > 1 { " Mixed cells keep each environment\u{2019}s rate until you edit them." } else { "" };
         let keys: Vec<String> = selected.iter().map(|t| t.key.clone()).collect();
         let hints = hints(&selected, super::usage::scanned_models(&s.ui.pages.usage, &keys));
-        body = body.child(table(t, u, &selected, &staged, &errors, locked, &hints, overlays)).child(
+        body = body.child(table(t, u, &selected, &staged, &errors, locked, &hints, &mut popups)).child(
             text(format!("Blank cache rates use the input price. Enter 0 for free tokens. A mapped model\u{2019}s usage counts as the model it maps to.{mixed}"))
                 .font(theme::TEXT_XS)
                 .color(muted)
@@ -880,6 +882,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         .open(true)
         .on_close(close)
         .build(t, overlays);
+    overlays.extend(popups);
 }
 
 const MODEL_W: f32 = 180.0;
