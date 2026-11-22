@@ -47,3 +47,15 @@ opt-level = 2
 [profile.release]
 codegen-units = 16
 incremental = true
+
+# Rune at the pinned rev plus one commit exposing full screen and maximize on `WindowHandle`
+# (SparshKaushik/rune `s5code/window-state`). Every Rune crate in the tree comes from the fork so
+# none mixes the two sources.
+[patch."https://github.com/anomalyco/rune"]
+rune = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-kit = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-mac = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-mermaid = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-motion = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-staging = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
+rune-taffy = { git = "https://github.com/SparshKaushik/rune", rev = "fc797d14747df0c9e9450d77a469c546a3efeb1f" }
