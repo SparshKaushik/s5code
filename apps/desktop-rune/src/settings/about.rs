@@ -77,6 +77,11 @@ fn updates_denial(policy: Option<&Value>) -> Option<String> {
     (policy["limits"]["updates"]["mode"] == "off").then(|| format!("{} manages T3 Code updates.", organization(policy)))
 }
 
+/// This machine's policy refusing app updates, for the desktop updater.
+pub(crate) fn managed_denial(s: &App) -> Option<String> {
+    updates_denial(primary_policy(s))
+}
+
 /// Web's update-track description when the policy allows only stable releases.
 fn nightly_denied(policy: &Value, selected: &str) -> String {
     format!(
@@ -185,14 +190,14 @@ pub fn view(s: &App, t: &T) -> El {
         ));
     }
     let denial = updates_denial(policy);
-    // Web's About version row: Electron's app update, which Rune builds have no feed for.
-    app.push(about_row(
-        t,
-        &format!("Version {}", env!("CARGO_PKG_VERSION")),
-        denial.as_deref().unwrap_or(crate::desktop::NO_UPDATE_FEED),
-        c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
-    )
-    .key(super::title_key("Version")));
+    // Web's About version row: this app's own update (`desktop::updates`).
+    let (status, next) = crate::desktop::updates::about(s);
+    let button = match next {
+        Some("Check for Updates") => c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
+        Some(label) => c::button(label, t).on_press(crate::desktop::updates::press),
+        None => c::press_if(c::button("Check for Updates", t), false, |_| {}),
+    };
+    app.push(about_row(t, &format!("Version {}", crate::desktop::updates::version()), &status, button).key(super::title_key("Version")));
     app.push(track_row(s, t, policy, denial.is_some()));
     // Web keeps this under Connections (`ServerUpdateAction`); here it names the server apart.
     let mut controls = row().gap(8.0).child(
@@ -427,13 +432,16 @@ fn switch_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     };
     let version = release["version"].as_str().unwrap_or_default().to_owned();
     let machines = awaiting(s, &channel);
-    let crosses_local = update_channel(env!("CARGO_PKG_VERSION")) != channel;
+    let crosses_local = update_channel(crate::desktop::updates::version()) != channel;
     let mut notes = Vec::new();
     if machines.is_empty() && !crosses_local {
         notes.push(format!("Every connected machine is already on {label}. This only saves the track."));
     }
     if crosses_local {
-        notes.push("This app's updates are off here, so reinstall it yourself to switch.".to_owned());
+        notes.push(match crate::desktop::updates::disabled(s) {
+            Some(reason) => format!("{reason} Reinstall this app yourself to switch."),
+            None => format!("This app checks the {label} track for its update after the switch."),
+        });
     }
     let mut body = col().w_full().gap(12.0);
     for note in notes {
@@ -473,6 +481,7 @@ fn switch_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 }
             }
             close_switch(s);
+            crate::desktop::updates::check(s, false);
         })
         .build(t);
     kit::Dialog::new("update-track-switch", format!("Switch to {label}?"))
