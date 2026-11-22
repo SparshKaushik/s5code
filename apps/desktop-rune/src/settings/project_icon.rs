@@ -153,7 +153,7 @@ pub fn set(s: &mut App, project: &str, favicon: Value, icon: Value) {
 const IMAGE_EXTS: [&str; 9] = ["avif", "gif", "icns", "ico", "jpg", "jpeg", "png", "svg", "webp"];
 
 /// Web's "Project icon" settings row: the current icon, the picker, a workspace image, and Reset.
-pub fn settings_row(t: &T, project: &Value) -> El {
+pub fn settings_row(s: &App, t: &T, project: &Value) -> El {
     let id = crate::data::s(project, "id").to_owned();
     let mut heading = row().gap(6.0).center_y().child(text("Project icon").font(theme::SM_MEDIUM).color(t.c.foreground));
     if !has_default(project) {
@@ -168,7 +168,7 @@ pub fn settings_row(t: &T, project: &Value) -> El {
         );
     }
     let chosen = project.clone();
-    let root = crate::data::s(project, "workspaceRoot").to_owned();
+    let files = (project.clone(), local(s, &id));
     row()
         .w_full()
         .px(16.0)
@@ -200,15 +200,160 @@ pub fn settings_row(t: &T, project: &Value) -> El {
                     kit::Button::new("Choose file")
                         .variant("outline")
                         .size("sm")
+                        .on_press(move |s: &mut App| open_files(s, &files.0, files.1))
                         .build(t)
-                        .label("Choose a project icon file")
-                        .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| choose_file(tx, id.clone(), root.clone())),
+                        .label("Choose a project icon file"),
                 ),
         )
 }
 
-/// Web lists the workspace's images; here the native dialog opens in the workspace and the pick
-/// is kept as a workspace-relative path, the only kind the server resolves.
+const SEARCH: &str = "projects.searchEntries";
+/// `PROJECT_FILE_PICKER_RESULT_LIMIT`.
+const SEARCH_LIMIT: u32 = 200;
+
+/// Whether the project's checkout is on this machine, where the native dialog can reach it.
+fn local(s: &App, project: &str) -> bool {
+    crate::env::owner(s, project) == crate::env::LOCAL
+}
+
+/// Web `ProjectFaviconPickerDialog`: the checkout's image files, searched on whichever machine
+/// holds it, so remote projects can pick one too.
+fn open_files(s: &mut App, project: &Value, local: bool) {
+    let mut query = TextEdit::new("");
+    query.focused = true;
+    s.ui.settings.icon_picker = Some(Draft {
+        project: crate::data::s(project, "id").to_owned(),
+        query,
+        files: Some(Files {
+            root: crate::data::s(project, "workspaceRoot").to_owned(),
+            title: crate::data::s(project, "title").to_owned(),
+            local,
+        }),
+        ..Draft::default()
+    });
+    s.ui.settings.results.remove(SEARCH);
+    s.ui.settings.error = None;
+    search(s);
+}
+
+/// Replies land in the settings results under `SEARCH`, in request order.
+fn search(s: &mut App) {
+    let Some(d) = s.ui.settings.icon_picker.as_ref() else { return };
+    let Some(files) = &d.files else { return };
+    let (project, root) = (d.project.clone(), files.root.clone());
+    let query: String = d.query.text.trim().chars().take(256).collect();
+    let payload = json!({"cwd": root, "query": query, "limit": SEARCH_LIMIT, "kind": "file", "imageOnly": true});
+    // Parked environments hand their replies to `App::src`, where settings polling takes them.
+    if let Some(id) = crate::env::net_for(s, &project).map(|net| net.request(SEARCH, payload)) {
+        s.ui.settings.pending.insert(id, SEARCH.into());
+    }
+}
+
+fn pick(s: &mut App, path: &str) {
+    let Some(project) = s.ui.settings.icon_picker.take().map(|d| d.project) else { return };
+    set(s, &project, json!(path), Value::Null);
+}
+
+fn found(s: &App) -> Vec<String> {
+    let entries = s.ui.settings.results.get(SEARCH).and_then(|r| r["entries"].as_array());
+    entries.into_iter().flatten().filter(|e| e["kind"] != "directory").map(|e| crate::data::s(e, "path").to_owned()).collect()
+}
+
+/// Web's `emptyMessage`.
+fn empty_message(query: &str, error: Option<&str>, pending: bool) -> String {
+    if let Some(error) = error {
+        return error.to_owned();
+    }
+    let message = match (pending, !query.trim().is_empty()) {
+        (true, true) => "Searching project files…",
+        (true, false) => "Indexing project files…",
+        (false, true) => "No matching image files.",
+        (false, false) => "No image files found.",
+    };
+    message.to_owned()
+}
+
+fn files_dialog(s: &App, t: &T, d: &Draft, files: &Files, layers: &mut Vec<El>) {
+    let close = |s: &mut App| s.ui.settings.icon_picker = None;
+    let paths = found(s);
+    let mut list = col().w_full().gap(2.0);
+    if paths.is_empty() {
+        let pending = s.ui.settings.pending.values().any(|m| m == SEARCH);
+        let error = if pending { None } else { s.ui.settings.error.as_deref() };
+        list = list.child(
+            el().w_full().py(32.0).center().child(text(empty_message(&d.query.text, error, pending)).font(theme::TEXT_SM).color(t.c.muted_foreground)),
+        );
+    } else {
+        list = list.child(text(files.title.clone()).font(theme::XS_MEDIUM).color(t.c.muted_foreground).px(8.0).py(6.0));
+        for path in paths {
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+            let chosen = path.clone();
+            list = list.child(
+                row()
+                    .key(format!("project-favicon-{path}"))
+                    .w_full()
+                    .px(8.0)
+                    .py(6.0)
+                    .gap(8.0)
+                    .center_y()
+                    .radius(6.0)
+                    .hover(t.c.accent)
+                    .cursor(Cursor::Pointer)
+                    .focusable(true)
+                    .role("button")
+                    .label(name.clone())
+                    .child(icon(&icons::IMAGE, 16.0).color(t.c.muted_foreground))
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .child(text(name).font(theme::TEXT_SM).color(t.c.foreground).truncate())
+                            .child(text(path).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate()),
+                    )
+                    .on_press(move |s: &mut App| pick(s, &chosen)),
+            );
+        }
+    }
+    let input = kit::Input::new(&d.query)
+        .placeholder("Search image files…")
+        .on_edit(|s: &mut App| &mut draft(s).query)
+        .on_change(|s: &mut App, _: &mut rune::Tx| search(s))
+        .on_submit(|s: &mut App, _| {
+            if let Some(first) = found(s).first().cloned() {
+                pick(s, &first);
+            }
+        })
+        .build(t)
+        .single_line();
+    let mut footer = row().w_full().gap(8.0).center_y();
+    if files.local {
+        let manager = if cfg!(target_os = "macos") {
+            "Finder"
+        } else if cfg!(target_os = "windows") {
+            "File Explorer"
+        } else {
+            "Files"
+        };
+        let (project, root) = (d.project.clone(), files.root.clone());
+        footer = footer.child(
+            kit::Button::new(format!("Open in {manager}"))
+                .variant("outline")
+                .build(t)
+                .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| choose_file(tx, project.clone(), root.clone())),
+        );
+    }
+    footer = footer.child(el().grow(1.0)).child(kit::Button::new("Close").variant("outline").on_press(close).build(t));
+    kit::Dialog::new("project-favicon", "Choose project icon")
+        .open(true)
+        .child(input)
+        .child(kit::scroll_area("project-favicon-files", col().w_full().max_h(320.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(list), t))
+        .child(footer)
+        .on_close(close)
+        .build(t, layers);
+}
+
+/// The local "Open in Finder" pick: the native dialog opens in the workspace and the pick is kept
+/// as a workspace-relative path, the only kind the server resolves.
 fn choose_file(tx: &mut rune::Tx, project: String, root: String) {
     let options = rune::FileDialogOptions {
         title: "Choose project icon".into(),
@@ -219,7 +364,10 @@ fn choose_file(tx: &mut rune::Tx, project: String, root: String) {
     tx.open_file(options, move |s: &mut App, picked: rune::FileDialogResult, _| {
         let Ok(Some(path)) = picked else { return };
         match workspace_relative(&root, &path) {
-            Some(relative) => set(s, &project, json!(relative), Value::Null),
+            Some(relative) => {
+                s.ui.settings.icon_picker = None;
+                set(s, &project, json!(relative), Value::Null);
+            }
             None => crate::shell::palette::toast(s, "Choose an image inside the project folder.", None),
         }
     });
@@ -241,6 +389,14 @@ pub struct Draft {
     emoji: String,
     query: TextEdit,
     custom: TextEdit,
+    /// "Choose file" searches the workspace's images in place of the icon picker.
+    files: Option<Files>,
+}
+
+struct Files {
+    root: String,
+    title: String,
+    local: bool,
 }
 
 const MODES: [&str; 3] = ["lucide", "emoji", "monogram"];
@@ -335,6 +491,9 @@ fn grid(cells: Vec<El>, t: &T) -> El {
 
 pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(d) = &s.ui.settings.icon_picker else { return };
+    if let Some(files) = &d.files {
+        return files_dialog(s, t, d, files, layers);
+    }
     let mode = MODES[d.mode];
     let size = ((464.0 - 4.0 - 9.0 * 4.0) / 10.0_f32).floor();
     let mut body = col().w_full().gap(16.0).child(

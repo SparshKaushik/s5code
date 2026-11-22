@@ -403,15 +403,14 @@ pub fn view(s: &App, t: &T) -> El {
     col().w_full().gap(32.0).child(c::section("Devices", device_rows(s, t, state), t)).child(sources(s, t, state))
 }
 
-fn copy(t: &T, key: &str, title: &str, reset: Option<El>, description: El, note: Option<&str>) -> El {
+fn copy(t: &T, key: &str, title: &str, reset: Option<El>, description: El, marker: Option<El>) -> El {
     col()
         .key(format!("copy-{key}"))
         .grow(1.0)
         .min_w(0.0)
         .gap(4.0)
-        .child(row().gap(6.0).center_y().child(text(title.to_owned()).key(super::title_key(title)).font(theme::SM_MEDIUM).color(t.c.foreground)).children(reset))
+        .child(row().gap(6.0).center_y().child(text(title.to_owned()).key(super::title_key(title)).font(theme::SM_MEDIUM).color(t.c.foreground)).children(marker).children(reset))
         .child(description)
-        .children(note.map(|note| text(note.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground)))
 }
 
 /// A description followed by its tool's version, which opens the version details.
@@ -518,9 +517,7 @@ fn device_rows(s: &App, t: &T, state: Option<&Value>) -> Vec<El> {
             .on_press(move |s: &mut App| super::scope::reset(s, key))
             .build(t)
     });
-    let note = project.then(|| {
-        if super::scope::customized(s, key) { "Overridden for this project" } else { "Inherited from environment" }
-    });
+    let marker = super::scope::marker(s, t, key);
     let agent = row()
         .key("row-agent-device-access")
         .w_full()
@@ -534,7 +531,7 @@ fn device_rows(s: &App, t: &T, state: Option<&Value>) -> Vec<El> {
             "Agents can use devices",
             reset,
             described(s, t, "New agent sessions can open and drive these devices. agent-device:", "agent", tools),
-            note,
+            marker,
         ))
         .child(control((pending == Some("agent")).then(|| spinner_label(t, pending_label(hub_status))), agent_switch));
 

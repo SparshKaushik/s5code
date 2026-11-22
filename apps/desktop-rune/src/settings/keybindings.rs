@@ -345,6 +345,27 @@ fn command_options(rows: &[Row]) -> Vec<String> {
     commands
 }
 
+/// Web's `KEYBINDING_SEARCH_ITEMS`: each static command's label, with its id and default keys as
+/// search terms. A command with no default binding has no row to land on.
+pub fn search_entries() -> Vec<(String, Vec<String>, bool)> {
+    let mut seen = HashSet::new();
+    let mut commands: Vec<String> = UNBOUND_COMMANDS
+        .iter()
+        .map(|c| c.to_string())
+        .chain(defaults().iter().map(|d| d.command.clone()))
+        .filter(|c| !c.starts_with("script.") && seen.insert(c.clone()))
+        .collect();
+    commands.sort_by(|a, b| when::locale_order(&label(a), &label(b)));
+    commands
+        .into_iter()
+        .map(|command| {
+            let keys: Vec<String> = defaults().iter().filter(|d| d.command == command).map(|d| d.shortcut.input()).collect();
+            let bound = !keys.is_empty();
+            (label(&command), std::iter::once(command).chain(keys).collect(), bound)
+        })
+        .collect()
+}
+
 /// `filterKeybindingRows`; `query` is already trimmed and lowercased.
 fn matches(r: &Row, query: &str) -> bool {
     query.is_empty()
@@ -728,7 +749,15 @@ fn binding_row(s: &App, t: &T, r: &Row, rows: &[Row], busy: Option<&str>) -> El 
         .gap(8.0)
         .center_y()
         .help(r.command.clone())
-        .child(text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child({
+            let title = text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground);
+            // A search result lands on the command's first row (web's `keybinding-{command}`).
+            if rows.iter().find(|other| other.command == r.command).is_some_and(|first| first.id == r.id) {
+                title.key(super::title_key(&name))
+            } else {
+                title
+            }
+        })
         .children((r.source != "Default").then(|| crate::kit::badge(r.source, "outline", "sm", t)));
     let mut controls = row()
         .gap(6.0)
@@ -756,7 +785,7 @@ fn binding_row(s: &App, t: &T, r: &Row, rows: &[Row], busy: Option<&str>) -> El 
     } else {
         controls.child(key_field(s, t, &r.id, &r.key, &draft.key, &seed, &format!("Keybinding for {name}")))
     };
-    settings_row(title, when_line(&r.id, &name, draft, &seed, t), controls)
+    super::pulsed(s, t, &name, settings_row(title, when_line(&r.id, &name, draft, &seed, t), controls))
 }
 
 fn new_row(s: &App, t: &T, rows: &[Row], busy: Option<&str>) -> El {

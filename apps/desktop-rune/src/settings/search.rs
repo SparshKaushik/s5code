@@ -32,6 +32,14 @@ pub fn items() -> &'static [Item] {
                 target: v["target"].as_str().map(str::to_owned),
                 secondary: v["secondary"] == true,
             })
+            .chain(super::keybindings::search_entries().into_iter().map(|(title, terms, bound)| Item {
+                id: format!("keybinding-{}", terms[0]),
+                title,
+                to: "keybindings".into(),
+                terms: terms.iter().map(|t| normalize(t)).collect(),
+                target: (!bound).then(|| "Keybindings".into()),
+                secondary: true,
+            }))
             .collect()
     })
 }
