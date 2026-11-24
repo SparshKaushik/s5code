@@ -60,6 +60,18 @@ Start Metro for an already verified dev client:
 vp run dev:client
 ```
 
+Metro keeps its transform cache between ordinary starts. If the cache itself is causing stale or
+invalid output, clear it for one development-client start:
+
+```bash
+vp run dev:client:reset
+```
+
+Run that reset once after installing or changing the Uniwind dependency patch. Cached transforms
+can otherwise reference its previous pnpm package path. Ordinary Metro starts still keep the cache.
+
+Component edits use Fast Refresh. See [mobile development lifecycle](../../docs/internals/13_mobile-development.md)
+before changing runtime ownership or refresh behavior.
 Build and run the local iOS dev client:
 
 ```bash

@@ -5,8 +5,18 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
-import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
+import {
+  injectMcpAppCookieBootstrap,
+  injectMcpAppDocumentBootstrap,
+  injectMcpAppThemeBootstrap,
+} from "@t3tools/shared/mcpApp";
 import { FILE_PREVIEW_SCROLL_SCRIPT } from "@t3tools/shared/htmlRender";
+import {
+  DESKTOP_READINESS_CHALLENGE_MAX_LENGTH,
+  DESKTOP_READINESS_CHALLENGE_PARAM,
+  DESKTOP_READINESS_PROOF_PATH,
+  desktopReadinessProof,
+} from "@t3tools/shared/desktopReadinessProof";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as ByteSize from "effect/ByteSize";
 import * as Context from "effect/Context";
@@ -23,12 +33,14 @@ import { cast, pipe } from "effect/Function";
 import {
   HttpClient,
   HttpClientResponse,
+  HttpEffect,
   HttpMiddleware,
   HttpRouter,
   HttpServerResponse,
   HttpServerRequest,
   HttpServerRespondable,
 } from "effect/http";
+import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
@@ -77,6 +89,13 @@ const isSafeInlineMediaMimeType = (mimeType: string): boolean =>
   DOWNLOAD_MIME_TYPE_PATTERN.test(mimeType) && /^(?:audio|video)\//i.test(mimeType);
 const isSafeInlineDocumentMimeType = (mimeType: string): boolean =>
   mimeType.toLowerCase() === "application/pdf" || mimeType.toLowerCase() === "text/html";
+
+// XML types render as documents, so they get the same policy as SVG.
+const isScriptableXmlPath = (filePath: string): boolean =>
+  Option.match(Mime.getType(filePath), {
+    onNone: () => false,
+    onSome: (mimeType) => /(?:\/xml(?:$|-)|\+xml$)/.test(mimeType),
+  });
 
 export function downloadContentDisposition(fileName?: string): string {
   if (fileName === undefined) {
@@ -135,7 +154,7 @@ export function assetResponseHeaders(
                 "Content-Security-Policy": HTML_CONTENT_SECURITY_POLICY,
               }
             : {}),
-    ...(!options?.download && lowerPath.endsWith(".svg")
+    ...(!options?.download && isScriptableXmlPath(lowerPath)
       ? { "Content-Security-Policy": SVG_CONTENT_SECURITY_POLICY }
       : {}),
   };
@@ -190,6 +209,8 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
       new TextDecoder().decode(bytes),
       injectMcpAppThemeBootstrap,
       injectMcpAppCookieBootstrap,
+      // Applied last so it is the document's first script.
+      injectMcpAppDocumentBootstrap,
       (html) => new TextEncoder().encode(html),
     );
     headers["Content-Length"] = String(body.byteLength);
@@ -272,52 +293,93 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
 });
 
+// The default body limit for API routes. Routes that take more set their own limit.
+export const API_MAX_BODY_BYTES = 1024 * 1024;
+export const layerApiBodyLimit = HttpRouter.middleware(
+  Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(API_MAX_BODY_BYTES)),
+).layer;
+
 export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {
   global: true,
 });
+
+function withVaryOrigin(
+  response: HttpServerResponse.HttpServerResponse,
+): HttpServerResponse.HttpServerResponse {
+  const existing = response.headers.vary;
+  if (
+    existing !== undefined &&
+    existing.split(",").some((token) => token.trim().toLowerCase() === "origin")
+  ) {
+    return response;
+  }
+  return HttpServerResponse.setHeader(
+    response,
+    "vary",
+    existing ? `${existing}, Origin` : "Origin",
+  );
+}
 
 export const layerBrowserApiCors = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const devOrigin = config.devUrl?.origin;
     // Chromium treats custom-scheme renderers as credentialed CORS clients, so dev
-    // and packaged servers echo known origins instead of `*`.
+    // and packaged servers echo known origins instead of `*`. Originless desktop/native
+    // requests in dev use the non-credentialed wildcard with Vary: Origin.
     // T3CODE_DEV_ALLOWED_ORIGINS adds dev origins such as a tailnet name or LAN IP.
-    const cors = HttpMiddleware.cors({
-      ...(devOrigin
-        ? {
-            allowedOrigins: [devOrigin, ...DESKTOP_RENDERER_ORIGINS, ...config.devAllowedOrigins],
-            credentials: true,
-          }
-        : {
-            allowedOrigins: (origin: string) => DESKTOP_RENDERER_ORIGIN_SET.has(origin),
-          }),
+    const wildcardCors = HttpMiddleware.cors({
       allowedMethods: browserApiCorsAllowedMethods,
       allowedHeaders: browserApiCorsAllowedHeaders,
       maxAge: 600,
     });
+    const packagedCors = HttpMiddleware.cors({
+      allowedOrigins: (origin: string) => DESKTOP_RENDERER_ORIGIN_SET.has(origin),
+      allowedMethods: browserApiCorsAllowedMethods,
+      allowedHeaders: browserApiCorsAllowedHeaders,
+      maxAge: 600,
+    });
+    const devCors = devOrigin
+      ? HttpMiddleware.cors({
+          allowedOrigins: [devOrigin, ...DESKTOP_RENDERER_ORIGINS, ...config.devAllowedOrigins],
+          credentials: true,
+          allowedMethods: browserApiCorsAllowedMethods,
+          allowedHeaders: browserApiCorsAllowedHeaders,
+          maxAge: 600,
+        })
+      : undefined;
     return HttpRouter.middleware(
       (httpEffect) => {
-        const withCors = cors(httpEffect);
+        const withWildcardCors = wildcardCors(httpEffect);
+        const withPackagedCors = packagedCors(httpEffect);
+        const withDevCors = devCors ? devCors(httpEffect) : undefined;
         return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
           if (request.url.split("?", 1)[0] === MCP_HTTP_PATH) return httpEffect;
-          if (devOrigin !== undefined) return withCors;
-          // Effect's CORS middleware applies ordinary response headers in a pre-response hook. Some
-          // packaged server adapters bypass that hook, while their OPTIONS path still works. Set the
-          // header directly as a fallback without replacing an origin already added upstream.
-          return withCors.pipe(
-            Effect.map((response) => {
-              if (Option.isSome(Headers.get(response.headers, "access-control-allow-origin"))) {
-                return response;
-              }
-              const origin = request.headers.origin;
-              return HttpServerResponse.setHeader(
-                response,
-                "access-control-allow-origin",
-                origin !== undefined && DESKTOP_RENDERER_ORIGIN_SET.has(origin) ? origin : "*",
-              );
-            }),
-          );
+          if (!withDevCors) {
+            // Effect's CORS middleware applies ordinary response headers in a pre-response hook. Some
+            // packaged server adapters bypass that hook, while their OPTIONS path still works. Set the
+            // header directly as a fallback without replacing an origin already added upstream.
+            return withPackagedCors.pipe(
+              Effect.map((response) => {
+                if (Option.isSome(Headers.get(response.headers, "access-control-allow-origin"))) {
+                  return response;
+                }
+                const origin = request.headers.origin;
+                return HttpServerResponse.setHeader(
+                  response,
+                  "access-control-allow-origin",
+                  origin !== undefined && DESKTOP_RENDERER_ORIGIN_SET.has(origin) ? origin : "*",
+                );
+              }),
+            );
+          }
+          if (request.headers.origin !== undefined) return withDevCors;
+          if (request.method === "OPTIONS") {
+            return Effect.map(withWildcardCors, withVaryOrigin);
+          }
+          return HttpEffect.appendPreResponseHandler((_request, response) =>
+            Effect.succeed(withVaryOrigin(response)),
+          ).pipe(Effect.andThen(withWildcardCors));
         });
       },
       { global: true },
@@ -376,6 +438,29 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
         return yield* serverEnvironment.getDescriptor;
       }, traceRelayRequest),
     );
+  }),
+);
+
+// Answers only for a launch that was handed a readiness secret, so the desktop app can tell the
+// backend it started from any other listener at the same address.
+export const layerDesktopReadinessProofRoute = HttpRouter.add(
+  "GET",
+  DESKTOP_READINESS_PROOF_PATH,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const secret = config.desktopReadinessSecret;
+    const challenge = Option.getOrUndefined(requestUrl(request))?.searchParams.get(
+      DESKTOP_READINESS_CHALLENGE_PARAM,
+    );
+    if (
+      secret === undefined ||
+      !challenge ||
+      challenge.length > DESKTOP_READINESS_CHALLENGE_MAX_LENGTH
+    ) {
+      return HttpServerResponse.empty({ status: 404 });
+    }
+    return HttpServerResponse.text(yield* desktopReadinessProof(secret, challenge));
   }),
 );
 
