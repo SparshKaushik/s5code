@@ -699,6 +699,7 @@ fn changed_sticky(app: &mut App) {
     push_items(app, "visibleTurnItems", vec![serde_json::json!({"position": 100, "item": reply})]);
     let files: Vec<_> = (1..=36).map(|n| serde_json::json!({"path": format!("src/handlers/route_{n:02}.rs"), "additions": n * 3, "deletions": n % 5})).collect();
     push_items(app, "checkpoints", vec![serde_json::json!({"runId": "scene-sticky-run", "appRunOrdinal": 99, "status": "ready", "files": files})]);
+    app.ui.chat.timeline.expanded.insert("changed-all:scene-sticky-run".into());
 }
 fn changed_expand_all(app: &mut App) {
     showcase(app);
