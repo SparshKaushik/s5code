@@ -325,7 +325,8 @@ fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: 
 
 /// Desktop notifications and the unread badge. macOS posts through Notification Center when the
 /// app runs from its bundle (else `osascript`, which can't report clicks) and badges the Dock tile;
-/// Linux uses `notify-send` and the launcher entry's count; Windows shows a PowerShell toast.
+/// Linux uses `notify-send` and the launcher entry's count; Windows shows a PowerShell toast and
+/// the taskbar button's overlay icon.
 mod os {
     /// macOS hands a clicked notification's thread back from any thread.
     pub fn listen(wake: rune::Waker) {
@@ -442,6 +443,29 @@ mod os {
             });
             return;
         }
+        // The toast's PowerShell stays to hear a click, which Windows raises only in the process that
+        // showed it; with no app id of our own, a later click in Action Center opens nothing.
+        if cfg!(target_os = "windows") {
+            use std::io::BufRead;
+            let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
+            std::thread::spawn(move || {
+                let mut command = std::process::Command::new("powershell");
+                command.args(["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]).env("S5_TOAST_TITLE", &title).env("S5_TOAST_BODY", &body);
+                command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+                #[cfg(windows)]
+                std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+                let Ok(mut child) = command.spawn() else { return };
+                let clicked = child.stdout.take().is_some_and(|out| std::io::BufReader::new(out).lines().map_while(Result::ok).any(|line| line.trim() == "activated"));
+                let _ = child.wait();
+                if clicked {
+                    super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
+                    if let Some(wake) = wake {
+                        wake();
+                    }
+                }
+            });
+            return;
+        }
         if rune_mac::notify::available() {
             rune_mac::notify::post(&rune_mac::notify::Notification::new(thread, title).body(body).info("thread", thread));
             return;
@@ -450,12 +474,6 @@ mod os {
             let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
             let mut c = std::process::Command::new("osascript");
             c.arg("-e").arg(format!("display notification {} with title {}", quote(body), quote(title)));
-            c
-        } else if cfg!(target_os = "windows") {
-            let mut c = std::process::Command::new("powershell");
-            c.args(["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]).env("S5_TOAST_TITLE", title).env("S5_TOAST_BODY", body);
-            #[cfg(windows)]
-            std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
             c
         } else {
             let mut c = std::process::Command::new("notify-send");
@@ -504,12 +522,20 @@ mod os {
     }
 
     /// The toast template, filled from the environment so no text is parsed as script. It posts as
-    /// PowerShell, the one app id Windows accepts unregistered, so a click opens nothing.
-    const WINDOWS_TOAST: &str = "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+    /// PowerShell, the one app id Windows accepts unregistered, then prints `activated` if it is
+    /// clicked within ten minutes. Moving to Action Center (a `TimedOut` dismissal) keeps waiting.
+    pub(super) const WINDOWS_TOAST: &str = "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
         $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);\
         $t=$x.GetElementsByTagName('text');[void]$t.Item(0).AppendChild($x.CreateTextNode($env:S5_TOAST_TITLE));\
         [void]$t.Item(1).AppendChild($x.CreateTextNode($env:S5_TOAST_BODY));\
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+        $n=[Windows.UI.Notifications.ToastNotification]::new($x);\
+        [void](Register-ObjectEvent -InputObject $n -EventName Activated -SourceIdentifier a);\
+        [void](Register-ObjectEvent -InputObject $n -EventName Dismissed -SourceIdentifier d);\
+        [void](Register-ObjectEvent -InputObject $n -EventName Failed -SourceIdentifier f);\
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($n);\
+        $end=(Get-Date).AddMinutes(10);\
+        while(($left=[int]($end-(Get-Date)).TotalSeconds) -gt 0){$e=Wait-Event -Timeout $left;if(-not $e){break};Remove-Event -EventIdentifier $e.EventIdentifier;\
+        if($e.SourceIdentifier -eq 'a'){'activated';break};if($e.SourceIdentifier -ne 'd' -or [int]$e.SourceEventArgs.Reason -ne 2){break}}";
 
     /// `com.canonical.Unity.LauncherEntry.Update` for the app's `.desktop` file, which docks such as
     /// KDE's task manager and Dash to Dock draw as a count on the launcher.
@@ -538,9 +564,146 @@ mod os {
         });
     }
 
-    /// Windows would need a taskbar overlay icon.
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// Electron's `setOverlayIcon`: web's red count badge on the taskbar button, cleared at zero.
+    #[cfg(windows)]
+    pub fn set_badge(count: usize) {
+        let icon = (count > 0).then(|| icon_resource(&badge_pixels(count), BADGE_SIDE));
+        let label = if count > 0 { format!("{count} threads with new notifications") } else { String::new() };
+        let label: Vec<u16> = label.encode_utf16().chain([0]).collect();
+        let _ = crate::desktop::with_window(|window| {
+            window.with_raw_handle(|handle| {
+                let rune::raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+                // SAFETY: on the UI thread, with the live window's HWND and a NUL-terminated label.
+                unsafe { taskbar::set_overlay(h.hwnd.get(), icon.as_deref(), BADGE_SIDE as i32, &label) };
+            })
+        });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     pub fn set_badge(_count: usize) {}
+
+    pub(super) const BADGE_SIDE: usize = 32;
+    /// 3×5 digits, a row's three bits left to right.
+    const DIGITS: [[u8; 5]; 10] = [
+        [0b111, 0b101, 0b101, 0b101, 0b111],
+        [0b010, 0b110, 0b010, 0b010, 0b111],
+        [0b111, 0b001, 0b111, 0b100, 0b111],
+        [0b111, 0b001, 0b111, 0b001, 0b111],
+        [0b101, 0b101, 0b111, 0b001, 0b001],
+        [0b111, 0b100, 0b111, 0b001, 0b111],
+        [0b111, 0b100, 0b111, 0b101, 0b111],
+        [0b111, 0b001, 0b010, 0b010, 0b010],
+        [0b111, 0b101, 0b111, 0b101, 0b111],
+        [0b111, 0b101, 0b111, 0b001, 0b111],
+    ];
+    const PLUS: [u8; 5] = [0b000, 0b010, 0b111, 0b010, 0b000];
+
+    /// Web's `setNotificationBadge` canvas as RGBA: a #e5484d disc with the count in white, "9+"
+    /// past nine.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) fn badge_pixels(count: usize) -> Vec<u8> {
+        let side = BADGE_SIDE;
+        let glyphs = if count > 9 { vec![DIGITS[9], PLUS] } else { vec![DIGITS[count]] };
+        let scale = if glyphs.len() > 1 { 3 } else { 4 };
+        let (width, height) = ((glyphs.len() * 4 - 1) * scale, 5 * scale);
+        let (left, top) = ((side - width) / 2, (side - height) / 2);
+        let (center, radius) = (side as f32 / 2.0, side as f32 * 28.0 / 64.0);
+        let mut out = vec![0u8; side * side * 4];
+        for y in 0..side {
+            for x in 0..side {
+                let distance = ((x as f32 + 0.5 - center).powi(2) + (y as f32 + 0.5 - center).powi(2)).sqrt();
+                let coverage = (radius - distance + 0.5).clamp(0.0, 1.0);
+                if coverage == 0.0 {
+                    continue;
+                }
+                let ink = (left..left + width).contains(&x) && (top..top + height).contains(&y) && {
+                    let (column, row) = ((x - left) / scale, (y - top) / scale);
+                    column % 4 != 3 && glyphs[column / 4][row] >> (2 - column % 4) & 1 == 1
+                };
+                let i = (y * side + x) * 4;
+                let rgb: [u8; 3] = if ink { [255, 255, 255] } else { [0xe5, 0x48, 0x4d] };
+                out[i..i + 3].copy_from_slice(&rgb);
+                out[i + 3] = (coverage * 255.0).round() as u8;
+            }
+        }
+        out
+    }
+
+    /// RGBA as an icon resource for `CreateIconFromResourceEx`: a 32-bit DIB, bottom-up BGRA,
+    /// then an all-clear AND mask so alpha alone decides.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) fn icon_resource(rgba: &[u8], side: usize) -> Vec<u8> {
+        let mask = side * side.div_ceil(32) * 4;
+        let mut out = Vec::with_capacity(40 + rgba.len() + mask);
+        for value in [40, side as u32, 2 * side as u32] {
+            out.extend(value.to_le_bytes());
+        }
+        out.extend(1u16.to_le_bytes());
+        out.extend(32u16.to_le_bytes());
+        // No compression, size, resolution or palette.
+        out.extend([0u8; 24]);
+        for row in rgba.chunks_exact(side * 4).rev() {
+            for p in row.chunks_exact(4) {
+                out.extend([p[2], p[1], p[0], p[3]]);
+            }
+        }
+        out.resize(out.len() + mask, 0);
+        out
+    }
+
+    /// `ITaskbarList3::SetOverlayIcon`, called through its vtable.
+    #[cfg(windows)]
+    mod taskbar {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct Guid(u32, u16, u16, [u8; 8]);
+        const CLSID_TASKBAR_LIST: Guid = Guid(0x56FD_F344, 0xFD6D, 0x11D0, [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90]);
+        const IID_TASKBAR_LIST3: Guid = Guid(0xEA1A_FB91, 0x9E28, 0x4B86, [0x90, 0xE9, 0x9E, 0x9F, 0x8A, 0x5E, 0xEF, 0xAF]);
+        // IUnknown (0-2), ITaskbarList (3-7), ITaskbarList2 (8), then ITaskbarList3's own.
+        const RELEASE: usize = 2;
+        const HR_INIT: usize = 3;
+        const SET_OVERLAY_ICON: usize = 18;
+
+        #[link(name = "ole32")]
+        unsafe extern "system" {
+            fn CoInitializeEx(reserved: *const c_void, model: u32) -> i32;
+            fn CoUninitialize();
+            fn CoCreateInstance(clsid: *const Guid, outer: *mut c_void, context: u32, iid: *const Guid, out: *mut *mut c_void) -> i32;
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateIconFromResourceEx(bits: *const u8, size: u32, icon: i32, version: u32, cx: i32, cy: i32, flags: u32) -> *mut c_void;
+            fn DestroyIcon(icon: *mut c_void) -> i32;
+        }
+
+        /// # Safety
+        /// `hwnd` is a live top-level window and `label` ends in NUL.
+        pub unsafe fn set_overlay(hwnd: isize, icon: Option<&[u8]>, side: i32, label: &[u16]) {
+            unsafe {
+                // Apartment-threaded, as winit's OLE setup already made the UI thread.
+                let initialized = CoInitializeEx(std::ptr::null(), 0x2) >= 0;
+                let mut list: *mut c_void = std::ptr::null_mut();
+                if CoCreateInstance(&CLSID_TASKBAR_LIST, std::ptr::null_mut(), 0x1, &IID_TASKBAR_LIST3, &mut list) >= 0 && !list.is_null() {
+                    let vtable = *(list as *const *const usize);
+                    let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtable.add(RELEASE));
+                    let hr_init: unsafe extern "system" fn(*mut c_void) -> i32 = std::mem::transmute(*vtable.add(HR_INIT));
+                    let set: unsafe extern "system" fn(*mut c_void, isize, *mut c_void, *const u16) -> i32 = std::mem::transmute(*vtable.add(SET_OVERLAY_ICON));
+                    if hr_init(list) >= 0 {
+                        let icon = icon.map_or(std::ptr::null_mut(), |bits| CreateIconFromResourceEx(bits.as_ptr(), bits.len() as u32, 1, 0x0003_0000, side, side, 0));
+                        set(list, hwnd, icon, label.as_ptr());
+                        if !icon.is_null() {
+                            DestroyIcon(icon);
+                        }
+                    }
+                    release(list);
+                }
+                if initialized {
+                    CoUninitialize();
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +711,40 @@ mod tests {
     use super::*;
     use crate::data;
     use serde_json::json;
+
+    #[test]
+    fn the_windows_badge_draws_webs_disc_and_count_as_an_icon() {
+        let side = os::BADGE_SIDE;
+        let at = |pixels: &[u8], x: usize, y: usize| pixels[(y * side + x) * 4..][..4].to_vec();
+        let one = os::badge_pixels(1);
+        assert_eq!(at(&one, 0, 0), [0, 0, 0, 0], "outside the disc is clear");
+        assert_eq!(at(&one, 16, 4), [0xe5, 0x48, 0x4d, 255], "the disc is web's red");
+        // "1" at 4x from (10, 6): its stem is the middle column, its foot the full bottom row.
+        assert_eq!(at(&one, 15, 8), [255, 255, 255, 255]);
+        assert_eq!(at(&one, 11, 8)[..3], [0xe5, 0x48, 0x4d], "left of the stem's top is disc");
+        assert_eq!(at(&one, 11, 24), [255, 255, 255, 255]);
+        let many = os::badge_pixels(12);
+        assert_ne!(many, os::badge_pixels(9), "past nine reads 9+");
+        assert_eq!(many, os::badge_pixels(40));
+
+        let icon = os::icon_resource(&one, side);
+        assert_eq!(icon.len(), 40 + side * side * 4 + side * 4);
+        assert_eq!(icon[..16], [40, 0, 0, 0, 32, 0, 0, 0, 64, 0, 0, 0, 1, 0, 32, 0], "a 32-bit DIB twice as tall, for its AND mask");
+        let disc_top_stored_near_the_end = 40 + (side - 4) * side * 4 + 16 * 4;
+        assert_eq!(icon[disc_top_stored_near_the_end..][..4], [0x4d, 0x48, 0xe5, 255], "rows bottom-up, BGRA");
+        assert!(icon[40 + side * side * 4..].iter().all(|b| *b == 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_toast_script_parses() {
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$null=[scriptblock]::Create($env:S5_TOAST_SCRIPT); 'parsed'"])
+            .env("S5_TOAST_SCRIPT", os::WINDOWS_TOAST)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "parsed", "{}", String::from_utf8_lossy(&out.stderr));
+    }
 
     #[test]
     fn the_linux_badge_counts_on_the_apps_launcher_entry() {

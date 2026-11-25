@@ -1398,13 +1398,16 @@ fn remember_secret(key: &str, secret: Option<&str>) {
 }
 
 fn askpass() -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
     let path = crate::host::t3_home().join("bin").join("ssh-askpass.sh");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(ASKPASS_SCRIPT) {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
         std::fs::write(&path, ASKPASS_SCRIPT).map_err(|e| e.to_string())?;
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
     Ok(path)
 }
 
@@ -1732,10 +1735,12 @@ const REMOTE_EDITORS: &[RemoteEditor] = &[
 
 /// Editors on this machine that can open a folder on an SSH host.
 pub fn probe_remote_editors(path_env: &str) -> Vec<&'static str> {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |p: PathBuf| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    let dirs: Vec<&str> = path_env.split(':').filter(|d| !d.is_empty()).collect();
-    REMOTE_EDITORS.iter().filter(|e| e.commands.iter().any(|c| dirs.iter().any(|d| executable(Path::new(d).join(c))))).map(|e| e.id).collect()
+    #[cfg(unix)]
+    let executable = |p: PathBuf| std::fs::metadata(p).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0 && m.is_file());
+    #[cfg(not(unix))]
+    let executable = |p: PathBuf| p.with_extension("exe").is_file() || p.with_extension("cmd").is_file();
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(path_env).filter(|d| !d.as_os_str().is_empty()).collect();
+    REMOTE_EDITORS.iter().filter(|e| e.commands.iter().any(|c| dirs.iter().any(|d| executable(d.join(c))))).map(|e| e.id).collect()
 }
 
 /// `remoteOpen.ts`'s SSH host for an environment: its alias, split at a `user@`.

@@ -582,6 +582,21 @@ mod hyprland {
     }
 }
 
+/// Niri runs only on Linux; elsewhere there is never a `NIRI_SOCKET` to reach.
+#[cfg(not(unix))]
+mod niri {
+    use std::path::Path;
+
+    pub fn check(_: &Path) -> Result<(), String> {
+        Err("Niri is not available on this system.".into())
+    }
+
+    pub fn capture(path: &Path) -> Result<(Vec<u8>, Option<super::Window>), String> {
+        check(path).map(|()| (Vec::new(), None))
+    }
+}
+
+#[cfg(unix)]
 mod niri {
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Read, Write};

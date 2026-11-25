@@ -1,0 +1,66 @@
+name: Rune desktop (Windows build and tests)
+
+on:
+  push:
+    branches: ["feat/rune-**"]
+    paths:
+      - apps/desktop-rune/**
+      - .github/workflows/rune-desktop-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rune-desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/desktop-rune
+    # The Open source licenses page embeds this manifest (build.rs); set for every cargo step so
+    # tests don't rebuild without it.
+    env:
+      S5_CRATE_NOTICES: target/crate-notices.json
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-rune/target
+          key: rune-windows-${{ github.ref_name }}-${{ hashFiles('apps/desktop-rune/Cargo.lock') }}
+          restore-keys: |
+            rune-windows-${{ github.ref_name }}-
+            rune-windows-
+
+      - name: Rust crate notices
+        run: |
+          cargo fetch --locked
+          mkdir -p target
+          python tools/crate_notices.py target/crate-notices.json
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked --workspace 2>&1 | grep -E "^test |test result|panicked|FAILED|error" ; exit ${PIPESTATUS[0]}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s5code-rune-windows-${{ github.sha }}
+          path: apps/desktop-rune/target/release/s5code-rune.exe
+          retention-days: 3

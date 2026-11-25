@@ -173,7 +173,7 @@ function run(argv) {
 }"#;
 
 pub fn supported() -> bool {
-    cfg!(target_os = "macos") || linux()
+    cfg!(any(target_os = "macos", windows)) || linux()
 }
 
 /// Linux capture, which Electron offers on Wayland only.
@@ -361,7 +361,7 @@ fn push(event: Event, waker: &Option<Waker>) {
 pub fn register(app: &mut rune::App<App>) {
     let handle = app.handle();
     // Overlays need window positions, which Wayland hides; Hyprland reports them through hyprctl.
-    let overlays = cfg!(target_os = "macos") || crate::desktop::capture_linux::hyprland_session();
+    let overlays = cfg!(any(target_os = "macos", windows)) || crate::desktop::capture_linux::hyprland_session();
     let flash = overlays.then(|| {
         let spec = rune::OverlaySpec { name: "SnapShot flash", size: (1.0, 1.0), edge: rune::ScreenEdge::Top, margin: 0.0, align: rune::Align::Center, inset: 0.0, interactive: false, view: flash_view };
         let options = rune::OverlayOptions { input: rune::OverlayInput::None, exclude_from_capture: true, ..Default::default() };
@@ -576,6 +576,7 @@ struct Extras {
 }
 
 /// Finds and captures the front window into `path`, scaled down as Electron stores it.
+#[cfg(not(windows))]
 fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
     let find = |status| (Step::FindWindow, status);
     let failed = (Step::CaptureWindow, Status::Failed);
@@ -597,6 +598,25 @@ fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
     let text = extras.text.then(|| read_text(front.pid, &window.title)).flatten();
     let source = snap_shot_source(&front.owner, &window.title, text.as_deref());
     Ok(Shot { bounds: window.bounds, source, thumbnail, origin: (0.0, 0.0), notice: None })
+}
+
+/// Windows: the foreground window through `PrintWindow`, stored at no more than its own pixels;
+/// the flash and flight use its frame in the window's DPI. Window text isn't read yet.
+#[cfg(windows)]
+fn capture_front(path: &Path, extras: Extras) -> Result<Shot, (Step, Status)> {
+    let (front, picture) = crate::desktop::capture_windows::capture().map_err(|status| (if status == Status::Missing { Step::FindWindow } else { Step::CaptureWindow }, status))?;
+    let [x, y, width, height] = front.bounds.map(f64::from);
+    let mut image = image::DynamicImage::ImageRgba8(picture);
+    if let Some((w, h)) = fitted((image.width(), image.height()), Bounds { x, y, width, height }) {
+        image = image.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
+    }
+    image.save_with_format(path, image::ImageFormat::Png).map_err(|_| (Step::CaptureWindow, Status::Failed))?;
+    let scale = f64::from(front.dpi) / 96.0;
+    let bounds = Bounds { x: x / scale, y: y / scale, width: width / scale, height: height / scale };
+    let _ = extras.text;
+    let thumbnail = extras.thumbnail.then(|| flight_pixels(image));
+    let source = snap_shot_source(&front.owner, &front.title, None);
+    Ok(Shot { bounds, source, thumbnail, origin: (0.0, 0.0), notice: None })
 }
 
 fn flight_pixels(image: image::DynamicImage) -> rune::Pixels {
@@ -1106,7 +1126,7 @@ pub fn start(s: &mut App) {
 
 /// The setup wizard's "Test capture": a capture that is discarded.
 pub fn test(s: &mut App) {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", windows)) {
         LIVE.with(|live| live.borrow_mut().state.test = Test::Failed("Test capture requires macOS.".into()));
         return;
     }
@@ -1307,6 +1327,11 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         if unknown_setup && !busy && (enabled(s) || on_page) {
             refresh_linux(s);
         }
+    } else if cfg!(windows) {
+        // Windows asks no permission to capture a window.
+        LIVE.with(|live| {
+            live.borrow_mut().state.permissions.get_or_insert(Permissions { screen_recording: true, accessibility: false });
+        });
     } else if (unknown && (enabled(s) || on_page)) || (wizard && due) {
         check_permissions(s, false);
     }

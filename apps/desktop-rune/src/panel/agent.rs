@@ -5,9 +5,8 @@
 //! pages' own DevTools sockets, as Electron's `CdpRelay` does over a webview's debugger.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +17,11 @@ use tungstenite::{Message, WebSocket};
 /// A preview session: `(threadId, tabId)`.
 pub type Key = (String, String);
 
+/// Where the server reads browser events.
+type Writer = Box<dyn Write + Send>;
+
 struct Channel {
-    writer: Arc<Mutex<UnixStream>>,
+    writer: Arc<Mutex<Writer>>,
     /// Each attached tab's DevTools `host:port` and page target.
     targets: HashMap<Key, (String, String)>,
     relays: HashMap<Key, Sender<In>>,
@@ -66,8 +68,8 @@ const AGENT_DOWNLOAD_WINDOW: Duration = Duration::from_secs(5);
 
 /// The server just started with these as its `desktopBrowserFd` peer (we write events) and its
 /// `desktopBrowserControlFd` peer (we read commands).
-pub fn connect(events: UnixStream, commands: UnixStream) {
-    let writer = Arc::new(Mutex::new(events));
+pub fn connect(events: impl Write + Send + 'static, commands: impl Read + Send + 'static) {
+    let writer: Arc<Mutex<Writer>> = Arc::new(Mutex::new(Box::new(events)));
     *CHANNEL.lock().unwrap() = Some(Channel { writer: writer.clone(), targets: HashMap::new(), relays: HashMap::new() });
     *GENERATION.lock().unwrap() += 1;
     std::thread::spawn(move || read_commands(commands, writer));
@@ -166,11 +168,11 @@ pub fn pointer(key: &Key) -> Option<Pointer> {
     POINTERS.lock().unwrap().as_ref()?.get(key).cloned()
 }
 
-fn write(writer: &Mutex<UnixStream>, event: &Value) {
+fn write(writer: &Mutex<Writer>, event: &Value) {
     let _ = writer.lock().unwrap().write_all(format!("{event}\n").as_bytes());
 }
 
-fn read_commands(commands: UnixStream, mine: Arc<Mutex<UnixStream>>) {
+fn read_commands(commands: impl Read, mine: Arc<Mutex<Writer>>) {
     let mut sequence = 0;
     for line in BufReader::new(commands).lines() {
         let Ok(line) = line else { break };
@@ -245,7 +247,7 @@ fn read(ws: &mut WebSocket<TcpStream>) -> Read {
     }
 }
 
-fn run_relay(key: Key, host: String, target: String, rx: Receiver<In>, writer: Arc<Mutex<UnixStream>>) {
+fn run_relay(key: Key, host: String, target: String, rx: Receiver<In>, writer: Arc<Mutex<Writer>>) {
     let send_server = |message: String| write(&writer, &json!({ "type": "cdp", "threadId": key.0, "tabId": key.1, "message": message }));
     let Some(mut ws) = page_socket(&host, &target, 5) else { return };
     let mut popups: HashMap<String, WebSocket<TcpStream>> = HashMap::new();
