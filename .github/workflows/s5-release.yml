@@ -454,8 +454,6 @@ jobs:
       # The release channel is already stable, nightly, or preview. Builds in
       # other repositories report "dev" telemetry.
       - name: Build JS bundle
-        env:
-          T3CODE_TELEMETRY_CHANNEL: ${{ github.repository == 'pingdotgg/t3code' && needs.preflight.outputs.release_channel || 'dev' }}
         run: vp run build:desktop
 
       # Two paths under apps/ so the artifact root is apps/; consumers download

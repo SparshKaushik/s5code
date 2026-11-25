@@ -1,33 +1,19 @@
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as HttpObservability from "@t3tools/shared/httpObservability";
 import { makeLocalFileTracer, makeTraceSink } from "@t3tools/shared/observability";
-import * as SharedObservability from "@t3tools/shared/observability";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import * as Tracer from "effect/Tracer";
-import * as OtlpExporter from "effect/observability/OtlpExporter";
-import * as OtlpMetrics from "effect/observability/OtlpMetrics";
-import * as OtlpTracer from "effect/observability/OtlpTracer";
 import * as Statement from "effect/sql/Statement";
 
 import * as ServerConfig from "../config.ts";
 import * as ResourceAttribution from "../resourceTelemetry/ResourceAttribution.ts";
 import * as ServerLogger from "../serverLogger.ts";
-import * as BrowserTraceCollector from "./BrowserTraceCollector.ts";
 import * as HeapAttribution from "./HeapAttribution.ts";
-import * as OtlpExportFailures from "./OtlpExportFailures.ts";
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-
-    const traces = config.otlpTracesExport;
-    const metrics = config.otlpMetricsExport;
-    // Keep serialization in context for the browser trace forwarder's exporter.
-    const layerSerialization = SharedObservability.layerOtlpSerialization(traces.protocol);
-    const resource = ServerConfig.otlpResource(config, yield* HostProcess.Hostname);
     const attribution = yield* ResourceAttribution.ResourceAttribution;
 
     const layerTraceReferences = Layer.mergeAll(
@@ -54,15 +40,6 @@ export const layer = Layer.unwrap(
               durationMs: stats.durationMs,
             }),
         });
-        const delegate =
-          config.otlpTracesUrl === undefined
-            ? undefined
-            : yield* OtlpTracer.make({
-                url: config.otlpTracesUrl,
-                exportInterval: `${traces.exportIntervalMs} millis`,
-                headers: traces.headers,
-                resource,
-              }).pipe(Effect.provide(OtlpExportFailures.layer("traces")));
 
         const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,
@@ -70,51 +47,20 @@ export const layer = Layer.unwrap(
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
           sink,
-          ...(delegate ? { delegate } : {}),
         });
 
         // Bun's getHeapStatistics walks the heap (about 10 ms a call, twice per span), which
         // stalled the standalone server for minutes, so its binary traces without attribution.
         if (typeof Bun !== "undefined") {
-          return Layer.mergeAll(
-            Layer.succeed(Tracer.Tracer, tracer),
-            BrowserTraceCollector.layer(sink),
-          );
+          return Layer.succeed(Tracer.Tracer, tracer);
         }
         const heapAttribution = yield* HeapAttribution.make(tracer);
         yield* heapAttribution.run;
 
-        return Layer.mergeAll(
-          Layer.succeed(Tracer.Tracer, heapAttribution.tracer),
-          BrowserTraceCollector.layer(sink),
-        );
+        return Layer.succeed(Tracer.Tracer, heapAttribution.tracer);
       }),
-    ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(layerSerialization));
-
-    const metricsLayer =
-      config.otlpMetricsUrl === undefined
-        ? Layer.empty
-        : OtlpMetrics.layer({
-            url: config.otlpMetricsUrl,
-            exportInterval: `${metrics.exportIntervalMs} millis`,
-            headers: metrics.headers,
-            resource,
-          }).pipe(
-            Layer.provide(OtlpExportFailures.layer("metrics")),
-            Layer.provide(SharedObservability.layerOtlpSerialization(metrics.protocol)),
-          );
-
-    const layerOtelWarnings = Layer.effectDiscard(
-      Effect.forEach(config.otelEnvironment.warnings, (warning) => Effect.logWarning(warning)),
     );
 
-    return layerOtelWarnings.pipe(
-      Layer.provideMerge(
-        Layer.mergeAll(ServerLogger.layer, layerTraceReferences, layerTracer, metricsLayer),
-      ),
-      Layer.provide(
-        OtelEnvironment.layerResourceAttributes(config.otelEnvironment.resourceAttributes),
-      ),
-    );
+    return Layer.mergeAll(ServerLogger.layer, layerTraceReferences, layerTracer);
   }),
 );

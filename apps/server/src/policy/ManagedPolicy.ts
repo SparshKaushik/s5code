@@ -25,10 +25,11 @@ import {
   readManagedPolicyFile,
 } from "@t3tools/shared/managedPolicyFile";
 
-import { telemetryChannel } from "../config.ts";
 import * as ManagedLimits from "./managedLimits.ts";
 import * as ManagedProviders from "./managedProviders.ts";
 import * as ManagedSettings from "./managedSettings.ts";
+
+declare const __T3CODE_BUILD_CHANNEL__: "nightly" | "latest" | undefined;
 
 export class ManagedPolicy extends Context.Service<
   ManagedPolicy,
@@ -178,7 +179,7 @@ const make = Effect.gen(function* () {
   // Source builds may read a policy from elsewhere so it can be tried without root. Release
   // builds never do: any override a user can set is a way around the policy.
   const devPath =
-    telemetryChannel === "dev"
+    typeof __T3CODE_BUILD_CHANNEL__ === "undefined"
       ? yield* Config.option(Config.String("T3CODE_DEV_MANAGED_POLICY_PATH")).pipe(
           Effect.orElseSucceed(() => Option.none<string>()),
         )

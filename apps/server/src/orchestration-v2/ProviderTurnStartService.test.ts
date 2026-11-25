@@ -85,7 +85,6 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
-import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
@@ -529,7 +528,6 @@ function makeLocalCommandHarness(input: {
     readonly threadRuntimeMode?: OrchestrationV2ThreadProjection["thread"]["runtimeMode"];
   };
 }) {
-  const settledRuns: Array<string> = [];
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
   const runId = RunId.make("run-native-account-command");
@@ -1436,11 +1434,6 @@ function makeLocalCommandHarness(input: {
           startRootRun,
           forkBaseline: () => Effect.succeed(Effect.void),
         }),
-        Layer.succeed(ProviderUsageAnalytics.ProviderTurnAnalytics, {
-          runStarted: () => Effect.void,
-          turnCompleted: () => Effect.void,
-          runSettled: (report) => Effect.sync(() => void settledRuns.push(report.status)),
-        }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
           resolve: resolveRuntimePolicy,
         }),
@@ -1450,7 +1443,6 @@ function makeLocalCommandHarness(input: {
   return {
     layer,
     interruptRun,
-    settledRuns,
     getThreadRecords,
     getTurnStartContext,
     getRuntimeRecoveryProjection,
@@ -2400,7 +2392,6 @@ effectIt.effect("refuses unsupported resume instead of manufacturing a user prom
     yield* harness.start;
     expect(harness.startTurn).not.toHaveBeenCalled();
     expect(harness.startRootRun).not.toHaveBeenCalled();
-    expect(harness.settledRuns).toEqual(["failed"]);
     expect(harness.projection().turnItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2429,7 +2420,6 @@ effectIt.effect.each([
         sideChat,
       });
       yield* harness.start;
-      expect(harness.settledRuns).toEqual([]);
       expect(harness.startTurn.mock.calls.map(([turn]) => turn.message.text)).toEqual([
         withInlineContext("SIDE_CHAT_CONTEXT", "Continue where you left off."),
       ]);
@@ -2796,7 +2786,6 @@ effectIt.effect.each(["before-start", "during-fork"] as const)(
       expect(harness.projection().providerThreads[0]?.handoffIds).toEqual([
         "side-chat-fork-context",
       ]);
-      expect(harness.settledRuns).toEqual([]);
       expect(
         harness.prepareProviderHandoff.mock.calls[0]?.[0].items.map((item) => item.id),
       ).toEqual([items[0]!.id]);
@@ -3258,7 +3247,6 @@ effectIt.effect("terminalizes a starting run when its provider session cannot op
     );
     const projection = harness.projection();
     expect(projection.runs.at(-1)).toMatchObject({ status: "failed", startedAt: null });
-    expect(harness.settledRuns).toEqual(["failed"]);
     expect(projection.attempts[0]).toMatchObject({ status: "failed", startedAt: null });
     expect(projection.nodes[0]).toMatchObject({ status: "failed", startedAt: null });
     expect(projection.turnItems).toMatchObject([
@@ -3382,7 +3370,6 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
     expect(harness.startRootRun).not.toHaveBeenCalled();
     const projection = harness.projection();
     expect(projection.runs.at(-1)?.status).toBe("interrupted");
-    expect(harness.settledRuns).toEqual([]);
     expect(projection.attempts[0]?.status).toBe("pending");
     expect(projection.nodes[0]?.status).toBe("pending");
     expect(projection.turnItems).toEqual([]);

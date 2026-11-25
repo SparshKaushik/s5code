@@ -880,7 +880,12 @@ effectIt.effect.each(["linux", "darwin"] as const)(
           }),
           Layer.succeed(HostProcess.Platform, platform),
           FetchHttpClient.layer.pipe(
-            Layer.provide(Layer.succeed(FetchHttpClient.Fetch, () => Promise.reject(new Error()))),
+            Layer.provide(
+              Layer.succeed(
+                FetchHttpClient.Fetch,
+                (() => Promise.reject(new Error())) as typeof fetch,
+              ),
+            ),
           ),
         ),
       ),
@@ -1119,7 +1124,12 @@ effectIt.effect(
           }),
           Layer.succeed(HostProcess.Platform, "linux"),
           FetchHttpClient.layer.pipe(
-            Layer.provide(Layer.succeed(FetchHttpClient.Fetch, () => Promise.reject(new Error()))),
+            Layer.provide(
+              Layer.succeed(
+                FetchHttpClient.Fetch,
+                (() => Promise.reject(new Error())) as typeof fetch,
+              ),
+            ),
           ),
         ),
       ),

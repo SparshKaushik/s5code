@@ -71,6 +71,7 @@
   "cd03eb1b84271c02": "Agent",
   "bfe1a60f3f9c60fb": "Turn {turn} · {what}",
   "dfdaa6255a416140": "Outline of {turns, plural, one {{turns} recent turn} other {{turns} recent turns}}, {textTurns, plural, =0 {no message text} one {message text of the last turn} other {message text of the last {textTurns} turns}}{truncated, select, yes {, shortened to fit} other {}}",
+  "260c6b45f52d2f27": "Adds the text of your messages and the agent's replies in the last {textTurns, plural, one {turn} other {{textTurns} turns}}.",
   "afac52a5cc2dc801": "Could not send your answer. Try again.",
   "79d776428f4d0650": "The file could not be loaded. Reconnect and try again.",
   "3ea34cbb1ca5ba9b": "Preview cancelled.",
@@ -1342,9 +1343,9 @@
   "a9b663922945a4fa": "This connection cannot open an editor on this environment.",
   "868596d482a1a2bd": "Open",
   "f58caaa68c09fbeb": "Open with",
+  "75b6d7c3bc9c72da": "Could not open in {editor}",
   "415d9fed5542d278": "Could not open file",
   "1d1bbe5b700afe63": "Unable to reveal file",
-  "75b6d7c3bc9c72da": "Could not open in {editor}",
   "31dc19d033af2774": "Unable to open link.",
   "029d8d0201aed231": "Unable to open System Settings.",
   "9af3083226778d3c": "Open VSX returned malformed theme details.",
@@ -2736,9 +2737,9 @@
   "db7b3a938c45e56c": "Update {version} ready to download",
   "9a951140b69ba740": "Downloading update ({percent}%)",
   "7fdece033260e9fb": "Downloading update",
+  "52e1d4a487c0cf4b": "Install failed for {version}. Click to retry.",
   "09ef51903e99e876": "Update ready downloaded. Click to restart and install.",
   "d62631cab06d2b80": "Update {version} downloaded. Click to restart and install.",
-  "52e1d4a487c0cf4b": "Install failed for {version}. Click to retry.",
   "78a04e0e625c0990": "Update failed",
   "c24de5eb69373a55": "This {build} build ignores {track} releases. Review the update track in Settings to finish the switch.",
   "b02ae45a6109c93b": "Up to date",
@@ -3105,7 +3106,6 @@
   "c646366e142ba05f": "Desktop WSL state is unavailable.",
   "228dcd284ea651b3": "Failed to load WSL state.",
   "b08d105dd2553f8d": "The project did not appear in the desktop app.",
-  "7a4b3f3b83e121d7": "{organization} turned off anonymous usage data.",
   "d85822b18e9475df": "Managed by {organization}.",
   "a6dd531d58080010": "Connect to this server to check releases.",
   "9c1471a7fba9ae4a": "This server does not support release lookups. Update it before switching tracks.",
@@ -3212,7 +3212,10 @@
     {
       "t": "span",
       "i": 2,
-      "c": [" ", "on the computer that opened this page"]
+      "c": [
+        " ",
+        "on the computer that opened this page"
+      ]
     }
   ],
   "b2d53b4d1d48fbef": [
@@ -3224,7 +3227,10 @@
     {
       "t": "span",
       "i": 2,
-      "c": [" ", "· whoever runs it gets this access"]
+      "c": [
+        " ",
+        "· whoever runs it gets this access"
+      ]
     }
   ],
   "c54cc9c75db9dc58": "Only approve a sign-in you just started.",
@@ -3326,9 +3332,6 @@
   "b90e87f4b7125237": "Details",
   "16dc67f5429d8bae": "Background work",
   "2188eee8f81b0f51": "Open subagent",
-  "ec9e0be8ec693302": "Collapse all folders",
-  "b791dd86f7991cc0": "Expand all folders",
-  "55b936e3014e16c8": "Open diff",
   "28bb7ce40dfd349a": "Terminal output can't be added to a question answer.",
   "801cb8edea94b8f6": "Answer or dismiss the question first, then add it to chat.",
   "aa5507f20d94d5a9": "Update this server to send files with question answers",
@@ -3642,7 +3645,6 @@
   "4e0710d19dfc2e7e": "Send this report to the T3 team?",
   "87d0ae0723ba75d1": "This is everything that leaves your machine. Nothing is sent unless you press Send.",
   "bf19826f81484328": "Include the conversation",
-  "260c6b45f52d2f27": "Adds the text of your messages and the agent's replies in the last {textTurns, plural, one {turn} other {{textTurns} turns}}.",
   "ddb7e6f8ce99e657": "Only someone who can run agents on this machine can send or decline it.",
   "03c1eb603c112f47": "Don't send",
   "653405e4ed498d9f": "Send",
@@ -4636,6 +4638,7 @@
       "v": "v"
     }
   ],
+  "55b936e3014e16c8": "Open diff",
   "83c29850641c8935": "Queued",
   "8402f099f88fd0e0": "Running",
   "c5f5b73e92221a6a": "Waiting",
@@ -5517,6 +5520,8 @@
   "1601d7e39a52c48f": "Retry loading diff",
   "b7b137472adb6989": "Partial diff preview",
   "f0d79aa56f06663f": "This file is too large to show in full. Counts include all changes.",
+  "ec9e0be8ec693302": "Collapse all folders",
+  "b791dd86f7991cc0": "Expand all folders",
   "7fdde2b893ba1b9d": "Removed",
   "e58ce271d835b447": "Added",
   "07b9970b662ab70d": "Show Mermaid source",
@@ -6231,26 +6236,6 @@
   ],
   "216ab7514aea1d61": "Start without an agent",
   "501ce2d99da8bfd1": "Set up one agent to start.",
-  "71f3822326109c8e": [
-    "T3 Code collects anonymous usage data to improve the app. To opt out, see the",
-    " ",
-    {
-      "t": "a",
-      "i": 1,
-      "c": "privacy policy"
-    },
-    "."
-  ],
-  "b33f35083757b42c": [
-    "See the",
-    " ",
-    {
-      "t": "a",
-      "i": 1,
-      "c": "privacy policy"
-    },
-    "."
-  ],
   "f77d000c0710f066": "Turn on",
   "4ed27bf946e504db": "Set up",
   "7a26eaacff0607f7": [
@@ -6643,8 +6628,6 @@
   "1b381201aba745c2": "No checks reported",
   "a6d75a4380173c60": "Open checks: {summary}",
   "be3d1766bad18693": "Checks: {summary}",
-  "425e4a3d6c5c2867": "{count, plural, one {{count} failed} other {{count} failed}}",
-  "fd63b391898889f9": "{count, plural, one {{count} awaiting action} other {{count} awaiting action}}",
   "cb116c139cdace98": "No checks reported",
   "60b56e201607c7ec": "Check details are out of date. Refresh the pull request to update them.",
   "e74cd4e960cbb5e5": "Unchanged lines are unavailable in a file with cut lines.",
@@ -7026,19 +7009,27 @@
     }
   ],
   "ce703d4ba40dc9b4": "Merging stack...",
+  "8a883c4fbc127b68": "Enabling stack auto-merge...",
   "ac7feb9c583b02a0": "Rebasing stack...",
   "cb0f63bbb0b68d94": "Could not merge the stack",
+  "5fb2a26ae31e8983": "Could not enable stack auto-merge",
   "c8a943fa15a56b2b": "Could not rebase the stack",
   "ec22caeb8b949ed1": "The host refused the rebase. A rebase stops at the first commit that does not apply cleanly.",
   "ead3e2bac1a8d231": "Stack merge request completed",
+  "986d0dcbf4dd0098": "Stack auto-merge enabled",
   "d7079b5ac269c65e": "Stack rebased",
   "5631b32be0ce48d3": "{host} merged the stack or added it to its merge queue.",
+  "f3ed1f63c8a3eef2": "{host} merges the stack through #{number} once its requirements are met.",
+  "bd536a0a1754f6cb": "Could not cancel stack auto-merge",
+  "bb90ac3b2f3a72d5": "The host refused to cancel auto-merge. Refresh and try again.",
   "2d3b55018a54287e": "Checking the stack with the host…",
   "eea55205e46d2e3d": "Stack {number}, layer {position} of {size}",
   "b6f729119107a145": "{count, plural, one {Merge stack through '#'{number} into {base} ({count} {term, select, mr {merge request} cr {change request} other {pull request}})} other {Merge stack through '#'{number} into {base} ({count} {term, select, mr {merge requests} cr {change requests} other {pull requests}})}}",
   "d4bfcdc6bb7676a3": "{count, plural, one {Merge {count} {term, select, mr {merge request} cr {change request} other {pull request}}?} other {Merge {count} {term, select, mr {merge requests} cr {change requests} other {pull requests}}?}}",
+  "9c28753c777c37b7": "{count, plural, one {Auto-merge {count} {term, select, mr {merge request} cr {change request} other {pull request}}?} other {Auto-merge {count} {term, select, mr {merge requests} cr {change requests} other {pull requests}}?}}",
   "b9f2a24a3757f6c9": "{count, plural, one {Rebase {count} {term, select, mr {merge request} cr {change request} other {pull request}}?} other {Rebase {count} {term, select, mr {merge requests} cr {change requests} other {pull requests}}?}}",
   "d1bcf19eb2753fff": "Merge #{number} and its unmerged layers below into {base} using {method}. {host} checks their rules before merging or queueing them and rebases the remaining stack after merging.",
+  "a86b49982e18784d": "Merge #{number} and its unmerged layers below into {base} using {method} once every one of them meets the requirements on {host}. This may happen immediately.",
   "31d2f22f5a282719": "Rebase the remote branches from bottom to top onto {base}. This rewrites branch history and may restart checks. If a layer fails, earlier updates remain.",
   "a0adf78733c368ae": "Merge stack",
   "140dc384c58b74f3": "Rebase stack",
@@ -7073,8 +7064,19 @@
     },
     ")"
   ],
+  "b1afda5c964deee4": [
+    "Auto-merge stack (",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    ")"
+  ],
+  "33d18dda74f6d7b3": "Cancel stack auto-merge",
   "30440f98e929440a": "Rebase stack",
   "13718a03e3144142": "Every layer being merged must be open and ready for review.",
+  "012c67c7f1a99e33": "Auto-merge stack",
   "4aafe1baf113088a": "Merge stack",
   "0292da19054f2a04": "Loading stack…",
   "583869e6df57abeb": "This pull request is no longer in a stack.",
@@ -7302,6 +7304,9 @@
   "9b0647af63a7d8c1": "Approved earlier changes",
   "abe99679224fea5e": "Changes requested earlier changes",
   "6b31ad910278ff72": "Review dismissed earlier changes",
+  "425e4a3d6c5c2867": "{count, plural, one {{count} failed} other {{count} failed}}",
+  "fd63b391898889f9": "{count, plural, one {{count} awaiting action} other {{count} awaiting action}}",
+  "948185631ef288e6": "{count, plural, one {{count} running} other {{count} running}}",
   "aaf22207b2f18c45": "{workflows, plural, one {{workflows} workflow} other {{workflows} workflows}} and {checks, plural, one {{checks} check} other {{checks} checks}} awaiting action",
   "c51411813ebafcc1": "{count, plural, one {{count} workflow awaiting approval} other {{count} workflows awaiting approval}}",
   "4946778c8e18a1db": "{count, plural, one {{count} check awaiting action} other {{count} checks awaiting action}}",
@@ -7535,6 +7540,7 @@
   "d5dc7576fd468be7": "Comfortable",
   "3141408bf3874e64": "Wide",
   "831badd18b64547e": "Full",
+  "6287212fed0deec6": "Match chat",
   "a96255594ebf2ce3": "Word",
   "1ee44eb65708a8aa": "Bars",
   "7670f789e0d8672a": "Only built-in themes show artwork, so this theme shows the version pill.",
@@ -7552,12 +7558,11 @@
   "03338c6aec8edacd": "Set how wide messages and the composer can grow on large screens.",
   "92785adb251da88c": "Reset chat width to default",
   "4d457bcce0c0e272": "Chat width",
-  "7d7f65967cc821e3": "HTML preview width",
+  "81f3a196537bbee0": "Comfortable (default)",
   "70ce0af7f78d5957": "Let HTML previews in a chat grow wider than its messages, which stay centered.",
   "f2b119bf02ae2558": "Reset HTML preview width to default",
-  "6287212fed0deec6": "Match chat",
+  "7d7f65967cc821e3": "HTML preview width",
   "dc8e85ea0364649c": "Match chat (default)",
-  "81f3a196537bbee0": "Comfortable (default)",
   "e79e5388f669495f": "Show reasoning effort in the composer as its name, such as High, or as bars.",
   "7f0365c7e4e8bcbf": "Reset effort display to default",
   "14bf40f765172a50": "Effort display",
@@ -8754,9 +8759,13 @@
   "ed83b25c71c98a20": "Pick one or more {tracker} {scope}s for each project. Their issues list beside the repository's own, and agents file new issues in the first one unless asked for another.",
   "19c2d5e81ff8f89a": "{tracker} {scope} for {project}",
   "68e061510b765772": "Not bound",
+  "99d51127f573296b": "Another account",
+  "8ec2c57414669b79": "Connect a second {tracker} workspace or user.",
+  "99963c0142e17f00": "For the new {tracker} account.",
   "a2d95d39d3398bda": "Credential rejected",
   "9eae463720500113": "Stored on the server.",
   "b6e27ab2537ef874": "Create one",
+  "6d8e4ebc889bace9": "Add account",
   "13ef526271b0f5d4": "Clear all conditions",
   "d1938a629f039515": "Remove condition",
   "84a605b241ce65b7": "Remove group and its conditions",
@@ -10236,8 +10245,7 @@
   "c424bee294b9f778": "This environment is managed by {organization}. Some settings and features follow its policy.",
   "82d9538af590f58c": "See your agents, import projects, and set up your phone.",
   "6a48fd0a37e725a1": "Legal",
-  "d6d3ea46ac979e1c": "How we handle your data, including the anonymous usage data T3 Code collects.",
-  "e741b1ab9396053a": "How we handle your data. {telemetryOff}",
+  "bf640cddaf25a472": "How we handle your data. S5 Code collects no telemetry.",
   "0bffbbf4d7f780c0": "Notices for dependencies, assets, and optional tools used by T3 Code.",
   "e39a57514be028e9": "Review",
   "7c0512387c3a42ea": "Stable",
@@ -11138,57 +11146,6 @@
   "a899361f5deb3476": "Any local files",
   "8c92f29a2b29adb5": "Uncommitted changes",
   "deb572d6e83f3818": "Edited tracked files",
-  "83729e5228731819": "Traces endpoint",
-  "8739ffcda2007458": "Metrics endpoint",
-  "5c90c5ba936fb908": "Logs endpoint",
-  "5e29f3c15d14bbce": "Set by environment",
-  "4136ff89bb436dcc": "Set by desktop",
-  "7271a3d01a7593ee": "Off",
-  "dc827550691bafd1": "Connected · {ms} ms",
-  "11b77b0add59d7b4": "Rejected · HTTP {status}",
-  "10cf4b8e7ecc020b": "Timed out",
-  "523b72ed9d712100": "OpenTelemetry export",
-  "ecaa5a9da2c44a47": "Choose one environment to configure its telemetry exports.",
-  "5548e6d2e9b8cc64": "Saved. Restart the server to apply.",
-  "23029f9ce3382536": "This connection lacks permission to change settings on {environment}.",
-  "a5f1fe10ef6373fd": "Enter an HTTP or HTTPS endpoint, or leave empty to disable export.",
-  "5b928a84a624e831": "Running: {url}",
-  "b07718fe86a16cc6": "Running: Disabled",
-  "6d0831556a517821": "Send traces, metrics, and logs to an OTLP HTTP receiver. Restart the server to apply. Environment variables override these settings.",
-  "f7c3ae7a79ede728": "Test",
-  "b93d2ec53e944576": [
-    "Running: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " from",
-    " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": {
-        "i": 3,
-        "k": "_gt_value_3",
-        "v": "v"
-      }
-    }
-  ],
-  "ae9958ee0d8ed8e8": [
-    "Running: Disabled from",
-    " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
-  "97585565390197f6": "Discard",
   "c0fce4a3555c5c17": "Connect",
   "0d1eba54ff075d77": "Use it",
   "035dc7d3b0f3e526": "Thread titles and other generated text",
@@ -11245,6 +11202,7 @@
     " answered. It works."
   ],
   "74718b8533319acb": "Follows the text generation model",
+  "f7c3ae7a79ede728": "Test",
   "b2ae5ae37b088f1b": "No models match.",
   "84853da6b47fd3ab": "Background",
   "76ded36bf5337e44": "Toolbar background",
@@ -11919,8 +11877,7 @@
   "6310b97b04ef239f": "Welcome page",
   "df9fa3a9cb004b9b": "onboarding setup first run getting started agents import projects",
   "3188bc3b3c4508bc": "Privacy policy",
-  "901a823214edc8c4": "telemetry analytics usage data tracking legal opt out",
-  "82136480255a5106": "OTel OTLP telemetry export endpoints logs traces metrics Grafana",
+  "669727743f273fbf": "privacy legal data",
   "659d081051faf7ff": "logs traces processes resource history failures spans cpu memory",
   "5eaeacfa9f82051a": "report bug problem t3 team send feedback agents tools automatic when i ask",
   "f537f91e1ee41d47": "keyboard shortcuts hotkeys commands bindings json",
@@ -12137,14 +12094,12 @@
   "c1a9fe8e24876f1d": "{count, plural, one {{count} running thread will be interrupted.} other {{count} running threads will be interrupted.}}",
   "ecdf5f108ecc71d0": "{count, plural, one {{count} can resume after the restart.} other {{count} can resume after the restart.}}",
   "0576c87870fb6389": "Update",
-  "948185631ef288e6": "{count, plural, one {{count} running} other {{count} running}}",
   "3d9a2f6b9c114039": "Providers",
   "f4baf8deafbb227d": "Skipped",
   "f938bb483eb3d189": "restarts last",
+  "f13e08bd3614112e": "update T3 Code on that machine",
   "9bca02be2b4d612a": "not connected",
   "2dcc418b6a13b83c": "needs a manual update",
-  "f13e08bd3614112e": "update T3 Code on that machine",
-  "3c3348c36a2695af": "change the update track on that machine",
   "fa8faa732a2688ef": "on the {channel} channel",
   "e65649675cb4cbaa": "turned off",
   "a1e7c08d9ef315c7": "still loading",
@@ -12161,6 +12116,7 @@
   "3ac986d604a2ad62": "This app cannot switch: its server is not connected, so its database cannot be checked.",
   "3bbb6e9ade0cf7e1": "run `{command}` there",
   "e7194946af611278": "runs a preview build",
+  "3c3348c36a2695af": "change the update track on that machine",
   "f5eac23351c99297": "switch the Mac app on that Mac",
   "d7444fbde9a80f04": "<1m",
   "09c1af20e9323765": "Restart in {seconds}s",
@@ -12632,6 +12588,16 @@
   "156ff7b625287a1e": "Hide skipped",
   "69b985b97ab45e6b": "Show {count} skipped",
   "2400254d362de84d": "Loading workflow runs…",
+  "cae5c3205c01d062": [
+    {
+      "t": "span",
+      "i": 1,
+      "c": "A workflow file has a problem."
+    },
+    " ",
+    "The last version that did keeps running."
+  ],
+  "ed8ce6ebc73dc12d": "Open the file",
   "145e1f7503ba3b2c": [
     "This environment has no run with that link.",
     " ",
@@ -12657,16 +12623,6 @@
       "c": "Read the guide"
     }
   ],
-  "cae5c3205c01d062": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "A workflow file has a problem."
-    },
-    " ",
-    "The last version that did keeps running."
-  ],
-  "ed8ce6ebc73dc12d": "Open the file",
   "5d8d278ff828102d": "All workflows",
   "39459da07479f482": "Agent",
   "7741243632056b81": "{step} · transcript",
@@ -12810,28 +12766,5 @@
   "27d76249d09eb69f": "Review guide ready",
   "faa3bb26abb39c93": "Review guide failed",
   "b7df38b7d8792d78": "Open guide",
-  "9e91e9a77b664e4e": "Could not start a review guide",
-  "99d51127f573296b": "Another account",
-  "8ec2c57414669b79": "Connect a second {tracker} workspace or user.",
-  "99963c0142e17f00": "For the new {tracker} account.",
-  "6d8e4ebc889bace9": "Add account",
-  "8a883c4fbc127b68": "Enabling stack auto-merge...",
-  "5fb2a26ae31e8983": "Could not enable stack auto-merge",
-  "986d0dcbf4dd0098": "Stack auto-merge enabled",
-  "f3ed1f63c8a3eef2": "{host} merges the stack through #{number} once its requirements are met.",
-  "bd536a0a1754f6cb": "Could not cancel stack auto-merge",
-  "bb90ac3b2f3a72d5": "The host refused to cancel auto-merge. Refresh and try again.",
-  "9c28753c777c37b7": "{count, plural, one {Auto-merge {count} {term, select, mr {merge request} cr {change request} other {pull request}}?} other {Auto-merge {count} {term, select, mr {merge requests} cr {change requests} other {pull requests}}?}}",
-  "a86b49982e18784d": "Merge #{number} and its unmerged layers below into {base} using {method} once every one of them meets the requirements on {host}. This may happen immediately.",
-  "b1afda5c964deee4": [
-    "Auto-merge stack (",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    ")"
-  ],
-  "33d18dda74f6d7b3": "Cancel stack auto-merge",
-  "012c67c7f1a99e33": "Auto-merge stack"
+  "9e91e9a77b664e4e": "Could not start a review guide"
 }
