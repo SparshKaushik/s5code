@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 const RESUME_TIMEOUT_MS: i64 = 32 * 60 * 1000;
 /// Desktop commits tried before giving up on the app installing the prepared update.
 const MAX_COMMITS: u8 = 3;
-const LIFECYCLE: &str = "subscribeServerLifecycle";
+use crate::shell::lifecycle::METHOD as LIFECYCLE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -222,6 +222,7 @@ pub fn poll(app: &mut App) -> bool {
         return false;
     }
     let mut updates = std::mem::take(&mut app.ui.chat.server_update.0);
+    let mut lifecycle = std::mem::take(&mut app.ui.shell.lifecycle);
     let mut changed = false;
     updates.retain(|key, operation| {
         if matches!(operation.step, Step::None) {
@@ -248,7 +249,7 @@ pub fn poll(app: &mut App) -> bool {
                 }
                 reply = reply.or_else(|| net.take_reply(id));
             }
-            poll_one(operation, net, now, chunks, reply)
+            poll_one(operation, net, &mut lifecycle, key, now, chunks, reply)
         } else {
             fail(operation, format!("Could not confirm that the server resumed on t3@{target}. Reconnect to check the update outcome."));
             true
@@ -270,11 +271,21 @@ pub fn poll(app: &mut App) -> bool {
         changed |= updated;
         operation.status != Status::Idle
     });
+    app.ui.shell.lifecycle = lifecycle;
     app.ui.chat.server_update.0 = updates;
     changed
 }
 
-fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<Value>, reply: Option<s5_net::Reply>) -> bool {
+fn poll_one(
+    state: &mut Operation,
+    net: &mut s5_net::Net,
+    lifecycle: &mut crate::shell::lifecycle::Ui,
+    key: &str,
+    now: i64,
+    chunks: Vec<Value>,
+    reply: Option<s5_net::Reply>,
+) -> bool {
+    let primary = key == env::LOCAL;
     let (from, target) = match &state.status {
         Status::Running { from, target, .. } => (from.clone(), target.clone()),
         _ => return false,
@@ -305,7 +316,7 @@ fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<
                                 state.commits = 1;
                                 state.step = Step::Commit(net.request("server.commitDesktopUpdate", json!({"requestId": token})), result);
                             }
-                            None => resume(state, net, result, &from, now),
+                            None => resume(state, net, lifecycle, key, result, &from, now),
                         },
                     }
                 }
@@ -315,16 +326,17 @@ fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<
             None => state.step = Step::Commit(id, result),
             Some(Err(cause)) if !transport_lost(&cause) => {
                 changed = true;
+                release(net, primary);
                 fail(state, failure_message(&cause));
             }
             Some(_) => {
                 changed = true;
-                resume(state, net, result, &from, now);
+                resume(state, net, lifecycle, key, result, &from, now);
             }
         },
         Step::Resume { result, deadline, mut disconnected, mut nudged } => {
             if now > deadline {
-                net.unwatch_resource(LIFECYCLE, json!({}));
+                release(net, primary);
                 fail(state, format!("Could not confirm that the server resumed on t3@{target}. Reconnect to check the update outcome."));
                 return true;
             }
@@ -338,16 +350,16 @@ fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<
             } else if net.state().conn == s5_net::Conn::Connecting {
                 disconnected = true;
             }
-            for event in net.take_resource_events(LIFECYCLE, json!({})) {
+            for event in crate::shell::lifecycle::take(lifecycle, key) {
                 match ready(&result, &event, disconnected) {
                     Ready::Skip => {}
                     Ready::Done => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         *state = Operation::default();
                         return true;
                     }
                     Ready::Failed(message) => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         fail(state, message);
                         return true;
                     }
@@ -358,7 +370,7 @@ fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<
                         return true;
                     }
                     Ready::Recommit => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         fail(state, "The desktop app resumed without installing the prepared update.".to_owned());
                         return true;
                     }
@@ -370,8 +382,15 @@ fn poll_one(state: &mut Operation, net: &mut s5_net::Net, now: i64, chunks: Vec<
     changed
 }
 
+/// Ends the update's lifecycle subscription, unless it is the primary server's standing one.
+fn release(net: &mut s5_net::Net, primary: bool) {
+    if !primary {
+        net.unwatch_resource(LIFECYCLE, json!({}));
+    }
+}
+
 /// The update was accepted: wait for the server to come back on it.
-fn resume(state: &mut Operation, net: &mut s5_net::Net, result: Value, from: &str, now: i64) {
+fn resume(state: &mut Operation, net: &mut s5_net::Net, lifecycle: &mut crate::shell::lifecycle::Ui, key: &str, result: Value, from: &str, now: i64) {
     let target = s(&result, "targetVersion").to_owned();
     // A track switch's desktop host already on its newest build only saved the track.
     if s(&result, "method") == "desktop-app" && s(&result, "desktopUpdateToken").is_empty() && target == from {
@@ -384,7 +403,10 @@ fn resume(state: &mut Operation, net: &mut s5_net::Net, result: Value, from: &st
     }
     net.watch_resource(LIFECYCLE, json!({}));
     // Events from before this point belong to the old server.
-    let _ = net.take_resource_events(LIFECYCLE, json!({}));
+    if key != env::LOCAL {
+        let _ = net.take_resource_events(LIFECYCLE, json!({}));
+    }
+    let _ = crate::shell::lifecycle::take(lifecycle, key);
     state.step = Step::Resume { result, deadline: now + RESUME_TIMEOUT_MS, disconnected: false, nudged: now };
 }
 
@@ -394,6 +416,29 @@ mod tests {
 
     fn lost() -> Result<Value, Value> {
         Err(json!({"_tag": "TransportError", "message": "connection lost; command outcome may be unknown"}))
+    }
+
+    #[test]
+    fn an_update_timeout_releases_only_the_parked_servers_lifecycle_watch() {
+        use crate::data::Source;
+        let mut app = App::new();
+        app.src = Source::Live(s5_net::Net::in_memory("http://local.test"));
+        env::park(&mut app, "box", Source::Live(s5_net::Net::in_memory("http://box.test")));
+        for key in [env::LOCAL, "box"] {
+            let net = env::net_of(&mut app, key).unwrap();
+            net.watch_resource(LIFECYCLE, json!({}));
+            let status = Status::Running { stage: Stage::Resuming, from: "1.0.0".into(), target: "2.0.0".into() };
+            app.ui.chat.server_update.0.insert(key.into(), Operation {
+                status,
+                step: Step::Resume { result: json!({"targetVersion": "2.0.0"}), deadline: app.now_ms - 1, disconnected: false, nudged: 0 },
+                ..Operation::default()
+            });
+        }
+        assert!(poll(&mut app));
+        for (key, watching) in [(env::LOCAL, true), ("box", false)] {
+            assert!(matches!(status_on(&app, key), Status::Failed { .. }));
+            assert_eq!(env::net_of(&mut app, key).unwrap().watching(LIFECYCLE, json!({})), watching);
+        }
     }
 
     #[test]

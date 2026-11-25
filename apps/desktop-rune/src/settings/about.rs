@@ -385,9 +385,9 @@ pub fn view(s: &App, t: &T) -> El {
     // Web's About version row: this app's own update (`desktop::updates`).
     let (status, next) = crate::desktop::updates::about(s);
     let button = match next {
-        Some("Check for Updates") => c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
+        Some(label @ ("Check for Updates" | "Up to Date")) => c::button(label, t).on_press(crate::desktop::check_for_updates),
         Some(label) => c::button(label, t).on_press(crate::desktop::updates::press),
-        None => c::press_if(c::button("Check for Updates", t), false, |_| {}),
+        None => c::press_if(c::button(crate::desktop::updates::about_busy_label(s), t), false, |_| {}),
     };
     app.push(
         row()

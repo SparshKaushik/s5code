@@ -59,6 +59,8 @@ pub(crate) struct Toast {
     /// `expandableContent` behind "Show details" / "Hide details".
     pub details: Option<String>,
     pub details_open: bool,
+    /// `expandableLabels`: (expand, collapse) in place of "Show details" / "Hide details".
+    pub details_labels: Option<(&'static str, &'static str)>,
     /// `data.threadId`: shown only while this thread is open.
     pub thread: Option<String>,
     /// `hideCopyButton`: an error toast copies its description unless this is set.
@@ -79,6 +81,7 @@ impl Toast {
             until: 0,
             details: None,
             details_open: false,
+            details_labels: None,
             thread: None,
             hide_copy: false,
         }
@@ -243,7 +246,8 @@ fn card(toast: &Toast, t: &T) -> El {
     }
     if let Some(details) = &toast.details {
         let open = toast.details_open;
-        let label = if open { "Hide details" } else { "Show details" };
+        let (expand, collapse) = toast.details_labels.unwrap_or(("Show details", "Hide details"));
+        let label = if open { collapse } else { expand };
         body = body.child(
             row()
                 .key(format!("toast-{id}-details"))

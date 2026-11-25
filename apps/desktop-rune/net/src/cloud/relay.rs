@@ -337,6 +337,13 @@ pub fn client_devices(origin: &str, clerk_jwt: &str) -> Result<Vec<Device>, Fail
     devices(&read_json(action, response)?).map_err(Failure::new)
 }
 
+/// `createT3ChatLinkRequest`: the T3 Chat page that links the account's T3 Chat plan.
+pub fn t3chat_link_request(origin: &str, clerk_jwt: &str) -> Result<String, Failure> {
+    let action = "start linking T3 Chat";
+    let response = agent().post(&format!("{origin}/v1/client/t3chat-link-requests")).set("Authorization", &format!("Bearer {clerk_jwt}")).send_json(json!({})).map_err(|e| failure(action, e))?;
+    read_json(action, response)?["url"].as_str().map(str::trim).filter(|u| !u.is_empty()).map(str::to_owned).ok_or_else(|| Failure::new("The relay returned no T3 Chat link."))
+}
+
 /// `unlinkEnvironment`: revokes the environment's T3 Connect access and frees its host space.
 pub fn deregister(origin: &str, clerk_jwt: &str, environment: &str) -> Result<(), Failure> {
     let action = "deregister the server";

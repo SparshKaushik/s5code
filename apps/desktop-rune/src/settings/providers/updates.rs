@@ -29,7 +29,7 @@ pub struct Machine {
     pub candidates: Vec<(String, String)>,
 }
 
-fn driver_name(driver: &str) -> &str {
+pub(crate) fn driver_name(driver: &str) -> &str {
     DRIVERS.iter().find(|(kind, ..)| *kind == driver).map_or(driver, |(_, label, _)| label)
 }
 
@@ -126,7 +126,7 @@ fn update_all(s: &mut App) {
 }
 
 /// `getProviderUpdateRunOutcome`: the failure line, if it failed.
-fn outcome(machine: &str, driver: &str, instance: &str, reply: &Result<Value, Value>) -> Option<String> {
+pub(crate) fn outcome(machine: &str, driver: &str, instance: &str, reply: &Result<Value, Value>) -> Option<String> {
     let label = format!("{machine} · {}", driver_name(driver));
     match reply {
         Err(error) => Some(format!("{label}: {}", error["message"].as_str().unwrap_or("Provider update failed."))),

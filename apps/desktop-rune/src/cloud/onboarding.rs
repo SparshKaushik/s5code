@@ -145,7 +145,7 @@ fn toggle_row(key: &str, title: &str, description: &str, on: bool, disabled: boo
         .child(kit::Switch::new(on).label(title.to_owned()).hide_label().disabled(disabled).on_toggle(move |s: &mut App| edit(s, flip)).build(&kit::theme(t)))
 }
 
-fn publish_step(ui: &Onboarding, t: &T) -> El {
+fn publish_step(ui: &Onboarding, upgrade: Option<&'static str>, t: &T) -> El {
     let disabled = ui.applying;
     let mut body = col().w_full().gap(12.0).child(
         col()
@@ -168,22 +168,34 @@ fn publish_step(ui: &Onboarding, t: &T) -> El {
         body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
     }
     if ui.tunnel_limit.is_some() {
-        body = body.child(tunnel_limit_alert(t));
+        body = body.child(tunnel_limit_alert(upgrade, t));
     }
     body
 }
 
-/// Web `TunnelLimitAlert` without a T3 Chat plan to upgrade, which Rune does not read: deregister
-/// an environment instead, from the account's registered environments.
-fn tunnel_limit_alert(t: &T) -> El {
-    let manage = kit::Button::new("Manage tunnels")
-        .variant("outline")
-        .size("sm")
-        .on_press(|s: &mut App| {
-            complete(s);
-            s.navigate(crate::Route::Settings("connections".into()));
-        })
-        .build(t);
+/// Web `OnboardingTunnelLimitAlert`: link or upgrade the T3 Chat plan behind the account's
+/// tunnel cap, or else deregister an environment from the account's registered environments.
+fn tunnel_limit_alert(upgrade: Option<&'static str>, t: &T) -> El {
+    let (description, action) = match upgrade {
+        Some("link") => (
+            "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
+            kit::Button::new("Link T3 Chat").size("sm").on_press(|s: &mut App| {
+                complete(s);
+                super::account::link_t3chat(s);
+            }),
+        ),
+        Some(_) => (
+            "Switch to Tailscale or get more tunnels by upgrading your T3 Chat sub (sorry!)",
+            kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| crate::settings::auth::open_url(s, crate::settings::connect::T3CHAT_SUBSCRIPTION_URL)),
+        ),
+        None => (
+            "Switch to Tailscale or deregister an environment you no longer use (sorry!)",
+            kit::Button::new("Manage tunnels").variant("outline").size("sm").on_press(|s: &mut App| {
+                complete(s);
+                s.navigate(crate::Route::Settings("connections".into()));
+            }),
+        ),
+    };
     row()
         .key("t3-connect-tunnel-limit")
         .role("alert")
@@ -202,9 +214,9 @@ fn tunnel_limit_alert(t: &T) -> El {
                 .min_w(0.0)
                 .gap(2.0)
                 .child(text("You're out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground).wrap())
-                .child(text("Switch to Tailscale or deregister an environment you no longer use (sorry!)").font(theme::TEXT_SM).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
+                .child(text(description).font(theme::TEXT_SM).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
         )
-        .child(manage)
+        .child(action.build(t))
 }
 
 fn devices_step(s: &App, t: &T) -> El {
@@ -244,7 +256,7 @@ fn steps(ui: &Onboarding, t: &T) -> El {
 pub fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(ui) = &s.ui.cloud.onboarding else { return };
     let publish = ui.step == Step::Publish && s.ui.cloud.link.is_some();
-    let content = if publish { publish_step(ui, t) } else { devices_step(s, t) };
+    let content = if publish { publish_step(ui, crate::settings::connect::tunnel_upgrade(s), t) } else { devices_step(s, t) };
     let dont_show = ui.dont_show;
     let buttons = if publish {
         row()
@@ -280,9 +292,11 @@ pub(crate) fn scene(s: &mut App, publish: bool) {
     open(s, "user_1");
 }
 
-/// Scene: Continue refused because the account is at its tunnel cap.
-pub(crate) fn scene_tunnel_limit(s: &mut App) {
+/// Scene: Continue refused because the account is at its tunnel cap, whose T3 Chat plan
+/// `upgrade` would raise (`link`, `pro` or `premier`).
+pub(crate) fn scene_tunnel_limit(s: &mut App, upgrade: Option<&'static str>) {
     scene(s, true);
+    crate::settings::connect::scene_usage(s, upgrade);
     edit(s, |o| o.applying = true);
     published(s, Err("https://relay/v1/client/environment-links failed: Limit reached".into()), Some(2));
 }
