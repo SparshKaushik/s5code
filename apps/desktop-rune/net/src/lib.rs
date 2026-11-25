@@ -58,18 +58,12 @@ pub struct State {
     pub conn_trace: Option<String>,
 }
 
-/// How a socket authorizes.
-#[derive(Clone)]
-pub enum Auth {
-    /// A token sent in the upgrade's `Authorization` header.
-    Bearer(String),
-    /// A socket URL minted before each attempt: T3 Connect's DPoP ticket and upgrade proof.
-    Socket(Arc<dyn Fn() -> Result<String, cloud::Failure> + Send + Sync>),
-}
+pub use auth::{Auth, Dpop};
 
 /// A finished one-shot request: `Ok(value)` for `Exit Success`, `Err(cause)` for a failure.
 pub type Reply = Result<Value, Value>;
 
+mod auth;
 pub mod cloud;
 mod pairing;
 mod projection;
@@ -92,7 +86,7 @@ pub struct Net {
     resources: HashMap<Route, Value>,
     resource_events: HashMap<Route, Vec<Value>>,
     base_url: String,
-    bearer: String,
+    auth: Auth,
     incoming_tx: Sender<Incoming>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -128,8 +122,7 @@ impl Net {
     pub fn connect_requests_only(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
         Self::spawn(base_url, token, false, wake)
     }
-    /// A connection whose socket authorizes some other way than a bearer token. HTTP routes
-    /// (`api_get` and friends) still need [`Net::bearer`], which is empty here.
+    /// A connection that authorizes some other way than a bearer token, such as T3 Connect's DPoP.
     pub fn connect_with(base_url: &str, auth: Auth, wake: impl Fn() + Send + Sync + 'static) -> Net {
         Self::spawn_with(base_url, auth, true, wake)
     }
@@ -137,18 +130,15 @@ impl Net {
         Self::spawn_with(base_url, Auth::Bearer(token.to_owned()), subscribe_shell, wake)
     }
     fn spawn_with(base_url: &str, auth: Auth, subscribe_shell: bool, wake: impl Fn() + Send + Sync + 'static) -> Net {
-        let token = match &auth {
-            Auth::Bearer(token) => token.clone(),
-            Auth::Socket(_) => String::new(),
-        };
         let (tx, commands) = mpsc::channel();
         let (incoming, rx) = mpsc::channel();
         let incoming_tx = incoming.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let worker_wake = wake.clone();
         let base = base_url.to_owned();
+        let worker_auth = auth.clone();
         std::thread::spawn(move || {
-            transport::run(base, auth, subscribe_shell, commands, incoming, move || {
+            transport::run(base, worker_auth, subscribe_shell, commands, incoming, move || {
                 worker_wake()
             })
         });
@@ -161,7 +151,7 @@ impl Net {
             resources: HashMap::new(),
             resource_events: HashMap::new(),
             base_url: base_url.to_owned(),
-            bearer: token,
+            auth,
             incoming_tx,
             wake,
         }
@@ -180,7 +170,7 @@ impl Net {
             resources: HashMap::new(),
             resource_events: HashMap::new(),
             base_url: String::new(),
-            bearer: String::new(),
+            auth: Auth::Bearer(String::new()),
             incoming_tx,
             wake: Arc::new(|| {}),
         }
@@ -201,7 +191,7 @@ impl Net {
             resources: HashMap::new(),
             resource_events: HashMap::new(),
             base_url: base_url.to_owned(),
-            bearer: String::new(),
+            auth: Auth::Bearer(String::new()),
             incoming_tx,
             wake: Arc::new(|| {}),
         }
@@ -272,9 +262,9 @@ impl Net {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
-    /// The session token, for a connection of the client's own such as `api_socket`.
-    pub fn bearer(&self) -> &str {
-        &self.bearer
+    /// How this connection authorizes, for requests of the client's own such as `api_get`.
+    pub fn auth(&self) -> &Auth {
+        &self.auth
     }
     pub fn state(&self) -> &State {
         &self.state
@@ -356,7 +346,7 @@ impl Net {
     pub fn http_request(&mut self, method: &str, path: &str, payload: Value) -> u64 {
         let id = next_id();
         let base = self.base_url.clone();
-        let bearer = self.bearer.clone();
+        let auth = self.auth.clone();
         let method = method.to_owned();
         let path = path.to_owned();
         let tx = self.incoming_tx.clone();
@@ -371,26 +361,9 @@ impl Net {
                 url.set_path(&path);
                 url.set_query(None);
                 url.set_fragment(None);
-                let req = ureq::AgentBuilder::new()
-                    .redirects(0)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .request(&method, url.as_str())
-                    .set("Authorization", &format!("Bearer {bearer}"));
-                let response = if method == "GET" {
-                    req.call()
-                } else {
-                    req.send_json(payload)
-                };
-                match response {
-                    Ok(response) => response
-                        .into_json::<Value>()
-                        .map_err(|e| json!({"message":e.to_string()})),
-                    Err(ureq::Error::Status(code, response)) => Err(response
-                        .into_json::<Value>()
-                        .unwrap_or_else(|_| json!({"message":format!("HTTP {code}")}))),
-                    Err(error) => Err(json!({"message":error.to_string()})),
-                }
+                let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build();
+                let response = auth::send(&auth, &agent, &method, url.as_str(), |req| if method == "GET" { req.call() } else { req.send_json(&payload) });
+                response.map_err(auth::Failed::json)?.into_json::<Value>().map_err(|e| json!({"message":e.to_string()}))
             })();
             let _ = tx.send(Incoming::Reply(id, result));
             wake();
@@ -415,25 +388,14 @@ impl Net {
         url.path_segments_mut().ok()?.clear().extend(["api", "orchestration", "threads", thread_id, "history"]);
         url.query_pairs_mut().clear().extend_pairs(query.iter().copied());
         url.set_fragment(None);
-        let bearer = self.bearer.clone();
+        let auth = self.auth.clone();
         let tx = self.incoming_tx.clone();
         let wake = self.wake.clone();
         std::thread::spawn(move || {
-            let response = ureq::AgentBuilder::new()
-                .redirects(0)
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .get(url.as_str())
-                .set("Authorization", &format!("Bearer {bearer}"))
-                .set("x-t3-orchestration-protocol", "2")
-                .call();
-            let result = match response {
-                Ok(response) => response.into_json::<Value>().map_err(|e| json!({"message":e.to_string()})),
-                Err(ureq::Error::Status(code, response)) => Err(response
-                    .into_json::<Value>()
-                    .unwrap_or_else(|_| json!({"message":format!("HTTP {code}")}))),
-                Err(error) => Err(json!({"message":error.to_string()})),
-            };
+            let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build();
+            let result = auth::send(&auth, &agent, "GET", url.as_str(), |req| req.set("x-t3-orchestration-protocol", "2").call())
+                .map_err(auth::Failed::json)
+                .and_then(|response| response.into_json::<Value>().map_err(|e| json!({"message":e.to_string()})));
             let _ = tx.send(Incoming::Reply(id, result));
             wake();
         });
@@ -443,7 +405,7 @@ impl Net {
     pub fn upload_file(&mut self, relative_url: &str, path: &std::path::Path, mime: &str) -> u64 {
         let id = next_id();
         let url = upload_url(&self.base_url, relative_url);
-        let bearer = self.bearer.clone();
+        let auth = self.auth.clone();
         let path = path.to_owned();
         let mime = mime.to_owned();
         let tx = self.incoming_tx.clone();
@@ -452,23 +414,8 @@ impl Net {
             let result = (|| {
                 let url = url?;
                 let bytes = std::fs::read(&path).map_err(|e| json!({"message":e.to_string()}))?;
-                let response = ureq::AgentBuilder::new()
-                    .redirects(0)
-                    .timeout(std::time::Duration::from_secs(600))
-                    .build()
-                    .post(&url)
-                    .set("Authorization", &format!("Bearer {bearer}"))
-                    .set("Content-Type", &mime)
-                    .send_bytes(&bytes);
-                match response {
-                    Ok(_) => Ok(Value::Null),
-                    Err(ureq::Error::Status(code, response)) => Err(json!({"message": response
-                        .into_string()
-                        .ok()
-                        .filter(|t| !t.trim().is_empty())
-                        .unwrap_or_else(|| format!("HTTP {code}"))})),
-                    Err(error) => Err(json!({"message":error.to_string()})),
-                }
+                let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(600)).build();
+                auth::send(&auth, &agent, "POST", &url, |req| req.set("Content-Type", &mime).send_bytes(&bytes)).map(|_| Value::Null).map_err(|failed| json!({"message": failed.text()}))
             })();
             let _ = tx.send(Incoming::Reply(id, result));
             wake();
@@ -547,7 +494,7 @@ impl Sent {
 
 pub fn api_socket(
     base: &str,
-    bearer: &str,
+    auth: &Auth,
     path: &str,
     query: &str,
     read_timeout: std::time::Duration,
@@ -558,20 +505,22 @@ pub fn api_socket(
         return Err("Unsupported API path".into());
     }
     let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
-    let scheme = match url.scheme() {
-        "https" | "wss" => "wss",
-        "http" | "ws" => "ws",
+    let (scheme, http) = match url.scheme() {
+        "https" | "wss" => ("wss", "https"),
+        "http" | "ws" => ("ws", "http"),
         _ => return Err("unsupported server URL scheme".into()),
     };
-    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
     url.set_path(path);
     url.set_query(Some(query).filter(|q| !q.is_empty()));
     url.set_fragment(None);
+    // The server checks an upgrade's proof against the request as HTTP.
+    url.set_scheme(http).map_err(|_| "invalid server URL")?;
+    let (headers, _) = auth.headers("GET", url.as_str(), None)?;
+    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
     let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
-    req.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {bearer}").parse().map_err(|_| "invalid bearer token")?,
-    );
+    for (name, value) in headers {
+        req.headers_mut().insert(name, value.parse().map_err(|_| "invalid authorization header")?);
+    }
     let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
     let tcp = match socket.get_mut() {
         MaybeTlsStream::Plain(tcp) => tcp,
@@ -592,60 +541,28 @@ fn api_url(base: &str, path: &str, query: &str) -> Result<url::Url, String> {
     url.set_fragment(None);
     Ok(url)
 }
-fn api_error(error: ureq::Error) -> String {
-    match error {
-        ureq::Error::Status(code, response) => response
-            .into_string()
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| format!("HTTP {code}")),
-        error => error.to_string(),
-    }
+fn api_body(response: ureq::Response, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 /// The body of a GET on one of the server's `/api` routes as this client, at most `limit` bytes.
-pub fn api_get(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+pub fn api_get(base: &str, auth: &Auth, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
     let url = api_url(base, path, query)?;
-    let response = ureq::AgentBuilder::new()
-        .redirects(0)
-        .build()
-        .get(url.as_str())
-        .set("Authorization", &format!("Bearer {bearer}"))
-        .call()
-        .map_err(api_error)?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    api_body(auth::send(auth, &agent, "GET", url.as_str(), |req| req.call()).map_err(auth::Failed::text)?, limit)
 }
 /// A POST of `body` to one of the server's `/api` routes as this client.
-pub fn api_post(base: &str, bearer: &str, path: &str, query: &str, content_type: &str, body: &[u8]) -> Result<(), String> {
+pub fn api_post(base: &str, auth: &Auth, path: &str, query: &str, content_type: &str, body: &[u8]) -> Result<(), String> {
     let url = api_url(base, path, query)?;
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .post(url.as_str())
-        .set("Authorization", &format!("Bearer {bearer}"))
-        .set("Content-Type", content_type)
-        .send_bytes(body)
-        .map(|_| ())
-        .map_err(api_error)
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(120)).build();
+    auth::send(auth, &agent, "POST", url.as_str(), |req| req.set("Content-Type", content_type).send_bytes(body)).map(|_| ()).map_err(auth::Failed::text)
 }
 /// The body of an empty POST to one of the server's `/api` routes as this client, at most `limit` bytes.
-pub fn api_post_read(base: &str, bearer: &str, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
+pub fn api_post_read(base: &str, auth: &Auth, path: &str, query: &str, limit: u64) -> Result<Vec<u8>, String> {
     let url = api_url(base, path, query)?;
-    let response = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .post(url.as_str())
-        .set("Authorization", &format!("Bearer {bearer}"))
-        .call()
-        .map_err(api_error)?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(20)).build();
+    api_body(auth::send(auth, &agent, "POST", url.as_str(), |req| req.call()).map_err(auth::Failed::text)?, limit)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {

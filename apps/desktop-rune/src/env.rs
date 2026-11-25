@@ -169,8 +169,8 @@ fn save(s: &App) -> Result<(), String> {
     let path = path();
     let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
     write(&path, &ui.saved, &ui.off, &ui.alternates, &ui.outdated)?;
-    let saved = &ui.saved;
-    catalog::export(&old, saved);
+    let relay: Vec<String> = ui.saved.iter().filter(|e| reached_by_relay(s, &e.id)).map(|e| e.id.clone()).collect();
+    catalog::export(&old, &ui.saved, &relay);
     Ok(())
 }
 
@@ -201,7 +201,7 @@ fn connect_to(s: &App, id: &str, base: &str, bearer: &str) -> Source {
         }
     };
     Source::Live(if bearer == T3_CONNECT {
-        s5_net::Net::connect_with(base, crate::cloud::socket_auth(id), wake)
+        s5_net::Net::connect_with(base, crate::cloud::auth(id), wake)
     } else if s.ui.env.outdated.contains_key(id) {
         s5_net::Net::connect_requests_only(base, bearer, wake)
     } else {
@@ -229,22 +229,24 @@ pub fn start(s: &mut App) {
 }
 
 /// Electron's saved connections, read off the UI thread at launch.
-static CATALOG: std::sync::Mutex<Option<Vec<Saved>>> = std::sync::Mutex::new(None);
+static CATALOG: std::sync::Mutex<Option<(Vec<Saved>, Vec<(String, String)>)>> = std::sync::Mutex::new(None);
 
 /// Connections paired in the Electron app that this list lacks join it, and connect.
 fn adopt_catalog(s: &mut App) -> bool {
-    let Some(found) = CATALOG.lock().unwrap().take() else { return false };
+    let Some((found, relays)) = CATALOG.lock().unwrap().take() else { return false };
     let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
-    if new.is_empty() {
-        return false;
-    }
+    let adopted = !new.is_empty();
     for env in new {
         let src = connect(s, &env);
         s.ui.env.parked.push((env.id.clone(), src));
         s.ui.env.saved.push(env);
     }
-    s.ui.env.error = save(s).err().map(|e| format!("Could not save environments: {e}"));
-    true
+    if adopted {
+        s.ui.env.error = save(s).err().map(|e| format!("Could not save environments: {e}"));
+    }
+    // After the bearer routes, so a relay route joins its environment as a fallback.
+    crate::cloud::import(s, relays);
+    adopted
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -1200,7 +1202,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("wizard-t3-connect", |s| {
         scene_failing(s);
         crate::wizard::scene_computers(s);
-        crate::cloud::scene_signed_in(s);
+        crate::wizard::scene_t3_connect(s);
     }),
     ("wizard-t3-connect-signed-out", |s| {
         scene_failing(s);

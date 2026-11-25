@@ -12,7 +12,7 @@ use rune::{El, col, icon, row, text};
 use s5_net::cloud::Failure;
 use s5_net::cloud::clerk::{self, Callback, Clerk, Identity};
 use s5_net::cloud::dpop::Key;
-use s5_net::cloud::relay::{self, Linked, Relay, Token};
+use s5_net::cloud::relay::{self, Linked, Relay, Status, Token};
 use serde_json::{Value, json};
 
 use crate::theme::{self, T};
@@ -60,11 +60,24 @@ pub struct Ui {
     pub signing_in: Option<SignIn>,
     /// The account's computers: `None` until listed.
     pub environments: Option<Result<Vec<Linked>, String>>,
+    /// Each listed computer's relay status (web `RelayEnvironmentAvailability`).
+    pub availability: HashMap<String, Availability>,
+    /// Relay connections Electron's catalog holds, added once the account lists them.
+    pub imports: Vec<(String, String)>,
     pub loading: bool,
     pub error: Option<String>,
     /// The setup wizard's T3 Connect card, folded away.
     pub wizard_folded: bool,
     events: Option<(Sender<Event>, Receiver<Event>)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Availability {
+    Checking,
+    Online,
+    /// Offline, and why when it will not come back by itself.
+    Offline(Option<String>),
+    Error(String),
 }
 
 pub enum Event {
@@ -74,6 +87,7 @@ pub enum Event {
     Failed { attempt: String, message: String },
     SignedIn { attempt: String, result: Result<Identity, String> },
     Environments(Result<Vec<Linked>, Failure>),
+    Status(String, Result<Status, Failure>),
     SignedOut,
 }
 
@@ -84,7 +98,8 @@ struct Shared {
     client_jwt: Option<String>,
     identity: Option<Identity>,
     key: Option<Arc<Key>>,
-    relay: Option<Token>,
+    /// Relay tokens by the scopes they grant.
+    relay: HashMap<&'static str, Token>,
     environments: HashMap<String, (Linked, Token)>,
 }
 
@@ -227,48 +242,97 @@ fn session_token(config: &Config) -> Result<String, Failure> {
     token
 }
 
-/// The relay token, exchanged again when it lapses or `stale` says the relay refused it.
-fn relay_token(config: &Config, key: &Key, stale: bool) -> Result<Token, Failure> {
-    let cached = shared().relay.clone().filter(|t| !stale && t.fresh(relay::now()));
+/// The relay token for `scope`, exchanged again when it lapses or `stale` says the relay refused it.
+fn relay_token(config: &Config, key: &Key, scope: &'static str, stale: bool) -> Result<Token, Failure> {
+    let cached = shared().relay.get(scope).cloned().filter(|t| !stale && t.fresh(relay::now()));
     if let Some(token) = cached {
         return Ok(token);
     }
-    let token = Relay { origin: config.relay.clone(), key }.exchange(&session_token(config)?, relay::CONNECT_SCOPE)?;
-    shared().relay = Some(token.clone());
+    let token = Relay { origin: config.relay.clone(), key }.exchange(&session_token(config)?, scope)?;
+    shared().relay.insert(scope, token.clone());
     Ok(token)
 }
 
-/// `authorizeDpop` for a socket: a cached environment token mints a ticket; otherwise the
-/// relay connects the environment again. Runs on the socket's own thread before each attempt.
-pub fn mint(environment: &str) -> Result<String, Failure> {
-    let config = config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?;
-    let cached = shared().environments.get(environment).cloned().filter(|(_, token)| token.fresh(relay::now()));
-    if let Some((linked, token)) = cached {
-        match relay::socket(&*key()?, &linked, &token) {
-            Err(refused) if refused.denied() => {
-                shared().environments.remove(environment);
+/// One environment token mint at a time, so a socket, its renewal and HTTP requests that all
+/// find the token lapsed share one relay round trip (web `pendingTokens`).
+static MINTING: Mutex<()> = Mutex::new(());
+
+/// `getDpopToken`: the cached environment token while fresh and not `rejected`; otherwise the
+/// relay connects the environment again and its `/oauth/token` issues a new one.
+fn environment_token(environment: &str, rejected: Option<&str>) -> Result<(Linked, Token), Failure> {
+    let _one = MINTING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    {
+        let mut state = shared();
+        let cached = state.environments.get(environment).cloned();
+        match cached {
+            Some((_, token)) if rejected == Some(token.access.as_str()) => {
+                state.environments.remove(environment);
             }
-            other => return other,
+            Some(cached) if cached.1.fresh(relay::now()) => return Ok(cached),
+            _ => {}
+        }
+        if state.identity.is_none() {
+            return Err(signed_out());
         }
     }
-    if shared().identity.is_none() {
-        return Err(signed_out());
-    }
+    let config = config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?;
     let key = key()?;
     let relay = Relay { origin: config.relay.clone(), key: &key };
-    let bootstrap = match relay.connect(&relay_token(&config, &key, false)?, environment) {
-        Err(refused) if refused.denied() => relay.connect(&relay_token(&config, &key, true)?, environment)?,
+    let bootstrap = match relay.connect(&relay_token(&config, &key, relay::CONNECT_SCOPE, false)?, environment) {
+        Err(refused) if refused.denied() => relay.connect(&relay_token(&config, &key, relay::CONNECT_SCOPE, true)?, environment)?,
         other => other?,
     };
     let token = relay::environment_token(&key, &bootstrap)?;
-    shared().environments.insert(environment.to_owned(), (bootstrap.environment.clone(), token.clone()));
-    relay::socket(&key, &bootstrap.environment, &token)
+    let minted = (bootstrap.environment, token);
+    shared().environments.insert(environment.to_owned(), minted.clone());
+    Ok(minted)
 }
 
-/// The socket auth of an environment saved as reached through T3 Connect.
-pub fn socket_auth(environment: &str) -> s5_net::Auth {
-    let environment = environment.to_owned();
-    s5_net::Auth::Socket(Arc::new(move || mint(&environment)))
+/// A saved environment reached through T3 Connect (`authorizeDpop`, `authorizeDpopHttp`).
+struct Environment(String);
+
+impl s5_net::Dpop for Environment {
+    fn socket(&self) -> Result<String, Failure> {
+        let key = key()?;
+        let (linked, token) = environment_token(&self.0, None)?;
+        match relay::socket(&key, &linked, &token) {
+            Err(refused) if refused.denied() => {
+                let (linked, token) = environment_token(&self.0, Some(&token.access))?;
+                relay::socket(&key, &linked, &token)
+            }
+            other => other,
+        }
+    }
+
+    fn token(&self, rejected: Option<&str>) -> Result<String, Failure> {
+        environment_token(&self.0, rejected).map(|(_, token)| token.access)
+    }
+
+    fn expires_at(&self) -> Option<u64> {
+        shared().environments.get(&self.0).map(|(_, token)| token.expires_at)
+    }
+
+    fn proof(&self, method: &str, url: &str, token: &str) -> Result<String, Failure> {
+        key()?.proof(method, url, Some(token)).map_err(Failure::new)
+    }
+}
+
+/// How an environment saved as reached through T3 Connect authorizes, socket and HTTP alike.
+pub fn auth(environment: &str) -> s5_net::Auth {
+    s5_net::Auth::Dpop(Arc::new(Environment(environment.to_owned())))
+}
+
+/// Whether this device is signed in to T3 Connect: the gate for account features on
+/// environment rows. Stable for other modules; [`session_jwt`] is what they send.
+pub(crate) fn signed_in(s: &App) -> bool {
+    s.ui.cloud.identity.is_some()
+}
+
+/// A fresh Clerk session JWT for the relay's bearer-authorized routes. Blocks on the network,
+/// so callers run it off the UI thread.
+#[allow(dead_code)] // For Settings' T3 Connect controls on environment rows.
+pub(crate) fn session_jwt() -> Result<String, Failure> {
+    session_token(&config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?)
 }
 
 /// The providers to offer: the instance's, else GitHub and Google until they load.
@@ -344,7 +408,7 @@ fn finish(s: &mut App) {
             let mut state = shared();
             state.client_jwt = clerk.client_jwt.clone().or(state.client_jwt.take());
             state.identity = Some(identity.clone());
-            state.relay = None;
+            state.relay.clear();
             state.environments.clear();
             save(&state);
         } else {
@@ -369,11 +433,22 @@ pub fn refresh(s: &mut App) {
     spawn(s, move || Event::Environments(session_token(&config).and_then(|jwt| relay::environments(&config.relay, &jwt))));
 }
 
+/// `refreshStatus`: whether the relay reaches a listed computer.
+fn check(linked: &Linked) -> Result<Status, Failure> {
+    let config = config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?;
+    let key = key()?;
+    let relay = Relay { origin: config.relay.clone(), key: &key };
+    match relay.status(&relay_token(&config, &key, relay::STATUS_SCOPE, false)?, linked) {
+        Err(refused) if refused.denied() => relay.status(&relay_token(&config, &key, relay::STATUS_SCOPE, true)?, linked),
+        other => other,
+    }
+}
+
 pub fn sign_out(s: &mut App) {
     let session = {
         let mut state = shared();
         let session = state.identity.take().map(|i| i.session);
-        state.relay = None;
+        state.relay.clear();
         state.environments.clear();
         save(&state);
         session
@@ -381,6 +456,7 @@ pub fn sign_out(s: &mut App) {
     let ui = &mut s.ui.cloud;
     ui.identity = None;
     ui.environments = None;
+    ui.availability.clear();
     ui.signing_in = None;
     ui.error = None;
     if let (Some(session), Some(config)) = (session, config()) {
@@ -446,7 +522,26 @@ fn land(s: &mut App, event: Event) {
         }
         Event::Environments(result) => {
             ui.loading = false;
-            ui.environments = Some(result.map_err(|f| f.message));
+            ui.availability.clear();
+            if let Ok(list) = &result {
+                for linked in list {
+                    s.ui.cloud.availability.insert(linked.id.clone(), Availability::Checking);
+                    let target = linked.clone();
+                    spawn(s, move || Event::Status(target.id.clone(), check(&target)));
+                }
+                adopt_imports(s, list);
+            }
+            s.ui.cloud.environments = Some(result.map_err(|f| f.message));
+        }
+        Event::Status(id, result) => {
+            let availability = match result {
+                Ok(status) if status.online => Availability::Online,
+                Ok(status) => Availability::Offline(status.offline_reason),
+                Err(failure) => Availability::Error(failure.message),
+            };
+            if let Some(slot) = ui.availability.get_mut(&id) {
+                *slot = availability;
+            }
         }
     }
 }
@@ -461,13 +556,41 @@ fn reconnect_relay_environments(s: &mut App) {
     }
 }
 
+/// Electron's relay connections join once the account lists them, since only the listing says
+/// where each one is.
+fn adopt_imports(s: &mut App, list: &[Linked]) {
+    let imports = std::mem::take(&mut s.ui.cloud.imports);
+    for (id, label) in imports {
+        match list.iter().find(|l| l.id == id) {
+            Some(linked) => {
+                let linked = Linked { label: if linked.label.is_empty() { label } else { linked.label.clone() }, ..linked.clone() };
+                crate::env::add_relay(s, &linked);
+            }
+            None => s.ui.cloud.imports.push((id, label)),
+        }
+    }
+}
+
+/// Relay connections read from Electron's catalog, for [`adopt_imports`].
+pub(crate) fn import(s: &mut App, relays: Vec<(String, String)>) {
+    let ui = &mut s.ui.cloud;
+    for (id, label) in relays {
+        if !ui.imports.iter().any(|(known, _)| *known == id) {
+            ui.imports.push((id, label));
+        }
+    }
+    if let Some(Ok(list)) = ui.environments.clone() {
+        adopt_imports(s, &list);
+    }
+}
+
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     while let Some(event) = s.ui.cloud.events.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) {
         land(s, event);
         changed = true;
     }
-    let showing = matches!(&s.route, crate::Route::Settings(page) if page == "connections") || s.ui.wizard.open;
+    let showing = matches!(&s.route, crate::Route::Settings(page) if page == "connections") || s.ui.wizard.open || !s.ui.cloud.imports.is_empty();
     if showing && s.ui.cloud.identity.is_some() && s.ui.cloud.environments.is_none() && !s.ui.cloud.loading {
         refresh(s);
     }
@@ -480,10 +603,30 @@ fn standing(s: &App, linked: &Linked) -> (String, Option<&'static str>) {
     if saved && crate::env::reached_by_relay(s, &linked.id) {
         return (crate::env::status(s, &linked.id), None);
     }
-    if saved {
-        return ("T3 Connect · Saved without T3 Connect".into(), Some("Add route"));
+    let not_added = if saved { "Saved without T3 Connect" } else { "Not added" };
+    let status = match availability(s, &linked.id) {
+        Availability::Offline(Some(reason)) => reason.clone(),
+        Availability::Offline(None) => format!("T3 Connect · {not_added} · Relay offline"),
+        Availability::Online => format!("T3 Connect · {not_added} · Relay online"),
+        Availability::Checking => format!("T3 Connect · {not_added} · Checking relay status…"),
+        Availability::Error(message) => message.clone(),
+    };
+    (status, Some(if saved { "Add route" } else { "Add" }))
+}
+
+fn availability<'a>(s: &'a App, id: &str) -> &'a Availability {
+    static CHECKING: Availability = Availability::Checking;
+    s.ui.cloud.availability.get(id).unwrap_or(&CHECKING)
+}
+
+/// The wizard's word for a computer not added yet.
+fn available(s: &App, id: &str) -> &'static str {
+    match availability(s, id) {
+        Availability::Online => "Available",
+        Availability::Offline(_) => "Offline",
+        Availability::Error(_) => "Unavailable",
+        Availability::Checking => "Checking…",
     }
-    ("T3 Connect · Not added".into(), Some("Add"))
 }
 
 fn muted(copy: impl Into<String>, t: &T) -> El {
@@ -591,12 +734,19 @@ pub fn section(s: &App, t: &T) -> Option<El> {
     Some(crate::settings::controls::section("T3 Connect", rows, t))
 }
 
-/// The account's computers the wizard can still set up: those not saved yet.
-fn unsaved(s: &App) -> Vec<Linked> {
+/// The account's computers the wizard lists: those not saved yet and those saved through
+/// T3 Connect. One saved over another address is set up from the main list.
+fn wizard_computers(s: &App) -> Vec<Linked> {
     match &s.ui.cloud.environments {
-        Some(Ok(list)) => list.iter().filter(|l| !s.ui.env.saved.iter().any(|e| e.id == l.id)).cloned().collect(),
+        Some(Ok(list)) => list.iter().filter(|l| !s.ui.env.saved.iter().any(|e| e.id == l.id) || crate::env::reached_by_relay(s, &l.id)).cloned().collect(),
         _ => vec![],
     }
+}
+
+/// Listed computers not saved yet whose relay status is known, for the wizard to tick once
+/// (`selectNewComputers`).
+pub(crate) fn new_computers(s: &App) -> Vec<Linked> {
+    wizard_computers(s).into_iter().filter(|l| !s.ui.env.saved.iter().any(|e| e.id == l.id) && *availability(s, &l.id) != Availability::Checking).collect()
 }
 
 /// Web onboarding `ConnectAccountOption`: sign in, then pick the account's computers.
@@ -639,7 +789,7 @@ pub fn wizard_option(s: &App, t: &T) -> Option<El> {
             body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
         }
     } else {
-        let computers = unsaved(s);
+        let computers = wizard_computers(s);
         if matches!(ui.environments, Some(Ok(_))) && computers.is_empty() {
             body = body.child(text("No computers linked yet.").font(theme::TEXT_SM).color(t.c.muted_foreground));
         }
@@ -649,6 +799,9 @@ pub fn wizard_option(s: &App, t: &T) -> Option<El> {
         for linked in computers {
             let target = linked.clone();
             let label = if linked.label.is_empty() { linked.id.clone() } else { linked.label.clone() };
+            let checked = crate::wizard::chosen(s, &linked.id);
+            let saved = s.ui.env.saved.iter().any(|e| e.id == linked.id);
+            let state = if saved { crate::env::short_status(s, &linked.id) } else { available(s, &linked.id) };
             body = body.child(
                 row()
                     .w_full()
@@ -659,12 +812,12 @@ pub fn wizard_option(s: &App, t: &T) -> Option<El> {
                     .radius(8.0)
                     .border(1.0, t.c.border)
                     .cursor(rune::Cursor::Pointer)
-                    .child(kit::Checkbox::new(false).hide_label().label(label.clone()).build(&kit::theme(t)))
+                    .key(format!("wizard-t3-connect-{}", linked.id))
+                    .child(kit::Checkbox::new(checked).hide_label().label(label.clone()).build(&kit::theme(t)))
                     .child(icon(&icons::MONITOR, 16.0).color(t.c.muted_foreground))
                     .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground).truncate().grow(1.0))
-                    .child(text("Available").font(theme::TEXT_XS).color(t.c.muted_foreground))
-                    // The wizard ticks a computer the first time it appears.
-                    .on_press(move |s: &mut App| add(s, &target)),
+                    .child(text(state).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                    .on_press(move |s: &mut App| crate::wizard::choose(s, &target, !checked)),
             );
         }
     }
@@ -688,6 +841,7 @@ pub(crate) fn scene_signed_in(s: &mut App) {
         Linked { id: "env-box".into(), label: "Hetzner box".into(), http: "https://box.tunnel.example.com/".into(), ws: "wss://box.tunnel.example.com/".into() },
         Linked { id: "env-studio".into(), label: "Studio Mac".into(), http: "https://studio.tunnel.example.com/".into(), ws: "wss://studio.tunnel.example.com/".into() },
     ]));
+    s.ui.cloud.availability = HashMap::from([("env-box".into(), Availability::Online), ("env-studio".into(), Availability::Offline(None))]);
 }
 
 pub(crate) fn scene_signing_in(s: &mut App) {
@@ -754,17 +908,19 @@ mod tests {
         let mut s = App::new();
         scene_signed_in(&mut s);
         let box_ = linked(&s, "env-box").unwrap();
-        assert_eq!(standing(&s, &box_), ("T3 Connect · Not added".into(), Some("Add")));
+        assert_eq!(standing(&s, &box_), ("T3 Connect · Not added · Relay online".into(), Some("Add")));
         add(&mut s, &box_);
         let saved = s.ui.env.saved.iter().find(|e| e.id == "env-box").unwrap();
         assert_eq!((saved.base.as_str(), saved.bearer.as_str()), ("https://box.tunnel.example.com", crate::env::T3_CONNECT));
         assert_eq!(crate::shell::palette::toast_description(&s), Some("Connecting to Hetzner box through T3 Connect."));
         assert_eq!(standing(&s, &box_).1, None, "added: the row shows its connection");
-        assert!(unsaved(&s).iter().all(|l| l.id != "env-box"), "the wizard offers only computers not saved yet");
+        assert!(wizard_computers(&s).iter().any(|l| l.id == "env-box"), "the wizard keeps listing a computer saved through T3 Connect");
+        assert!(new_computers(&s).iter().all(|l| l.id != "env-box"), "but no longer ticks it as new");
 
         s.ui.env.saved.push(crate::env::Saved { id: "env-studio".into(), label: "Studio Mac".into(), base: "http://192.168.1.4:3773".into(), bearer: "token".into() });
         let studio = linked(&s, "env-studio").unwrap();
-        assert_eq!(standing(&s, &studio), ("T3 Connect · Saved without T3 Connect".into(), Some("Add route")));
+        assert_eq!(standing(&s, &studio), ("T3 Connect · Saved without T3 Connect · Relay offline".into(), Some("Add route")));
+        assert!(wizard_computers(&s).iter().all(|l| l.id != "env-studio"), "a computer saved over another address is set up from the main list");
         add(&mut s, &studio);
         let routes = crate::env::routes(&s, "env-studio");
         assert_eq!(routes.len(), 2, "T3 Connect joins as a fallback after the saved address");
@@ -772,5 +928,51 @@ mod tests {
         assert_eq!(crate::shell::palette::toast_title(&s), Some("T3 Connect route added"));
         add(&mut s, &studio);
         assert_eq!(crate::env::routes(&s, "env-studio").len(), 2, "adding twice keeps one T3 Connect route");
+    }
+
+    #[test]
+    fn relay_status_lands_on_listed_computers_only() {
+        let mut s = App::new();
+        s.ui.cloud.identity = Some(Identity { session: "sess_1".into(), ..Identity::default() });
+        let listed = Linked { id: "env-1".into(), label: "Lab".into(), http: "https://lab.example/".into(), ws: "wss://lab.example/".into() };
+        land(&mut s, Event::Environments(Ok(vec![listed.clone()])));
+        assert_eq!(standing(&s, &listed).0, "T3 Connect · Not added · Checking relay status…");
+        assert!(new_computers(&s).is_empty(), "the wizard waits for a status before ticking");
+        let released = Status { online: false, offline_reason: Some("Offline for a while, so its T3 Connect tunnel was removed.".into()), error: None, trace: None };
+        land(&mut s, Event::Status("env-1".into(), Ok(released)));
+        assert_eq!(standing(&s, &listed).0, "Offline for a while, so its T3 Connect tunnel was removed.", "the reason replaces the status line");
+        assert_eq!(available(&s, "env-1"), "Offline");
+        assert_eq!(new_computers(&s), [listed.clone()]);
+        land(&mut s, Event::Status("env-1".into(), Err(Failure::new("Could not check environment status: HTTP 502"))));
+        assert_eq!((standing(&s, &listed).0, available(&s, "env-1")), ("Could not check environment status: HTTP 502".into(), "Unavailable"));
+        land(&mut s, Event::Status("env-gone".into(), Ok(Status { online: true, offline_reason: None, error: None, trace: None })));
+        assert!(!s.ui.cloud.availability.contains_key("env-gone"), "a status for a computer no longer listed is dropped");
+    }
+
+    #[test]
+    fn electron_relay_connections_join_once_the_account_lists_them() {
+        // SAFETY: tests that save environments all point here; keeps them off the real config dir.
+        unsafe { std::env::set_var("S5_ENVIRONMENTS", std::env::temp_dir().join(format!("s5-env-{}.json", std::process::id()))) };
+        let mut s = App::new();
+        s.ui.cloud.identity = Some(Identity { session: "sess_1".into(), ..Identity::default() });
+        s.ui.env.saved.push(crate::env::Saved { id: "env-lan".into(), label: "Desk".into(), base: "http://192.168.1.9:3773".into(), bearer: "token".into() });
+        import(&mut s, vec![("env-relay".into(), "Studio".into()), ("env-lan".into(), "Desk".into()), ("env-later".into(), "Later".into())]);
+        assert!(s.ui.env.saved.iter().all(|e| e.id != "env-relay"), "nothing joins before the listing says where it is");
+        let at = |id: &str| Linked { id: id.into(), label: String::new(), http: format!("https://{id}.tunnel.example/"), ws: format!("wss://{id}.tunnel.example/") };
+        land(&mut s, Event::Environments(Ok(vec![at("env-relay"), at("env-lan")])));
+        let relay = s.ui.env.saved.iter().find(|e| e.id == "env-relay").expect("a listed relay connection joins");
+        assert_eq!((relay.label.as_str(), relay.base.as_str(), relay.bearer.as_str()), ("Studio", "https://env-relay.tunnel.example", crate::env::T3_CONNECT), "the catalog's label stands in for an empty one");
+        assert_eq!(crate::env::routes(&s, "env-lan").iter().map(|r| r.bearer.as_str()).collect::<Vec<_>>(), ["token", crate::env::T3_CONNECT], "on a bearer environment it joins as the fallback route");
+        assert_eq!(s.ui.cloud.imports, [("env-later".to_owned(), "Later".to_owned())], "one the account does not list waits");
+    }
+
+    #[test]
+    fn signed_in_follows_the_account() {
+        let mut s = App::new();
+        assert!(!signed_in(&s));
+        scene_signed_in(&mut s);
+        assert!(signed_in(&s));
+        sign_out(&mut s);
+        assert!(!signed_in(&s) && s.ui.cloud.availability.is_empty());
     }
 }
