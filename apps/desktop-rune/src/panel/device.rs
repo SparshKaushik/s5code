@@ -5,7 +5,11 @@
 mod h264;
 mod input;
 mod inspect;
+mod model;
 mod video;
+mod viewport;
+
+pub use viewport::Viewport;
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,6 +109,19 @@ struct Stream {
     /// the last settled screen and from when it went into a stand.
     duo_vertical: Option<bool>,
     stand_vertical: Option<bool>,
+    /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
+    flat: bool,
+    pose: model::Pose,
+    /// A pointer on the 3D view: touching the screen at its last point, or turning the phone.
+    grab: Option<Grab>,
+    /// The phone the 3D view draws (the device's model, else the procedural phone) and what it was made for.
+    phone: Option<(String, Arc<model::Model>)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Grab {
+    Touch(f64, f64),
+    Orbit(f32, f32),
 }
 
 #[derive(Default)]
@@ -320,6 +337,10 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         fold: Arc::default(),
         duo_vertical: None,
         stand_vertical: None,
+        flat: false,
+        pose: model::Pose::default(),
+        grab: None,
+        phone: None,
     };
     let wake = app.ui.panel.waker.clone();
     let wake = move || {
@@ -375,6 +396,10 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         fold: Arc::default(),
         duo_vertical: None,
         stand_vertical: None,
+        flat: false,
+        pose: model::Pose::default(),
+        grab: None,
+        phone: None,
     }
 }
 
@@ -629,6 +654,134 @@ fn change_fold(app: &mut App, posture: &'static str) {
     });
 }
 
+/// The shown device's name, as the device list has it.
+fn device_name<'a>(app: &'a App, stream: &Stream) -> &'a str {
+    let Some((host, device)) = stream.key.split_once('\u{0}') else { return "" };
+    state(app)
+        .and_then(|st| st["devices"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|d| d["hostId"] == host && d["id"] == device)
+        .map_or("", |d| data::s(d, "name"))
+}
+
+fn screen_state(stream: &Stream) -> Option<input::Screen> {
+    stream.input.as_ref()?.state.lock().unwrap_or_else(|e| e.into_inner()).screen.clone()
+}
+
+/// Web's `phoneUnavailableReason`, for what this app can't draw in 3D yet too.
+fn unavailable_3d(app: &App, stream: &Stream) -> Option<&'static str> {
+    if model::model_id(stream.android, device_name(app, stream)) == Some("iphone-duo") {
+        let hinged = screen_state(stream).is_some_and(|s| s.supports_hinge);
+        return Some(if hinged { "iPhone Duo 3D isn't in this app yet" } else { "iPhone Duo 3D requires Device Hub 0.11.0 or newer" });
+    }
+    stream.ax.is_some().then_some("Turn off accessibility frames to use 3D")
+}
+
+fn streaming(stream: &Stream) -> bool {
+    let shared = stream.shared.lock().unwrap_or_else(|e| e.into_inner());
+    shared.frames > 0 && shared.failed.is_none()
+}
+
+/// Web's `showPhone`: the 3D view, unless the device is flat, not streaming or can't be drawn.
+fn shows_3d(app: &App, stream: &Stream) -> bool {
+    !stream.flat && stream.phone.is_some() && streaming(stream) && unavailable_3d(app, stream).is_none()
+}
+
+/// Keeps the phone the 3D view draws in step with the device: its model once parsed (`now` in
+/// scenes), else web's procedural phone for its shape and display.
+fn sync_phone(app: &mut App) -> bool {
+    let Some(stream) = app.ui.panel.device.stream.as_ref() else { return false };
+    let name = device_name(app, stream).to_owned();
+    let now = app.ui.panel.device.fixture.is_some();
+    let wake = app.ui.panel.waker.clone();
+    let wake = move || {
+        if let Some(wake) = &wake {
+            wake();
+        }
+    };
+    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match model::model_id(stream.android, &name).and_then(|id| model::model(id, now, wake)) {
+        Some(model) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
+        None => {
+            let (w, h) = stream.pixels.size();
+            let layout = model::layout(None, w, h);
+            let profile = model::profile(stream.android, &name, layout.aspect);
+            (format!("{}:{}", profile.id, layout.aspect), Box::new(move || Arc::new(model::phone(&profile, layout.aspect))))
+        }
+    };
+    let stream = app.ui.panel.device.stream.as_mut().expect("checked above");
+    if stream.phone.as_ref().is_some_and(|(made, _)| *made == want) {
+        return false;
+    }
+    stream.phone = Some((want, build()));
+    true
+}
+
+/// What the compositor draws for the panel's 3D view this frame.
+fn scene_3d(app: &App) -> Option<viewport::Scene> {
+    let stream = app.ui.panel.device.stream.as_ref()?;
+    if !shows_3d(app, stream) {
+        return None;
+    }
+    let (_, model) = stream.phone.as_ref()?;
+    let (w, h) = stream.pixels.size();
+    let layout = model::layout(screen_state(stream).as_ref().map(|s| s.orientation.as_str()), w, h);
+    Some(viewport::Scene { model: model.clone(), world: stream.pose.matrix(layout.rotation), layout, pixels: stream.pixels.clone() })
+}
+
+/// Web `createPhoneInteraction` on the 3D view of `size` points: a press on the screen touches
+/// it, anywhere else turns the phone, which stands back up when let go.
+fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32)) {
+    let Some(scene) = scene_3d(s) else { return };
+    let camera = model::camera(&scene.model, &scene.world, size.0 / size.1);
+    let (x, y) = (d.x / size.0, d.y / size.1);
+    let Some(stream) = s.ui.panel.device.stream.as_mut() else { return };
+    let ended = d.cancelled() || matches!(d.phase, Phase::Up);
+    let grab = match (stream.grab, matches!(d.phase, Phase::Down)) {
+        (None, true) => match model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, false) {
+            Some((u, v)) => {
+                if let Some(input) = &stream.input {
+                    input.touch("begin", f64::from(u), f64::from(v));
+                }
+                Some(Grab::Touch(f64::from(u), f64::from(v)))
+            }
+            None => Some(Grab::Orbit(d.x, d.y)),
+        },
+        (Some(Grab::Touch(u, v)), _) => {
+            let (u, v) = model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
+            if let Some(input) = &stream.input {
+                input.touch(if ended { "end" } else { "move" }, u, v);
+            }
+            Some(Grab::Touch(u, v))
+        }
+        (Some(Grab::Orbit(px, py)), _) => {
+            stream.pose.orbit(d.x - px, d.y - py);
+            Some(Grab::Orbit(d.x, d.y))
+        }
+        (None, false) => None,
+    };
+    stream.grab = if ended {
+        if matches!(grab, Some(Grab::Orbit(..))) {
+            stream.pose.settle();
+        }
+        None
+    } else {
+        grab
+    };
+}
+
+/// Web's `resetView`: the phone upright and facing the camera, and the device back in portrait.
+fn restore_3d(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    stream.pose = model::Pose::default();
+    stream.grab = None;
+    if let Some(input) = &stream.input
+        && screen_state(stream).is_some_and(|s| s.orientation != "portrait")
+    {
+        input.orient("portrait");
+    }
+}
+
 /// The hub connection a readout thread uses: base URL, bearer, the device's host and id, and the wake.
 fn hub(app: &App) -> Option<(String, String, String, String, impl Fn() + Send + 'static)> {
     let net = app.src.net_ref()?;
@@ -732,6 +885,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     sync_stream(app, tx);
+    changed |= sync_phone(app);
     let ready = input_ready(app);
     let fold_hub = hub(app);
     let base = app.src.net_ref().map(|n| n.base_url().to_owned()).unwrap_or_default();
@@ -957,7 +1111,23 @@ fn ax_overlay(elements: &[inspect::AxElement], (w, h): (f32, f32), t: &T) -> Vec
 }
 
 /// The screen at its fitted size once the stage is laid out.
-fn screen(stream: &Stream, stage: Option<(f32, f32)>, name: &str, t: &T) -> El {
+fn screen(stream: &Stream, three: bool, stage: Option<(f32, f32)>, name: &str, t: &T) -> El {
+    if three && let Some((w, h)) = stage.map(|(w, h)| (w - 32., h - 32.)).filter(|(w, h)| *w >= 1. && *h >= 1.) {
+        let phone = el()
+            .size(w, h)
+            .effect(viewport::MARK)
+            .key("device-3d")
+            .focusable(true)
+            .on_drag(move |s: &mut App, d, _| grab_3d(s, d, (w, h)))
+            .on_key(|s: &mut App, e, tx| {
+                if matches!(e.key, Key::Escape) && e.mods.shift {
+                    tx.blur();
+                    return true;
+                }
+                !e.mods.cmd && !e.mods.ctrl && input(s).is_some_and(|i| i.key(&e.key))
+            });
+        return col().key("device-stage").grow(1.).min_h(0.).min_w(0.).padding(16.).center().role("img").label(format!("{name} screen")).child(phone);
+    }
     let (iw, ih) = stream.pixels.size();
     let fitted = stage.filter(|_| iw > 0 && ih > 0).map(|(w, h)| fit((w - 32., h - 32.), (iw as f32, ih as f32))).filter(|(w, h)| *w >= 1. && *h >= 1.);
     let elements = stream.ax.as_ref().and_then(|f| f.data.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
@@ -1094,6 +1264,39 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
         kit::MenuItem::new(if kind == "simlock" { "Return device to the pool" } else { "Power off device" }).icon(&icons::POWER).variant("destructive").disabled(app.ui.panel.device.powering_off.is_some()).on_select(power_off),
     ];
     pill = pill.child(rail_menu(app, Menu::More, kit::Button::new("More device actions").icon(&icons::ELLIPSIS), more, t, overlays));
+    if let Some(stream) = stream {
+        let (phone, live, reason) = (shows_3d(app, stream), streaming(stream), unavailable_3d(app, stream));
+        let three = kit::Button::new("3D view")
+            .icon(&icons::BOX)
+            .variant(if phone { "secondary" } else { "ghost" })
+            .size("icon-sm")
+            .disabled(!live || reason.is_some())
+            .on_press(|s: &mut App| {
+                if let Some(stream) = s.ui.panel.device.stream.as_mut() {
+                    stream.flat = false;
+                }
+            })
+            .build(t)
+            .help(reason.unwrap_or("3D view"))
+            .checked(phone);
+        let flat = kit::Button::new("Flat view")
+            .icon(&icons::SMARTPHONE)
+            .variant(if phone { "ghost" } else { "secondary" })
+            .size("icon-sm")
+            .disabled(!live)
+            .on_press(|s: &mut App| {
+                if let Some(stream) = s.ui.panel.device.stream.as_mut() {
+                    (stream.flat, stream.grab) = (true, None);
+                }
+            })
+            .build(t)
+            .help("Flat view")
+            .checked(!phone);
+        pill = pill.child(el().w(20.).h(1.).fill(t.c.border)).child(three).child(flat);
+        if phone {
+            pill = pill.child(rail_button("Restore 3D view", &icons::MAXIMIZE, false, t, restore_3d));
+        }
+    }
     let mut rail = col().key("device-controls").label("Device controls").w(56.).h_full().pr(8.).py(12.).gap(8.).center().child(pill);
     if let Some(stream) = stream {
         rail = if android { rail.children(fold_controls(stream, ready, t)) } else { rail.children(duo_controls(stream, ready, t)) };
@@ -1542,7 +1745,7 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
                 } else if shared.frames == 0 {
                     centered(vec![spinner(t), note("Connecting video\u{2026}", t)])
                 } else {
-                    screen(stream, stage, &name, t)
+                    screen(stream, shows_3d(app, stream), stage, &name, t)
                 }
             }
             None => centered(vec![spinner(t), note("Connecting video\u{2026}", t)]),
@@ -1707,6 +1910,9 @@ pub fn fixture(app: &mut App, sessions: Value) {
             {"hostId": "local", "id": "ios-se", "platform": "ios", "name": "iPhone SE (3rd generation)", "version": "iOS 18.2", "booted": false, "physical": false},
             {"hostId": "local", "id": "ipad", "platform": "ios", "name": "iPad Air 13-inch (M2)", "version": "iOS 18.2", "booted": false, "physical": false},
             {"hostId": "local", "id": "pixel", "platform": "android", "name": "Pixel 9", "version": "Android 15", "booted": true, "physical": false},
+            {"hostId": "local", "id": "fold", "platform": "android", "name": "Pixel 9 Pro Fold", "version": "Android 15", "booted": true, "physical": false},
+            {"hostId": "local", "id": "ios-18", "platform": "ios", "name": "iPhone 18 Pro", "version": "iOS 26.0", "booted": true, "physical": false},
+            {"hostId": "local", "id": "duo", "platform": "ios", "name": "iPhone Duo", "version": "iOS 26.0", "booted": true, "physical": false},
             {"hostId": "eas", "id": "eas-16", "platform": "ios", "name": "iPhone 16 (EAS)", "version": "iOS 18.2", "booted": true, "physical": false}
         ],
         "sessions": sessions,
@@ -1717,6 +1923,36 @@ pub fn fixture(app: &mut App, sessions: Value) {
         (transport != Transport::WebRtc).then(|| (key(data::s(session, "hostId"), data::s(session, "deviceId")), transport, session["platform"] == "android", host_kind(state, session).to_owned()))
     });
     app.ui.panel.device.stream = first.map(|(key, transport, android, kind)| fixture_stream(key, transport, android, kind));
+    sync_phone(app);
+}
+
+/// An emulated foldable whose last posture change timed out, for scenes.
+pub fn fold_fixture(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_ref() else { return };
+    let mut fold = stream.fold.lock().unwrap_or_else(|e| e.into_inner());
+    fold.state = Some(FoldState { supported: true, posture: Some("half_opened".into()), hinge_angle: Some(90.) });
+    fold.angle = Some(90.);
+    fold.error = Some("Fold command timed out.".into());
+    fold.read_for = Some(stream.pixels.size());
+}
+
+/// An iPhone Duo held open in a laptop stand, for scenes.
+pub fn duo_fixture(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    let (input, _) = input::Input::channel(false);
+    let mut state = input.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.admitted = true;
+    state.screen = Some(input::Screen {
+        width: 2868.,
+        height: 1320.,
+        orientation: "landscape_left".into(),
+        screen_id: Some(2),
+        supports_hinge: true,
+        hinge_angle: Some(110.),
+        hinge_pose: Some("laptop".into()),
+    });
+    drop(state);
+    stream.input = Some(input);
 }
 
 #[cfg(test)]

@@ -248,6 +248,13 @@ impl Input {
         }
     }
 
+    /// Web's `setOrientation`, on iOS.
+    pub fn orient(&self, orientation: &str) {
+        if !self.android {
+            self.send(Message::Binary(tagged(ORIENTATION, &json!({"orientation": orientation}))));
+        }
+    }
+
     pub fn rotate(&self) {
         if self.android {
             return;
