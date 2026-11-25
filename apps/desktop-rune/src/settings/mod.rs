@@ -1607,6 +1607,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-appearance-font-picker", appearance_font_picker),
     ("settings-access-t3-connect", |s| {
         scene(s, "access");
+        s.ui.settings.loaded_page = Some("access".into());
         connect::scene(s, json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": true, "holdWebhooksWhileOffline": false,
             "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
     }),
@@ -1622,6 +1623,8 @@ fn appearance_font_picker(s: &mut App) {
             .map(|name| font_picker::Family { name: name.into(), mono: !matches!(name, "Geist" | "Inter" | "Noto Sans") }),
     ));
     s.ui.settings.reveal = Some("Monospace font".into());
+    // The first poll would treat the page as newly opened and drop the reveal.
+    s.ui.settings.loaded_page = Some("appearance".into());
     let picker = s.ui.settings.font_pickers.entry("fontFamilyCode".into()).or_default();
     picker.open = true;
     picker.search.focused = true;
