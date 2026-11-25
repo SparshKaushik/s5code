@@ -151,49 +151,18 @@ const printThroughConsole = (fields: object) =>
   });
 
 describe("ServerLoggerLive", () => {
-  it.effect("exports the operator's service instance id instead of a generated one", () =>
+  it.effect("never exports OTLP logs remotely even when otlpLogsUrl is configured", () =>
     Effect.gen(function* () {
       const { requests } = yield* logInSpanThrough({
         otlpLogsUrl: "https://collector.example.com/v1/logs",
+        mode: "desktop",
         otelEnvironment: {
           ...OtelEnvironment.none,
           resourceAttributes: { "service.instance.id": "pod-7" },
         },
       });
 
-      const body = requests.map((request) => request.body).join("\n");
-      assert.include(body, '"key":"service.instance.id","value":{"stringValue":"pod-7"}');
-    }),
-  );
-
-  it.effect("exports a resource that names whether the desktop app launched the server", () =>
-    Effect.gen(function* () {
-      const { requests } = yield* logInSpanThrough({
-        otlpLogsUrl: "https://collector.example.com/v1/logs",
-        mode: "desktop",
-      });
-
-      const body = requests.map((request) => request.body).join("\n");
-      assert.include(body, '"key":"t3code.server.managed_by","value":{"stringValue":"desktop"}');
-      assert.notInclude(body, "service.mode");
-    }),
-  );
-
-  it.effect("exports logged request failures without their connection tickets", () =>
-    Effect.gen(function* () {
-      const { requests } = yield* logInSpanThrough(
-        { otlpLogsUrl: "https://collector.example.com/v1/logs" },
-        Effect.logError(
-          Cause.die(
-            new Error("RequestParseError (GET /ws?wsTicket=ticket-secret&dpop=proof-secret)"),
-          ),
-        ),
-      );
-
-      const body = requests.map((request) => request.body).join("\n");
-      assert.include(body, "wsTicket=<redacted>&dpop=<redacted>");
-      assert.notInclude(body, "ticket-secret");
-      assert.notInclude(body, "proof-secret");
+      assert.deepStrictEqual(requests, []);
     }),
   );
 
@@ -248,16 +217,14 @@ describe("ServerLoggerLive", () => {
       Effect.andThen(logBrowserAutoOpenUnavailable),
     );
 
-    it.effect("prints the full URL but keeps its token out of exported log records", () =>
+    it.effect("prints the full URL to console without exporting remote OTLP logs", () =>
       Effect.gen(function* () {
         const { requests } = yield* logInSpanThrough(
           { otlpLogsUrl: "https://collector.example.com/v1/logs" },
           announce,
         );
 
-        const body = requests.map((request) => request.body).join("\n");
-        assert.include(body, "Authentication required");
-        assert.notInclude(body, pairingToken);
+        assert.deepStrictEqual(requests, []);
         const printed = (yield* TestConsole.logLines).map((line) =>
           Array.isArray(line) ? line.join(" ") : String(line),
         );

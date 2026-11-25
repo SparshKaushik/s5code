@@ -124,7 +124,7 @@ export function failEnvironmentInvalidRequest(reason: EnvironmentRequestInvalidR
   );
 }
 
-export function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope) {
+function failEnvironmentScopeRequired(requiredScope: AuthEnvironmentScope) {
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(

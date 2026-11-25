@@ -125,10 +125,14 @@ interface Launcher {
 }
 
 const syncRef = (launcher: Launcher) => {
+  const channel = launcher.worker.channel as
+    | { ref?: () => void; unref?: () => void }
+    | null
+    | undefined;
   if ([...launcher.children.values()].some((child) => child.referenced)) {
-    launcher.worker.channel?.ref();
+    if (typeof channel?.ref === "function") channel.ref();
   } else {
-    launcher.worker.channel?.unref();
+    if (typeof channel?.unref === "function") channel.unref();
   }
 };
 
@@ -286,7 +290,8 @@ export const make = Effect.fn("ProcessLauncher.make")(function* (
       heard: 0,
     };
     worker.unref();
-    worker.channel?.unref();
+    const workerChannel = worker.channel as { unref?: () => void } | null | undefined;
+    if (typeof workerChannel?.unref === "function") workerChannel.unref();
     worker.on("message", (event: LauncherEvent, socket: NodeNet.Socket | undefined) =>
       onEvent(launcher, event, socket),
     );

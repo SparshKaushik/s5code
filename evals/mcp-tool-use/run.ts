@@ -31,7 +31,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
-import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { Tool } from "effect/ai";
@@ -57,15 +56,6 @@ import { makeSideChatContext } from "../../apps/server/src/orchestration-v2/Cont
 import { withInlineContext } from "../../apps/server/src/orchestration-v2/ContextHandoffDelivery.ts";
 import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment/tools.ts";
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
-import { FeedbackToolkit } from "../../apps/server/src/mcp/toolkits/feedback/tools.ts";
-import {
-  FEEDBACK_AWAITING_APPROVAL_NOTE,
-  FEEDBACK_SUBJECT_MESSAGE,
-  FeedbackInput,
-  FeedbackNotRequestedError,
-  resolveFeedbackSubject,
-} from "../../apps/server/src/feedback/FeedbackReport.ts";
-import { scrubFeedback } from "../../apps/server/src/feedback/scrubFeedback.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
 import { HtmlToolkit } from "../../apps/server/src/mcp/toolkits/html/tools.ts";
 import { IssuesToolkit } from "../../apps/server/src/mcp/toolkits/issues/tools.ts";
@@ -503,7 +493,6 @@ const t3SourceTools: ReadonlyArray<Tool.Any> = [
   ProjectToolkit,
   EnvironmentToolkit,
   ThemeToolkit,
-  FeedbackToolkit,
   PreviewControlsToolkit,
   WorktreeToolkit,
   PullRequestsToolkit,
@@ -2140,8 +2129,6 @@ const savedSecretFile = (
   }
 };
 
-const decodeFeedbackInput = Schema.decodeUnknownResult(FeedbackInput);
-
 /** The result for one tool call. */
 const FORGE_WRITE_TOOLS = new Set([
   "pull_request_create",
@@ -2307,39 +2294,6 @@ export const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(fun
   if (isT3Name(call.name)) {
     const refused = productRefusal(sample, name, input);
     if (refused !== undefined) return failed(refused);
-  }
-  if (isT3Name(call.name) && name === "t3_feedback" && (mock === undefined || mock === "default")) {
-    const decoded = decodeFeedbackInput(input);
-    if (Result.isFailure(decoded)) return failed(decoded.failure.message);
-    const report = decoded.success;
-    // The same refusals as FeedbackService, in its order.
-    if (sample.testCase.setup.world?.agentFeedback === "on-request" && !report.userRequested)
-      return failed(new FeedbackNotRequestedError({ source: "mcp" }).message);
-    const subject = resolveFeedbackSubject(
-      report.subject,
-      t3SourceTools.map((tool) => tool.name),
-    );
-    if (subject === undefined) return failed(FEEDBACK_SUBJECT_MESSAGE);
-    // T3 shows a requested report to the user in a card and answers at once.
-    if (report.userRequested) {
-      return toolResult(call.id, {
-        status: "awaiting_approval",
-        note: FEEDBACK_AWAITING_APPROVAL_NOTE,
-      });
-    }
-    return toolResult(call.id, {
-      ...report,
-      subject,
-      trace: null,
-      expected: scrubFeedback(report.expected, []),
-      actual: scrubFeedback(report.actual, []),
-      workaround: scrubFeedback(report.workaround, []),
-      id: "019a7b3c-0000-7000-8000-000000000001",
-      threadId: "thread-1",
-      createdAt: `${base.environment.date ?? "2026-01-01"}T12:00:00.000Z`,
-      source: "mcp",
-      sent: true,
-    });
   }
   // A pasted secret is saved without a card, so a mocked card outcome does not apply.
   if (mock !== undefined && mock !== "default" && !pastedSecret(name, input)) {
