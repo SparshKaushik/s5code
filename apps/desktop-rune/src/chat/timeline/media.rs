@@ -929,7 +929,7 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
         _ => None,
     };
     let (key, media, _) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
-    let loaded = (!failed).then(|| checker(&media));
+    let loaded = (!failed).then(|| scene_loaded(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.clone(), Entry { media, request: None, loaded, failed });
     Some(key)
 }
@@ -938,11 +938,7 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
 /// video is a clip made here, where it can play.
 pub fn scene_linked(app: &mut App, key: &str, name: &str, kind: Kind, failed: bool) {
     let media = Media { kind, name: name.to_owned(), reference: None, open_file: None };
-    let loaded = (!failed).then(|| match kind {
-        #[cfg(target_os = "linux")]
-        Kind::Video => Loaded { soft: Some(soft::SoftPlayer::bytes(scene_clip(), None)), ..checker(&media) },
-        _ => checker(&media),
-    });
+    let loaded = (!failed).then(|| scene_loaded(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.to_owned(), Entry { media, request: None, loaded, failed });
 }
 
@@ -951,6 +947,15 @@ pub fn scene_open(app: &mut App, gallery: Vec<String>) {
     let assets = &mut app.ui.chat.timeline.assets;
     assets.open = gallery.first().cloned();
     assets.gallery = gallery;
+}
+
+/// Scenes: a test picture, or for a video a clip made here where it can play.
+fn scene_loaded(media: &Media) -> Loaded {
+    match media.kind {
+        #[cfg(target_os = "linux")]
+        Kind::Video => Loaded { soft: Some(soft::SoftPlayer::bytes(scene_clip(), None)), ..checker(media) },
+        _ => checker(media),
+    }
 }
 
 /// A short H.264 clip, encoded here: a square crossing a gradient (scenes and tests).
