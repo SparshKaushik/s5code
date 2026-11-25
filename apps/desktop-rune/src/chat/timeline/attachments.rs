@@ -2,9 +2,10 @@ use crate::{
     App,
     data::s,
     icons,
-    theme::{self, T},
+    theme::{self, AlphaMul, T},
 };
 use super::media::{self, Kind, Loaded};
+use crate::chat::snapshot;
 use rune::{Drag, El, Key, Phase, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -204,6 +205,9 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
             .fill(t.c.message_surface);
         if let Some(loaded) = asset {
             frame = frame.pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit);
+            if snapshot::is_snapshot(&attachment["source"]) {
+                frame = frame.child(snapshot::overlay(app, &attachment["source"], format!("snapshot-contents-{id}")));
+            }
         }
         frame
     } else {
@@ -289,6 +293,16 @@ fn siblings(app: &App, id: &str) -> Vec<String> {
                 .then(|| list.iter().filter(|a| s(a, "mimeType").starts_with("image/")).map(|a| s(a, "id").to_owned()).collect())
         })
         .unwrap_or_default()
+}
+
+/// The open picture's `SnapShotSource`, when it is a snapshot sent in this thread.
+fn snapshot_source<'a>(app: &'a App, id: &str) -> Option<&'a Value> {
+    let crate::Route::Thread(thread) = app.frame_route() else { return None };
+    let p = &app.state().thread_views.get(thread)?.projection;
+    let messages = p["messages"].as_array().into_iter().flatten();
+    let items = p["visibleTurnItems"].as_array().into_iter().flatten().map(|i| &i["item"]);
+    let attachment = messages.chain(items).flat_map(|m| m["attachments"].as_array().into_iter().flatten()).find(|a| s(a, "id") == id)?;
+    Some(&attachment["source"]).filter(|source| snapshot::is_snapshot(source))
 }
 
 fn close(app: &mut App) {
@@ -525,6 +539,52 @@ pub fn lightbox(app: &App) -> Option<El> {
             media::with_actions(el().key(STAGE).w_full().grow(1.0).min_h(0.0).pixels_fit(pixels, rune::SurfaceFit::Fit), id, &source, false)
         }
     };
+    let source = snapshot_source(app, id);
+    let details = source.and_then(snapshot::details);
+    let showing = details.is_some() && app.ui.chat.snapshot.lightbox.as_ref() == Some(id);
+    // SnapShotAccessibilityData in the picture's place (the lightbox is dark in both themes).
+    let picture = match details.as_ref().filter(|_| showing) {
+        Some(d) => {
+            let dark = theme::theme(true);
+            let panel = el()
+                .w_full()
+                .max_w(672.0)
+                .max_h(640.0)
+                .padding(16.0)
+                .radius(theme::radius::LG)
+                .fill(dark.c.background)
+                .border(1.0, dark.c.border.alpha_mul(0.7))
+                .child(snapshot::data_view(app, &dark, d, &format!("lightbox-data-{id}")))
+                .scroll(rune::ScrollSpec { stick_bottom: false });
+            el().key(STAGE).w_full().grow(1.0).min_h(0.0).center().child(panel)
+        }
+        None => picture,
+    };
+    let contents = match (&details, source) {
+        (Some(d), _) => {
+            let label = if showing { "Show screenshot" } else if d.json { "Show accessibility JSON" } else { "Show extracted text" };
+            let open = id.clone();
+            Some(
+                el().key("image-lightbox-contents")
+                    .size(18.0, 18.0)
+                    .center()
+                    .radius(theme::radius::SM)
+                    .fill(rune::Color::BLACK.alpha(0.35))
+                    .hover(rune::Color::BLACK.alpha(0.6))
+                    .cursor(rune::Cursor::Pointer)
+                    .role("button")
+                    .label(label)
+                    .help(label)
+                    .child(icon(if showing { &icons::IMAGE } else { &icons::TEXT }, 12.0).color(rune::Color::WHITE))
+                    .on_press(move |app: &mut App| {
+                        let shown = &mut app.ui.chat.snapshot.lightbox;
+                        *shown = if shown.as_ref() == Some(&open) { None } else { Some(open.clone()) };
+                    }),
+            )
+        }
+        (None, Some(source)) => Some(snapshot::contents_button(app, source, "image-lightbox-contents".into())),
+        _ => None,
+    };
     let place = place(&app.ui.chat.timeline.assets);
     let caption = match place {
         Some((index, count)) => format!("{} ({}/{count})", loaded.name, index + 1),
@@ -573,7 +633,7 @@ pub fn lightbox(app: &App) -> Option<El> {
                                     .h_full()
                                     .gap(8.0)
                                     .child(picture)
-                                    .child(row().w_full().justify_center().child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate())),
+                                    .child(row().w_full().justify_center().center_y().gap(6.0).child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate()).children(contents)),
                             )
                             .children(place.map(|_| button("image-lightbox-next", &icons::CHEVRON_RIGHT, "Next media").on_press(|app: &mut App| step(app, 1)))),
                     )

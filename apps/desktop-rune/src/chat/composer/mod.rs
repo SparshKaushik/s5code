@@ -2630,19 +2630,23 @@ fn attachment_chips(s: &App, t: &T, paths: &[String]) -> El {
 /// A queued image's 64-point tile (ComposerImageThumbnail): its thumbnail cropped to fill, or its
 /// name while the thumbnail decodes or when it can't.
 fn image_tile(s: &App, t: &T, i: usize, path: &str, name: &str) -> El {
+    let thumb = s.ui.chat.composer.thumbs.get(path);
+    // A snapshot's tile is wider, with its app and window along the bottom (SNAP_SHOT_ATTACHMENT_FRAME_CLASS).
+    let snapshot = thumb.and_then(|th| th.source.as_ref()).filter(|source| crate::chat::snapshot::is_snapshot(source));
+    let (w, h) = if snapshot.is_some() { (208.0, 112.0) } else { (64.0, 64.0) };
     let tile = el()
         .key(format!("composer-attachment-{i}"))
-        .size(64.0, 64.0)
+        .size(w, h)
         .radius(radius::LG)
         .border(1.0, t.c.border.alpha_mul(0.8))
         .fill(t.c.background)
         .clip_rounded(radius::LG)
         .help(path.to_owned());
-    let thumb = s.ui.chat.composer.thumbs.get(path);
-    match thumb.filter(|th| !th.failed() && th.pixels.size().0 > 0) {
+    let tile = match thumb.filter(|th| !th.failed() && th.pixels.size().0 > 0) {
         Some(th) => tile.label(name.to_owned()).child(el().w_full().h_full().pixels_fit(&th.pixels, rune::SurfaceFit::Fill)),
         None => tile.center().px(4.0).child(text(name.to_owned()).font(theme::TEXT_2XS).color(t.c.secondary_label).truncate()),
-    }
+    };
+    tile.children(snapshot.map(|source| crate::chat::snapshot::overlay(s, source, format!("composer-snapshot-contents-{i}"))))
 }
 
 /// Any file: a filter list would narrow the macOS picker to its types.
@@ -3263,6 +3267,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_text(s, "What's wrong with this layout?");
         draft_mut(s).attachments = vec![shot.clone(), "/home/ubuntu/s5code/README.md".into()];
         s.ui.chat.composer.thumbs.load_now(&shot);
+    }),
+    // A queued snapshot's wide tile with its app and window, the accessibility popover open.
+    ("composer-snapshot", |s| {
+        on_replay_showcase(s);
+        let dir = std::env::temp_dir().join("s5-scene-snapshot");
+        let _ = std::fs::create_dir_all(&dir);
+        let shot = dir.join("snapshot.png");
+        let _ = image::DynamicImage::ImageRgba8(crate::chat::snapshot::scene_picture()).save(&shot);
+        let shot = shot.display().to_string();
+        let source = crate::chat::snapshot::scene_source();
+        let _ = std::fs::write(crate::desktop::capture::source_path(&shot), source.to_string());
+        set_text(s, "Why does the download link look disabled?");
+        draft_mut(s).attachments = vec![shot.clone()];
+        s.ui.chat.composer.thumbs.load_now(&shot);
+        s.ui.chat.snapshot.open = Some(("composer-snapshot-contents-0".into(), source));
     }),
     ("composer-list-continuation", |s| {
         on_replay_showcase(s);

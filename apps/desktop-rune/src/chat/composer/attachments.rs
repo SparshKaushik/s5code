@@ -208,6 +208,8 @@ pub struct Thumb {
     broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// A view has seen it decoded.
     shown: bool,
+    /// A snapshot's `SnapShotSource`, read once from beside the picture.
+    pub source: Option<serde_json::Value>,
 }
 
 impl Thumb {
@@ -216,20 +218,23 @@ impl Thumb {
     }
 }
 
-fn decode_thumb(path: &str) -> Option<image::RgbaImage> {
+fn decode_thumb(path: &str, side: u32) -> Option<image::RgbaImage> {
     let size = std::fs::metadata(path).ok()?.len();
     if size == 0 || size > MAX_THUMB_SOURCE {
         return None;
     }
     let image = image::load_from_memory(&std::fs::read(path).ok()?).ok()?;
-    Some(image.thumbnail(THUMB_DECODE, THUMB_DECODE).to_rgba8())
+    Some(image.thumbnail(side, side).to_rgba8())
 }
 
 fn load_thumb(path: &str, waker: Option<rune::Waker>, now: bool) -> Thumb {
-    let thumb = Thumb { pixels: rune::Pixels::new(), broken: Default::default(), shown: false };
+    let source = crate::desktop::capture::attached_source(path);
+    // A snapshot's wider tile decodes at twice its 208 points.
+    let side = if source.is_some() { 416 } else { THUMB_DECODE };
+    let thumb = Thumb { pixels: rune::Pixels::new(), broken: Default::default(), shown: false, source };
     let (path, pixels, broken) = (path.to_owned(), thumb.pixels.clone(), thumb.broken.clone());
     let run = move || {
-        match decode_thumb(&path) {
+        match decode_thumb(&path, side) {
             Some(image) => pixels.set(image.width(), image.height(), image.into_raw()),
             None => broken.store(true, std::sync::atomic::Ordering::Relaxed),
         }

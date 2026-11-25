@@ -291,6 +291,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-markdown-alerts", markdown_alerts),
     ("timeline-codex-directives", codex_directives),
     ("timeline-file-card", file_card),
+    ("timeline-snapshot", snapshot),
+    ("timeline-snapshot-lightbox", snapshot_lightbox),
     ("timeline-lightbox-nav", lightbox_nav),
     ("timeline-optimistic-send", optimistic_send),
     ("chat-drop-overlay", drop_overlay),
@@ -377,6 +379,28 @@ fn file_card(app: &mut App) {
             {"type": "file", "id": "scene-file-unsigned", "name": "trace.json", "mimeType": "application/json", "sizeBytes": 2048}]})]);
     let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
+}
+/// A sent snapshot (SnapShotAttachmentDetails), its accessibility popover open.
+fn snapshot(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let source = crate::chat::snapshot::scene_source();
+    push_visible(app, vec![json!({"id": "scene-snapshot-message", "type": "user_message", "status": "completed", "inputIntent": "turn_start",
+        "text": "Why does the download link look disabled?", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
+            {"type": "image", "id": "scene-snapshot", "name": "Safari snapshot.png", "mimeType": "image/png", "sizeBytes": 182_000, "source": source}]})]);
+    let mut loaded = super::media::Loaded::new("https://example.com/snapshot.png".into(), "Safari snapshot.png".into(), None, 0, None);
+    let picture = crate::chat::snapshot::scene_picture();
+    loaded.pixels.set(picture.width(), picture.height(), picture.into_raw());
+    loaded.kind = Some(super::media::Kind::Image);
+    app.ui.chat.timeline.assets.ready.insert("scene-snapshot".into(), loaded);
+    app.ui.chat.snapshot.open = Some(("snapshot-contents-scene-snapshot".into(), source));
+}
+/// The snapshot in the lightbox, showing its accessibility JSON in the picture's place.
+fn snapshot_lightbox(app: &mut App) {
+    snapshot(app);
+    app.ui.chat.snapshot.open = None;
+    app.ui.chat.timeline.assets.open = Some("scene-snapshot".into());
+    app.ui.chat.snapshot.lightbox = Some("scene-snapshot".into());
 }
 /// The lightbox on the second of three pictures in one paragraph: Previous, Next and "(2/3)".
 fn lightbox_nav(app: &mut App) {
