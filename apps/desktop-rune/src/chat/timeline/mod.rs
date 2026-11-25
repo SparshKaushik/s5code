@@ -10,7 +10,7 @@ pub(crate) mod language_icons;
 pub mod plan;
 pub mod question;
 pub mod queue;
-mod subagent;
+pub(crate) mod subagent;
 pub mod requests;
 mod rows;
 mod scenes;

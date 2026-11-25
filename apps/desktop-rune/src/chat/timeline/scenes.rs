@@ -264,6 +264,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("details-items-empty", crate::chat::details::items::scene_empty),
     ("details-servers", crate::chat::details::servers::scene),
     ("details-automations", crate::chat::details::automations::scene),
+    ("details-lineage", crate::chat::details::lineage::scene),
     ("dialog-native-child-work", crate::chat::details::child_work::scene),
     ("composer-banner-feedback", composer_banner_feedback),
     ("composer-banner-fallback", composer_banner_fallback),
