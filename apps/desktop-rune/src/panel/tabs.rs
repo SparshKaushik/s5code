@@ -68,7 +68,7 @@ impl Target {
 pub(super) struct Tabs {
     entries: Vec<(String, Target)>,
     pub(super) drag: Option<(Surface, f32)>,
-    scroll: Arc<Mutex<(f32, f32)>>,
+    scroll: Arc<Mutex<f32>>,
     pub(super) reveal: Option<Surface>,
     pub(super) rename: Option<(usize, TextEdit)>,
 }
@@ -218,14 +218,31 @@ fn reorder(surfaces: &mut Vec<Surface>, surface: Surface, to: usize) -> bool {
     true
 }
 
-pub(super) fn spans(app: &App, cx: &mut Cx<App>) -> Vec<(f32, f32)> {
+pub(super) const GAP: f32 = 4.;
+
+pub(super) fn tab_width(title: &str, audio: bool, renaming: bool) -> f32 {
+    let label = if renaming { 96. } else { rune::text::advance(title, theme::TEXT_XS).ceil() };
+    (32. + label + if audio { 18. } else { 0. }).min(144.)
+}
+
+pub(super) fn spans(widths: impl IntoIterator<Item = f32>) -> Vec<(f32, f32)> {
     let mut x = 0.;
-    app.ui.panel.surfaces.iter().map(|&tab| {
-        let w = cx.layout_with(key(tab).as_str(), |r| r[2]).unwrap_or_default();
+    widths.into_iter().map(|w| {
         let mid = x + w / 2.;
-        x += w + 4.;
+        x += w + GAP;
         (mid, w)
     }).collect()
+}
+
+pub(super) fn strip_width(spans: &[(f32, f32)], available: f32) -> (f32, f32) {
+    let content = spans.last().map_or(0., |(center, width)| center + width / 2.);
+    if content <= available {
+        (content, 0.)
+    } else {
+        // Two 24pt buttons, the gap between them, and the header's gap beside the pair.
+        let viewport = (available - 50. - GAP).max(0.);
+        (viewport, content - viewport)
+    }
 }
 
 fn destination(spans: &[(f32, f32)], from: usize, dx: f32) -> Option<usize> {
@@ -270,13 +287,13 @@ pub(super) fn dragged(app: &App, surface: Surface, tab: El) -> El {
     }
 }
 
-pub(super) fn strip(app: &App, tabs: El) -> El {
+pub(super) fn strip(app: &App, tabs: El, width: f32) -> El {
     let scroll = app.ui.panel.tabs.scroll.clone();
     let wake = app.ui.panel.waker.clone();
-    row().key(STRIP).grow(1.).min_w(0.).h_full().scroll_x().scroll_edge_fade(24.)
+    row().key(STRIP).w(width).min_w(0.).h_full().scroll_x().scroll_edge_fade(24.)
         .on_scroll_offset(move |at: rune::ScrollPos| {
             let mut prior = scroll.lock().unwrap_or_else(|error| error.into_inner());
-            let next = (at.offset[0], at.max[0]);
+            let next = at.offset[0];
             if *prior != next {
                 *prior = next;
                 if let Some(waker) = &wake {
@@ -287,16 +304,17 @@ pub(super) fn strip(app: &App, tabs: El) -> El {
         .child(tabs)
 }
 
-pub(super) fn overflow(app: &App, t: &T) -> Option<El> {
-    let (offset, max) = *app.ui.panel.tabs.scroll.lock().unwrap_or_else(|error| error.into_inner());
-    if max <= 0.5 { return None; }
-    let arrow = |label: &str, glyph: &'static rune::Icon, enabled: bool, target: f32| {
+pub(super) fn overflow(app: &App, t: &T, max: f32) -> Option<El> {
+    if max <= 0. { return None; }
+    let offset = *app.ui.panel.tabs.scroll.lock().unwrap_or_else(|error| error.into_inner());
+    let offset = offset.clamp(0., max);
+    let arrow = |key: &str, label: &str, glyph: &'static rune::Icon, enabled: bool, target: f32| {
         kit::Button::new(label).icon(glyph).variant("ghost").size("icon-xs").disabled(!enabled).build(t)
-            .help(label).on_press_tx(move |_: &mut App, tx: &mut Tx| tx.scroll_to(STRIP, target, 0.))
+            .key(key).help(label).on_press_tx(move |_: &mut App, tx: &mut Tx| tx.scroll_to(STRIP, target, 0.))
     };
-    Some(row().gap(2.).center_y().shrink()
-        .child(arrow("Scroll tabs left", &icons::CHEVRON_LEFT, offset > 0.5, (offset - 160.).max(0.)))
-        .child(arrow("Scroll tabs right", &icons::CHEVRON_RIGHT, offset < max - 0.5, (offset + 160.).min(max))))
+    Some(row().gap(2.).center_y()
+        .child(arrow("panel-tabs-scroll-left", "Scroll tabs left", &icons::CHEVRON_LEFT, offset > 0.5, (offset - 160.).max(0.)))
+        .child(arrow("panel-tabs-scroll-right", "Scroll tabs right", &icons::CHEVRON_RIGHT, offset < max - 0.5, (offset + 160.).min(max))))
 }
 
 pub(super) fn rename(app: &mut App, surface: Surface) {

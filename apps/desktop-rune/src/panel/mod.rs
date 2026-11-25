@@ -1248,15 +1248,27 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let sheet = viewport.and_then(sheet_width);
     let width = sheet.unwrap_or_else(|| app.ui.panel.width.min(viewport.map_or(1000., |w| w * 0.7)));
     // Web's RightPanelTabs: 24pt tabs whose surface icon turns into the close button on hover.
-    let mut tabs = row().h_full().gap(4.).center_y().role("tablist");
-    let spans = tabs::spans(app, cx);
-    for &surface in &app.ui.panel.surfaces {
-        let active = app.ui.panel.active == Some(surface);
+    let mut tabs = row().h_full().gap(tabs::GAP).center_y().role("tablist");
+    let items: Vec<_> = app.ui.panel.surfaces.iter().map(|&surface| {
         let title = match surface {
             Surface::Browser(tab) => preview::title(app, tab),
             Surface::Tab(id) => tabs::title(app, id),
             _ => surface.title().to_string(),
         };
+        let audio = match surface {
+            Surface::Browser(tab) => preview::audio(app, tab),
+            _ => None,
+        };
+        let renaming = app.ui.panel.tabs.rename.as_ref().is_some_and(|(id, _)| Surface::Tab(*id) == surface);
+        let width = tabs::tab_width(&title, audio.is_some(), renaming);
+        (surface, title, audio, width)
+    }).collect();
+    let spans = tabs::spans(items.iter().map(|item| item.3));
+    let control_count = if sheet.is_some() { 2. } else { 3. };
+    let available = (width - 1. - 20. - control_count * 24. - (control_count + 1.) * tabs::GAP).max(0.);
+    let (strip_width, max_scroll) = tabs::strip_width(&spans, available);
+    for (surface, title, audio, tab_width) in items {
+        let active = app.ui.panel.active == Some(surface);
         let fg = if active { t.c.contrast_foreground } else { t.c.muted_foreground };
         let mut glyph = el()
             .absolute(2., 2.)
@@ -1294,7 +1306,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             );
         // Web's speaker on a playing browser tab; a press mutes or unmutes it.
         let speaker = match surface {
-            Surface::Browser(tab) => preview::audio(app, tab).map(|muted| {
+            Surface::Browser(tab) => audio.map(|muted| {
                 el().size(16., 16.)
                     .radius(4.)
                     .center()
@@ -1311,7 +1323,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         let tab = row()
                 .key(tabs::key(surface))
                 .h(24.)
-                .max_w(144.)
+                .w(tab_width)
                 .pl(6.)
                 .pr(8.)
                 .gap(2.)
@@ -1341,8 +1353,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         tabs = tabs.child(tabs::dragged(app, surface, tab));
     }
     let tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y()
-        .child(tabs::strip(app, tabs))
-        .children(tabs::overflow(app, t))
+        .child(tabs::strip(app, tabs, strip_width))
+        .children(tabs::overflow(app, t, max_scroll))
         .child(
             el().key("panel-add").child(
                 action(t, "Add panel surface", &icons::PLUS)
@@ -1934,6 +1946,22 @@ mod tests {
         // The rest of the row still opens a tab in the default profile.
         click(&mut rt, (chevron[0] - 120., y));
         assert!(matches!(rt.state.ui.panel.surfaces[..], [Surface::Browser(_)]), "the row opens one tab");
+    }
+
+    #[test]
+    fn overflowing_tabs_render_both_arrows_without_scrolling_first() {
+        fn view(s: &App, cx: &mut rune::Cx<App>) -> El {
+            super::view(s, cx, &crate::theme::theme(true), &mut Vec::new())
+        }
+        let mut app = App::new();
+        let scene = SCENES.iter().find(|(name, _)| *name == "panel-tabs-overflow").unwrap().1;
+        scene(&mut app);
+        let mut rt = rune::Runtime::new(app, view, (540., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let nodes = rt.elements();
+        for key in ["panel-tabs-scroll-left", "panel-tabs-scroll-right"] {
+            assert!(nodes.iter().any(|e| e.key.as_deref() == Some(key) && e.rect[2] > 0.), "{key} is present on the first frame");
+        }
     }
 
     #[test]
