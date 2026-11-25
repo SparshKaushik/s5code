@@ -87,7 +87,7 @@ pub struct State {
     pub generation: u64,
     /// The typesetting page's `file:` URL once written; `Err` when it could not be.
     page: Option<Result<String, ()>>,
-    /// Scenes' stand-in pictures by TeX and display, in any ink and size.
+    /// Scenes' pictures by TeX and display, in any ink and size.
     stills: HashMap<(String, bool), (Shot, f32, f32)>,
 }
 
@@ -117,9 +117,9 @@ pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color
 }
 
 /// An inline-math paragraph laid out a word at a time, its formulas as pictures, once all of
-/// them are typeset: Rune's text can't hold a picture. `None` keeps it TeX source, as do
-/// links, images and HTML, which this layout doesn't draw.
-pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> Option<El> {
+/// them are typeset: Rune's text can't hold a picture. A link is one unbroken piece. `None`
+/// keeps it TeX source, as do images, HTML and a formula inside a link.
+pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, link_ink: Color) -> Option<El> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut source = String::new();
     let mut formulas = Vec::new();
@@ -139,6 +139,8 @@ pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> 
     let mut word = row().center_y();
     let mut empty = true;
     let (mut strong, mut emphasis) = (0, 0);
+    // The open link's URL and the text read so far.
+    let mut link: Option<(String, String)> = None;
     let finish = |word: &mut El, empty: &mut bool, words: &mut Vec<El>| {
         if !*empty {
             words.push(std::mem::replace(word, row().center_y()));
@@ -162,6 +164,34 @@ pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> 
             }
             Event::End(TagEnd::Emphasis) => {
                 emphasis -= 1;
+                continue;
+            }
+            Event::Start(Tag::Link { dest_url, .. }) if link.is_none() => {
+                link = Some((dest_url.into_string(), String::new()));
+                continue;
+            }
+            Event::End(TagEnd::Link) => {
+                let (url, label) = link.take()?;
+                let style = if strong > 0 { theme::weight(font, 600.) } else { font };
+                let help = super::md_links::help(&url);
+                let mut target = rune::Link::new(0..label.len(), url);
+                if let Some(help) = help {
+                    target = target.help(help);
+                }
+                word = word.child(text(label).font(style).color(link_ink).single_line().link(target).on_link(super::md_links::open));
+                empty = false;
+                continue;
+            }
+            Event::Text(t) | Event::Code(t) if link.is_some() => {
+                let (_, label) = link.as_mut()?;
+                if t.contains('\u{e000}') {
+                    return None;
+                }
+                label.push_str(&t);
+                continue;
+            }
+            Event::SoftBreak | Event::HardBreak if link.is_some() => {
+                link.as_mut()?.1.push(' ');
                 continue;
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -309,23 +339,32 @@ fn encode_component(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// Scenes: a formula already typeset, drawn here as a striped stand-in of its size since the
-/// render host has no Chrome.
-pub fn scene_seed(app: &mut App, tex: &str, display: bool, (w, h): (f32, f32)) {
-    let shot = Shot::new(String::new(), 0, true);
-    let (pw, ph) = ((w * 2.) as u32, (h * 2.) as u32);
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    for y in ph / 4..ph * 3 / 4 {
-        for x in 0..pw {
-            if (x / 6) % 3 != 2 {
-                let at = ((y * pw + x) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&[0xa1, 0xa1, 0xaa, 0xff]);
-            }
+/// Scenes with Chrome (`S5_CHROME`): typesets each formula for real, waiting here since a
+/// headless run's clock does not wait on Chrome. The pictures then stand for their formula in
+/// any ink and size; without Chrome the formulas stay TeX source and the reason goes to stderr.
+pub fn scene_typeset(app: &mut App, formulas: &[(&str, bool)]) {
+    if app.ui.panel.waker.is_none() {
+        app.ui.panel.waker = Some(std::sync::Arc::new(|| {}));
+    }
+    let ink = theme::theme(app.appearance != crate::Appearance::Light).c.foreground.hex();
+    let size = (theme::TEXT_SM.size * 10.).round() as u32;
+    let keys: Vec<Key> = formulas.iter().map(|(tex, display)| Key { tex: (*tex).to_owned(), display: *display, size, ink: ink.clone() }).collect();
+    app.ui.chat.timeline.katex.wanted.get_mut().extend(keys.iter().cloned());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let waiting = |state: &State| keys.iter().any(|k| matches!(state.entries.get(k), None | Some(Entry::Queued | Entry::Pending(_))));
+    poll(app);
+    while waiting(&app.ui.chat.timeline.katex) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        poll(app);
+    }
+    crate::panel::browser::shutdown();
+    let state = &mut app.ui.chat.timeline.katex;
+    for key in &keys {
+        if let Some(Entry::Ready(shot, w, h)) = state.entries.get(key) {
+            state.stills.insert((key.tex.clone(), key.display), (shot.clone(), *w, *h));
         }
     }
-    shot.pixels.set(pw, ph, rgba);
-    let state = &mut app.ui.chat.timeline.katex;
-    state.stills.insert((tex.to_owned(), display), (shot, w, h));
+    eprintln!("scene: KaTeX typeset {} of {} formulas", state.stills.len(), keys.len());
     state.generation += 1;
 }
 
@@ -342,5 +381,18 @@ mod tests {
         assert!(picture(&app, "x^2", false, 14., ink).is_none());
         assert!(app.ui.chat.timeline.katex.wanted.borrow().is_empty(), "a failed formula isn't asked for again");
         assert!(!poll(&mut app));
+    }
+
+    #[test]
+    fn a_paragraph_with_a_link_flows_but_a_formula_inside_one_stays_source() {
+        let mut app = App::new();
+        app.ui.chat.timeline.katex.stills.insert(("x".into(), false), (Shot::new(String::new(), 0, true), 8., 14.));
+        let ink = Color { r: 1., g: 1., b: 1., a: 1. };
+        let math = || Inline::Math { tex: "x".into(), display: false };
+        let around = |before: &str, after: &str| vec![Inline::Text(before.into()), math(), Inline::Text(after.into())];
+        let flows = |parts: &[Inline]| flow(&app, parts, theme::TEXT_SM, ink, ink).is_some();
+        assert!(flows(&around("See [the **docs**](https://example.com) for ", ".")));
+        assert!(!flows(&[Inline::Text("[see ".into()), math(), Inline::Text("](https://example.com)".into())]));
+        assert!(!flows(&around("![chart](a.png) and ", "")));
     }
 }
