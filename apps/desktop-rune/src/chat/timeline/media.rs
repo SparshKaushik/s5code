@@ -785,7 +785,8 @@ pub fn linked(app: &App, url: &str, name: &str, kind: Kind, host: Option<&Host>,
     let loaded = entry.and_then(|e| e.loaded.as_ref());
     let failed = entry.is_some_and(|e| e.failed);
     let shown = match kind {
-        Kind::Video => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
+        // Pull requests only link pictures and videos; the player also plays sound.
+        Kind::Video | Kind::Audio => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
         Kind::Image => picture(&key, &media, loaded, failed, false, gallery, t),
     };
     with_actions(shown, &key, &media, true)
