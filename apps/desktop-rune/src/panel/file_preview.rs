@@ -1,7 +1,6 @@
 //! FilePreviewPanel's preview modes around the editor: what a file is (packages/shared
 //! filePreview), the rendered markdown, table and notebook views, and AttachmentFilePreview's
-//! "No preview for this file" for formats Rune cannot draw (audio, video, PDF, Office, fonts,
-//! archives). Mermaid stays source: no existing crate lays out its diagrams.
+//! "No preview for this file" for unsupported formats.
 
 use rune::{El, col, el, row, text};
 use serde_json::Value;

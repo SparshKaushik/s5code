@@ -1,6 +1,7 @@
 mod archive;
 mod large_text;
 mod notebook;
+mod office;
 mod scenes;
 mod sqlite;
 
@@ -33,6 +34,7 @@ pub(super) enum Mode {
     Video,
     Font,
     Notebook,
+    Office(office::Format),
 }
 
 impl Mode {
@@ -44,6 +46,7 @@ impl Mode {
             Kind::Audio => Mode::Audio,
             Kind::Font => Mode::Font,
             Kind::Notebook => Mode::Notebook,
+            Kind::Office => Mode::Office(office::Format::from_path(path)?),
             Kind::Archive if [".sqlite", ".sqlite3", ".db"].iter().any(|ext| path.to_ascii_lowercase().ends_with(ext)) => Mode::Sqlite,
             Kind::Archive => Mode::Archive,
             _ => return None,
@@ -66,6 +69,7 @@ enum Content {
     Sqlite(Database),
     Browser(Frame),
     Notebook(notebook::NotebookView),
+    Office(office::Office),
 }
 
 pub(super) struct Viewer {
@@ -101,6 +105,7 @@ impl Viewer {
             Some(Ok(Content::Sqlite(database))) => database.view(t),
             Some(Ok(Content::Browser(frame))) => frame.view(app, t),
             Some(Ok(Content::Notebook(notebook))) => notebook.view(app, t),
+            Some(Ok(Content::Office(office))) => office.view(t),
         }
     }
 
@@ -204,6 +209,7 @@ fn open(mode: Mode, url: &str, name: &str) -> Result<Content, String> {
         Mode::Sqlite => Content::Sqlite(Database::open(&bytes)?),
         Mode::Font => Content::Browser(Frame::new(mode, font_url(&bytes, name))),
         Mode::Notebook => Content::Notebook(notebook::NotebookView::new(&bytes)?),
+        Mode::Office(format) => Content::Office(office::Office::open(format, &bytes)?),
         _ => unreachable!(),
     })
 }

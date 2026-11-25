@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use rune::Pixels;
 
-use super::{Archive, Content, Database, Frame, LargeText, Mode, Viewer, font_url, html_url, media_url, notebook};
+use super::{Archive, Content, Database, Frame, LargeText, Mode, Viewer, font_url, html_url, media_url, notebook, office};
 use crate::panel::{self, Surface, browser, files, html_frame, preview};
 use crate::App;
 
@@ -20,6 +20,9 @@ pub(in crate::panel) const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-file-archive", archive),
     ("panel-file-sqlite", sqlite),
     ("panel-file-notebook", notebook),
+    ("panel-file-docx", docx),
+    ("panel-file-xlsx", xlsx),
+    ("panel-file-pptx", pptx),
     ("panel-diff-hide-tests", hide_tests),
 ];
 
@@ -215,6 +218,23 @@ fn notebook(app: &mut App) {
         Content::Notebook(notebook)
     });
     show(app, Mode::Notebook, content);
+}
+
+fn office_scene(app: &mut App, path: &str, format: office::Format) {
+    scene(app, path, true);
+    show(app, Mode::Office(format), office::fixture(format).map(Content::Office));
+}
+
+fn docx(app: &mut App) {
+    office_scene(app, "reports/checklist.docx", office::Format::Word);
+}
+
+fn xlsx(app: &mut App) {
+    office_scene(app, "reports/results.xlsx", office::Format::Sheet);
+}
+
+fn pptx(app: &mut App) {
+    office_scene(app, "reports/overview.pptx", office::Format::Slides);
 }
 
 fn hide_tests(app: &mut App) {

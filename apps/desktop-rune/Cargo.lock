@@ -3115,6 +3115,7 @@ dependencies = [
  "qrcodegen",
  "regex-automata",
  "ring",
+ "roxmltree",
  "rune",
  "rune-kit",
  "rune-mac",
