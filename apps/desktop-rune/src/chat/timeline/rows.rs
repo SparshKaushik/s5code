@@ -450,11 +450,11 @@ pub fn derive_with_meta(p: &Value, now: i64) -> (Vec<Row<'_>>, HashSet<&str>) {
             }
         }
     }
-    let latest = array(p, "runs").iter().max_by_key(|r| r["ordinal"].as_i64().unwrap_or(0)).map(|r| s(r, "id"));
+    let newest_run = array(p, "runs").iter().max_by_key(|r| r["ordinal"].as_i64().unwrap_or(0)).map(|r| s(r, "id"));
     for (key, index) in folds {
         let run = runs.get(key).copied();
         // The latest turn stopped without an interrupt item (those stay unfolded).
-        let stopped = run.is_some_and(|r| s(r, "status") == "interrupted") && latest == Some(key);
+        let stopped = run.is_some_and(|r| s(r, "status") == "interrupted") && newest_run == Some(key);
         let (first, last) = spans.get(key).copied().unwrap_or_default();
         let start = run.and_then(|r| ts(r, "startedAt")).or(first);
         let end = run.and_then(|r| ts(r, "completedAt")).or(last);
