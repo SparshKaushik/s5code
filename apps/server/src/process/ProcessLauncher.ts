@@ -166,7 +166,8 @@ export const make = Effect.fn("ProcessLauncher.make")(function* (
   replyTimeout: Duration.Input = SPAWN_REPLY_TIMEOUT,
 ) {
   const fallback = yield* ChildProcessSpawner.ChildProcessSpawner;
-  if ((yield* HostProcess.Platform) !== "linux") {
+  // Bun IPC cannot send the pipe handles the helper hands back ("This handle type cannot be sent").
+  if ((yield* HostProcess.Platform) !== "linux" || typeof Bun !== "undefined") {
     return Context.make(ChildProcessSpawner.ChildProcessSpawner, fallback).pipe(
       Context.add(ProcessLauncher, { currentPid: Effect.undefined }),
     );
