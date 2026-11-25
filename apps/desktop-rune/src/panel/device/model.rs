@@ -11,10 +11,6 @@ use serde_json::Value;
 pub const SCREEN_HEIGHT: f32 = 2.2;
 /// `PerspectiveCamera(32, …)`: the vertical field of view.
 pub const FOV_Y: f32 = 32.0 * std::f32::consts::PI / 180.0;
-/// `deviceMotion.ts`'s `gain`: radians per dragged point.
-const ORBIT_GAIN: f32 = 0.006;
-/// `nearestDeviceView`'s `yawLimit`: a released phone turns back to within this yaw, upright.
-const YAW_LIMIT: f32 = std::f32::consts::PI / 3.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Material {
@@ -744,6 +740,43 @@ fn turn(p: [f32; 3], angle: f32, z: f32) -> [f32; 3] {
     [p[0] * c + (p[2] - z) * s, p[1], -p[0] * s + (p[2] - z) * c + z]
 }
 
+/// `ANDROID_FOLD_TURN_MS`: how long the 3D view takes to fold to a new hinge angle.
+const FOLD_TURN: f32 = 0.85;
+
+/// Web's `foldTurn`: the hinge angle the 3D view shows, eased to each new one it's given.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FoldTurn {
+    shown: Option<f32>,
+    turn: Option<(f32, f32, std::time::Instant)>,
+}
+
+impl FoldTurn {
+    /// The angle to show at `now` for a device at `target`; a new target turns from wherever the
+    /// hinge shows, and the first one shows at once.
+    pub fn show(&mut self, target: Option<f32>, now: std::time::Instant) -> Option<f32> {
+        let Some(target) = target else {
+            *self = FoldTurn::default();
+            return None;
+        };
+        let shown = *self.shown.get_or_insert(target);
+        if self.turn.map_or(shown, |(_, to, _)| to) != target {
+            self.turn = Some((shown, target, now));
+        }
+        if let Some((from, to, start)) = self.turn {
+            let progress = (now.saturating_duration_since(start).as_secs_f32() / FOLD_TURN).min(1.);
+            self.shown = Some(from + (to - from) * progress * progress * (3. - 2. * progress));
+            if progress >= 1. {
+                self.turn = None;
+            }
+        }
+        self.shown
+    }
+
+    pub fn moving(&self) -> bool {
+        self.turn.is_some()
+    }
+}
+
 /// `createAndroidFoldScene` at a hinge `angle` (0 closed, 180 open) around an inner display of
 /// `inner_aspect`: two halves on a spine, the continuous inner screen bending with the left half
 /// from 90° open, the cover screen before that.
@@ -894,83 +927,11 @@ pub fn layout(orientation: Option<&str>, width: u32, height: u32) -> Layout {
     }
 }
 
-/// The phone's pose: web's free orbit, settling upright within the yaw limit on release.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Pose {
-    pub yaw: f32,
-    pub pitch: f32,
-}
-
-impl Pose {
-    pub fn orbit(&mut self, dx: f32, dy: f32) {
-        self.yaw += dx * ORBIT_GAIN;
-        self.pitch = (self.pitch + dy * ORBIT_GAIN).clamp(-1.4, 1.4);
-    }
-
-    /// `nearestDeviceView` over the one rest view.
-    pub fn settled(&self) -> Pose {
-        let yaw = self.yaw.sin().atan2(self.yaw.cos());
-        Pose { yaw: yaw.clamp(-YAW_LIMIT, YAW_LIMIT), pitch: 0. }
-    }
-
-    /// The root's rotation (pitch about x, then yaw about y) and the orientation group's turn.
-    pub fn matrix(&self, rotation: f32) -> Mat4 {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sz, cz) = rotation.sin_cos();
-        let pitch: Mat4 = [1., 0., 0., 0., 0., cp, sp, 0., 0., -sp, cp, 0., 0., 0., 0., 1.];
-        let yaw: Mat4 = [cy, 0., -sy, 0., 0., 1., 0., 0., sy, 0., cy, 0., 0., 0., 0., 1.];
-        let turn: Mat4 = [cz, sz, 0., 0., -sz, cz, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
-        mul(&mul(&pitch, &yaw), &turn)
-    }
-}
-
-const SPRING_TICK: f32 = 1. / 120.;
-
-/// `deviceMotion`'s release spring: response 0.5 s and damping 0.78 in fixed 120 Hz ticks for
-/// at most two seconds, so a let-go phone comes to rest alike at any refresh rate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Spring {
-    target: Pose,
-    velocity: [f32; 2],
-    ticks: u32,
-    carry: f32,
-}
-
-impl Spring {
-    /// A spring from `pose` to `target`, the short way round.
-    pub fn toward(pose: &Pose, target: Pose) -> Spring {
-        let turn = target.yaw - pose.yaw;
-        let yaw = pose.yaw + turn.sin().atan2(turn.cos());
-        Spring { target: Pose { yaw, pitch: target.pitch }, velocity: [0.; 2], ticks: 0, carry: 0. }
-    }
-
-    /// Moves `pose` on by `seconds`; false once it rests at the target.
-    pub fn advance(&mut self, pose: &mut Pose, seconds: f32) -> bool {
-        let frequency = std::f32::consts::TAU / 0.5;
-        let decay = frequency * 0.78;
-        self.carry += seconds.max(0.);
-        while self.carry >= SPRING_TICK && self.ticks < 240 {
-            self.carry -= SPRING_TICK;
-            self.ticks += 1;
-            let error = [self.target.yaw - pose.yaw, self.target.pitch - pose.pitch];
-            for (v, e) in self.velocity.iter_mut().zip(error) {
-                *v += (e * frequency * frequency - 2. * decay * *v) * SPRING_TICK;
-            }
-            let speed = self.velocity[0].hypot(self.velocity[1]);
-            if speed > 9. {
-                self.velocity = self.velocity.map(|v| v * 9. / speed);
-            }
-            pose.yaw += self.velocity[0] * SPRING_TICK;
-            pose.pitch += self.velocity[1] * SPRING_TICK;
-        }
-        let error = (self.target.yaw - pose.yaw).hypot(self.target.pitch - pose.pitch);
-        let rest = self.ticks >= 240 || (error < 0.0005 && self.velocity[0].hypot(self.velocity[1]) < 0.005);
-        if rest {
-            *pose = self.target;
-        }
-        !rest
-    }
+/// The root's `rotation` and the orientation group's `turn` about z.
+pub fn world(rotation: super::motion::Quat, turn: f32) -> Mat4 {
+    let (sz, cz) = turn.sin_cos();
+    let turn: Mat4 = [cz, sz, 0., 0., -sz, cz, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+    mul(&super::motion::matrix(rotation), &turn)
 }
 
 /// The camera `deviceFraming.ts` settles on: looking down -z at the posed bounds' centre from far
@@ -1120,7 +1081,7 @@ mod tests {
         assert_eq!(profile(true, "Pixel Tablet", 0.6).id, "android-tablet");
         assert_eq!(profile(false, "iPad Air", 0.7).id, "ios-tablet");
         let portrait = layout(Some("portrait"), 1179, 2556);
-        let world = Pose::default().matrix(portrait.rotation);
+        let world = world(super::super::motion::IDENTITY, portrait.rotation);
         let cam = camera(&model, &world, 0.6);
         let centre = screen_point(&model, &world, &cam, &portrait, 0.5, 0.5, false).unwrap();
         assert!((centre.0 - 0.5).abs() < 0.01 && (centre.1 - 0.5).abs() < 0.01, "{centre:?}");
@@ -1130,21 +1091,10 @@ mod tests {
         assert!(screen_point(&model, &world, &cam, &portrait, 0.01, 0.5, true).is_some(), "a captured touch keeps going");
         // Landscape left: the screen's top runs along the phone's left side.
         let left = layout(Some("landscape_left"), 2556, 1179);
-        let world = Pose::default().matrix(left.rotation);
+        let world = world(super::super::motion::IDENTITY, left.rotation);
         let cam = camera(&model, &world, 1.6);
         let (x, y) = screen_point(&model, &world, &cam, &left, 0.4, 0.5, false).unwrap();
         assert!(x < 0.5 && (y - 0.5).abs() < 0.01, "{x} {y}");
-        let mut pose = Pose::default();
-        pose.orbit(400., 100.);
-        let mut spring = Spring::toward(&pose, pose.settled());
-        assert!(spring.advance(&mut pose, 1. / 60.), "a released phone springs back over frames");
-        assert!(pose.yaw > YAW_LIMIT && pose.pitch < 0.6, "{pose:?}");
-        assert!(!spring.advance(&mut pose, 3.), "and comes to rest");
-        assert_eq!(pose, Pose { yaw: YAW_LIMIT, pitch: 0. }, "upright within the yaw limit");
-        let mut turned = Pose { yaw: 2. * std::f32::consts::TAU + 0.1, pitch: 0. };
-        let mut spring = Spring::toward(&turned, Pose::default());
-        while spring.advance(&mut turned, 0.1) {}
-        assert!((turned.yaw - 2. * std::f32::consts::TAU).abs() < 1e-3, "it turns back the short way: {turned:?}");
     }
 
     #[test]
@@ -1153,7 +1103,7 @@ mod tests {
         assert!((aspect - FOLD_INNER_ASPECT).abs() < 1e-6);
         assert_eq!(fold_inner_aspect(1080, 2424), FOLD_INNER_ASPECT, "a folded frame isn't the inner display");
         let inner = layout(None, 2076, 2152);
-        let world = Pose::default().matrix(0.);
+        let world = world(super::super::motion::IDENTITY, 0.);
         let open = fold(180., aspect);
         assert_eq!(open.faces.len(), 2, "open, the inner display's two halves take touches");
         let cam = camera(&open, &world, 1.);
@@ -1163,6 +1113,20 @@ mod tests {
         assert!(x < 0.5 && y < 0.5, "the left half is the screen's left: {x} {y}");
         assert!(screen_point(&open, &world, &cam, &inner, 0.6, 0.5, false).unwrap().0 > 0.5);
         assert_eq!(screen_point(&open, &world, &cam, &inner, 0.01, 0.5, false), None, "the frame isn't the screen");
+        let mut turn = FoldTurn::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(turn.show(Some(180.), t0), Some(180.), "the first angle shows at once");
+        assert!(!turn.moving());
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let a = turn.show(Some(0.), ms(100)).unwrap();
+        assert!(turn.moving() && a == 180., "a new angle starts turning from the shown one");
+        let b = turn.show(Some(0.), ms(400)).unwrap();
+        assert!(b < 180. && b > 0., "{b}");
+        let c = turn.show(Some(90.), ms(500)).unwrap();
+        assert!((c - b).abs() < 1e-3, "a change mid-turn starts from where the hinge shows");
+        assert_eq!(turn.show(Some(90.), ms(1400)), Some(90.));
+        assert!(!turn.moving(), "and it ends");
+        assert_eq!(turn.show(None, ms(1500)), None);
         let half = fold(90., aspect);
         assert!(half.max[2] > open.max[2] + 0.5, "half open, the left half stands toward the camera");
         let closed = fold(0., aspect);

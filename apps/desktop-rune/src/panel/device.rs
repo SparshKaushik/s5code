@@ -6,6 +6,7 @@ pub(crate) mod h264;
 mod input;
 mod inspect;
 mod model;
+mod motion;
 mod video;
 mod viewport;
 
@@ -111,11 +112,12 @@ struct Stream {
     stand_vertical: Option<bool>,
     /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
     flat: bool,
-    pose: model::Pose,
+    motion: motion::Motion,
+    /// The hinge angle the 3D view shows, eased to each one the device reports.
+    fold_turn: model::FoldTurn,
+    fold_shown: Option<f32>,
     /// Web's Magic Keyboard on an iPad Pro 13-inch's 3D view.
     keyboard: bool,
-    /// The phone springing back to rest after a turn, and the frame it last moved at.
-    spring: Option<(model::Spring, Instant)>,
     /// When a wheel turn that sent no end of its gesture counts as let go (web's 1.2 s).
     wheel_until: Option<Instant>,
     /// A pointer on the 3D view: touching the screen at its last point, or turning the phone.
@@ -344,9 +346,10 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         duo_vertical: None,
         stand_vertical: None,
         flat: false,
-        pose: model::Pose::default(),
+        motion: motion::Motion::default(),
+        fold_turn: model::FoldTurn::default(),
+        fold_shown: None,
         keyboard: false,
-        spring: None,
         wheel_until: None,
         grab: None,
         phone: None,
@@ -406,9 +409,10 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         duo_vertical: None,
         stand_vertical: None,
         flat: false,
-        pose: model::Pose::default(),
+        motion: motion::Motion::default(),
+        fold_turn: model::FoldTurn::default(),
+        fold_shown: None,
         keyboard: false,
-        spring: None,
         wheel_until: None,
         grab: None,
         phone: None,
@@ -710,6 +714,10 @@ fn fold_angle(stream: &Stream) -> Option<f32> {
 /// Keeps the phone the 3D view draws in step with the device: its model once parsed (`now` in
 /// scenes), else a foldable at its hinge angle, else web's procedural phone for its shape and display.
 fn sync_phone(app: &mut App) -> bool {
+    if let Some(stream) = app.ui.panel.device.stream.as_mut() {
+        let target = fold_angle(stream);
+        stream.fold_shown = stream.fold_turn.show(target, Instant::now());
+    }
     let Some(stream) = app.ui.panel.device.stream.as_ref() else { return false };
     let name = device_name(app, stream).to_owned();
     let now = app.ui.panel.device.fixture.is_some();
@@ -725,7 +733,7 @@ fn sync_phone(app: &mut App) -> bool {
     let id = model::model_id(stream.android, &name);
     // The bare iPad shows while the one with its keyboard loads.
     let keyboard = (stream.keyboard && id == Some(KEYBOARD_FOR)).then(|| model::model(model::KEYBOARD, now, wake())).flatten();
-    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (keyboard.or_else(|| id.and_then(|id| model::model(id, now, wake()))), fold_angle(stream)) {
+    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (keyboard.or_else(|| id.and_then(|id| model::model(id, now, wake()))), stream.fold_shown) {
         (Some(model), _) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
         (None, Some(angle)) => {
             let (w, h) = stream.pixels.size();
@@ -758,30 +766,42 @@ fn scene_3d(app: &App) -> Option<viewport::Scene> {
     let layout = model::layout(screen_state(stream).as_ref().map(|s| s.orientation.as_str()), w, h);
     // A foldable turns with its hinge, not its orientation.
     let turn = if model.faces.is_empty() { layout.rotation } else { 0. };
-    Some(viewport::Scene { model: model.clone(), world: stream.pose.matrix(turn), layout, pixels: stream.pixels.clone() })
+    Some(viewport::Scene { model: model.clone(), world: model::world(stream.motion.rotation, turn), layout, pixels: stream.pixels.clone() })
+}
+
+/// Milliseconds on one clock, as web's `performance.now()` for the 3D view's motion.
+fn now_ms() -> f64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
 }
 
 /// Web `createPhoneInteraction` on the 3D view of `size` points: a press on the screen touches
-/// it, anywhere else turns the phone, which stands back up when let go.
+/// it and holds the phone still, anywhere else turns the phone, which flicks or springs to rest
+/// when let go.
 fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
     let Some(scene) = scene_3d(s) else { return };
     let camera = model::camera(&scene.model, &scene.world, size.0 / size.1);
     let (x, y) = (d.x / size.0, d.y / size.1);
     let Some(stream) = s.ui.panel.device.stream.as_mut() else { return };
     let ended = d.cancelled() || matches!(d.phase, Phase::Up);
+    let now = now_ms();
     let grab = match (stream.grab, matches!(d.phase, Phase::Down)) {
-        (None, true) => match model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, false) {
-            Some((u, v)) => {
-                if let Some(input) = &stream.input {
-                    input.touch("begin", f64::from(u), f64::from(v));
+        (None, true) => {
+            stream.wheel_until = None;
+            match model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, false) {
+                Some((u, v)) => {
+                    stream.motion.hold(true, now, &motion::phone_view);
+                    if let Some(input) = &stream.input {
+                        input.touch("begin", f64::from(u), f64::from(v));
+                    }
+                    Some(Grab::Touch(f64::from(u), f64::from(v)))
                 }
-                Some(Grab::Touch(f64::from(u), f64::from(v)))
+                None => {
+                    stream.motion.drag_active(true, now, &motion::phone_view);
+                    Some(Grab::Orbit(d.x, d.y))
+                }
             }
-            None => {
-                (stream.spring, stream.wheel_until) = (None, None);
-                Some(Grab::Orbit(d.x, d.y))
-            }
-        },
+        }
         (Some(Grab::Touch(u, v)), _) => {
             let (u, v) = model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
             if let Some(input) = &stream.input {
@@ -790,30 +810,24 @@ fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
             Some(Grab::Touch(u, v))
         }
         (Some(Grab::Orbit(px, py)), _) => {
-            stream.pose.orbit(d.x - px, d.y - py);
+            stream.motion.orbit(d.x - px, d.y - py, now);
             Some(Grab::Orbit(d.x, d.y))
         }
         (None, false) => None,
     };
-    stream.grab = if ended {
-        if matches!(grab, Some(Grab::Orbit(..))) {
-            let rest = stream.pose.settled();
-            spring_to(stream, rest, tx);
+    if ended {
+        match grab {
+            Some(Grab::Orbit(..)) => stream.motion.drag_active(false, now, &motion::phone_view),
+            Some(Grab::Touch(..)) => stream.motion.hold(false, now, &motion::phone_view),
+            None => {}
         }
-        None
-    } else {
-        grab
-    };
-}
-
-fn spring_to(stream: &mut Stream, target: model::Pose, tx: &mut Tx) {
-    stream.wheel_until = None;
-    stream.spring = Some((model::Spring::toward(&stream.pose, target), Instant::now()));
+    }
+    stream.grab = if ended { None } else { grab };
     tx.wake_after(Duration::ZERO);
 }
 
 /// Web `phoneWheelNavigation` on the 3D view of `size` points: a scroll turns the phone (a
-/// pinch, the Duo's, does nothing here), which springs back when the gesture ends.
+/// pinch, the Duo's, does nothing here), which flicks or springs to rest when the gesture ends.
 fn wheel_3d(s: &mut App, e: rune::WheelEvent, size: (f32, f32), tx: &mut Tx) -> bool {
     let Some(stream) = s.ui.panel.device.stream.as_mut() else { return false };
     // Turning during a touch would move the point it holds on the screen.
@@ -821,42 +835,39 @@ fn wheel_3d(s: &mut App, e: rune::WheelEvent, size: (f32, f32), tx: &mut Tx) -> 
         return true;
     }
     if e.momentum || matches!(e.phase, rune::GesturePhase::Ended) {
-        if stream.wheel_until.is_some() {
-            let rest = stream.pose.settled();
-            spring_to(stream, rest, tx);
+        if stream.wheel_until.take().is_some() {
+            stream.motion.drag_active(false, now_ms(), &motion::phone_view);
+            tx.wake_after(Duration::ZERO);
         }
         return true;
     }
     if e.dx == 0. && e.dy == 0. {
         return true;
     }
-    stream.spring = None;
-    stream.pose.orbit(e.dx.clamp(-size.0 / 4., size.0 / 4.), e.dy.clamp(-size.1 / 4., size.1 / 4.));
+    stream.motion.orbit(e.dx.clamp(-size.0 / 4., size.0 / 4.), e.dy.clamp(-size.1 / 4., size.1 / 4.), now_ms());
     stream.wheel_until = Some(Instant::now() + WHEEL_IDLE);
+    tx.wake_after(Duration::ZERO);
     tx.wake_after(WHEEL_IDLE);
     true
 }
 
-/// Steps the phone's spring and lets go of an idle wheel turn, asking for frames only while it moves.
+/// Steps the phone's motion and the fold's turn, and lets go of an idle wheel turn, asking for
+/// frames only while something moves.
 fn step_3d(stream: &mut Stream, tx: &mut Tx) -> bool {
     let now = Instant::now();
     match stream.wheel_until {
         Some(until) if now >= until => {
             stream.wheel_until = None;
-            stream.spring = Some((model::Spring::toward(&stream.pose, stream.pose.settled()), now));
+            stream.motion.drag_active(false, now_ms(), &motion::phone_view);
         }
         Some(until) => tx.wake_after(until - now),
         None => {}
     }
-    let Some((spring, at)) = stream.spring.as_mut() else { return false };
-    let moving = spring.advance(&mut stream.pose, now.duration_since(*at).as_secs_f32());
-    *at = now;
-    if moving {
+    let moved = stream.motion.advance(now_ms());
+    if stream.motion.needs_frame() || stream.fold_turn.moving() {
         tx.wake_after(Duration::ZERO);
-    } else {
-        stream.spring = None;
     }
-    true
+    moved
 }
 
 /// The device web's `deviceKeyboard` attaches the Magic Keyboard to.
@@ -881,7 +892,7 @@ fn toggle_keyboard(app: &mut App) {
 /// to portrait (landscape right with the Magic Keyboard).
 fn restore_3d(app: &mut App) {
     let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
-    stream.spring = Some((model::Spring::toward(&stream.pose, model::Pose::default()), Instant::now()));
+    stream.motion.reset(motion::IDENTITY, now_ms());
     stream.wheel_until = None;
     stream.grab = None;
     let rest = if stream.keyboard { "landscape_right" } else { "portrait" };
