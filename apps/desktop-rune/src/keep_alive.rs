@@ -30,7 +30,8 @@ fn detail_done(view: Option<&s5_net::ThreadView>, listed: bool) -> bool {
 /// The threads to follow: the running ones, and those that stopped whose stream hasn't caught up.
 fn next_kept(threads: &[Value], previous: &HashSet<String>, done: impl Fn(&str) -> bool) -> HashSet<String> {
     let mut kept: HashSet<String> = threads.iter().filter(|t| running(data::s(t, "status"))).map(|t| data::s(t, "id").to_owned()).collect();
-    kept.extend(previous.iter().filter(|id| !kept.contains(*id) && !done(id)).cloned());
+    let stopped: Vec<String> = previous.iter().filter(|id| !kept.contains(*id) && !done(id)).cloned().collect();
+    kept.extend(stopped);
     kept
 }
 
