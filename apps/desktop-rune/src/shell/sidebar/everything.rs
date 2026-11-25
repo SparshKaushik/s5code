@@ -352,7 +352,7 @@ fn save(key: &str, value: &Value) {
 
 /// Reads `key` once: it is cleared as it is read.
 fn take(key: &str) -> Option<Value> {
-    let prefs = prefs();
+    let mut prefs = prefs();
     let value: Value = prefs.get(key)?;
     if value.is_null() {
         return None;
@@ -705,7 +705,7 @@ fn release_notes(s: &App, t: &T, layers: &mut Vec<El>) {
     let surface = kit::menu::glass(body, &k, false)
         .hover_delays(std::time::Duration::ZERO, std::time::Duration::from_millis(150))
         .on_hover_change(|s: &mut App, on, _: &mut Tx| s.ui.shell.sidebar.everything.notes.1 = on);
-    layers.push(kit::motion::popup(rune_kit::popover::anchored(&k, surface, "sb-app-update", rune_kit::Placement::TopCenter, 4.0)));
+    layers.push(kit::motion::popup(rune_kit::popover::anchored(&k, surface, "sb-app-update", rune_kit::Placement::Top, 4.0)));
 }
 
 /// Scenes: the confirm dialog, the capsule counting down with its popover, and the app pill's
