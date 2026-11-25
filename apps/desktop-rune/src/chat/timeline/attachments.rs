@@ -375,6 +375,7 @@ pub(crate) fn panel_view(app: &App, id: &str, t: &T) -> El {
     content = match loaded.kind {
         Some(Kind::Image) => content.child(el().w_full().grow(1.).min_h(0.).pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit)),
         Some(Kind::Video) => content.child(media::video(&id, &name, Some(loaded), false, None, t)),
+        Some(Kind::Audio) => content.child(audio(&json!({"id": id, "name": name}), Some(loaded), false, t)),
         None => content.child(text(&name).font(theme::SM_MEDIUM).color(t.c.foreground)),
     };
     content.child(row().gap(6.)
