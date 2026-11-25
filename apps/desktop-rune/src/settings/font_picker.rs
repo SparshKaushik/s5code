@@ -109,7 +109,7 @@ fn read_faces(path: &Path) -> Vec<Family> {
 
 fn faces<R: Read + Seek>(file: &mut R) -> Option<Vec<Family>> {
     let head = at(file, 0, 12)?;
-    let offsets = if &head[..4] == b"ttcf" {
+    let offsets: Vec<u64> = if &head[..4] == b"ttcf" {
         let count = u32_at(&head, 8)?.min(256);
         let table = at(file, 12, count as usize * 4)?;
         (0..count as usize).filter_map(|i| u32_at(&table, i * 4)).map(u64::from).collect()
@@ -282,7 +282,7 @@ mod tests {
         let mut head = vec![0, 0];
         head.extend((records.len() as u16).to_be_bytes());
         head.extend((6 + records.len() as u16 * 12).to_be_bytes());
-        let mut storage = Vec::new();
+        let mut storage: Vec<u8> = Vec::new();
         for (platform, encoding, language, id, bytes) in records {
             for v in [*platform, *encoding, *language, *id, bytes.len() as u16, storage.len() as u16] {
                 head.extend(v.to_be_bytes());
@@ -301,14 +301,14 @@ mod tests {
         let mut out = vec![0, 1, 0, 0];
         out.extend((tables.len() as u16).to_be_bytes());
         out.extend([0; 6]);
-        let mut data = Vec::new();
+        let mut data: Vec<u8> = Vec::new();
         let start = base + 12 + tables.len() as u32 * 16;
         for (tag, bytes) in tables {
             out.extend_from_slice(*tag);
             out.extend([0; 4]);
             out.extend((start + data.len() as u32).to_be_bytes());
             out.extend((bytes.len() as u32).to_be_bytes());
-            data.extend(bytes);
+            data.extend_from_slice(bytes);
         }
         out.extend(data);
         out
