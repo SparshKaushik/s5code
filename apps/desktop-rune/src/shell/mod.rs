@@ -121,6 +121,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     crate::links::overlays(s, t, &mut overlays);
     crate::add_to_machine::overlays(s, t, &mut overlays);
     crate::wizard::overlays(s, t, &mut overlays);
+    crate::cloud::onboarding::overlay(s, t, &mut overlays);
+    crate::cloud::relay_client::overlay(s, t, &mut overlays);
     crate::desktop::updates::confirm(s, t, &mut overlays);
     overlays.extend(quit::overlay(s, t));
     rune_kit::root(body, overlays)

@@ -502,6 +502,10 @@ pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Error, Vec::new(), None);
 }
+/// `toast_error` with actions, such as Copy trace ID.
+pub(crate) fn toast_error_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
+    raise(s, title, description, Kind::Error, actions, None);
+}
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
 pub(crate) fn toast_warning_sticky(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Warning, Vec::new(), None);

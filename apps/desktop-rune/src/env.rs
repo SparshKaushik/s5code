@@ -1209,6 +1209,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         crate::wizard::scene_computers(s);
     }),
     ("wizard-chatgpt-account", crate::wizard::scene_chatgpt),
+    ("t3-connect-onboarding", |s| crate::cloud::onboarding::scene(s, true)),
+    ("t3-connect-onboarding-devices", |s| crate::cloud::onboarding::scene(s, false)),
 ];
 
 #[cfg(test)]

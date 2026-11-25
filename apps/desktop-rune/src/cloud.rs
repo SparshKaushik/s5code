@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 use crate::theme::{self, T};
 use crate::{App, icons, kit};
 
+pub mod account;
+pub mod onboarding;
+pub mod relay_client;
+
 /// The public cloud config `loadRepoEnv` reads; the process environment overrides it.
 const PUBLIC_CONFIG: &str = include_str!("../../../.env.example");
 
@@ -68,6 +72,13 @@ pub struct Ui {
     pub error: Option<String>,
     /// The setup wizard's T3 Connect card, folded away.
     pub wizard_folded: bool,
+    pub account: account::Account,
+    /// A relay client check or install a link waits on.
+    pub install: Option<relay_client::Install>,
+    /// "Set up T3 Connect", open after a fresh sign-in.
+    pub onboarding: Option<onboarding::Onboarding>,
+    /// This environment's T3 Connect link, as the link controller last reported it.
+    pub link: Option<onboarding::LinkState>,
     events: Option<(Sender<Event>, Receiver<Event>)>,
 }
 
@@ -88,6 +99,8 @@ pub enum Event {
     SignedIn { attempt: String, result: Result<Identity, String> },
     Environments(Result<Vec<Linked>, Failure>),
     Status(String, Result<Status, Failure>),
+    Devices(Result<Vec<relay::Device>, Failure>),
+    Deregistered(Linked, Result<(), Failure>),
     SignedOut,
 }
 
@@ -101,6 +114,8 @@ struct Shared {
     /// Relay tokens by the scopes they grant.
     relay: HashMap<&'static str, Token>,
     environments: HashMap<String, (Linked, Token)>,
+    /// Accounts that chose "Don't show this again" for onboarding on this device.
+    opt_out: Vec<String>,
 }
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Mutex::default);
@@ -133,6 +148,9 @@ fn save(state: &Shared) {
     }
     if let Some(i) = &state.identity {
         file["identity"] = json!({"session": i.session, "user": i.user, "email": i.email, "name": i.name});
+    }
+    if !state.opt_out.is_empty() {
+        file["onboardingOptOut"] = json!(state.opt_out);
     }
     let path = path();
     let write = || -> std::io::Result<()> {
@@ -170,6 +188,7 @@ pub fn start(s: &mut App) {
         let mut state = shared();
         state.client_jwt = file["clientJwt"].as_str().map(str::to_owned);
         state.identity = identity.clone();
+        state.opt_out = file["onboardingOptOut"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_owned)).collect();
         state.key = file["dpopKey"].as_str().and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok()).and_then(|k| Key::from_pkcs8(&k).ok()).map(Arc::new);
     }
     s.ui.cloud.identity = identity.clone();
@@ -240,6 +259,13 @@ fn session_token(config: &Config) -> Result<String, Failure> {
     let token = clerk.session_token(&session, &config.template);
     keep(&clerk);
     token
+}
+
+/// The signed-in account's session JWT, for the relay's client endpoints (linking this machine).
+/// Blocks on Clerk: call it off the UI thread.
+pub fn account_token() -> Result<String, Failure> {
+    let config = config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?;
+    session_token(&config)
 }
 
 /// The relay token for `scope`, exchanged again when it lapses or `stale` says the relay refused it.
@@ -326,13 +352,6 @@ pub fn auth(environment: &str) -> s5_net::Auth {
 /// environment rows. Stable for other modules; [`session_jwt`] is what they send.
 pub(crate) fn signed_in(s: &App) -> bool {
     s.ui.cloud.identity.is_some()
-}
-
-/// A fresh Clerk session JWT for the relay's bearer-authorized routes. Blocks on the network,
-/// so callers run it off the UI thread.
-#[allow(dead_code)] // For Settings' T3 Connect controls on environment rows.
-pub(crate) fn session_jwt() -> Result<String, Failure> {
-    session_token(&config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?)
 }
 
 /// The providers to offer: the instance's, else GitHub and Google until they load.
@@ -457,6 +476,8 @@ pub fn sign_out(s: &mut App) {
     ui.identity = None;
     ui.environments = None;
     ui.availability.clear();
+    ui.account = account::Account::default();
+    ui.onboarding = None;
     ui.signing_in = None;
     ui.error = None;
     if let (Some(session), Some(config)) = (session, config()) {
@@ -511,11 +532,14 @@ fn land(s: &mut App, event: Event) {
             ui.signing_in = None;
             match result {
                 Ok(identity) => {
+                    let user = identity.user.clone();
                     ui.identity = Some(identity);
                     ui.environments = None;
+                    ui.account = account::Account::default();
                     ui.error = None;
                     crate::shell::palette::toast(s, "Signed in to T3 Connect", None);
                     reconnect_relay_environments(s);
+                    onboarding::open(s, &user);
                 }
                 Err(message) => ui.error = Some(message),
             }
@@ -543,6 +567,8 @@ fn land(s: &mut App, event: Event) {
                 *slot = availability;
             }
         }
+        Event::Devices(result) => account::devices_landed(s, result),
+        Event::Deregistered(linked, result) => account::deregistered(s, linked, result),
     }
 }
 
@@ -585,7 +611,7 @@ pub(crate) fn import(s: &mut App, relays: Vec<(String, String)>) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let mut changed = false;
+    let mut changed = relay_client::poll(s);
     while let Some(event) = s.ui.cloud.events.as_ref().and_then(|(_, rx)| rx.try_recv().ok()) {
         land(s, event);
         changed = true;
@@ -593,6 +619,9 @@ pub fn poll(s: &mut App) -> bool {
     let showing = matches!(&s.route, crate::Route::Settings(page) if page == "connections") || s.ui.wizard.open || !s.ui.cloud.imports.is_empty();
     if showing && s.ui.cloud.identity.is_some() && s.ui.cloud.environments.is_none() && !s.ui.cloud.loading {
         refresh(s);
+    }
+    if matches!(&s.route, crate::Route::Settings(page) if page == "connections") && s.ui.cloud.identity.is_some() {
+        account::poll(s);
     }
     changed
 }
@@ -678,7 +707,8 @@ pub(crate) fn link_hint(t: &T) -> El {
     col().w_full().gap(8.0).child(muted("Run this on each computer you want to connect.", t)).child(crate::wizard::command_block("npx t3 connect", t))
 }
 
-fn environment_rows(s: &App, t: &T) -> Vec<El> {
+/// The account's computers; `empty` replaces the link hint when there are none.
+fn environment_rows(s: &App, t: &T, empty: Option<&str>) -> Vec<El> {
     let pad = |inner: El| row().w_full().px(16.0).py(12.0).child(inner);
     match &s.ui.cloud.environments {
         None => vec![pad(muted("Loading computers…", t))],
@@ -690,7 +720,10 @@ fn environment_rows(s: &App, t: &T) -> Vec<El> {
                 .child(muted(message.clone(), t))
                 .child(row().mt(8.0).child(kit::Button::new("Retry").variant("outline").size("sm").disabled(s.ui.cloud.loading).on_press(refresh).build(t))),
         )],
-        Some(Ok(list)) if list.is_empty() => vec![pad(col().w_full().gap(12.0).child(text("No computers linked yet.").font(theme::TEXT_SM).color(t.c.muted_foreground)).child(link_hint(t)))],
+        Some(Ok(list)) if list.is_empty() => match empty {
+            Some(copy) => vec![row().w_full().px(16.0).py(24.0).justify_center().child(text(copy.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center))],
+            None => vec![pad(col().w_full().gap(12.0).child(text("No computers linked yet.").font(theme::TEXT_SM).color(t.c.muted_foreground)).child(link_hint(t)))],
+        },
         Some(Ok(list)) => list
             .iter()
             .map(|linked| {
@@ -729,7 +762,7 @@ pub fn section(s: &App, t: &T) -> Option<El> {
     config()?;
     let mut rows = vec![account(s, t)];
     if s.ui.cloud.identity.is_some() && s.ui.cloud.signing_in.is_none() {
-        rows.extend(environment_rows(s, t));
+        rows.extend(environment_rows(s, t, None));
     }
     Some(crate::settings::controls::section("T3 Connect", rows, t))
 }
@@ -838,8 +871,8 @@ pub fn linked(s: &App, id: &str) -> Option<Linked> {
 pub(crate) fn scene_signed_in(s: &mut App) {
     s.ui.cloud.identity = Some(Identity { session: "sess_1".into(), user: "user_1".into(), email: "ada@example.com".into(), name: "Ada Lovelace".into() });
     s.ui.cloud.environments = Some(Ok(vec![
-        Linked { id: "env-box".into(), label: "Hetzner box".into(), http: "https://box.tunnel.example.com/".into(), ws: "wss://box.tunnel.example.com/".into() },
-        Linked { id: "env-studio".into(), label: "Studio Mac".into(), http: "https://studio.tunnel.example.com/".into(), ws: "wss://studio.tunnel.example.com/".into() },
+        Linked { id: "env-box".into(), label: "Hetzner box".into(), http: "https://box.tunnel.example.com/".into(), ws: "wss://box.tunnel.example.com/".into(), linked_at: "2026-09-14T08:00:00.000Z".into(), managed: true },
+        Linked { id: "env-studio".into(), label: "Studio Mac".into(), http: "https://studio.tunnel.example.com/".into(), ws: "wss://studio.tunnel.example.com/".into(), linked_at: "2026-11-02T08:00:00.000Z".into(), managed: false },
     ]));
     s.ui.cloud.availability = HashMap::from([("env-box".into(), Availability::Online), ("env-studio".into(), Availability::Offline(None))]);
 }
@@ -934,7 +967,7 @@ mod tests {
     fn relay_status_lands_on_listed_computers_only() {
         let mut s = App::new();
         s.ui.cloud.identity = Some(Identity { session: "sess_1".into(), ..Identity::default() });
-        let listed = Linked { id: "env-1".into(), label: "Lab".into(), http: "https://lab.example/".into(), ws: "wss://lab.example/".into() };
+        let listed = Linked { id: "env-1".into(), label: "Lab".into(), http: "https://lab.example/".into(), ws: "wss://lab.example/".into(), ..Linked::default() };
         land(&mut s, Event::Environments(Ok(vec![listed.clone()])));
         assert_eq!(standing(&s, &listed).0, "T3 Connect · Not added · Checking relay status…");
         assert!(new_computers(&s).is_empty(), "the wizard waits for a status before ticking");
@@ -958,7 +991,7 @@ mod tests {
         s.ui.env.saved.push(crate::env::Saved { id: "env-lan".into(), label: "Desk".into(), base: "http://192.168.1.9:3773".into(), bearer: "token".into() });
         import(&mut s, vec![("env-relay".into(), "Studio".into()), ("env-lan".into(), "Desk".into()), ("env-later".into(), "Later".into())]);
         assert!(s.ui.env.saved.iter().all(|e| e.id != "env-relay"), "nothing joins before the listing says where it is");
-        let at = |id: &str| Linked { id: id.into(), label: String::new(), http: format!("https://{id}.tunnel.example/"), ws: format!("wss://{id}.tunnel.example/") };
+        let at = |id: &str| Linked { id: id.into(), label: String::new(), http: format!("https://{id}.tunnel.example/"), ws: format!("wss://{id}.tunnel.example/"), ..Linked::default() };
         land(&mut s, Event::Environments(Ok(vec![at("env-relay"), at("env-lan")])));
         let relay = s.ui.env.saved.iter().find(|e| e.id == "env-relay").expect("a listed relay connection joins");
         assert_eq!((relay.label.as_str(), relay.base.as_str(), relay.bearer.as_str()), ("Studio", "https://env-relay.tunnel.example", crate::env::T3_CONNECT), "the catalog's label stands in for an empty one");
