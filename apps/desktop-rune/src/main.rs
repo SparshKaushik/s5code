@@ -120,6 +120,9 @@ impl App {
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
+        if route != self.route {
+            panel::flush_file(self);
+        }
         env::follow(self, &route);
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()

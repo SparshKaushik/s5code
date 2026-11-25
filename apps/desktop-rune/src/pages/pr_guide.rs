@@ -488,7 +488,7 @@ pub fn poll(s: &mut App) -> bool {
     sync(s);
     let now = crate::data::now_ms();
     let mut changed = take_open(s, now) | poll_watches(s, now);
-    if matches!(s.frame_route(), Route::PullRequests) && s.ui.pages.pull_requests.selected.is_some() && available(s) {
+    if (crate::panel::active_pull_request(s).is_some() || (matches!(s.frame_route(), Route::PullRequests) && s.ui.pages.pull_requests.selected.is_some())) && available(s) {
         changed |= want_guide(s);
         if s.ui.pages.detail.tab == TAB {
             changed |= want_diff(s);
@@ -698,7 +698,7 @@ fn write(s: &mut App) {
 /// The run key of the guide on screen, which a settled run doesn't announce.
 fn shown_key(s: &App) -> Option<String> {
     let u = &s.ui.pages.detail;
-    let on = matches!(s.frame_route(), Route::PullRequests) && s.ui.pages.pull_requests.selected.is_some() && u.tab == TAB && available(s);
+    let on = (crate::panel::active_pull_request(s).is_some() || (matches!(s.frame_route(), Route::PullRequests) && s.ui.pages.pull_requests.selected.is_some())) && u.tab == TAB && available(s);
     u.entry.as_ref().filter(|_| on).map(|e| run_key(s, e))
 }
 

@@ -3459,7 +3459,7 @@ mod tests {
         // Overlays follow the composer used last, while its side chat is open beside the route.
         assert_eq!(s.ui.chat.composer.owner.as_deref(), Some(side.as_str()));
         assert_eq!(side_owner(&s), None);
-        s.ui.chat.side.open.insert(main.clone(), side.clone());
+        crate::panel::open_side_chat(&mut s, &main, &side);
         assert_eq!(side_owner(&s), Some(side.as_str()));
         acting(&mut s, None, |_| ());
         assert_eq!(side_owner(&s), None, "using the chat's composer takes them back");

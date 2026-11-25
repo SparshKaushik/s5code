@@ -1360,7 +1360,7 @@ mod tests {
         let mut app = crate::App::new();
         app.route = crate::Route::Thread("parent".into());
         assert!(!super::in_side_pane(&app, "side"));
-        app.ui.chat.side.open.insert("parent".into(), "side".into());
+        crate::panel::open_side_chat(&mut app, "parent", "side");
         assert!(super::in_side_pane(&app, "side"));
         assert!(!super::in_side_pane(&app, "parent"), "the chat keeps its own follow state");
         app.route = crate::Route::Thread("other".into());

@@ -868,6 +868,12 @@ fn layer_url(url: &str, from: &Value, to: &Value) -> Option<String> {
 fn select_layer(s: &mut App, e: &Value, layer: &Value) {
     ui(s).stack_open = None;
     let number = &layer["number"];
+    if crate::panel::active_pull_request(s).is_some() {
+        if let Some(url) = layer_url(field(e, "url"), &e["number"], number) {
+            crate::panel::open_pull_request(s, layer_entry(e, layer, url));
+        }
+        return;
+    }
     let list = &mut s.ui.pages.pull_requests;
     let listed = list.result.as_ref().and_then(|r| {
         r["entries"].as_array()?.iter().find(|x| x[crate::env::TAG] == e[crate::env::TAG] && field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())

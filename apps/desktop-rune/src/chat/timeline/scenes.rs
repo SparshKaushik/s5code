@@ -1191,7 +1191,7 @@ fn side_pane(app: &mut App) {
             state.thread_views.insert("scene-side".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
         }
     }
-    app.ui.chat.side.open.insert(parent, "scene-side".into());
+    crate::panel::open_side_chat(app, &parent, "scene-side");
 }
 /// The side chat's composer with a typed follow-up and a file queued, the caret in it.
 fn side_pane_composer(app: &mut App) {
@@ -1219,7 +1219,7 @@ fn side_pane_stop(app: &mut App) {
 /// A closed side chat opened again from its parent (openSideChatTab), the caret in its composer.
 fn side_reopen(app: &mut App) {
     side_pane(app);
-    app.ui.chat.side.open.clear();
+    crate::panel::close_side_chat(app, "scene-side", false);
     crate::chat::side::open_tab(app, "scene-side");
 }
 /// The details card's "Side chats": eight of the showcase's side chats in each state, one

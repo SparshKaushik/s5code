@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum View {
     Files(String),
+    Attachment(String),
+    Device { host: String, device: String, name: String, title: Option<String> },
     Diff,
     Browser(String),
     /// A side chat closed beside its thread (the web's `side-chat:` tab): the side chat's id.
@@ -26,11 +28,17 @@ pub struct Closed {
 impl Closed {
     /// The web's `sameTarget`: a pull request tab is the same view while its URL is.
     fn same_target(&self, other: &Closed) -> bool {
-        self.thread == other.thread
-            && match (&self.view, &other.view) {
-                (View::PullRequest(a), View::PullRequest(b)) => a["url"] == b["url"],
-                (a, b) => a == b,
-            }
+        self.thread == other.thread && self.view.same_target(&other.view)
+    }
+}
+
+impl View {
+    pub(super) fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::PullRequest(a), Self::PullRequest(b)) => a["url"] == b["url"],
+            (Self::Device { host: a, device: b, .. }, Self::Device { host: c, device: d, .. }) => a == c && b == d,
+            _ => self == other,
+        }
     }
 }
 
@@ -43,7 +51,7 @@ const FILE: &str = "closed-views.json";
 const PAGE_FILE: &str = "pull-request-closed-views.json";
 
 /// A pull request entry worth reopening (`isClosedViewEntry`'s pull-request case).
-fn pull_request(e: &Value) -> Option<Value> {
+pub(super) fn pull_request(e: &Value) -> Option<Value> {
     (e["url"].as_str().is_some_and(|u| !u.is_empty()) && e["number"].as_u64().is_some_and(|n| n > 0)).then(|| e.clone())
 }
 
@@ -73,6 +81,8 @@ fn encode(entries: &[Closed]) -> Value {
     let rows: Vec<Value> = entries
         .iter()
         .map(|c| match &c.view {
+            View::Attachment(id) => json!({"thread":c.thread, "kind":"attachment", "id":id}),
+            View::Device { host, device, name, title } => json!({"thread":c.thread, "kind":"device", "host":host, "device":device, "name":name, "title":title}),
             View::Files(path) => json!({"thread": c.thread, "kind": "files", "path": path}),
             View::Diff => json!({"thread": c.thread, "kind": "diff"}),
             View::PullRequests => json!({"thread": c.thread, "kind": "pull-requests"}),
@@ -93,6 +103,7 @@ fn decode(v: &Value) -> Vec<Closed> {
         .filter_map(|row| {
             let thread = row["thread"].as_str().filter(|t| !t.is_empty())?.to_owned();
             let view = match row["kind"].as_str()? {
+                "attachment" | "device" => super::tabs::Target::decode(row)?.closed()?,
                 "files" => View::Files(row["path"].as_str()?.to_owned()),
                 "diff" => View::Diff,
                 "pull-requests" => View::PullRequests,
@@ -217,6 +228,8 @@ mod tests {
             closed("c", View::Browser("http://localhost:5173/".into())),
             closed("d", View::SideChat("side-1".into())),
             closed("e", View::PullRequests),
+            closed("a", View::Attachment("attachment-1".into())),
+            closed("a", View::Device { host: "host".into(), device: "phone".into(), name: "Phone".into(), title: Some("My phone".into()) }),
         ];
         assert_eq!(decode(&encode(&entries)), entries);
         let saved = json!({"entries": [
