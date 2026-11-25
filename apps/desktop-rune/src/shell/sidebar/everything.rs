@@ -1,15 +1,18 @@
 //! Web's "update everything" (`useUpdateEverything`, `UpdateEverythingDialog`,
-//! `SidebarUpdateCapsule`) for this app and the providers of every connected environment: one
-//! confirm, the providers update, then this app restarts into its update after a 5 s countdown
-//! the user can postpone. Remote servers keep their own update flow (`chat::server_update`).
+//! `SidebarUpdateCapsule`) for this app, the providers of every connected environment and the
+//! remote servers behind this app's bundled server: one confirm, the providers update, then the
+//! servers (each through `chat::server_update`'s flow, retried from the capsule if one fails),
+//! then this app restarts into its update after a 5 s countdown the user can postpone.
 //! Also the app pill's release notes popover (`SidebarUpdateReleaseNotes`) and the launch notices
 //! (`startDesktopUpdateLaunchNotice`).
 
-use rune::{Cursor, El, ScrollSpec, Span, Tx, col, el, icon, rich, row, spacer, text};
+use rune::{Cursor, El, Span, Tx, col, el, icon, rich, row, spacer, text};
 use serde_json::{Value, json};
 
+use crate::chat::server_update::{self, Stage, Status as ServerStatus};
 use crate::desktop::updates::{self, Status};
 use crate::icons as i;
+use crate::settings::machines::{self, Target};
 use crate::settings::providers::updates as providers;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, env, kit};
@@ -34,11 +37,14 @@ pub struct Ui {
     /// The release notes popover: the pill or the popover is hovered.
     notes: (bool, bool),
     launch_checked: bool,
+    skipped_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Providers,
+    /// Providers are done; the servers update, until each restarted or failed.
+    Servers,
     /// Providers are done; this app downloads before it can restart.
     Downloading,
     Countdown(i64),
@@ -54,6 +60,9 @@ struct Run {
     machines: Vec<Machine>,
     requests: Vec<Request>,
     local_failures: Vec<String>,
+    servers_updated: usize,
+    /// A retry settles its machines without reporting the run again.
+    quiet: bool,
 }
 
 struct Machine {
@@ -62,6 +71,11 @@ struct Machine {
     started_at: i64,
     /// `None` while updating; then the failure lines, empty when it succeeded.
     result: Option<Vec<String>>,
+    updates_providers: bool,
+    /// The server to update and, once started, its update; cleared once it updated.
+    server: Option<(Target, Option<server_update::State>)>,
+    /// Provider failures on a machine whose server updates after them (`providerFailure`).
+    provider_failures: Vec<String>,
 }
 
 struct Request {
@@ -84,9 +98,30 @@ fn downloading(s: &App) -> bool {
     matches!(s.ui.desktop.updates.status, Status::Downloading(_))
 }
 
-/// `runsEverything`: providers wait somewhere and this app isn't mid-download.
+/// `collectServerUpdateTargets`: remote servers behind this app's bundled server, and the ones
+/// skipped with why. A server this app runs updates with the app, so it is never a target.
+fn servers(s: &App) -> (Vec<Target>, Vec<(String, String, &'static str)>) {
+    let (mut targets, mut skipped) = (Vec::new(), Vec::new());
+    for target in machines::targets(s) {
+        let busy = machines::row_updating(s, &target.key) || (s.ui.env.active == target.key && matches!(server_update::status(s), ServerStatus::Running { .. }));
+        let reason = if busy {
+            Some("already updating")
+        } else if env::outdated(s, &target.key).is_none() && !crate::settings::permissions::can_on(s, &target.key, "environment:maintain") {
+            Some("no permission")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => skipped.push((target.key, target.label, reason)),
+            None => targets.push(target),
+        }
+    }
+    (targets, skipped)
+}
+
+/// `runsEverything`: servers or providers wait somewhere and this app isn't mid-download.
 pub fn available(s: &App) -> bool {
-    !downloading(s) && !providers::machines(s).is_empty()
+    !downloading(s) && (!providers::machines(s).is_empty() || !servers(s).0.is_empty())
 }
 
 fn count(n: usize, noun: &str) -> Option<String> {
@@ -104,17 +139,21 @@ fn join(parts: &[String]) -> String {
 }
 
 /// `describeUpdateEverything`'s summary, the button's tooltip.
-fn summary(local: bool, providers: usize) -> String {
-    let parts: Vec<String> = [local.then(|| "this app".to_owned()), count(providers, "provider")].into_iter().flatten().collect();
+fn summary(local: bool, servers: usize, providers: usize) -> String {
+    let parts: Vec<String> = [local.then(|| "this app".to_owned()), count(servers, "server"), count(providers, "provider")].into_iter().flatten().collect();
     format!("Update {}", join(&parts))
 }
 
+#[derive(Default)]
 struct DialogRow {
     label: String,
-    this_app: bool,
+    /// `APP_LABELS`: "This app", "Server" or "Desktop app".
+    app: Option<&'static str>,
+    skipped: Option<&'static str>,
     providers: Vec<String>,
-    /// Threads the restart interrupts on this machine.
+    /// Threads the restart interrupts on this machine, and whether they resume after it.
     running: usize,
+    continues: bool,
 }
 
 fn running_threads(s: &App, key: &str) -> usize {
@@ -123,24 +162,39 @@ fn running_threads(s: &App, key: &str) -> usize {
     })
 }
 
-/// One row per machine, this app's first (`describeUpdateEverything`'s rows).
-fn rows(s: &App, local: bool) -> Vec<DialogRow> {
+/// `continueThreadsAfterServerUpdate` on environment `key`.
+fn continues(s: &App, key: &str) -> bool {
+    env::source(s, key).and_then(|src| src.state().config.as_ref()).is_some_and(|c| c["settings"]["continueThreadsAfterServerUpdate"] == true)
+}
+
+/// One row per machine: this app's, then servers, provider-only, and skipped
+/// (`describeUpdateEverything`'s rows), with `collectRestartingMachines`' running threads.
+fn rows(s: &App, local: bool) -> Vec<(String, DialogRow)> {
     let mut rows: Vec<(String, DialogRow)> = Vec::new();
+    let restarts = |s: &App, key: &str| if env::connected(s, key) { running_threads(s, key) } else { 0 };
     if local {
-        let restarts = env::keys(s).contains(&env::LOCAL.to_owned()) && env::connected(s, env::LOCAL);
-        rows.push((
-            env::LOCAL.to_owned(),
-            DialogRow { label: env::label(s, env::LOCAL), this_app: true, providers: vec![], running: if restarts { running_threads(s, env::LOCAL) } else { 0 } },
-        ));
+        let running = if env::keys(s).contains(&env::LOCAL.to_owned()) { restarts(s, env::LOCAL) } else { 0 };
+        rows.push((env::LOCAL.to_owned(), DialogRow { label: env::label(s, env::LOCAL), app: Some("This app"), running, continues: continues(s, env::LOCAL), ..DialogRow::default() }));
+    }
+    let (targets, skipped) = servers(s);
+    for t in targets {
+        let app = if t.self_update == "desktop-managed" { "Desktop app" } else { "Server" };
+        rows.push((t.key.clone(), DialogRow { label: t.label, app: Some(app), running: restarts(s, &t.key), continues: continues(s, &t.key), ..DialogRow::default() }));
     }
     for m in providers::machines(s) {
         let names = m.candidates.iter().map(|(driver, _)| providers::driver_name(driver).to_owned()).collect();
         match rows.iter_mut().find(|(key, _)| *key == m.key) {
             Some((_, row)) => row.providers = names,
-            None => rows.push((m.key.clone(), DialogRow { label: m.label, this_app: false, providers: names, running: 0 })),
+            None => rows.push((m.key.clone(), DialogRow { label: m.label, providers: names, ..DialogRow::default() })),
         }
     }
-    rows.into_iter().map(|(_, row)| row).collect()
+    for (key, label, reason) in skipped {
+        match rows.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, row)) => row.skipped = Some(reason),
+            None => rows.push((key, DialogRow { label, skipped: Some(reason), ..DialogRow::default() })),
+        }
+    }
+    rows
 }
 
 // The run.
@@ -163,19 +217,128 @@ fn start(s: &mut App) {
                 None => unreachable.push(m.label.clone()),
             }
         }
-        machines.push(Machine { key: m.key, label: m.label, started_at: now, result: None });
+        machines.push(Machine { key: m.key, label: m.label, started_at: now, result: None, updates_providers: true, server: None, provider_failures: vec![] });
+    }
+    for target in servers(s).0 {
+        match machines.iter_mut().find(|m| m.key == target.key) {
+            Some(m) => {
+                m.label = target.label.clone();
+                m.server = Some((target, None));
+            }
+            None => machines.push(Machine {
+                key: target.key.clone(),
+                label: target.label.clone(),
+                started_at: now,
+                result: None,
+                updates_providers: false,
+                server: Some((target, None)),
+                provider_failures: vec![],
+            }),
+        }
     }
     if let Some(label) = unreachable.first() {
         crate::shell::palette::toast_error(s, "Could not update everything", Some(&format!("{label} is no longer connected.")));
     }
-    s.ui.shell.sidebar.everything.run = Some(Run { local, phase: Phase::Providers, machines, requests, local_failures: vec![] });
+    s.ui.shell.sidebar.everything.run = Some(Run { local, phase: Phase::Providers, machines, requests, local_failures: vec![], servers_updated: 0, quiet: false });
+}
+
+/// Starts each waiting server's update once the providers are done.
+fn start_servers(s: &mut App, run: &mut Run, now: i64) {
+    for index in 0..run.machines.len() {
+        let failures = provider_lines(&run.requests, &run.machines[index]);
+        let m = &mut run.machines[index];
+        let Some((target, update)) = m.server.as_mut() else { continue };
+        if update.is_some() {
+            continue;
+        }
+        m.provider_failures = failures;
+        m.started_at = now;
+        let environment = match env::outdated(s, &m.key) {
+            Some(descriptor) => descriptor.clone(),
+            None => env::source(s, &m.key).and_then(|src| src.state().config.as_ref()).map_or(Value::Null, |c| c["environment"].clone()),
+        };
+        match env::net_of(s, &m.key) {
+            Some(net) => *update = Some(server_update::begin(&environment, net, &target.target_version)),
+            None => m.result = Some(vec![format!("{}: Not connected", m.label)]),
+        }
+    }
+}
+
+/// `retryFailedUpdateRunServers`: the failed servers update again; their providers stay as they ended.
+fn retry(s: &mut App) {
+    let Some(mut run) = s.ui.shell.sidebar.everything.run.take() else { return };
+    let now = crate::data::now_ms();
+    for m in run.machines.iter_mut().filter(|m| m.result.as_ref().is_some_and(|r| !r.is_empty())) {
+        if let Some((_, update)) = m.server.as_mut() {
+            *update = None;
+            m.result = None;
+        }
+    }
+    run.phase = Phase::Servers;
+    run.quiet = true;
+    start_servers(s, &mut run, now);
+    s.ui.shell.sidebar.everything.run = Some(run);
+}
+
+/// Moves each started server update along: done once its server is back on the target (or, for
+/// an outdated server that can't subscribe, once it accepted the restart), failed with why.
+fn advance_servers(s: &mut App, run: &mut Run, now: i64) -> bool {
+    let mut lifecycle = std::mem::take(&mut s.ui.shell.lifecycle);
+    let mut changed = false;
+    for m in run.machines.iter_mut().filter(|m| m.result.is_none()) {
+        let Some((_, Some(update))) = m.server.as_mut() else { continue };
+        // A fixture has no connection to update over; its scene stages the update itself.
+        if matches!(env::source(s, &m.key), Some(crate::data::Source::Fixture(_))) {
+            continue;
+        }
+        let Some(net) = env::net_of(s, &m.key) else {
+            m.result = Some(vec![format!("{}: Server update interrupted", m.label)]);
+            changed = true;
+            continue;
+        };
+        changed |= server_update::advance(update, net, &mut lifecycle, &m.key, now);
+        let done = match update.status() {
+            ServerStatus::Idle => Some(Ok(())),
+            ServerStatus::Failed { message, .. } => Some(Err(message.clone())),
+            ServerStatus::Running { stage: Stage::Resuming, .. } if env::outdated(s, &m.key).is_some() => Some(Ok(())),
+            ServerStatus::Running { .. } => None,
+        };
+        match done {
+            Some(Ok(())) => {
+                m.result = Some(std::mem::take(&mut m.provider_failures));
+                m.server = None;
+                run.servers_updated += 1;
+                env::server_updated(s, &m.key);
+            }
+            Some(Err(message)) => m.result = Some([format!("{}: {message}", m.label)].into_iter().chain(m.provider_failures.iter().cloned()).collect()),
+            None => continue,
+        }
+        changed = true;
+    }
+    s.ui.shell.lifecycle = lifecycle;
+    changed
+}
+
+/// A machine's provider update failures, once its requests all replied.
+fn provider_lines(requests: &[Request], m: &Machine) -> Vec<String> {
+    requests.iter().filter(|r| r.key == m.key).filter_map(|r| r.reply.as_ref().and_then(|reply| providers::outcome(&m.label, &r.driver, &r.instance, reply))).collect()
+}
+
+fn replied(requests: &[Request], key: &str) -> bool {
+    requests.iter().filter(|r| r.key == key).all(|r| r.reply.is_some())
+}
+
+/// The server update has handed off to the restarting server (`isServerUpdateHandedOff`).
+fn handed_off(m: &Machine) -> bool {
+    matches!(m.server.as_ref().and_then(|(_, u)| u.as_ref()).map(|u| u.status()), Some(ServerStatus::Running { stage: Stage::Resuming, .. }))
 }
 
 /// `postponeUpdateRestart`: providers stay updated; this app installs later from its button.
 fn postpone(s: &mut App) {
     let Some(run) = s.ui.shell.sidebar.everything.run.as_mut() else { return };
     run.local = None;
-    finish(s);
+    // The servers may still be restarting; the run reports once they settle.
+    run.phase = Phase::Servers;
 }
 
 /// `dismissSettledUpdateRunMachines`.
@@ -192,23 +355,30 @@ fn dismiss(s: &mut App) {
 
 /// `UpdateEverythingResult`, saved as web's `SavedResult`.
 #[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 struct Outcome {
     saved_at: i64,
     local: Option<String>,
+    servers: usize,
     providers: usize,
     failures: Vec<String>,
+    /// Servers still restarting as this app restarted (`handedOff`).
+    restarting: Vec<String>,
 }
 
 impl Outcome {
     fn to_json(&self) -> Value {
-        json!({"savedAt": self.saved_at, "localVersion": self.local, "updatedProviders": self.providers, "failures": self.failures})
+        let handed_off: Vec<Value> = self.restarting.iter().map(|label| json!({"label": label})).collect();
+        json!({"savedAt": self.saved_at, "localVersion": self.local, "updatedServers": self.servers, "updatedProviders": self.providers, "failures": self.failures, "handedOff": handed_off})
     }
     fn from_json(v: &Value) -> Option<Outcome> {
         Some(Outcome {
             saved_at: v["savedAt"].as_i64()?,
             local: v["localVersion"].as_str().map(str::to_owned),
+            servers: v["updatedServers"].as_u64().unwrap_or(0) as usize,
             providers: v["updatedProviders"].as_u64()? as usize,
             failures: v["failures"].as_array()?.iter().filter_map(|f| f.as_str().map(str::to_owned)).collect(),
+            restarting: v["handedOff"].as_array().into_iter().flatten().filter_map(|h| h["label"].as_str().map(str::to_owned)).collect(),
         })
     }
 }
@@ -217,18 +387,23 @@ fn outcome(run: &Run) -> Outcome {
     let failures: Vec<String> =
         run.local_failures.iter().map(|f| format!("This app: {f}")).chain(run.machines.iter().flat_map(|m| m.result.clone().unwrap_or_default())).collect();
     let providers = run.requests.iter().filter(|r| r.reply.as_ref().is_some_and(|reply| providers::outcome("", &r.driver, &r.instance, reply).is_none())).count();
-    Outcome { saved_at: crate::data::now_ms(), local: run.local.clone(), providers, failures }
+    let restarting = run.machines.iter().filter(|m| m.result.is_none() && handed_off(m)).map(|m| m.label.clone()).collect();
+    Outcome { saved_at: crate::data::now_ms(), local: run.local.clone(), servers: run.servers_updated, providers, failures, restarting }
 }
 
 /// `getUpdateEverythingToastView`: success, or an error listing the failures.
 fn toast_view(result: &Outcome, app_version: &str) -> Option<(bool, String, Option<String>)> {
-    let parts: Vec<String> =
-        [result.local.as_deref().filter(|v| *v == app_version).map(|_| "this app".to_owned()), count(result.providers, "provider")].into_iter().flatten().collect();
+    let parts: Vec<String> = [result.local.as_deref().filter(|v| *v == app_version).map(|_| "this app".to_owned()), count(result.servers, "server"), count(result.providers, "provider")]
+        .into_iter()
+        .flatten()
+        .collect();
+    let restarting = (!result.restarting.is_empty())
+        .then(|| format!("{} {} still restarting.", join(&result.restarting), if result.restarting.len() == 1 { "is" } else { "are" }));
     if result.failures.is_empty() {
-        return (!parts.is_empty()).then(|| (true, format!("Updated {}", join(&parts)), None));
+        return (!parts.is_empty()).then(|| (true, format!("Updated {}", join(&parts)), restarting));
     }
     let title = if parts.is_empty() { "Update failed".to_owned() } else { format!("Updated {}", join(&parts)) };
-    Some((false, title, Some(result.failures.join("\n"))))
+    Some((false, title, Some(result.failures.iter().cloned().chain(restarting).collect::<Vec<_>>().join("\n"))))
 }
 
 fn show(s: &mut App, result: &Outcome) {
@@ -245,11 +420,14 @@ fn finish(s: &mut App) {
     let Some(run) = ui.run.as_mut() else { return };
     run.phase = Phase::Settled;
     let result = outcome(run);
+    let quiet = std::mem::take(&mut run.quiet);
     // `closeFinishedUpdateRun`.
     if run.local.is_none() && run.machines.iter().all(|m| m.result.as_ref().is_some_and(Vec::is_empty)) {
         ui.run = None;
     }
-    show(s, &Outcome { local: None, ..result });
+    if !quiet {
+        show(s, &Outcome { local: None, ..result });
+    }
 }
 
 /// Restarts into this app's update, leaving the outcome for the relaunched app to report.
@@ -274,10 +452,10 @@ fn settle_replies(s: &mut App, run: &mut Run) -> bool {
             }
         }
     }
-    for m in run.machines.iter_mut().filter(|m| m.result.is_none()) {
-        let mine: Vec<&Request> = run.requests.iter().filter(|r| r.key == m.key).collect();
-        if mine.iter().all(|r| r.reply.is_some()) {
-            m.result = Some(mine.iter().filter_map(|r| providers::outcome(&m.label, &r.driver, &r.instance, r.reply.as_ref().expect("replied"))).collect());
+    // A machine with a server to update settles after it.
+    for m in run.machines.iter_mut().filter(|m| m.result.is_none() && m.server.is_none()) {
+        if replied(&run.requests, &m.key) {
+            m.result = Some(provider_lines(&run.requests, m));
             changed = true;
         }
     }
@@ -289,20 +467,30 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let Some(mut run) = s.ui.shell.sidebar.everything.run.take() else { return changed };
     let now = crate::data::now_ms();
     changed |= settle_replies(s, &mut run);
-    let providers_done = run.machines.iter().all(|m| m.result.is_some());
+    changed |= advance_servers(s, &mut run, now);
+    let providers_done = run.machines.iter().all(|m| m.result.is_some() || (m.server.is_some() && replied(&run.requests, &m.key)));
+    let servers_waiting = run.machines.iter().any(|m| m.result.is_none() && matches!(m.server, Some((_, None))));
+    // The app may restart once every server has handed off; without a restart, the run waits for them.
+    let handed_off = run.machines.iter().all(|m| m.result.is_some() || handed_off(m));
+    let settled = run.machines.iter().all(|m| m.result.is_some());
     let status = s.ui.desktop.updates.status.clone();
     let staged = updates::action(&s.ui.desktop.updates) == updates::Action::Install;
     let mut next = run.phase;
     match run.phase {
-        Phase::Providers | Phase::Downloading if providers_done => match (run.local.is_some(), &status) {
+        Phase::Providers if providers_done && servers_waiting => {
+            start_servers(s, &mut run, now);
+            next = Phase::Servers;
+        }
+        Phase::Providers | Phase::Servers | Phase::Downloading if providers_done && !servers_waiting && handed_off => match (run.local.is_some(), &status) {
             (true, _) if staged => next = Phase::Countdown(now + RESTART_DELAY_MS),
             (true, Status::Error(_, message)) => {
                 run.local_failures.push(format!("Could not download update: {message}"));
                 run.local = None;
-                next = Phase::Settled;
+                next = if settled { Phase::Settled } else { Phase::Servers };
             }
             (true, _) => next = Phase::Downloading,
-            (false, _) => next = Phase::Settled,
+            (false, _) if settled => next = Phase::Settled,
+            (false, _) => next = Phase::Servers,
         },
         Phase::Countdown(at) if now >= at => {
             next = Phase::Installing;
@@ -322,7 +510,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                 run.local_failures.push(format!("Could not install update: {message}"));
                 run.local = None;
                 save(SAVED_RESULT_KEY, &Value::Null);
-                next = Phase::Settled;
+                next = Phase::Servers;
             }
         }
         _ => {}
@@ -391,13 +579,13 @@ fn launch_notices(s: &mut App) -> bool {
 
 // The view.
 
-/// The footer's update control: the capsule while a run is on, else the combined button when
-/// providers wait, else `None` for the app's own pill.
 /// A run is showing the capsule, which takes the footer's free room (`flex-1` on web).
 pub fn running(s: &App) -> bool {
     s.ui.shell.sidebar.everything.run.is_some()
 }
 
+/// The footer's update control: the capsule while a run is on, else the combined button when
+/// servers or providers wait, else `None` for the app's own pill.
 pub fn control(s: &App, t: &T) -> Option<El> {
     if let Some(run) = &s.ui.shell.sidebar.everything.run {
         return Some(capsule(s, t, run));
@@ -407,7 +595,7 @@ pub fn control(s: &App, t: &T) -> Option<El> {
     }
     let local = local_version(s).is_some();
     let count: usize = providers::machines(s).iter().map(|m| m.candidates.len()).sum();
-    let tip = summary(local, count);
+    let tip = summary(local, servers(s).0.len(), count);
     Some(
         el().key("sb-update-everything")
             .size(32.0, 32.0)
@@ -442,8 +630,12 @@ fn machine_status(run: &Run, m: &Machine) -> &'static str {
     match &m.result {
         Some(failures) if failures.is_empty() => "done",
         Some(_) => "failed",
-        None if run.phase == Phase::Providers => "updating providers",
-        None => "waiting",
+        None if run.phase == Phase::Providers && m.updates_providers => "updating providers",
+        None => match m.server.as_ref().and_then(|(_, u)| u.as_ref()).map(|u| u.status()) {
+            Some(ServerStatus::Running { stage: Stage::Resuming, .. }) => "restarting",
+            Some(ServerStatus::Running { .. }) => "downloading",
+            _ => "waiting",
+        },
     }
 }
 
@@ -476,10 +668,11 @@ fn describe(run: &Run, percent: Option<f32>, now: i64) -> (Tone, String, Option<
         return (Tone::Default, percent.map_or("Downloading".to_owned(), |p| format!("Downloading {}%", p.floor() as u32)), None, None);
     }
     let failed: Vec<&Machine> = run.machines.iter().filter(|m| machine_status(run, m) == "failed").collect();
+    let action = if failed.iter().any(|m| m.server.is_some()) { "Retry" } else { "Dismiss" };
     match failed.as_slice() {
         [] => (Tone::Default, of, None, None),
-        [one] => (Tone::Failed, format!("{} failed", one.label), None, Some("Dismiss")),
-        many => (Tone::Failed, format!("{} failed", many.len()), None, Some("Dismiss")),
+        [one] => (Tone::Failed, format!("{} failed", one.label), None, Some(action)),
+        many => (Tone::Failed, format!("{} failed", many.len()), None, Some(action)),
     }
 }
 
@@ -544,7 +737,11 @@ fn capsule(s: &App, t: &T, run: &Run) -> El {
                 .label(action)
                 .cursor(Cursor::Pointer)
                 .child(rich(action, vec![Span::new(0, action.len()).underline(t.c.muted_foreground.alpha_mul(0.6))]).font(theme::TEXT_XS).color(t.sb.sidebar_foreground))
-                .on_press(move |s: &mut App| if action == "Later" { postpone(s) } else { dismiss(s) }),
+                .on_press(move |s: &mut App| match action {
+                    "Later" => postpone(s),
+                    "Retry" => retry(s),
+                    _ => dismiss(s),
+                }),
         ),
         None => body.child(el().size(32.0, 32.0).center().child(icon(&i::CIRCLE_ARROW_UP, 16.0).color(t.sb.sidebar_foreground))),
     }
@@ -559,8 +756,8 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
     if let Some(run) = ui.run.as_ref().filter(|_| ui.capsule_open) {
         capsule_popover(s, t, run, layers);
     }
-    if ui.run.is_none() && (ui.notes.0 || ui.notes.1) {
-        release_notes(s, t, layers);
+    if (ui.notes.0 || ui.notes.1) && notes_apply(s) {
+        super::release_notes::view(s, t, |s, on| s.ui.shell.sidebar.everything.notes.1 = on, layers);
     }
 }
 
@@ -580,7 +777,7 @@ fn capsule_popover(s: &App, t: &T, run: &Run, layers: &mut Vec<El>) {
                 .variant("outline")
                 .on_press(|s: &mut App| {
                     let version = local_version(s);
-                    install(s, Outcome { saved_at: crate::data::now_ms(), local: version, providers: 0, failures: vec![] });
+                    install(s, Outcome { saved_at: crate::data::now_ms(), local: version, ..Outcome::default() });
                 })
                 .build(t),
         ));
@@ -599,7 +796,16 @@ fn capsule_popover(s: &App, t: &T, run: &Run, layers: &mut Vec<El>) {
     }
     let settled = run.machines.iter().all(|m| m.result.is_some()) && run.local.is_none();
     if settled && run.machines.iter().any(|m| machine_status(run, m) == "failed") {
-        body = body.child(row().w_full().mt(4.0).gap(4.0).justify_end().child(kit::Button::new("Dismiss").size("xs").variant("ghost").on_press(dismiss).build(t)));
+        let retries = run.machines.iter().any(|m| machine_status(run, m) == "failed" && m.server.is_some());
+        body = body.child(
+            row()
+                .w_full()
+                .mt(4.0)
+                .gap(4.0)
+                .justify_end()
+                .children(retries.then(|| kit::Button::new("Retry").size("xs").variant("outline").on_press(retry).build(t)))
+                .child(kit::Button::new("Dismiss").size("xs").variant("ghost").on_press(dismiss).build(t)),
+        );
     }
     let surface = kit::menu::glass(body.padding(8.0), &k, false).modal(true, |s: &mut App| s.ui.shell.sidebar.everything.capsule_open = false);
     layers.push(kit::motion::popup(rune_kit::popover::anchored(&k, surface, "sb-update-capsule", rune_kit::Placement::TopEnd, 4.0)));
@@ -609,8 +815,9 @@ fn capsule_popover(s: &App, t: &T, run: &Run, layers: &mut Vec<El>) {
 fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let local = local_version(s);
     let rows = rows(s, local.is_some());
-    let providers: usize = rows.iter().map(|r| r.providers.len()).sum();
-    let description = [local.as_ref().map(|v| format!("S5 Code {v}")), (providers > 0).then(|| format!("{providers} provider {}", if providers == 1 { "update" } else { "updates" }))]
+    let providers: usize = rows.iter().map(|(_, r)| r.providers.len()).sum();
+    let version = local.clone().or_else(|| servers(s).0.into_iter().find(|t| t.self_update != "desktop-managed").map(|t| t.target_version));
+    let description = [version.map(|v| format!("S5 Code {v}")), (providers > 0).then(|| format!("{providers} provider {}", if providers == 1 { "update" } else { "updates" }))]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -620,11 +827,14 @@ fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let mut table = col().w_full().child(
         row().w_full().gap(16.0).pb(6.0).child(cell(128.0, text("Machine").font(theme::TEXT_XS).color(muted))).child(cell(96.0, text("S5 Code").font(theme::TEXT_XS).color(muted))).child(text("Providers").font(theme::TEXT_XS).color(muted)),
     ).child(el().w_full().h(1.0).fill(t.c.border));
-    for row_ in &rows {
-        let app = if row_.this_app {
-            col().child(text("This app").font(theme::TEXT_SM)).child(text("restarts last").font(theme::TEXT_XS).color(muted))
-        } else {
-            col()
+    let updating: Vec<&DialogRow> = rows.iter().map(|(_, r)| r).filter(|r| r.app.is_some() || !r.providers.is_empty()).collect();
+    let skipped: Vec<&DialogRow> = rows.iter().map(|(_, r)| r).filter(|r| r.skipped.is_some()).collect();
+    for row_ in &updating {
+        let app = match (row_.app, row_.skipped) {
+            (Some("This app"), _) => col().child(text("This app").font(theme::TEXT_SM)).child(text("restarts last").font(theme::TEXT_XS).color(muted)),
+            (Some(app), _) => col().child(text(app).font(theme::TEXT_SM)),
+            (None, Some(_)) => col().child(text("Skipped").font(theme::TEXT_SM).color(muted)),
+            (None, None) => col(),
         };
         let mut line = row()
             .w_full()
@@ -638,12 +848,37 @@ fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         }
         table = table.child(line);
     }
-    let running: usize = rows.iter().map(|r| r.running).sum();
-    let continues = crate::env::source(s, env::LOCAL).and_then(|src| src.state().config.as_ref()).is_some_and(|c| c["settings"]["continueThreadsAfterServerUpdate"] == true);
-    let threads = format!("{running} running {}", if running == 1 { "thread" } else { "threads" });
-    let note = (running > 0).then(|| if continues { format!("{threads} will be interrupted and can resume after the restart.") } else { format!("{threads} will be interrupted.") });
+    if !skipped.is_empty() {
+        let open = s.ui.shell.sidebar.everything.skipped_open;
+        table = table.child(
+            row()
+                .pt(8.0)
+                .gap(4.0)
+                .center_y()
+                .role("button")
+                .cursor(Cursor::Pointer)
+                .child(icon(if open { &i::CHEVRON_DOWN } else { &i::CHEVRON_RIGHT }, 14.0).color(muted))
+                .child(text(format!("{} skipped", skipped.len())).font(theme::TEXT_XS).color(muted))
+                .on_press(|s: &mut App| s.ui.shell.sidebar.everything.skipped_open ^= true),
+        );
+        if open {
+            for row_ in &skipped {
+                table = table.child(
+                    row()
+                        .pl(18.0)
+                        .pt(2.0)
+                        .gap(12.0)
+                        .child(el().max_w(128.0).min_w(0.0).child(text(row_.label.clone()).font(theme::TEXT_XS).color(muted).truncate()))
+                        .child(text(row_.skipped.unwrap_or_default()).font(theme::TEXT_XS).color(muted).wrap().shrink()),
+                );
+            }
+        }
+    }
+    let stopped: usize = updating.iter().filter(|r| !r.continues).map(|r| r.running).sum();
+    let continuing: usize = updating.iter().filter(|r| r.continues).map(|r| r.running).sum();
+    let note = interrupted(stopped, continuing);
     let close = |s: &mut App| s.ui.shell.sidebar.everything.confirming = false;
-    let n = rows.len();
+    let n = updating.len();
     kit::Dialog::new("update-everything", format!("Update {n} {}?", if n == 1 { "machine" } else { "machines" }))
         .open(true)
         .alert()
@@ -664,73 +899,96 @@ fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
+/// The dialog's footnote on the threads the restarts interrupt.
+fn interrupted(stopped: usize, continuing: usize) -> Option<String> {
+    let running = stopped + continuing;
+    let threads = format!("{running} running {}", if running == 1 { "thread" } else { "threads" });
+    (running > 0).then(|| match (stopped, continuing) {
+        (0, _) => format!("{threads} will be interrupted and can resume after the restart."),
+        (_, 0) => format!("{threads} will be interrupted."),
+        _ => format!("{threads} will be interrupted. {continuing} can resume after the restart."),
+    })
+}
+
 /// Hovering the app's pill shows its release notes, as web's hover popover.
 pub fn notes_trigger(pill: El) -> El {
     pill.hover_delays(std::time::Duration::ZERO, std::time::Duration::from_millis(150))
         .on_hover_change(|s: &mut App, on, _: &mut Tx| s.ui.shell.sidebar.everything.notes.0 = on)
 }
 
-/// `shouldUseSidebarUpdateReleaseNotesPopover`: an update to show with notes to read.
-fn notes_shown(s: &App) -> bool {
+/// `shouldUseSidebarUpdateReleaseNotesPopover`: an update to show with notes to read, and no run.
+pub fn notes_apply(s: &App) -> bool {
     let ui = &s.ui.desktop.updates;
-    updates::action(ui) != updates::Action::None || matches!(ui.status, Status::Downloading(_))
+    let details = updates::action(ui) != updates::Action::None || matches!(ui.status, Status::Downloading(_));
+    s.ui.shell.sidebar.everything.run.is_none() && details && !super::release_notes::current(s).0.is_empty()
 }
 
-/// `SidebarUpdateReleaseNotes`.
-fn release_notes(s: &App, t: &T, layers: &mut Vec<El>) {
-    let Some(release) = s.ui.desktop.updates.release.as_ref().filter(|r| !r.notes.trim().is_empty() && notes_shown(s)) else { return };
-    let k = kit::theme(t);
-    let head = if s.ui.desktop.updates.status == Status::Available {
-        col().child(text("Update ready to download").font(theme::SM_MEDIUM)).child(text(release.version.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).mt(2.0))
-    } else {
-        col().child(text(updates::summary(s)).font(theme::SM_MEDIUM).wrap())
-    };
-    let mut notes = col().gap(6.0).pt(12.0);
-    for line in release.notes.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        notes = notes.child(match line.strip_prefix("- ").or(line.strip_prefix("* ")) {
-            Some(item) => row().gap(6.0).child(text("•").font(theme::TEXT_XS)).child(text(item.to_owned()).font(theme::TEXT_XS).wrap().grow(1.0).shrink()),
-            None => row().child(text(line.trim_start_matches('#').trim().to_owned()).font(theme::XS_MEDIUM).wrap()),
-        });
+/// Two saved servers older than this app's bundled one: Hetzner box to update, and Mac mini,
+/// whose session can't maintain it.
+fn remote_servers(s: &mut App) {
+    for (id, label) in [("env-box", "Hetzner box"), ("env-mini", "Mac mini")] {
+        s.ui.env.saved.push(env::Saved { id: id.into(), label: label.into(), base: format!("https://{id}.example.com"), bearer: String::new() });
+        let mut state = crate::data::fixture_state();
+        if let Some(config) = state.config.as_mut() {
+            config["environment"]["serverVersion"] = json!("0.1.5");
+            config["environment"]["capabilities"]["serverSelfUpdate"] = json!("boot-service");
+        }
+        env::park(s, id, crate::data::Source::Fixture(state));
     }
-    let page = updates::release_page(&release.version);
-    notes = notes.child(
-        row()
-            .mt(4.0)
-            .gap(4.0)
-            .center_y()
-            .role("link")
-            .cursor(Cursor::Pointer)
-            .child(text("View release on GitHub").font(theme::TEXT_XS).color(t.c.muted_foreground))
-            .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.muted_foreground))
-            .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                let _ = tx.open_url(&page);
-            }),
-    );
-    let body = col().max_w(384.0).padding(8.0).role("dialog").label("Update release notes").child(head).child(kit::scroll_area("sb-release-notes", notes.max_h(448.0).scroll(ScrollSpec { stick_bottom: false }), t));
-    let surface = kit::menu::glass(body, &k, false)
-        .hover_delays(std::time::Duration::ZERO, std::time::Duration::from_millis(150))
-        .on_hover_change(|s: &mut App, on, _: &mut Tx| s.ui.shell.sidebar.everything.notes.1 = on);
-    layers.push(kit::motion::popup(rune_kit::popover::anchored(&k, surface, "sb-app-update", rune_kit::Placement::Top, 4.0)));
+    crate::settings::permissions::set_session(s, "env-mini", json!({"authenticated": true, "scopes": ["orchestration:read"]}));
 }
 
-/// Scenes: the confirm dialog, the capsule counting down with its popover, and the app pill's
-/// release notes.
+fn box_target() -> Target {
+    Target { key: "env-box".into(), label: "Hetzner box".into(), self_update: "boot-service".into(), target_version: "0.1.7".into() }
+}
+
+/// Scenes: the confirm dialog, the capsule counting down with its popover, a failed server to
+/// retry, and the app pill's release notes.
 pub fn scene(s: &mut App, which: &str) {
+    let now = crate::data::now_ms();
+    let machine = |key: &str, label: &str, result: Option<Vec<String>>, server| Machine {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        started_at: now - 90_000,
+        result,
+        updates_providers: true,
+        server,
+        provider_failures: vec![],
+    };
     match which {
         "confirm" => {
             app_update(s);
+            remote_servers(s);
             s.ui.shell.sidebar.everything.confirming = true;
+            s.ui.shell.sidebar.everything.skipped_open = true;
         }
         "capsule" => {
             app_update(s);
-            let now = crate::data::now_ms();
-            let machine = |label: &str, result: Option<Vec<String>>| Machine { key: env::LOCAL.to_owned(), label: label.to_owned(), started_at: now - 90_000, result };
+            let restarting = server_update::State::at(ServerStatus::Running { stage: Stage::Resuming, from: "0.1.5".into(), target: "0.1.7".into() });
             s.ui.shell.sidebar.everything.run = Some(Run {
                 local: local_version(s),
                 phase: Phase::Countdown(now + 4_000),
-                machines: vec![machine("This machine", Some(vec![])), machine("Build box", Some(vec!["Build box · Codex: npm ERR! EACCES".into()]))],
+                machines: vec![machine(env::LOCAL, "This machine", Some(vec![]), None), machine("env-box", "Hetzner box", None, Some((box_target(), Some(restarting))))],
                 requests: vec![],
                 local_failures: vec![],
+                servers_updated: 0,
+                quiet: false,
+            });
+            s.ui.shell.sidebar.everything.capsule_open = true;
+        }
+        "retry" => {
+            app_update(s);
+            s.ui.shell.sidebar.everything.run = Some(Run {
+                local: None,
+                phase: Phase::Settled,
+                machines: vec![
+                    machine(env::LOCAL, "This machine", Some(vec![]), None),
+                    machine("env-box", "Hetzner box", Some(vec!["Hetzner box: Server update failed: npm is offline".into()]), Some((box_target(), None))),
+                ],
+                requests: vec![],
+                local_failures: vec![],
+                servers_updated: 0,
+                quiet: false,
             });
             s.ui.shell.sidebar.everything.capsule_open = true;
         }
@@ -744,6 +1002,10 @@ pub fn scene(s: &mut App, which: &str) {
                     p["versionAdvisory"] = Value::Null;
                 }
             }
+            s.ui.desktop.updates.history = vec![
+                json!({"version": "0.1.3", "note": "<p>v0.1.3 · 14 PRs · 5 contributors</p><ul><li><strong>Speech menu</strong> dictates into the composer</li><li>Device streaming starts faster</li><li>Notifications open their thread</li></ul><h3>Plus 6 more fixes</h3><details><summary>Full changelog</summary></details>", "publishedAt": "2026-11-23T09:00:00.000Z"}),
+                json!({"version": "0.1.2", "note": "## What's Changed\n* Sidebar footer keeps the update capsule full width\n* Release notes list older releases\n\n**Full Changelog**: https://github.com/o/r/compare/rune-v0.1.1...rune-v0.1.2"}),
+            ];
             s.ui.shell.sidebar.everything.notes.0 = true;
         }
     }
@@ -761,24 +1023,30 @@ mod tests {
     use super::*;
 
     fn machine(label: &str, started_at: i64, result: Option<Vec<String>>) -> Machine {
-        Machine { key: label.to_owned(), label: label.to_owned(), started_at, result }
+        Machine { key: label.to_owned(), label: label.to_owned(), started_at, result, updates_providers: true, server: None, provider_failures: vec![] }
     }
 
     fn run(phase: Phase, machines: Vec<Machine>) -> Run {
-        Run { local: Some("0.1.3".into()), phase, machines, requests: vec![], local_failures: vec![] }
+        Run { local: Some("0.1.3".into()), phase, machines, requests: vec![], local_failures: vec![], servers_updated: 0, quiet: false }
     }
 
     #[test]
     fn the_summary_and_result_read_as_web_s() {
-        assert_eq!(summary(true, 2), "Update this app and 2 providers");
-        assert_eq!(summary(false, 1), "Update 1 provider");
+        assert_eq!(summary(true, 0, 2), "Update this app and 2 providers");
+        assert_eq!(summary(false, 0, 1), "Update 1 provider");
+        assert_eq!(summary(true, 1, 2), "Update this app, 1 server, and 2 providers");
         assert_eq!(join(&["a".into(), "b".into(), "c".into()]), "a, b, and c");
-        let ok = Outcome { saved_at: 0, local: Some("0.1.3".into()), providers: 2, failures: vec![] };
+        let ok = Outcome { local: Some("0.1.3".into()), providers: 2, ..Outcome::default() };
         assert_eq!(toast_view(&ok, "0.1.3"), Some((true, "Updated this app and 2 providers".into(), None)));
         assert_eq!(toast_view(&ok, "0.1.2").map(|v| v.1), Some("Updated 2 providers".into()), "FAILED: an app still on the old version did not update");
-        let failed = Outcome { saved_at: 0, local: None, providers: 0, failures: vec!["Box · Codex: denied".into()] };
+        let failed = Outcome { failures: vec!["Box · Codex: denied".into()], ..Outcome::default() };
         assert_eq!(toast_view(&failed, "0.1.3"), Some((false, "Update failed".into(), Some("Box · Codex: denied".into()))));
         assert_eq!(toast_view(&Outcome { failures: vec![], ..failed }, "0.1.3"), None);
+        let handed_off = Outcome { servers: 1, restarting: vec!["Mini".into()], ..Outcome::default() };
+        assert_eq!(toast_view(&handed_off, "0.1.3"), Some((true, "Updated 1 server".into(), Some("Mini is still restarting.".into()))));
+        assert_eq!(Outcome::from_json(&Outcome { saved_at: 1, ..handed_off }.to_json()).map(|o| o.restarting), Some(vec!["Mini".into()]), "FAILED: the relaunched app names the restarting server");
+        assert_eq!(interrupted(2, 1).as_deref(), Some("3 running threads will be interrupted. 1 can resume after the restart."));
+        assert_eq!(interrupted(0, 1).as_deref(), Some("1 running thread will be interrupted and can resume after the restart."));
         assert_eq!(not_applied(Some("0.1.3".into()), "0.1.2").as_deref(), Some("S5 Code is still on 0.1.2. Install 0.1.3 again from the update button."));
         assert_eq!(not_applied(Some("0.1.3".into()), "0.1.3"), None);
         assert_eq!(not_applied(None, "0.1.3"), None);
@@ -822,5 +1090,51 @@ mod tests {
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Update failed"));
         dismiss(&mut s);
         assert!(s.ui.shell.sidebar.everything.run.is_none());
+    }
+
+    fn sent(s: &mut App, key: &str, method: &str) -> u64 {
+        let net = env::net_of(s, key).expect("live");
+        net.awaiting().filter(|r| r.1 == method).map(|r| r.0).max().expect("FAILED: the request went out")
+    }
+
+    #[test]
+    fn a_remote_server_updates_after_the_providers_and_a_failure_retries() {
+        use crate::data::Source;
+        let mut s = App::new();
+        s.src = Source::Live(s5_net::Net::in_memory("http://local.test"));
+        s.ui.env.saved.push(env::Saved { id: "box".into(), label: "Box".into(), base: "http://box.test".into(), bearer: String::new() });
+        env::park(&mut s, "box", Source::Live(s5_net::Net::in_memory("http://box.test")));
+        let target = Target { key: "box".into(), label: "Box".into(), self_update: "respawn".into(), target_version: "0.1.7".into() };
+        let mut started = run(Phase::Providers, vec![Machine { server: Some((target, None)), updates_providers: false, ..machine("Box", 0, None) }]);
+        started.machines[0].key = "box".into();
+        started.local = None;
+        s.ui.shell.sidebar.everything.run = Some(started);
+        let tx = &mut Tx::default();
+
+        poll(&mut s, tx);
+        let ui = &s.ui.shell.sidebar.everything;
+        let r = ui.run.as_ref().expect("running");
+        assert_eq!((r.phase, machine_status(r, &r.machines[0])), (Phase::Servers, "downloading"), "FAILED: the server starts once the providers are done");
+        let failed = sent(&mut s, "box", "server.updateServer");
+        env::net_of(&mut s, "box").expect("live").put_reply(failed, Err(json!([{"_tag": "Fail", "error": {"_tag": "ServerSelfUpdateError", "reason": "npm is offline"}}])));
+        poll(&mut s, tx);
+        let r = s.ui.shell.sidebar.everything.run.as_ref().expect("a failure stays");
+        assert_eq!(r.machines[0].result, Some(vec!["Box: Server update failed: npm is offline".to_owned()]));
+        assert_eq!(describe(r, None, 0), (Tone::Failed, "Box failed".into(), None, Some("Retry")));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Update failed"));
+
+        retry(&mut s);
+        let again = sent(&mut s, "box", "server.updateServer");
+        assert_ne!(again, failed, "FAILED: Retry sends the update again");
+        env::net_of(&mut s, "box").expect("live").put_reply(again, Ok(json!({"targetVersion": "0.1.7", "method": "respawn"})));
+        poll(&mut s, tx);
+        let r = s.ui.shell.sidebar.everything.run.as_ref().expect("restarting");
+        assert_eq!(machine_status(r, &r.machines[0]), "restarting");
+        let ready = json!({"type": "ready", "payload": {"environment": {"serverVersion": "0.1.7"}}});
+        env::net_of(&mut s, "box").expect("live").put_resource_item(crate::shell::lifecycle::METHOD, json!({}), ready);
+        crate::shell::lifecycle::poll(&mut s);
+        poll(&mut s, tx);
+        assert!(s.ui.shell.sidebar.everything.run.is_none(), "FAILED: the server came back on 0.1.7, so the run closes");
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Update failed"), "FAILED: a retry settles without a second report");
     }
 }

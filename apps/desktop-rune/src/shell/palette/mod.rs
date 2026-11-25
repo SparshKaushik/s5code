@@ -1072,7 +1072,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
     out
 }
 /// `formatRelativeTimeLabel`: "just now" under a minute, then "5m ago", "3h ago", "2d ago".
-fn relative_time(now: i64, at: i64) -> String {
+pub(crate) fn relative_time(now: i64, at: i64) -> String {
     let seconds = (now - at).max(0) / 1000;
     let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
     if seconds < 60 {
