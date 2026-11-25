@@ -630,6 +630,10 @@ pub(super) fn failure_title(method: &str) -> Option<&'static str> {
 
 /// Web `useThreadActions.confirmAndDeleteThread`: asks first while `confirmThreadDelete` is on.
 fn request_delete(s: &mut App, id: String, title: String) {
+    // `threadOperationFailure`: without operate access it fails before asking.
+    if !crate::shell::sidebar::grants_on(s, &crate::env::owner(s, &id), "orchestration:operate") {
+        return crate::shell::palette::toast_error_brief(s, "Failed to delete thread", Some("This connection cannot change threads."));
+    }
     let key = "confirmThreadDelete";
     let confirm = s.client_settings.values.get(key).or_else(|| super::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false);
     if confirm {
@@ -826,6 +830,14 @@ mod tests {
         s.client_settings.values.insert("confirmThreadDelete".into(), json!(false));
         request_delete(&mut s, "t".into(), "Fix it".into());
         assert_eq!(crate::shell::confirm::current(&s), None);
+
+        // Without operate access it fails at once, before any confirmation (threadOperationFailure).
+        s.client_settings.values.insert("confirmThreadDelete".into(), json!(true));
+        crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));
+        request_delete(&mut s, "t".into(), "Fix it".into());
+        assert_eq!(crate::shell::confirm::current(&s), None);
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Failed to delete thread"));
+        assert_eq!(crate::shell::palette::toast_description(&s), Some("This connection cannot change threads."));
     }
 
     #[test]

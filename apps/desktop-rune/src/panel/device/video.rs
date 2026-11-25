@@ -102,8 +102,8 @@ pub fn read_avcc(url: &str, pixels: &Pixels, shared: &Mutex<Shared>, stop: &Atom
 
 /// serve-emu's socket for one emulator: video in, input out, until the panel lets go.
 #[allow(clippy::too_many_arguments)]
-pub fn run_semu(base: &str, bearer: &str, query: &str, rx: &Receiver<Message>, input: &Mutex<input::State>, pixels: &Pixels, shared: &Mutex<Shared>, stop: &AtomicBool, wake: &dyn Fn()) -> Result<(), String> {
-    let mut socket = s5_net::api_socket(base, bearer, "/api/device-hub/vendor/serve-emu/ws", query, Duration::from_millis(15))?;
+pub fn run_semu(base: &str, auth: &s5_net::Auth, query: &str, rx: &Receiver<Message>, input: &Mutex<input::State>, pixels: &Pixels, shared: &Mutex<Shared>, stop: &AtomicBool, wake: &dyn Fn()) -> Result<(), String> {
+    let mut socket = s5_net::api_socket(base, auth, "/api/device-hub/vendor/serve-emu/ws", query, Duration::from_millis(15))?;
     input.lock().unwrap_or_else(|e| e.into_inner()).admitted = true;
     wake();
     let (mut feed, mut asked) = (Feed::default(), None::<Instant>);
@@ -159,9 +159,9 @@ pub fn run_semu(base: &str, bearer: &str, query: &str, rx: &Receiver<Message>, i
 
 /// Starts Android's feed thread; its errors show on the panel with Reconnect.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_semu(base: String, bearer: String, query: String, rx: Receiver<Message>, input: Arc<Mutex<input::State>>, pixels: Pixels, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, wake: impl Fn() + Send + 'static) {
+pub fn spawn_semu(base: String, auth: s5_net::Auth, query: String, rx: Receiver<Message>, input: Arc<Mutex<input::State>>, pixels: Pixels, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
-        if let Err(e) = run_semu(&base, &bearer, &query, &rx, &input, &pixels, &shared, &stop, &wake)
+        if let Err(e) = run_semu(&base, &auth, &query, &rx, &input, &pixels, &shared, &stop, &wake)
             && !stop.load(Ordering::Relaxed)
         {
             shared.lock().unwrap_or_else(|e| e.into_inner()).failed = Some(e);

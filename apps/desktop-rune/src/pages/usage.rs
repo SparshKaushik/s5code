@@ -340,15 +340,46 @@ fn grouped(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
+/// Intl's en-US currency: the sign before the dollar sign.
 pub(super) fn usd(v: f64) -> String {
     let cents = (v * 100.0).round() as i64;
-    format!("${}.{:02}", grouped(cents / 100), (cents % 100).abs())
+    let sign = if cents < 0 { "-" } else { "" };
+    format!("{sign}${}.{:02}", grouped(cents.abs() / 100), cents.abs() % 100)
+}
+
+/// JS `toFixed`: a value exactly halfway rounds away from zero, where Rust's formatting rounds
+/// it to even (100.5 is "101", not "100").
+fn to_fixed(v: f64, digits: usize) -> String {
+    let exact = format!("{:.*}", digits + 30, v.abs());
+    let (kept, rest) = exact.split_at(exact.len() - 30);
+    if !(rest.starts_with('5') && rest[1..].bytes().all(|b| b == b'0')) {
+        return format!("{v:.digits$}");
+    }
+    let mut out: Vec<u8> = kept.trim_end_matches('.').bytes().collect();
+    let mut i = out.len();
+    loop {
+        if i == 0 {
+            out.insert(0, b'1');
+            break;
+        }
+        i -= 1;
+        match out[i] {
+            b'.' => {}
+            b'9' => out[i] = b'0',
+            d => {
+                out[i] = d + 1;
+                break;
+            }
+        }
+    }
+    let up = String::from_utf8(out).unwrap_or_default();
+    if v < 0.0 { format!("-{up}") } else { up }
 }
 
 /// `toFixed` then `/\.0+$/`: only an all-zero fraction drops, so 1.50 stays 1.50.
 fn trim(v: f64) -> String {
     let digits = if v.abs() >= 100.0 { 0 } else if v.abs() >= 10.0 { 1 } else { 2 };
-    let s = format!("{v:.digits$}");
+    let s = to_fixed(v, digits);
     match s.split_once('.') {
         Some((whole, fraction)) if fraction.bytes().all(|b| b == b'0') => whole.to_string(),
         _ => s,
@@ -372,7 +403,7 @@ fn tokens(v: f64) -> String {
 
 fn percent(share: f64) -> String {
     let p = share * 100.0;
-    if p > 0.0 && p < 0.1 { "<0.1%".into() } else { format!("{p:.1}%") }
+    if p > 0.0 && p < 0.1 { "<0.1%".into() } else { format!("{}%", to_fixed(p, 1)) }
 }
 
 // ---- data -------------------------------------------------------------------------------
@@ -2652,6 +2683,10 @@ mod tests {
         assert_eq!(tokens(12_300.0), "12.3K");
         assert_eq!(tokens(250_000_000_000.0), "250B");
         assert_eq!(tokens(999.0), "999");
+        // Exact halves round up as toFixed does, not to even.
+        assert_eq!((tokens(100_500.0), tokens(12_250_000.0), tokens(999_500.0)), ("101K".into(), "12.3M".into(), "1000K".into()));
+        assert_eq!((percent(0.5), percent(0.0005), percent(0.0)), ("50.0%".into(), "<0.1%".into(), "0.0%".into()));
+        assert_eq!((usd(1_234_567.891), usd(-1.234), usd(0.0)), ("$1,234,567.89".into(), "-$1.23".into(), "$0.00".into()));
     }
 
     #[test]

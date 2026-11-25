@@ -125,7 +125,7 @@ fn typeset(app: &App, source: &str, key: &str, t: &T, ink: rune::Color) -> El {
     for block in super::math::blocks(source.trim()) {
         let picture = match &block {
             Block::Display(tex) => display_math(app, tex, ink),
-            Block::Inline(parts) => super::katex::flow(app, parts, font, ink),
+            Block::Inline(parts) => super::katex::flow(app, parts, font, ink, t.c.info_foreground),
             Block::Text(_) => None,
         };
         match picture {

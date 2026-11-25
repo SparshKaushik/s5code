@@ -1433,6 +1433,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "connections");
         connections::scene(s, "t3-connect");
     }),
+    ("settings-connections-relay-client-install", |s| {
+        scene(s, "connections");
+        crate::cloud::relay_client::scene(s, false);
+    }),
+    ("settings-connections-relay-client-installing", |s| {
+        scene(s, "connections");
+        crate::cloud::relay_client::scene(s, true);
+    }),
+    ("settings-connections-t3-connect-mobile", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-mobile");
+    }),
+    ("settings-connections-t3-connect-account", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-account");
+    }),
     ("settings-connections-t3-connect-signing-in", |s| {
         scene(s, "connections");
         connections::scene(s, "t3-connect-signing-in");
@@ -1623,12 +1639,6 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-access-t3-connect-sign-in", |s| {
         scene(s, "access");
         connect::scene_prompt(s);
-    }),
-    ("settings-access-t3-connect-install", |s| {
-        scene(s, "access");
-        s.ui.settings.loaded_page = Some("access".into());
-        connect::scene(s, json!({"linked": true, "managedTunnelActive": false, "publishAgentActivity": true}));
-        connect::scene_install(s);
     }),
 ];
 
