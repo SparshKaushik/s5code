@@ -409,7 +409,7 @@ pub fn value(s: &App, id: &str, field: &str) -> Value {
 }
 pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
     if field == "title" && value.as_str().is_none_or(|v| v.trim().is_empty()) {
-        s.ui.settings.error = Some("Project name cannot be empty.".into());
+        crate::shell::palette::toast_warning(s, "Project title cannot be empty", None, vec![], false);
         return;
     }
     let value = if field == "faviconPath" && value == "" {

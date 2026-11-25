@@ -480,7 +480,7 @@ fn option_grid(s: &App, t: &T, featured: bool) -> El {
         cards.push(option);
     }
     // Web's `grid sm:grid-cols-2` inside a `gap-3` radio group: two equal columns.
-    let mut grid = col().w_full().gap(12.0).role("radiogroup");
+    let mut grid = col().w_full().gap(12.0).role("radiogroup").label(if featured { "Provider" } else { "More providers" });
     let mut cards = cards.into_iter();
     while let Some(first) = cards.next() {
         let mut pair = row().w_full().child(row().w_frac(0.5).pr(6.0).child(first));
@@ -1209,7 +1209,11 @@ pub(crate) fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
             let name = live.and_then(|p| p["displayName"].as_str()).map_or_else(|| format!("ChatGPT - {}", chatgpt.name.text.trim()), str::to_owned);
             let body = match live.filter(|p| p["setup"].is_object()) {
                 Some(p) => col().w_full().child(super::auth::view(s, t, p)),
-                None => col().w_full().child(text("Preparing managed setup.").font(theme::TEXT_SM).color(t.c.muted_foreground)),
+                None => col()
+                    .w_full()
+                    .gap(4.0)
+                    .child(text("Codex runtime").font(theme::SM_MEDIUM).color(t.c.foreground))
+                    .child(text("Preparing managed setup.").font(theme::TEXT_XS).color(t.c.muted_foreground)),
             };
             let footer = row().w_full().child(el().grow(1.0)).child(kit::Button::new("Finish later").variant("outline").size("sm").on_press(close).build(t));
             (name, body, footer)

@@ -5,7 +5,11 @@
 pub(crate) mod h264;
 mod input;
 mod inspect;
+mod model;
 mod video;
+mod viewport;
+
+pub use viewport::Viewport;
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +32,7 @@ const WEBRTC: &str = "This device streams over WebRTC, which this app can't show
 #[derive(Default)]
 pub struct Ui {
     /// `device.open` in flight: its request, the device's key and whether it was running.
-    opening: Option<(u64, String, bool)>,
+    opening: Vec<(u64, String, bool)>,
     listing: Option<u64>,
     error: Option<String>,
     /// The device this panel shows, once picked; otherwise the thread's newest session.
@@ -40,7 +44,7 @@ pub struct Ui {
     fixture: Option<Value>,
     menu: Option<Menu>,
     /// `device.close` with shutdown in flight.
-    powering_off: Option<u64>,
+    powering_off: Option<(u64, super::Surface, String)>,
     /// The Device tools side panel and its fields.
     tools: Option<Tools>,
     /// The device floating over the chat (web's mini player).
@@ -105,6 +109,25 @@ struct Stream {
     /// the last settled screen and from when it went into a stand.
     duo_vertical: Option<bool>,
     stand_vertical: Option<bool>,
+    /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
+    flat: bool,
+    pose: model::Pose,
+    /// Web's Magic Keyboard on an iPad Pro 13-inch's 3D view.
+    keyboard: bool,
+    /// The phone springing back to rest after a turn, and the frame it last moved at.
+    spring: Option<(model::Spring, Instant)>,
+    /// When a wheel turn that sent no end of its gesture counts as let go (web's 1.2 s).
+    wheel_until: Option<Instant>,
+    /// A pointer on the 3D view: touching the screen at its last point, or turning the phone.
+    grab: Option<Grab>,
+    /// The phone the 3D view draws (the device's model, else the procedural phone) and what it was made for.
+    phone: Option<(String, Arc<model::Model>)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Grab {
+    Touch(f64, f64),
+    Orbit(f32, f32),
 }
 
 #[derive(Default)]
@@ -143,7 +166,7 @@ fn session<'a>(state: &'a Value, thread: &str, selected: Option<&str>) -> Option
     let mut sessions: Vec<&Value> = state["sessions"].as_array().into_iter().flatten().filter(|s| s["threadId"] == thread).collect();
     sessions.sort_by_key(|s| std::cmp::Reverse(data::s(s, "openedAt").to_owned()));
     let picked = selected.and_then(|k| sessions.iter().copied().find(|s| key(data::s(s, "hostId"), data::s(s, "deviceId")) == k));
-    picked.or(sessions.first().copied())
+    if selected.is_some() { picked } else { sessions.first().copied() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,15 +280,49 @@ fn open(app: &mut App, device: &Value) {
     let Some((thread, _)) = super::context(app) else { return };
     let (host, id) = (data::s(device, "hostId").to_owned(), data::s(device, "id").to_owned());
     let payload = json!({"threadId": thread, "hostId": host, "deviceId": id, "platform": device["platform"]});
-    let ui = &mut app.ui.panel.device;
-    ui.selected = Some(key(&host, &id));
-    ui.browsing = false;
-    ui.error = None;
+    let target = super::tabs::Target::Device {
+        host: host.clone(), device: id.clone(), name: data::s(device, "name").to_owned(), title: None,
+    };
+    let device_key = key(&host, &id);
+    let before = app.ui.panel.surfaces.len();
+    let tab_id = super::tabs::open(app, target);
+    let surfaces = &mut app.ui.panel.surfaces;
+    let appended = surfaces.len() > before;
+    if let Some(index) = surfaces.iter().position(|&surface| surface == super::Surface::Device) {
+        let tab = super::Surface::Tab(tab_id);
+        surfaces.remove(index);
+        if appended && surfaces.last() == Some(&tab) {
+            surfaces.pop();
+            surfaces.insert(index, tab);
+        }
+    }
+    if app.ui.panel.device.opening.iter().any(|(_, pending, _)| pending == &device_key) {
+        return;
+    }
     let booted = device["booted"] == true;
     if let Some(request) = request(app, "device.open", payload) {
-        app.ui.panel.device.opening = Some((request, key(&host, &id), booted));
+        app.ui.panel.device.opening.push((request, device_key, booted));
     }
 }
+
+pub(super) fn browse(app: &mut App) {
+    let ui = &mut app.ui.panel.device;
+    ui.selected = None;
+    ui.browsing = true;
+    ui.error = None;
+}
+
+pub(super) fn select_tab(app: &mut App, host: &str, device: &str) {
+    let ui = &mut app.ui.panel.device;
+    let selected = key(host, device);
+    if ui.selected.as_ref() != Some(&selected) {
+        ui.error = None;
+        ui.tools = None;
+    }
+    ui.selected = Some(selected);
+    ui.browsing = false;
+}
+
 
 fn refresh(app: &mut App) {
     app.ui.panel.device.error = None;
@@ -274,7 +331,7 @@ fn refresh(app: &mut App) {
 
 /// Keeps one stream for the shown session while the Device surface is on screen.
 fn sync_stream(app: &mut App, tx: &mut Tx) {
-    let in_panel = app.ui.shell.panel_open && app.ui.panel.active == Some(super::Surface::Device) && !app.ui.panel.device.browsing;
+    let in_panel = app.ui.shell.panel_open && app.ui.panel.active.is_some_and(|surface| super::tabs::is_device(app, surface)) && !app.ui.panel.device.browsing;
     let floating = app.ui.panel.device.float.as_ref().map(|f| f.key.clone());
     let wanted = (in_panel || floating.is_some())
         .then(|| {
@@ -320,6 +377,13 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         fold: Arc::default(),
         duo_vertical: None,
         stand_vertical: None,
+        flat: false,
+        pose: model::Pose::default(),
+        keyboard: false,
+        spring: None,
+        wheel_until: None,
+        grab: None,
+        phone: None,
     };
     let wake = app.ui.panel.waker.clone();
     let wake = move || {
@@ -375,6 +439,13 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         fold: Arc::default(),
         duo_vertical: None,
         stand_vertical: None,
+        flat: false,
+        pose: model::Pose::default(),
+        keyboard: false,
+        spring: None,
+        wheel_until: None,
+        grab: None,
+        phone: None,
     }
 }
 
@@ -456,7 +527,10 @@ fn power_off(app: &mut App) {
     let Some((thread, _)) = super::context(app) else { return };
     let Some((host, device)) = app.ui.panel.device.stream.as_ref().and_then(|s| s.key.split_once('\u{0}')).map(|(h, d)| (h.to_owned(), d.to_owned())) else { return };
     app.ui.panel.device.menu = None;
-    app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}));
+    if let Some(surface) = app.ui.panel.active {
+        app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}))
+            .map(|request| (request, surface, thread));
+    }
 }
 
 /// Web's `DeviceDuoGlyph`: the Duo's fold shapes (upright, or a quarter turn for a flat phone)
@@ -473,6 +547,8 @@ static TENT: rune::Icon = rune::Icon { name: "stance-tent", view: 22.0, body: "<
 const FOLD_PATH: &str = "/api/device-hub/vendor/serve-emu/api/fold";
 const FOLD_TIMEOUT: Duration = Duration::from_secs(12);
 const FOLD_RETRY: Duration = Duration::from_secs(3);
+/// Web `bindPhoneTrackpad`'s wait before a wheel turn without an end counts as let go.
+const WHEEL_IDLE: Duration = Duration::from_millis(1200);
 
 /// Web's `AndroidFoldState`: serve-emu's readout of an emulated foldable.
 #[derive(Clone, Debug, PartialEq)]
@@ -629,6 +705,230 @@ fn change_fold(app: &mut App, posture: &'static str) {
     });
 }
 
+/// The shown device's name, as the device list has it.
+fn device_name<'a>(app: &'a App, stream: &Stream) -> &'a str {
+    let Some((host, device)) = stream.key.split_once('\u{0}') else { return "" };
+    state(app)
+        .and_then(|st| st["devices"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|d| d["hostId"] == host && d["id"] == device)
+        .map_or("", |d| data::s(d, "name"))
+}
+
+fn screen_state(stream: &Stream) -> Option<input::Screen> {
+    stream.input.as_ref()?.state.lock().unwrap_or_else(|e| e.into_inner()).screen.clone()
+}
+
+/// Web's `phoneUnavailableReason`, for what this app can't draw in 3D yet too.
+fn unavailable_3d(app: &App, stream: &Stream) -> Option<&'static str> {
+    if model::model_id(stream.android, device_name(app, stream)) == Some("iphone-duo") {
+        let hinged = screen_state(stream).is_some_and(|s| s.supports_hinge);
+        return Some(if hinged { "iPhone Duo 3D isn't in this app yet" } else { "iPhone Duo 3D requires Device Hub 0.11.0 or newer" });
+    }
+    stream.ax.is_some().then_some("Turn off accessibility frames to use 3D")
+}
+
+fn streaming(stream: &Stream) -> bool {
+    let shared = stream.shared.lock().unwrap_or_else(|e| e.into_inner());
+    shared.frames > 0 && shared.failed.is_none()
+}
+
+/// Web's `showPhone`: the 3D view, unless the device is flat, not streaming or can't be drawn.
+fn shows_3d(app: &App, stream: &Stream) -> bool {
+    !stream.flat && stream.phone.is_some() && streaming(stream) && unavailable_3d(app, stream).is_none()
+}
+
+/// The hinge angle an Android foldable's 3D view shows, once serve-emu says it folds.
+fn fold_angle(stream: &Stream) -> Option<f32> {
+    stream.android.then(|| stream.fold.lock().unwrap_or_else(|e| e.into_inner()).angle).flatten().map(|a| a as f32)
+}
+
+/// Keeps the phone the 3D view draws in step with the device: its model once parsed (`now` in
+/// scenes), else a foldable at its hinge angle, else web's procedural phone for its shape and display.
+fn sync_phone(app: &mut App) -> bool {
+    let Some(stream) = app.ui.panel.device.stream.as_ref() else { return false };
+    let name = device_name(app, stream).to_owned();
+    let now = app.ui.panel.device.fixture.is_some();
+    let waker = app.ui.panel.waker.clone();
+    let wake = || {
+        let waker = waker.clone();
+        move || {
+            if let Some(wake) = &waker {
+                wake();
+            }
+        }
+    };
+    let id = model::model_id(stream.android, &name);
+    // The bare iPad shows while the one with its keyboard loads.
+    let keyboard = (stream.keyboard && id == Some(KEYBOARD_FOR)).then(|| model::model(model::KEYBOARD, now, wake())).flatten();
+    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (keyboard.or_else(|| id.and_then(|id| model::model(id, now, wake()))), fold_angle(stream)) {
+        (Some(model), _) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
+        (None, Some(angle)) => {
+            let (w, h) = stream.pixels.size();
+            let aspect = model::fold_inner_aspect(w, h);
+            (format!("fold:{angle}:{aspect}"), Box::new(move || Arc::new(model::fold(angle, aspect))))
+        }
+        (None, None) => {
+            let (w, h) = stream.pixels.size();
+            let layout = model::layout(None, w, h);
+            let profile = model::profile(stream.android, &name, layout.aspect);
+            (format!("{}:{}", profile.id, layout.aspect), Box::new(move || Arc::new(model::phone(&profile, layout.aspect))))
+        }
+    };
+    let stream = app.ui.panel.device.stream.as_mut().expect("checked above");
+    if stream.phone.as_ref().is_some_and(|(made, _)| *made == want) {
+        return false;
+    }
+    stream.phone = Some((want, build()));
+    true
+}
+
+/// What the compositor draws for the panel's 3D view this frame.
+fn scene_3d(app: &App) -> Option<viewport::Scene> {
+    let stream = app.ui.panel.device.stream.as_ref()?;
+    if !shows_3d(app, stream) {
+        return None;
+    }
+    let (_, model) = stream.phone.as_ref()?;
+    let (w, h) = stream.pixels.size();
+    let layout = model::layout(screen_state(stream).as_ref().map(|s| s.orientation.as_str()), w, h);
+    // A foldable turns with its hinge, not its orientation.
+    let turn = if model.faces.is_empty() { layout.rotation } else { 0. };
+    Some(viewport::Scene { model: model.clone(), world: stream.pose.matrix(turn), layout, pixels: stream.pixels.clone() })
+}
+
+/// Web `createPhoneInteraction` on the 3D view of `size` points: a press on the screen touches
+/// it, anywhere else turns the phone, which stands back up when let go.
+fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
+    let Some(scene) = scene_3d(s) else { return };
+    let camera = model::camera(&scene.model, &scene.world, size.0 / size.1);
+    let (x, y) = (d.x / size.0, d.y / size.1);
+    let Some(stream) = s.ui.panel.device.stream.as_mut() else { return };
+    let ended = d.cancelled() || matches!(d.phase, Phase::Up);
+    let grab = match (stream.grab, matches!(d.phase, Phase::Down)) {
+        (None, true) => match model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, false) {
+            Some((u, v)) => {
+                if let Some(input) = &stream.input {
+                    input.touch("begin", f64::from(u), f64::from(v));
+                }
+                Some(Grab::Touch(f64::from(u), f64::from(v)))
+            }
+            None => {
+                (stream.spring, stream.wheel_until) = (None, None);
+                Some(Grab::Orbit(d.x, d.y))
+            }
+        },
+        (Some(Grab::Touch(u, v)), _) => {
+            let (u, v) = model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
+            if let Some(input) = &stream.input {
+                input.touch(if ended { "end" } else { "move" }, u, v);
+            }
+            Some(Grab::Touch(u, v))
+        }
+        (Some(Grab::Orbit(px, py)), _) => {
+            stream.pose.orbit(d.x - px, d.y - py);
+            Some(Grab::Orbit(d.x, d.y))
+        }
+        (None, false) => None,
+    };
+    stream.grab = if ended {
+        if matches!(grab, Some(Grab::Orbit(..))) {
+            let rest = stream.pose.settled();
+            spring_to(stream, rest, tx);
+        }
+        None
+    } else {
+        grab
+    };
+}
+
+fn spring_to(stream: &mut Stream, target: model::Pose, tx: &mut Tx) {
+    stream.wheel_until = None;
+    stream.spring = Some((model::Spring::toward(&stream.pose, target), Instant::now()));
+    tx.wake_after(Duration::ZERO);
+}
+
+/// Web `phoneWheelNavigation` on the 3D view of `size` points: a scroll turns the phone (a
+/// pinch, the Duo's, does nothing here), which springs back when the gesture ends.
+fn wheel_3d(s: &mut App, e: rune::WheelEvent, size: (f32, f32), tx: &mut Tx) -> bool {
+    let Some(stream) = s.ui.panel.device.stream.as_mut() else { return false };
+    // Turning during a touch would move the point it holds on the screen.
+    if stream.grab.is_some() || e.mods.ctrl || e.mods.cmd {
+        return true;
+    }
+    if e.momentum || matches!(e.phase, rune::GesturePhase::Ended) {
+        if stream.wheel_until.is_some() {
+            let rest = stream.pose.settled();
+            spring_to(stream, rest, tx);
+        }
+        return true;
+    }
+    if e.dx == 0. && e.dy == 0. {
+        return true;
+    }
+    stream.spring = None;
+    stream.pose.orbit(e.dx.clamp(-size.0 / 4., size.0 / 4.), e.dy.clamp(-size.1 / 4., size.1 / 4.));
+    stream.wheel_until = Some(Instant::now() + WHEEL_IDLE);
+    tx.wake_after(WHEEL_IDLE);
+    true
+}
+
+/// Steps the phone's spring and lets go of an idle wheel turn, asking for frames only while it moves.
+fn step_3d(stream: &mut Stream, tx: &mut Tx) -> bool {
+    let now = Instant::now();
+    match stream.wheel_until {
+        Some(until) if now >= until => {
+            stream.wheel_until = None;
+            stream.spring = Some((model::Spring::toward(&stream.pose, stream.pose.settled()), now));
+        }
+        Some(until) => tx.wake_after(until - now),
+        None => {}
+    }
+    let Some((spring, at)) = stream.spring.as_mut() else { return false };
+    let moving = spring.advance(&mut stream.pose, now.duration_since(*at).as_secs_f32());
+    *at = now;
+    if moving {
+        tx.wake_after(Duration::ZERO);
+    } else {
+        stream.spring = None;
+    }
+    true
+}
+
+/// The device web's `deviceKeyboard` attaches the Magic Keyboard to.
+const KEYBOARD_FOR: &str = "ipad-pro-13-m5";
+
+/// Web's Attach and Detach Magic Keyboard: attaching turns the iPad to landscape right.
+fn toggle_keyboard(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    if let (Some(Grab::Touch(u, v)), Some(input)) = (stream.grab.take(), &stream.input) {
+        input.touch("end", u, v);
+    }
+    if !stream.keyboard
+        && let Some(input) = &stream.input
+        && screen_state(stream).is_none_or(|s| s.orientation != "landscape_right")
+    {
+        input.orient("landscape_right");
+    }
+    stream.keyboard ^= true;
+}
+
+/// Web's `resetView`: the phone springs upright and facing the camera, and the device goes back
+/// to portrait (landscape right with the Magic Keyboard).
+fn restore_3d(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    stream.spring = Some((model::Spring::toward(&stream.pose, model::Pose::default()), Instant::now()));
+    stream.wheel_until = None;
+    stream.grab = None;
+    let rest = if stream.keyboard { "landscape_right" } else { "portrait" };
+    if let Some(input) = &stream.input
+        && screen_state(stream).is_some_and(|s| s.orientation != rest)
+    {
+        input.orient(rest);
+    }
+}
+
 /// The hub connection a readout thread uses: base URL, credentials, the device's host and id, and the wake.
 fn hub(app: &App) -> Option<(String, s5_net::Auth, String, String, impl Fn() + Send + 'static)> {
     let net = app.src.net_ref()?;
@@ -686,14 +986,21 @@ fn host_diagnostics<'a>(state: &'a Value, host_id: &str) -> Option<&'a str> {
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    if let Some((id, _, _)) = app.ui.panel.device.opening
-        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
-    {
-        app.ui.panel.device.opening = None;
-        if let Err(e) = reply {
-            app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not open the device."));
+    for (id, key, booted) in std::mem::take(&mut app.ui.panel.device.opening) {
+        match app.src.net().and_then(|n| n.take_reply(id)) {
+            Some(reply) => {
+                if let Err(e) = reply {
+                    let error = crate::shell::palette::error_message(&e, "Could not open the device.");
+                    if app.ui.panel.device.selected.as_ref() == Some(&key) {
+                        app.ui.panel.device.error = Some(error);
+                    } else {
+                        crate::shell::palette::toast_error_brief(app, "Could not open the device.", Some(&error));
+                    }
+                }
+                changed = true;
+            }
+            None => app.ui.panel.device.opening.push((id, key, booted)),
         }
-        changed = true;
     }
     if let Some(id) = app.ui.panel.device.listing
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
@@ -704,12 +1011,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    if let Some(id) = app.ui.panel.device.powering_off
+    if let Some((id, surface, thread)) = app.ui.panel.device.powering_off.clone()
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
     {
         app.ui.panel.device.powering_off = None;
         match reply {
-            Ok(_) => super::close(app, super::Surface::Device),
+            Ok(_) if super::context(app).is_some_and(|(current, _)| current == thread) => super::close(app, surface),
+            Ok(_) => {},
             Err(e) => app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not power off the device.")),
         }
         changed = true;
@@ -732,6 +1040,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     sync_stream(app, tx);
+    changed |= sync_phone(app);
     let ready = input_ready(app);
     let fold_hub = hub(app);
     let base = app.src.net_ref().map(|n| n.base_url().to_owned()).unwrap_or_default();
@@ -803,6 +1112,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         feeds += state.rev;
     }
+    changed |= step_3d(stream, tx);
     if feeds != stream.feeds_seen {
         stream.feeds_seen = feeds;
         changed = true;
@@ -957,7 +1267,24 @@ fn ax_overlay(elements: &[inspect::AxElement], (w, h): (f32, f32), t: &T) -> Vec
 }
 
 /// The screen at its fitted size once the stage is laid out.
-fn screen(stream: &Stream, stage: Option<(f32, f32)>, name: &str, t: &T) -> El {
+fn screen(stream: &Stream, three: bool, stage: Option<(f32, f32)>, name: &str, t: &T) -> El {
+    if three && let Some((w, h)) = stage.map(|(w, h)| (w - 32., h - 32.)).filter(|(w, h)| *w >= 1. && *h >= 1.) {
+        let phone = el()
+            .size(w, h)
+            .effect(viewport::MARK)
+            .key("device-3d")
+            .focusable(true)
+            .on_drag(move |s: &mut App, d, tx| grab_3d(s, d, (w, h), tx))
+            .on_wheel(move |s: &mut App, e, tx| wheel_3d(s, e, (w, h), tx))
+            .on_key(|s: &mut App, e, tx| {
+                if matches!(e.key, Key::Escape) && e.mods.shift {
+                    tx.blur();
+                    return true;
+                }
+                !e.mods.cmd && !e.mods.ctrl && input(s).is_some_and(|i| i.key(&e.key))
+            });
+        return col().key("device-stage").grow(1.).min_h(0.).min_w(0.).padding(16.).center().role("img").label(format!("{name} screen")).child(phone);
+    }
     let (iw, ih) = stream.pixels.size();
     let fitted = stage.filter(|_| iw > 0 && ih > 0).map(|(w, h)| fit((w - 32., h - 32.), (iw as f32, ih as f32))).filter(|(w, h)| *w >= 1. && *h >= 1.);
     let elements = stream.ax.as_ref().and_then(|f| f.data.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default();
@@ -1089,11 +1416,49 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
         kit::MenuItem::new("Float device over chat").icon(&icons::PICTURE_IN_PICTURE_2).on_select(float_device),
         kit::MenuItem::new("Close device panel").icon(&icons::X).on_select(|s: &mut App| {
             s.ui.panel.device.menu = None;
-            super::close(s, super::Surface::Device);
+            if let Some(surface) = s.ui.panel.active { super::close(s, surface); }
         }),
         kit::MenuItem::new(if kind == "simlock" { "Return device to the pool" } else { "Power off device" }).icon(&icons::POWER).variant("destructive").disabled(app.ui.panel.device.powering_off.is_some()).on_select(power_off),
     ];
     pill = pill.child(rail_menu(app, Menu::More, kit::Button::new("More device actions").icon(&icons::ELLIPSIS), more, t, overlays));
+    if let Some(stream) = stream {
+        let (phone, live, reason) = (shows_3d(app, stream), streaming, unavailable_3d(app, stream));
+        let three = kit::Button::new("3D view")
+            .icon(&icons::BOX)
+            .variant(if phone { "secondary" } else { "ghost" })
+            .size("icon-sm")
+            .disabled(!live || reason.is_some())
+            .on_press(|s: &mut App| {
+                if let Some(stream) = s.ui.panel.device.stream.as_mut() {
+                    stream.flat = false;
+                }
+            })
+            .build(t)
+            .help(reason.unwrap_or("3D view"))
+            .checked(phone);
+        let flat = kit::Button::new("Flat view")
+            .icon(&icons::SMARTPHONE)
+            .variant(if phone { "ghost" } else { "secondary" })
+            .size("icon-sm")
+            .disabled(!live)
+            .on_press(|s: &mut App| {
+                if let Some(stream) = s.ui.panel.device.stream.as_mut() {
+                    (stream.flat, stream.grab) = (true, None);
+                }
+            })
+            .build(t)
+            .help("Flat view")
+            .checked(!phone);
+        pill = pill.child(el().w(20.).h(1.).fill(t.c.border)).child(three).child(flat);
+        if phone && model::model_id(stream.android, device_name(app, stream)) == Some(KEYBOARD_FOR) {
+            let label = if stream.keyboard { "Detach Magic Keyboard" } else { "Attach Magic Keyboard" };
+            let keyboard = kit::Button::new(label).icon(&icons::KEYBOARD).variant(if stream.keyboard { "secondary" } else { "ghost" }).size("icon-sm").on_press(toggle_keyboard).build(t).help(label).checked(stream.keyboard);
+            pill = pill.child(keyboard);
+        }
+        if phone {
+            pill = pill.child(rail_button("Restore 3D view", &icons::MAXIMIZE, false, t, restore_3d));
+        }
+    }
     let mut rail = col().key("device-controls").label("Device controls").w(56.).h_full().pr(8.).py(12.).gap(8.).center().child(pill);
     if let Some(stream) = stream {
         rail = if android { rail.children(fold_controls(stream, ready, t)) } else { rail.children(duo_controls(stream, ready, t)) };
@@ -1186,9 +1551,12 @@ fn float_device(app: &mut App) {
 
 fn dock_float(app: &mut App) {
     if let Some(float) = app.ui.panel.device.float.take() {
-        app.ui.panel.device.selected = Some(float.key);
-        app.ui.panel.device.browsing = false;
-        super::activate(app, super::Surface::Device);
+        if let Some((host, device)) = float.key.split_once('\u{0}') {
+            let name = state(app).and_then(|state| state["devices"].as_array())
+                .and_then(|devices| devices.iter().find(|row| row["id"] == device && row["hostId"] == host))
+                .map(|row| data::s(row, "name").to_owned()).unwrap_or_default();
+            super::tabs::open(app, super::tabs::Target::Device { host: host.into(), device: device.into(), name, title: None });
+        }
     }
 }
 
@@ -1518,7 +1886,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, diagnostics: Option<&str>
 fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>) -> El {
     let device = state["devices"].as_array().into_iter().flatten().find(|d| d["id"] == session["deviceId"] && d["hostId"] == session["hostId"]);
     let name = device.map_or_else(|| data::s(session, "deviceId").to_owned(), |d| data::s(d, "name").to_owned());
-    let back = icon_button("Back to devices", &icons::ARROW_LEFT).on_press(|s: &mut App| s.ui.panel.device.browsing = true).build(t).help("Back to devices");
+    let back = icon_button("Back to devices", &icons::ARROW_LEFT).on_press(|s: &mut App| super::activate(s, super::Surface::Device)).build(t).help("Back to devices");
     let reconnect = icon_button("Reconnect", &icons::REFRESH_CW).on_press(|s: &mut App| s.ui.panel.device.stream = None).build(t).help("Reconnect");
     let streams = transport(state, session) != Transport::WebRtc;
     let title = text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).single_line().truncate();
@@ -1531,6 +1899,8 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
     } else {
         match &app.ui.panel.device.stream {
             Some(stream) => {
+                // Before `shared` locks: `shows_3d` reads it too.
+                let three = shows_3d(app, stream);
                 let shared = stream.shared.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(failed) = shared.failed.clone() {
                     centered(
@@ -1542,7 +1912,7 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
                 } else if shared.frames == 0 {
                     centered(vec![spinner(t), note("Connecting video\u{2026}", t)])
                 } else {
-                    screen(stream, stage, &name, t)
+                    screen(stream, three, stage, &name, t)
                 }
             }
             None => centered(vec![spinner(t), note("Connecting video\u{2026}", t)]),
@@ -1578,7 +1948,7 @@ pub fn view(app: &App, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>)
             ],
         );
     }
-    if let Some((_, _, booted)) = &ui.opening {
+    if let Some((_, _, booted)) = ui.opening.iter().find(|(_, key, _)| ui.selected.as_ref() == Some(key)) {
         return centered(vec![spinner(t), note(if *booted { "Opening device\u{2026}" } else { "Starting device\u{2026}" }, t)]);
     }
     let thread = super::context(app).map(|(id, _)| id).unwrap_or_default();
@@ -1707,6 +2077,9 @@ pub fn fixture(app: &mut App, sessions: Value) {
             {"hostId": "local", "id": "ios-se", "platform": "ios", "name": "iPhone SE (3rd generation)", "version": "iOS 18.2", "booted": false, "physical": false},
             {"hostId": "local", "id": "ipad", "platform": "ios", "name": "iPad Air 13-inch (M2)", "version": "iOS 18.2", "booted": false, "physical": false},
             {"hostId": "local", "id": "pixel", "platform": "android", "name": "Pixel 9", "version": "Android 15", "booted": true, "physical": false},
+            {"hostId": "local", "id": "fold", "platform": "android", "name": "Pixel 9 Pro Fold", "version": "Android 15", "booted": true, "physical": false},
+            {"hostId": "local", "id": "ios-18", "platform": "ios", "name": "iPhone 18 Pro", "version": "iOS 26.0", "booted": true, "physical": false},
+            {"hostId": "local", "id": "duo", "platform": "ios", "name": "iPhone Duo", "version": "iOS 26.0", "booted": true, "physical": false},
             {"hostId": "eas", "id": "eas-16", "platform": "ios", "name": "iPhone 16 (EAS)", "version": "iOS 18.2", "booted": true, "physical": false}
         ],
         "sessions": sessions,
@@ -1717,6 +2090,38 @@ pub fn fixture(app: &mut App, sessions: Value) {
         (transport != Transport::WebRtc).then(|| (key(data::s(session, "hostId"), data::s(session, "deviceId")), transport, session["platform"] == "android", host_kind(state, session).to_owned()))
     });
     app.ui.panel.device.stream = first.map(|(key, transport, android, kind)| fixture_stream(key, transport, android, kind));
+    sync_phone(app);
+}
+
+/// An emulated foldable whose last posture change timed out, for scenes.
+pub fn fold_fixture(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_ref() else { return };
+    let mut fold = stream.fold.lock().unwrap_or_else(|e| e.into_inner());
+    fold.state = Some(FoldState { supported: true, posture: Some("half_opened".into()), hinge_angle: Some(90.) });
+    fold.angle = Some(90.);
+    fold.error = Some("Fold command timed out.".into());
+    fold.read_for = Some(stream.pixels.size());
+    drop(fold);
+    sync_phone(app);
+}
+
+/// An iPhone Duo held open in a laptop stand, for scenes.
+pub fn duo_fixture(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    let (input, _) = input::Input::channel(false);
+    let mut state = input.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.admitted = true;
+    state.screen = Some(input::Screen {
+        width: 2868.,
+        height: 1320.,
+        orientation: "landscape_left".into(),
+        screen_id: Some(2),
+        supports_hinge: true,
+        hinge_angle: Some(110.),
+        hinge_pose: Some("laptop".into()),
+    });
+    drop(state);
+    stream.input = Some(input);
 }
 
 #[cfg(test)]
@@ -1797,6 +2202,23 @@ mod tests {
         assert_eq!(fold.read((1080, 1200), closed.clone()), Some(false), "a readout for another size is stale");
         assert_eq!(fold.read(size, closed), Some(true));
         assert_eq!((fold.angle, fold.state.as_ref().and_then(|f| f.posture.as_deref())), (Some(3.), Some("closed")));
+    }
+
+    #[test]
+    fn a_streaming_device_builds_its_3d_view_and_rail() {
+        // The view locks the stream's state; building it on a thread turns a deadlock into a failure.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut app = crate::App::new();
+            fixture(&mut app, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+            let state = app.ui.panel.device.fixture.clone().unwrap();
+            let stream = app.ui.panel.device.stream.as_ref().unwrap();
+            let shows = shows_3d(&app, stream);
+            drop(stream_view(&app, &state, &state["sessions"][0], &crate::theme::theme(true), Some((800., 700.)), &mut Vec::new()));
+            let _ = tx.send(shows);
+        });
+        let shows = rx.recv_timeout(Duration::from_secs(20)).expect("the device view builds without deadlocking");
+        assert!(shows, "a streaming iPhone shows web's default 3D view");
     }
 
     #[test]

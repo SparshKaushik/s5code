@@ -60,7 +60,13 @@ pub fn normalize(text: &str) -> String {
 
 /// Whether the setting's section is on screen now, as web's availability flags decide.
 pub fn shown(s: &crate::App, item: &Item) -> bool {
-    item.id != "linked-environments" || super::connections::offers_links(s)
+    match item.id.as_str() {
+        "linked-environments" => super::connections::offers_links(s),
+        // Web `cloudOnly` and `managedTunnelOnly`.
+        "t3-connect" | "publish-agent-activity" => crate::cloud::config().is_some(),
+        "hold-webhooks-while-offline" => crate::cloud::config().is_some() && super::connect::tunnel_on(s),
+        _ => true,
+    }
 }
 
 pub fn search(s: &crate::App, query: &str) -> Vec<&'static Item> {

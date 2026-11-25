@@ -302,7 +302,7 @@ fn terminal_preview(values: &Map<String, Value>, t: &T) -> El {
         }
         out = out.child(line);
     }
-    out
+    out.label("Terminal font preview")
 }
 
 fn squash(s: &str) -> String {
