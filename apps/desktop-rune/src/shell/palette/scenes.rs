@@ -61,6 +61,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_thread(s);
         crate::search::scene_results(s);
     }),
+    ("content-search-error", |s| {
+        open_thread(s);
+        crate::search::scene_error(s);
+    }),
     ("content-search-denied", |s| {
         open_thread(s);
         deny_files(s);

@@ -269,6 +269,9 @@ pub fn access(s: &App, t: &T) -> El {
 /// Web `ConnectionsSettings` view "environments".
 pub fn view(s: &App, t: &T) -> El {
     let mut page = col().w_full().gap(32.0);
+    if s.ui.cloud.account.isolated {
+        return page.children(crate::cloud::account::sections(s, t));
+    }
     if crate::host::managed() {
         page = page.child(c::section("This app", vec![local_row(s, t)], t));
     }
@@ -1820,10 +1823,15 @@ pub(super) fn scene(s: &mut App, open: &str) {
             }
         }
         "t3-connect" => crate::cloud::scene_signed_in(s),
-        "t3-connect-account" | "t3-connect-mobile" => {
+        "t3-connect-account" => {
             crate::cloud::scene_signed_in(s);
             crate::cloud::account::scene(s);
-            s.ui.settings.reveal = Some(if open == "t3-connect-mobile" { "Mobile clients" } else { "Registered environments" }.into());
+            s.ui.settings.reveal = Some("Registered environments".into());
+        }
+        "t3-connect-mobile" => {
+            crate::cloud::scene_signed_in(s);
+            crate::cloud::account::scene(s);
+            s.ui.cloud.account.isolated = true;
         }
         "t3-connect-signing-in" => crate::cloud::scene_signing_in(s),
         "t3-connect-route" => {

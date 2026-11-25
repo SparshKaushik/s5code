@@ -470,17 +470,16 @@ pub fn poll(s: &mut App) -> bool {
         };
         match slot {
             Some(slot) => s.ui.settings.connect.onboarding = Some(slot),
-            None => crate::cloud::onboarding::published(s, Err("Could not read environment cloud link state.".into())),
+            None => crate::cloud::onboarding::published(s, Err("Could not read environment cloud link state.".into()), None),
         }
         changed = true;
     }
     let applied = s.ui.settings.connect.onboarding.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
     if let Some(result) = applied {
         s.ui.settings.connect.onboarding = None;
-        if let Err(failure) = &result {
-            s.ui.settings.connect.tunnel_limit = failure.tunnel_limit;
-        }
-        crate::cloud::onboarding::published(s, result.map_err(|f| f.message));
+        let limit = result.as_ref().err().and_then(|f| f.tunnel_limit);
+        s.ui.settings.connect.tunnel_limit = limit;
+        crate::cloud::onboarding::published(s, result.map_err(|f| f.message), limit);
         refresh(s);
         crate::cloud::refresh(s);
         changed = true;

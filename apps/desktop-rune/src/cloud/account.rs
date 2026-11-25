@@ -20,6 +20,9 @@ pub struct Account {
     pub deregistering: Option<String>,
     /// Deregistered servers by id and link time, hidden until a listing drops them.
     pub removed: Vec<(String, String)>,
+    /// Scenes: the page shows only these sections, Mobile clients first, so a 900 px frame
+    /// reaches the phones.
+    pub isolated: bool,
 }
 
 pub fn refresh_devices(s: &mut App) {
@@ -291,6 +294,9 @@ fn registered(s: &App, t: &T) -> El {
 pub fn sections(s: &App, t: &T) -> Vec<El> {
     if config().is_none() || s.ui.cloud.identity.is_none() || s.ui.cloud.signing_in.is_some() {
         return vec![];
+    }
+    if s.ui.cloud.account.isolated {
+        return vec![mobile_clients(s, t), registered(s, t)];
     }
     vec![registered(s, t), mobile_clients(s, t)]
 }
