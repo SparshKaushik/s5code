@@ -39,6 +39,8 @@ pub enum Recovery {
     Failing(crate::host::StartupFailure),
     /// Still no shell after the timeout (FirstRunGate's "Still connecting").
     Stalled,
+    /// The saved client settings could not be read (FirstRunGate's `settingsReadFailed`).
+    Settings,
 }
 
 pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
@@ -59,6 +61,9 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
 }
 
 pub fn recovery(s: &App) -> Option<Recovery> {
+    if s.client_settings.read_failed {
+        return Some(Recovery::Settings);
+    }
     let st = s.state();
     if st.shell_ready || s.ui.onboarding.settled {
         return None;
@@ -83,6 +88,14 @@ fn retry(s: &mut App) {
     }
 }
 
+/// FirstRunRecovery's settings Retry: reads the file again, keeping the gate until it reads.
+fn retry_settings(s: &mut App) {
+    let fresh = crate::settings::client::ClientSettings::load();
+    if !fresh.read_failed {
+        s.client_settings = fresh;
+    }
+}
+
 /// FirstRunRecovery's Reload: where the web reloads the page, the local connection starts over
 /// and the gate waits again.
 fn reload(s: &mut App) {
@@ -100,6 +113,7 @@ pub fn recovery_view(recovery: Recovery, t: &T) -> El {
         Recovery::Failing(failure) => return crate::desktop::recovery::view(failure, t),
         Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), "Retry", retry),
         Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", "Reload", reload),
+        Recovery::Settings => ("Could not read settings", "Your saved settings could not be loaded.", "Retry", retry_settings),
     };
     let body = col()
         .max_w(384.0)
@@ -279,5 +293,7 @@ mod tests {
             state.shell_ready = false;
         }
         assert_eq!(recovery(&s), None, "a reconnect after the shell arrived keeps the app");
+        s.client_settings.read_failed = true;
+        assert_eq!(recovery(&s), Some(Recovery::Settings), "unreadable settings hold the app even with its shell in");
     }
 }

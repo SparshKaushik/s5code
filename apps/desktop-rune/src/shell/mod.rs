@@ -48,6 +48,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.desktop.local_off = true;
         s.navigate(crate::Route::Home { project_id: None });
     }),
+    ("first-run-settings", |s| {
+        open_titled(s, "New thread");
+        s.client_settings.read_failed = true;
+    }),
     ("toasts-stack", |s| {
         open_titled(s, "Replay showcase");
         toast::scene(s, false);
