@@ -71,6 +71,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("update-everything-confirm", |s| sidebar::everything::scene(s, "confirm")),
     ("update-capsule", |s| sidebar::everything::scene(s, "capsule")),
+    ("update-capsule-retry", |s| sidebar::everything::scene(s, "retry")),
     ("update-release-notes", |s| sidebar::everything::scene(s, "notes")),
     ("sidebar-regenerating", |s| {
         open_titled(s, "Replay showcase");
