@@ -49,7 +49,7 @@ pub fn poll(s: &mut App) -> bool {
 
 /// Starts the avatars the pull requests page shows, the open detail's first.
 fn want_avatars(s: &mut App) {
-    if !matches!(s.frame_route(), Route::PullRequests) {
+    if !matches!(s.frame_route(), Route::PullRequests) && crate::panel::active_pull_request(s).is_none() {
         return;
     }
     let waker = s.ui.panel.waker.as_ref();

@@ -498,6 +498,10 @@ fn row_prs(s: &App) -> Vec<RowPr> {
     out
 }
 
+pub(crate) fn panel_url(s: &App) -> Option<String> {
+    row_prs(s).into_iter().find(|row| row.reference.is_some() && !row.url.is_empty()).map(|row| row.url)
+}
+
 fn checks_supported(s: &App) -> bool {
     s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["pullRequestChecks"] == true)
 }

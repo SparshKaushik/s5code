@@ -115,7 +115,7 @@ fn submit(s: &mut App, method: &str, payload: Value, write: Write) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) || s.ui.pages.detail.entry.is_none() {
+    if (!matches!(s.frame_route(), Route::PullRequests) && crate::panel::active_pull_request(s).is_none()) || s.ui.pages.detail.entry.is_none() {
         return false;
     }
     let mut changed = keep_choice(s) | want_linked(s) | want_refs(s);

@@ -349,14 +349,14 @@ fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
     let download = if sending(attachment) { download } else { download.help(download_label) };
     let (identity, download) = match url {
         Some(url) => {
-            let (preview, name) = (url.clone(), s(attachment, "name").to_owned());
+            let (id, name) = (s(attachment, "id").to_owned(), s(attachment, "name").to_owned());
             (
                 identity
                     .focusable(true)
                     .role("button")
                     .cursor(rune::Cursor::Pointer)
                     .label(format!("Preview {label}"))
-                    .on_press(move |app: &mut App| crate::panel::open_preview(app, &preview)),
+                    .on_press(move |app: &mut App| crate::panel::open_attachment(app, &id)),
                 download
                     .focusable(true)
                     .cursor(rune::Cursor::Pointer)
@@ -367,6 +367,33 @@ fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
         None => (identity, download.disabled(true).opacity(0.64)),
     };
     row().w(256.0).gap(4.0).py(8.0).pl(8.0).pr(4.0).center_y().radius(16.0).fill(t.c.message_surface).child(identity).child(download)
+}
+
+pub(crate) fn panel_name<'a>(app: &'a App, id: &str) -> Option<&'a str> {
+    app.ui.chat.timeline.assets.ready.get(id).map(|loaded| loaded.name.as_str())
+}
+
+pub(crate) fn panel_view(app: &App, id: &str, t: &T) -> El {
+    let assets = &app.ui.chat.timeline.assets;
+    let mut content = col().grow(1.).min_h(0.).w_full().center().gap(8.).padding(16.);
+    let id = id.to_owned();
+    let Some(loaded) = assets.ready.get(&id) else {
+        let message = if assets.failed.contains(&id) { "Unable to load attachment." } else { "Loading attachment…" };
+        return content.child(text(message).font(theme::TEXT_SM).color(t.c.muted_foreground));
+    };
+    let (url, name) = (loaded.url.clone(), loaded.name.clone());
+    let browser = url.clone();
+    content = match loaded.kind {
+        Some(Kind::Image) => content.child(el().w_full().grow(1.).min_h(0.).pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit)),
+        Some(Kind::Video) => content.child(media::video(&id, &name, Some(loaded), false, None, t)),
+        Some(Kind::Audio) => content.child(audio(&json!({"id": id, "name": name}), Some(loaded), false, t)),
+        None => content.child(text(&name).font(theme::SM_MEDIUM).color(t.c.foreground)),
+    };
+    content.child(row().gap(6.)
+        .child(crate::kit::Button::new("Open in preview browser").variant("outline").size("xs")
+            .on_press(move |s: &mut App| crate::panel::open_preview(s, &browser)).build(t))
+        .child(crate::kit::Button::new("Download").variant("outline").size("xs").build(t)
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| media::save_attachment(s, url.clone(), name.clone(), tx))))
 }
 
 /// The pictures sent with the message holding attachment `id`, in order.
