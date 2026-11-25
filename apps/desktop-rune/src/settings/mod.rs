@@ -23,6 +23,7 @@ mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
+mod font_picker;
 mod keybindings;
 pub(crate) use keybindings::unshift;
 pub(crate) mod machines;
@@ -101,6 +102,8 @@ pub struct Ui {
     pub environment_scope_open: bool,
     pub scope_open: bool,
     pub open_select: Option<String>,
+    /// The installed-font menus' search and open state, by setting key.
+    pub font_pickers: HashMap<String, crate::kit::ComboboxState>,
     pub search: TextEdit,
     /// The highlighted search result (web's `activeResultIndex`).
     pub search_active: usize,
@@ -389,6 +392,11 @@ pub fn update(s: &mut App, key: &str, value: Value) {
 pub(super) const LOAD_ERROR: &str = "_loadError";
 
 pub fn request(s: &mut App, method: &str, payload: Value) {
+    request_id(s, method, payload);
+}
+
+/// `request`, returning the reply id when an environment took it.
+pub fn request_id(s: &mut App, method: &str, payload: Value) -> Option<u64> {
     if method == "server.updateSettings" && matches!(s.src, crate::data::Source::Live(_)) {
         let mut current = server_settings(s).clone();
         apply_patch(&mut current, &payload["patch"]);
@@ -399,6 +407,19 @@ pub fn request(s: &mut App, method: &str, payload: Value) {
     if let Some(net) = crate::env::net_for(s, &project) {
         let id = net.request(method, payload);
         s.ui.settings.pending.insert(id, method.into());
+        return Some(id);
+    }
+    None
+}
+
+/// Web's toast for a failed write whose handler names the action instead of "Setting not saved":
+/// the title and the description when the error carries no message.
+fn failure_toast(method: &str, provider_upsert: bool) -> Option<(&'static str, &'static str)> {
+    match method {
+        "server.updateSettings" if provider_upsert => Some(("Could not update provider instance", "The settings update failed.")),
+        "server.upsertKeybinding" => Some(("Unable to save keybinding", "The keybinding was not saved.")),
+        "server.removeKeybinding" => Some(("Unable to remove keybinding", "The keybinding was not removed.")),
+        _ => None,
     }
 }
 
@@ -612,6 +633,8 @@ pub fn poll(s: &mut App) -> bool {
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
+            let provider_upsert = s.ui.settings.providers_ui.upserts.remove(&id);
+            let toast = reply.as_ref().err().and(failure_toast(&method, provider_upsert));
             match reply {
                 Ok(result) => {
                     if method == "server.updateSettings" {
@@ -635,6 +658,14 @@ pub fn poll(s: &mut App) -> bool {
                 Err(error) if projects::failure_title(&method).is_some() => {
                     let detail = crate::shell::palette::error_message(&error, "An error occurred.");
                     crate::shell::palette::toast_error_brief(s, projects::failure_title(&method).unwrap_or_default(), Some(&detail));
+                }
+                Err(error) if toast.is_some() => {
+                    let (title, fallback) = toast.unwrap_or_default();
+                    if method.ends_with("Keybinding") {
+                        keybindings::failed(s);
+                    }
+                    let detail = failure_detail(&error).unwrap_or_else(|| fallback.to_owned());
+                    crate::shell::palette::toast_error(s, title, Some(&detail));
                 }
                 Err(error) => {
                     let environment = s
@@ -1204,6 +1235,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
     snapshots::overlays(s, t, &mut overlays);
+    font_picker::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -1547,7 +1579,26 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-theme-editor-resized", |s| theme_editor_scene(s, "resized")),
     ("settings-providers-codex-managed", providers_codex_managed),
     ("settings-providers-custom-model-options", providers_custom_model_options),
+    ("settings-providers-custom-model-copy-from", |s| {
+        providers_custom_model_options(s);
+        providers::scene_copy_from(s);
+    }),
+    ("settings-appearance-font-picker", appearance_font_picker),
 ];
+
+/// Typography's Monospace font menu open over a fixed font list.
+fn appearance_font_picker(s: &mut App) {
+    scene(s, "appearance");
+    font_picker::inject(font_picker::collect(
+        ["Fira Code", "Geist", "Geist Mono", "IBM Plex Mono", "Inter", "Iosevka", "JetBrains Mono", "Menlo", "Noto Sans", "Roboto Mono", "Source Code Pro", "Ubuntu Mono"]
+            .into_iter()
+            .map(|name| font_picker::Family { name: name.into(), mono: !matches!(name, "Geist" | "Inter" | "Noto Sans") }),
+    ));
+    s.ui.settings.reveal = Some("Monospace font".into());
+    let picker = s.ui.settings.font_pickers.entry("fontFamilyCode".into()).or_default();
+    picker.open = true;
+    picker.search.focused = true;
+}
 
 fn theme_editor_scene(s: &mut App, state: &str) {
     scene(s, "appearance");
@@ -1823,6 +1874,13 @@ pub fn clear_search_on_escape(search: &mut TextEdit, e: &rune::KeyEvent) -> bool
 #[cfg(test)]
 mod patch_tests {
     use super::*;
+    #[test]
+    fn failed_writes_toast_with_web_titles() {
+        assert_eq!(failure_toast("server.updateSettings", true), Some(("Could not update provider instance", "The settings update failed.")));
+        assert_eq!(failure_toast("server.updateSettings", false), None, "plain saves keep \"Setting not saved\"");
+        assert_eq!(failure_toast("server.upsertKeybinding", false).map(|t| t.0), Some("Unable to save keybinding"));
+        assert_eq!(failure_toast("server.removeKeybinding", false).map(|t| t.0), Some("Unable to remove keybinding"));
+    }
     #[test]
     fn rapid_scoped_changes_build_on_the_previous_pending_patch() {
         let mut settings = json!({"projectSettingsOverrides":{"p":{"future":true}}});

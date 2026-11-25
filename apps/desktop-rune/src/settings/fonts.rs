@@ -345,7 +345,7 @@ fn files(family: &str) -> Vec<PathBuf> {
     found
 }
 
-fn font_dirs() -> Vec<PathBuf> {
+pub(super) fn font_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if cfg!(target_os = "macos") {
         vec!["/System/Library/Fonts".into(), "/Library/Fonts".into(), home.join("Library/Fonts")]
