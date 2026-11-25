@@ -277,6 +277,11 @@ fn tunnels_in_use(environments: &Value) -> u64 {
     environments["environments"].as_array().into_iter().flatten().filter(|e| e["endpoint"]["providerKind"] == "cloudflare_tunnel").count() as u64
 }
 
+/// Web `useManagedTunnelUsage().upgrade`, for onboarding's tunnel-limit alert.
+pub(crate) fn tunnel_upgrade(s: &App) -> Option<&'static str> {
+    s.ui.settings.connect.usage.and_then(|u| u.upgrade)
+}
+
 /// Web `refreshManagedTunnelUsage`: the account's environments and its T3 Chat plan.
 fn read_usage(s: &mut App) {
     let Some(relay) = crate::cloud::config().map(|c| c.relay) else { return };
@@ -486,17 +491,16 @@ pub fn poll(s: &mut App) -> bool {
         };
         match slot {
             Some(slot) => s.ui.settings.connect.onboarding = Some(slot),
-            None => crate::cloud::onboarding::published(s, Err("Could not read environment cloud link state.".into())),
+            None => crate::cloud::onboarding::published(s, Err("Could not read environment cloud link state.".into()), None),
         }
         changed = true;
     }
     let applied = s.ui.settings.connect.onboarding.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
     if let Some(result) = applied {
         s.ui.settings.connect.onboarding = None;
-        if let Err(failure) = &result {
-            s.ui.settings.connect.tunnel_limit = failure.tunnel_limit;
-        }
-        crate::cloud::onboarding::published(s, result.map_err(|f| f.message));
+        let limit = result.as_ref().err().and_then(|f| f.tunnel_limit);
+        s.ui.settings.connect.tunnel_limit = limit;
+        crate::cloud::onboarding::published(s, result.map_err(|f| f.message), limit);
         refresh(s);
         crate::cloud::refresh(s);
         changed = true;
@@ -645,7 +649,7 @@ fn meter(usage: Usage, alert: bool, t: &T) -> El {
     col().max_w(384.0).w_full().gap(6.0).pt(6.0).child(line).child(bar.role("progressbar").label("T3 Connect tunnels in use").range_value(usage.used as f64, 0.0, usage.limit as f64))
 }
 
-const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
+pub(crate) const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
 
 /// Web `TunnelLimitAlert`. Rune has no account page, so linking T3 Chat or managing tunnels
 /// offers no button; an upgrade opens the T3 Chat subscription.
@@ -705,6 +709,12 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             .child(body)
             .build(t, layers);
     }
+}
+
+/// Scenes: the account at its tunnel cap on a T3 Chat plan that `upgrade` would raise.
+pub(crate) fn scene_usage(s: &mut App, upgrade: Option<&'static str>) {
+    let limit = if upgrade == Some("premier") { 10 } else { 3 };
+    s.ui.settings.connect.usage = Some(Usage { used: limit, limit, upgrade });
 }
 
 /// Scenes: signed in with this environment linked over a healthy tunnel.

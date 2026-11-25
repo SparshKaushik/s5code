@@ -20,6 +20,9 @@ pub struct Account {
     pub deregistering: Option<String>,
     /// Deregistered servers by id and link time, hidden until a listing drops them.
     pub removed: Vec<(String, String)>,
+    /// Scenes: the page shows only these sections, Mobile clients first, so a 900 px frame
+    /// reaches the phones.
+    pub isolated: bool,
 }
 
 pub fn refresh_devices(s: &mut App) {
@@ -74,17 +77,34 @@ pub(super) fn deregistered(s: &mut App, linked: Linked, result: Result<(), Failu
             super::refresh(s);
             crate::shell::palette::toast(s, "Server deregistered", Some("T3 Connect access was revoked and a host space is now available."));
         }
-        Err(failure) => {
-            let actions = failure
-                .trace
-                .clone()
-                .map(|trace| -> crate::shell::palette::ToastAction {
-                    ("Copy trace ID".to_owned(), false, std::rc::Rc::new(move |_: &mut App, tx: &mut rune::Tx| tx.copy(trace.clone())))
-                })
-                .into_iter()
-                .collect();
-            crate::shell::palette::toast_error_with(s, "Could not deregister server", Some(&failure.message), actions);
-        }
+        Err(failure) => report(s, "Could not deregister server", &failure),
+    }
+}
+
+/// A failed relay call's toast, offering its trace ID when the relay sent one.
+fn report(s: &mut App, title: &str, failure: &Failure) {
+    let actions = failure
+        .trace
+        .clone()
+        .map(|trace| -> crate::shell::palette::ToastAction {
+            ("Copy trace ID".to_owned(), false, std::rc::Rc::new(move |_: &mut App, tx: &mut rune::Tx| tx.copy(trace.clone())))
+        })
+        .into_iter()
+        .collect();
+    crate::shell::palette::toast_error_with(s, title, Some(&failure.message), actions);
+}
+
+/// Web `useT3ChatLink().link`: T3 Chat's page that links its plan to this account, in the
+/// browser. Linking raises the account's tunnel cap.
+pub(crate) fn link_t3chat(s: &mut App) {
+    let Some(config) = config() else { return };
+    spawn(s, move || Event::T3ChatLink(session_token(&config).and_then(|jwt| relay::t3chat_link_request(&config.relay, &jwt))));
+}
+
+pub(super) fn t3chat_link_landed(s: &mut App, result: Result<String, Failure>) {
+    match result {
+        Ok(url) => crate::settings::auth::open_url(s, &url),
+        Err(failure) => report(s, "Could not start linking", &failure),
     }
 }
 
@@ -291,6 +311,9 @@ fn registered(s: &App, t: &T) -> El {
 pub fn sections(s: &App, t: &T) -> Vec<El> {
     if config().is_none() || s.ui.cloud.identity.is_none() || s.ui.cloud.signing_in.is_some() {
         return vec![];
+    }
+    if s.ui.cloud.account.isolated {
+        return vec![mobile_clients(s, t), registered(s, t)];
     }
     vec![registered(s, t), mobile_clients(s, t)]
 }

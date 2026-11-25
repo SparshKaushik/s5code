@@ -39,6 +39,8 @@ pub struct Onboarding {
     requested: Option<(bool, bool)>,
     pub applying: bool,
     pub error: Option<String>,
+    /// The account's tunnel cap, once the relay refused a tunnel for being at it.
+    pub tunnel_limit: Option<u64>,
 }
 
 /// Opens for `account` unless it opted out on this device.
@@ -47,7 +49,7 @@ pub(super) fn open(s: &mut App, account: &str) {
         return;
     }
     let step = if s.ui.cloud.link.is_some() { Step::Publish } else { Step::Devices };
-    s.ui.cloud.onboarding = Some(Onboarding { account: account.to_owned(), step, expose: true, publish: true, dont_show: false, prefilled: false, requested: None, applying: false, error: None });
+    s.ui.cloud.onboarding = Some(Onboarding { account: account.to_owned(), step, expose: true, publish: true, dont_show: false, prefilled: false, requested: None, applying: false, error: None, tunnel_limit: None });
     prefill(s);
 }
 
@@ -82,9 +84,12 @@ pub(crate) fn take_publish(s: &mut App) -> Option<(bool, bool)> {
     s.ui.cloud.onboarding.as_mut()?.requested.take()
 }
 
-pub(crate) fn published(s: &mut App, result: Result<(), String>) {
+/// `tunnel_limit` is the account's cap when the relay refused a tunnel for being at it, which
+/// shows web's tunnel-limit alert instead of the error.
+pub(crate) fn published(s: &mut App, result: Result<(), String>, tunnel_limit: Option<u64>) {
     let Some(ui) = s.ui.cloud.onboarding.as_mut().filter(|o| o.applying) else { return };
     ui.applying = false;
+    ui.tunnel_limit = tunnel_limit;
     match result {
         Ok(()) => {
             ui.error = None;
@@ -92,6 +97,7 @@ pub(crate) fn published(s: &mut App, result: Result<(), String>) {
             let description = if ui.expose { "This environment is available to your other devices through T3 Connect." } else { "This environment publishes agent activity to your mobile clients." };
             crate::shell::palette::toast(s, "T3 Connect enabled", Some(description));
         }
+        Err(_) if tunnel_limit.is_some() => ui.error = None,
         Err(message) => ui.error = Some(message),
     }
 }
@@ -106,6 +112,7 @@ fn apply(s: &mut App) {
     }
     ui.applying = true;
     ui.error = None;
+    ui.tunnel_limit = None;
     ui.requested = Some((ui.expose, ui.publish));
 }
 
@@ -138,7 +145,7 @@ fn toggle_row(key: &str, title: &str, description: &str, on: bool, disabled: boo
         .child(kit::Switch::new(on).label(title.to_owned()).hide_label().disabled(disabled).on_toggle(move |s: &mut App| edit(s, flip)).build(&kit::theme(t)))
 }
 
-fn publish_step(ui: &Onboarding, t: &T) -> El {
+fn publish_step(ui: &Onboarding, upgrade: Option<&'static str>, t: &T) -> El {
     let disabled = ui.applying;
     let mut body = col().w_full().gap(12.0).child(
         col()
@@ -160,7 +167,56 @@ fn publish_step(ui: &Onboarding, t: &T) -> El {
     if let Some(error) = &ui.error {
         body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
     }
+    if ui.tunnel_limit.is_some() {
+        body = body.child(tunnel_limit_alert(upgrade, t));
+    }
     body
+}
+
+/// Web `OnboardingTunnelLimitAlert`: link or upgrade the T3 Chat plan behind the account's
+/// tunnel cap, or else deregister an environment from the account's registered environments.
+fn tunnel_limit_alert(upgrade: Option<&'static str>, t: &T) -> El {
+    let (description, action) = match upgrade {
+        Some("link") => (
+            "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
+            kit::Button::new("Link T3 Chat").size("sm").on_press(|s: &mut App| {
+                complete(s);
+                super::account::link_t3chat(s);
+            }),
+        ),
+        Some(_) => (
+            "Switch to Tailscale or get more tunnels by upgrading your T3 Chat sub (sorry!)",
+            kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| crate::settings::auth::open_url(s, crate::settings::connect::T3CHAT_SUBSCRIPTION_URL)),
+        ),
+        None => (
+            "Switch to Tailscale or deregister an environment you no longer use (sorry!)",
+            kit::Button::new("Manage tunnels").variant("outline").size("sm").on_press(|s: &mut App| {
+                complete(s);
+                s.navigate(crate::Route::Settings("connections".into()));
+            }),
+        ),
+    };
+    row()
+        .key("t3-connect-tunnel-limit")
+        .role("alert")
+        .w_full()
+        .px(14.0)
+        .py(12.0)
+        .gap(10.0)
+        .items_start()
+        .radius(12.0)
+        .border(1.0, t.c.warning.alpha_mul(0.32))
+        .fill(t.c.warning_surface)
+        .child(rune::icon(&crate::icons::TRIANGLE_ALERT, 16.0).color(t.c.warning))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text("You're out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground).wrap())
+                .child(text(description).font(theme::TEXT_SM).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
+        )
+        .child(action.build(t))
 }
 
 fn devices_step(s: &App, t: &T) -> El {
@@ -200,7 +256,7 @@ fn steps(ui: &Onboarding, t: &T) -> El {
 pub fn overlay(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(ui) = &s.ui.cloud.onboarding else { return };
     let publish = ui.step == Step::Publish && s.ui.cloud.link.is_some();
-    let content = if publish { publish_step(ui, t) } else { devices_step(s, t) };
+    let content = if publish { publish_step(ui, crate::settings::connect::tunnel_upgrade(s), t) } else { devices_step(s, t) };
     let dont_show = ui.dont_show;
     let buttons = if publish {
         row()
@@ -236,6 +292,15 @@ pub(crate) fn scene(s: &mut App, publish: bool) {
     open(s, "user_1");
 }
 
+/// Scene: Continue refused because the account is at its tunnel cap, whose T3 Chat plan
+/// `upgrade` would raise (`link`, `pro` or `premier`).
+pub(crate) fn scene_tunnel_limit(s: &mut App, upgrade: Option<&'static str>) {
+    scene(s, true);
+    crate::settings::connect::scene_usage(s, upgrade);
+    edit(s, |o| o.applying = true);
+    published(s, Err("https://relay/v1/client/environment-links failed: Limit reached".into()), Some(2));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,11 +330,16 @@ mod tests {
         assert_eq!(take_publish(&mut s), None, "taken once");
         complete(&mut s);
         assert!(s.ui.cloud.onboarding.is_some(), "it stays open while applying");
-        published(&mut s, Err("Relay unavailable".into()));
+        published(&mut s, Err("Relay unavailable".into()), None);
         let ui = s.ui.cloud.onboarding.as_ref().unwrap();
         assert_eq!((ui.step, ui.error.as_deref(), ui.applying), (Step::Publish, Some("Relay unavailable"), false));
         apply(&mut s);
-        published(&mut s, Ok(()));
+        published(&mut s, Err("environment-links failed: Limit reached".into()), Some(2));
+        let ui = s.ui.cloud.onboarding.as_ref().unwrap();
+        assert_eq!((ui.tunnel_limit, ui.error.as_deref()), (Some(2), None), "at the cap the alert replaces the error");
+        apply(&mut s);
+        assert_eq!(s.ui.cloud.onboarding.as_ref().unwrap().tunnel_limit, None);
+        published(&mut s, Ok(()), None);
         assert_eq!(s.ui.cloud.onboarding.as_ref().unwrap().step, Step::Devices);
         assert_eq!(crate::shell::palette::toast_description(&s), Some("This environment is available to your other devices through T3 Connect."));
     }

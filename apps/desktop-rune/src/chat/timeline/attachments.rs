@@ -245,7 +245,7 @@ fn audio_time(seconds: f64) -> String {
 const AUDIO_CHIP_WIDTH: f32 = 256.0;
 
 /// InlineAudioPreview's chip: play or pause, the name (pressed to preview the file), and the
-/// time over a progress fill; "Unavailable" when it can't play (Rune plays audio only on macOS).
+/// time over a progress fill; "Unavailable" when it can't play.
 fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El {
     let name = s(attachment, "name").to_owned();
     let accent = crate::chat::composer::chips::look("file", None).map_or(t.c.info_foreground, |(accent, _)| accent);

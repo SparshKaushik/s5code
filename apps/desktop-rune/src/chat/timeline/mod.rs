@@ -24,6 +24,7 @@ mod history;
 pub(crate) mod md_links;
 mod math;
 mod katex;
+mod inline;
 mod announcer;
 pub(crate) mod citation;
 pub mod media;
