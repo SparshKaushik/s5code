@@ -122,6 +122,9 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
         })
         .flat_map(|v| super::rows::array(v, "attachments").iter().cloned())
         .collect();
+    // A playing clip's time and progress move; the poll's one-second wake redraws them.
+    let playing = app.ui.chat.timeline.assets.ready.values().any(|l| l.player().is_some_and(|p| p.is_audio() && p.is_playing()));
+    let media_changed = media_changed | playing;
     let waker = app.ui.panel.waker.clone();
     let Some(net) = app.src.net() else {
         return media_changed;
@@ -197,6 +200,9 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
         let tile = el().w(240.0).child(media::video(id, name, asset, failed, None, t));
         return media::with_actions(tile, id, &source, false);
     }
+    if kind == Some(Kind::Audio) && attachment["downloadable"] != false {
+        return audio(attachment, asset, app.ui.chat.timeline.assets.failed.contains(id), t);
+    }
     let mut content = if s(attachment, "mimeType").starts_with("image/") {
         let mut frame = el()
             .size(240.0, 180.0)
@@ -228,6 +234,79 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
             });
     }
     content
+}
+
+/// "m:ss".
+fn audio_time(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+const AUDIO_CHIP_WIDTH: f32 = 256.0;
+
+/// InlineAudioPreview's chip: play or pause, the name (pressed to preview the file), and the
+/// time over a progress fill; "Unavailable" when it can't play (Rune plays audio only on macOS).
+fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El {
+    let name = s(attachment, "name").to_owned();
+    let accent = crate::chat::composer::chips::look("file", None).map_or(t.c.info_foreground, |(accent, _)| accent);
+    let player = asset.and_then(Loaded::player).cloned();
+    let failed = failed || asset.is_some_and(Loaded::failed);
+    let state = player.as_ref().map(rune::Player::state);
+    let loading = !failed && matches!(state, None | Some(rune::PlayerState::Loading));
+    let playing = player.as_ref().is_some_and(rune::Player::is_playing);
+    let duration = player.as_ref().and_then(rune::Player::duration).filter(|d| d.is_finite()).unwrap_or(0.0);
+    let elapsed = player.as_ref().map_or(0.0, rune::Player::time);
+    let (action, glyph) = match () {
+        _ if failed => ("Open", &icons::TRIANGLE_ALERT),
+        _ if loading => ("Loading", &icons::LOADER_CIRCLE),
+        _ if playing => ("Pause", &icons::PAUSE),
+        _ => ("Play", &icons::PLAY),
+    };
+    let time = match () {
+        _ if failed => "Unavailable".to_owned(),
+        _ if loading => "...".to_owned(),
+        _ if duration > 0.0 && (elapsed > 0.0 || playing) => format!("{} / {}", audio_time(elapsed), audio_time(duration)),
+        _ if duration > 0.0 => audio_time(duration),
+        _ => audio_time(elapsed),
+    };
+    let url = asset.map(|a| a.url.clone());
+    let preview = |el: El| match url.clone() {
+        Some(url) => el.cursor(rune::Cursor::Pointer).on_press(move |app: &mut App| crate::panel::open_preview(app, &url)),
+        None => el,
+    };
+    let mut button = el()
+        .size(20.0, 20.0)
+        .center()
+        .radius(theme::radius::SM)
+        .role("button")
+        .label(format!("{}{action} {name}", if failed { "Audio unavailable. " } else { "" }))
+        .child(icon(glyph, 12.0).color(accent));
+    button = match (&player, failed, loading) {
+        (_, true, _) => preview(button.focusable(true)),
+        (Some(player), false, false) => {
+            let toggle = player.clone();
+            button.focusable(true).cursor(rune::Cursor::Pointer).hover(accent.alpha(0.15)).on_press(move |_: &mut App| if toggle.is_playing() { toggle.pause() } else { toggle.play() })
+        }
+        _ => button.disabled(true),
+    };
+    let progress = if duration > 0.0 { (elapsed / duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let label = preview(text(name.clone()).font(theme::TEXT_SM).color(t.c.message_foreground).truncate().grow(1.0).shrink().min_w(0.0).label(format!("Preview {name}")));
+    row()
+        .w(AUDIO_CHIP_WIDTH)
+        .h(32.0)
+        .gap(6.0)
+        .pl(6.0)
+        .pr(10.0)
+        .center_y()
+        .radius(theme::radius::LG)
+        .border(1.0, if failed { t.c.destructive.alpha(0.4) } else { accent.alpha(0.3) })
+        .fill(t.c.message_surface)
+        .clip_rounded(theme::radius::LG)
+        .help(if failed { "Audio unavailable. Open the file or retry playback.".to_owned() } else { name })
+        .child(el().pin(Some(0.0), Some(0.0), None, Some(0.0)).w(AUDIO_CHIP_WIDTH * progress).fill(accent.alpha(0.17)))
+        .child(button)
+        .child(label)
+        .child(text(time).font(theme::TEXT_3XS).color(t.c.muted_foreground).shrink().min_w(0.0))
 }
 
 /// UserFileCard: the file's name and size, pressed to preview it in the panel, and Download

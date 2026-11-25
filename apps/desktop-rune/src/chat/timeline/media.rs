@@ -27,6 +27,7 @@ pub const MARKDOWN_DECODE: u32 = 960;
 pub enum Kind {
     Image,
     Video,
+    Audio,
 }
 
 impl Kind {
@@ -34,6 +35,7 @@ impl Kind {
         match self {
             Kind::Image => "image",
             Kind::Video => "video",
+            Kind::Audio => "audio",
         }
     }
 }
@@ -96,9 +98,22 @@ impl Loaded {
                 }
                 loaded.player = Some(player);
             }
+            Some(Kind::Audio) => {
+                let player = Player::audio(loaded.url.clone());
+                if let Some(wake) = waker {
+                    player.set_waker(wake);
+                }
+                // Its length shows before it plays, as web's preload="metadata".
+                player.preload();
+                loaded.player = Some(player);
+            }
             None => {}
         }
         loaded
+    }
+
+    pub fn player(&self) -> Option<&Player> {
+        self.player.as_ref()
     }
 
     /// The picture could not be read, or the video cannot play here.
@@ -239,7 +254,10 @@ pub fn attachment_kind(mime: &str, name: &str) -> Option<Kind> {
         return Some(Kind::Image);
     }
     let generic = mime.is_empty() || mime == "application/octet-stream";
-    (mime.starts_with("video/") || (generic && kind(name) == Some("video"))).then_some(Kind::Video)
+    if mime.starts_with("video/") || (generic && kind(name) == Some("video")) {
+        return Some(Kind::Video);
+    }
+    (mime.starts_with("audio/") || (generic && kind(name) == Some("audio"))).then_some(Kind::Audio)
 }
 
 fn windows_absolute(path: &str) -> bool {
@@ -615,6 +633,8 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
                 };
                 col().w_full().max_w(MAX_SIDE).child(video(&key, &media.name, loaded, failed, original, t))
             }
+            // `resolve` leaves audio with the Markdown text.
+            Kind::Audio => continue,
         };
         out = out.child(with_actions(shown, &key, &media, true));
     }
@@ -870,6 +890,8 @@ mod tests {
         assert_eq!(attachment_kind("video/quicktime", "a.mov"), Some(Kind::Video));
         assert_eq!(attachment_kind("", "a.webm"), Some(Kind::Video));
         assert_eq!(attachment_kind("application/pdf", "a.mp4"), None);
+        assert_eq!(attachment_kind("audio/mpeg", "memo.mp3"), Some(Kind::Audio));
+        assert_eq!(attachment_kind("", "memo.m4a"), Some(Kind::Audio));
         assert_eq!(attachment_kind("image/png", "a.png"), Some(Kind::Image));
     }
 

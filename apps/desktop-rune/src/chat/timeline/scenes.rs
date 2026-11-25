@@ -291,6 +291,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-markdown-alerts", markdown_alerts),
     ("timeline-codex-directives", codex_directives),
     ("timeline-file-card", file_card),
+    ("timeline-audio", audio),
     ("timeline-snapshot", snapshot),
     ("timeline-snapshot-lightbox", snapshot_lightbox),
     ("timeline-lightbox-nav", lightbox_nav),
@@ -326,7 +327,7 @@ fn context_strip(app: &mut App) {
 fn math(app: &mut App) {
     showcase(app);
     app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
-    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size. It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
+    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation](https://example.com/mse)). It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 
@@ -377,6 +378,18 @@ fn file_card(app: &mut App) {
             {"type": "file", "id": "scene-file-unsigned", "name": "trace.json", "mimeType": "application/json", "sizeBytes": 2048}]})]);
     let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
+}
+/// Sent audio: one clip signed (on Linux it can't play, so it reads Unavailable) and one still
+/// signing, under a file card.
+fn audio(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    push_visible(app, vec![json!({"id": "scene-audio", "type": "user_message", "status": "completed", "inputIntent": "turn_start",
+        "text": "Transcribe these voice notes.", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
+            {"type": "file", "id": "scene-audio-signed", "name": "standup-notes.m4a", "mimeType": "audio/mp4", "sizeBytes": 812_000},
+            {"type": "file", "id": "scene-audio-signing", "name": "follow-up.mp3", "mimeType": "audio/mpeg", "sizeBytes": 240_000}]})]);
+    let signed = super::media::Loaded::new("https://example.com/standup-notes.m4a".into(), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
+    app.ui.chat.timeline.assets.ready.insert("scene-audio-signed".into(), signed);
 }
 /// A sent snapshot (SnapShotAttachmentDetails), its accessibility popover open.
 fn snapshot(app: &mut App) {
