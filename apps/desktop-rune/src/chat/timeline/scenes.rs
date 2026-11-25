@@ -330,18 +330,16 @@ fn math(app: &mut App) {
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 
-/// The same formulas once KaTeX typeset them: striped stand-ins of their size, since the render
-/// host has no Chrome; the inline paragraph lays out a word at a time.
+/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph lays
+/// out a word at a time.
 fn math_typeset(app: &mut App) {
     math(app);
-    for (tex, display, size) in [
-        ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false, (118.0, 26.0)),
-        ("n", false, (10.0, 18.0)),
-        ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true, (210.0, 40.0)),
-        ("e^{i\\pi} + 1 = 0", true, (96.0, 22.0)),
-    ] {
-        super::katex::scene_seed(app, tex, display, size);
-    }
+    super::katex::scene_typeset(app, &[
+        ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false),
+        ("n", false),
+        ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true),
+        ("e^{i\\pi} + 1 = 0", true),
+    ]);
 }
 
 /// The lightbox's middle picture zoomed 2x and panned right and down.

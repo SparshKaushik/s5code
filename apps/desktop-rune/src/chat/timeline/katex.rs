@@ -87,7 +87,7 @@ pub struct State {
     pub generation: u64,
     /// The typesetting page's `file:` URL once written; `Err` when it could not be.
     page: Option<Result<String, ()>>,
-    /// Scenes' stand-in pictures by TeX and display, in any ink and size.
+    /// Scenes' pictures by TeX and display, in any ink and size.
     stills: HashMap<(String, bool), (Shot, f32, f32)>,
 }
 
@@ -309,23 +309,32 @@ fn encode_component(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// Scenes: a formula already typeset, drawn here as a striped stand-in of its size since the
-/// render host has no Chrome.
-pub fn scene_seed(app: &mut App, tex: &str, display: bool, (w, h): (f32, f32)) {
-    let shot = Shot::new(String::new(), 0, true);
-    let (pw, ph) = ((w * 2.) as u32, (h * 2.) as u32);
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    for y in ph / 4..ph * 3 / 4 {
-        for x in 0..pw {
-            if (x / 6) % 3 != 2 {
-                let at = ((y * pw + x) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&[0xa1, 0xa1, 0xaa, 0xff]);
-            }
+/// Scenes with Chrome (`S5_CHROME`): typesets each formula for real, waiting here since a
+/// headless run's clock does not wait on Chrome. The pictures then stand for their formula in
+/// any ink and size; without Chrome the formulas stay TeX source and the reason goes to stderr.
+pub fn scene_typeset(app: &mut App, formulas: &[(&str, bool)]) {
+    if app.ui.panel.waker.is_none() {
+        app.ui.panel.waker = Some(std::sync::Arc::new(|| {}));
+    }
+    let ink = theme::theme(app.appearance != crate::Appearance::Light).c.foreground.hex();
+    let size = (theme::TEXT_SM.size * 10.).round() as u32;
+    let keys: Vec<Key> = formulas.iter().map(|(tex, display)| Key { tex: (*tex).to_owned(), display: *display, size, ink: ink.clone() }).collect();
+    app.ui.chat.timeline.katex.wanted.get_mut().extend(keys.iter().cloned());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let waiting = |state: &State| keys.iter().any(|k| matches!(state.entries.get(k), None | Some(Entry::Queued | Entry::Pending(_))));
+    poll(app);
+    while waiting(&app.ui.chat.timeline.katex) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        poll(app);
+    }
+    crate::panel::browser::shutdown();
+    let state = &mut app.ui.chat.timeline.katex;
+    for key in &keys {
+        if let Some(Entry::Ready(shot, w, h)) = state.entries.get(key) {
+            state.stills.insert((key.tex.clone(), key.display), (shot.clone(), *w, *h));
         }
     }
-    shot.pixels.set(pw, ph, rgba);
-    let state = &mut app.ui.chat.timeline.katex;
-    state.stills.insert((tex.to_owned(), display), (shot, w, h));
+    eprintln!("scene: KaTeX typeset {} of {} formulas", state.stills.len(), keys.len());
     state.generation += 1;
 }
 
