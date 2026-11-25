@@ -272,6 +272,7 @@ pub(super) fn view(s: &App, t: &T) -> El {
         rows.push(version_row(s, t));
     }
     rows.extend(crate::desktop::exposure::rows(s, t));
+    rows.extend(super::connect::rows(s, t));
     rows.push(permissions(s, t));
     col()
         .w_full()

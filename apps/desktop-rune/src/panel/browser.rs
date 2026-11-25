@@ -590,6 +590,10 @@ fn launch(profile: &str, scale: f32) -> Result<(Child, String, PathBuf), String>
 }
 
 /// Every Chrome's switches but its folder and scale.
+/// Electron's `ALLOWED_PREVIEW_PERMISSIONS` as CDP names (its `fullscreen` needs no grant here):
+/// notifications, camera, microphone and the rest are denied.
+const PREVIEW_PERMISSIONS: [&str; 4] = ["geolocation", "clipboardSanitizedWrite", "pointerLock", "loopbackNetwork"];
+
 const CHROME_ARGS: [&str; 7] = ["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"];
 
 /// Whether Chrome could show a PDF itself, decided from how it was started rather than from
@@ -785,41 +789,16 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
     let (ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
-    let mut w = Worker {
-        ws,
-        host: host.clone(),
-        next: 0,
-        pending: HashMap::new(),
-        tabs: HashMap::new(),
-        sessions: HashMap::new(),
-        shown: None,
-        viewport: (0., 0., 1.),
-        scale,
-        pressed: false,
-        hovering: false,
-        hover_next: None,
-        recording: None,
-        tracking: None,
-        track_busy: false,
-        downloads: HashMap::new(),
-        agent_downloads: HashMap::new(),
-        crashes: HashMap::new(),
-        native_pdf,
-        snaps: HashMap::new(),
-        snap_next: 0,
-        lives: HashMap::new(),
-        opening: Vec::new(),
-        popups: HashSet::new(),
-        button: "left",
-        modifiers: 0,
-        modified: None,
-        shared,
-        waker,
-    };
+    let mut w = Worker::new(ws, host.clone(), scale, native_pdf, shared, waker);
     w.send(None, "Target.setDiscoverTargets", json!({ "discover": true }), None);
     let dir = downloads_staging();
     let _ = std::fs::create_dir_all(&dir);
     w.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "allowAndName", "downloadPath": dir, "eventsEnabled": true }), None);
+    // A grant denies every permission it leaves out, without a prompt. The short list stands where
+    // an older Chrome refuses a name in the long one, which fails the whole call.
+    for permissions in [&PREVIEW_PERMISSIONS[..2], &PREVIEW_PERMISSIONS[..]] {
+        w.send(None, "Browser.grantPermissions", json!({ "permissions": permissions }), None);
+    }
     for cmd in early {
         w.command(cmd);
     }
@@ -852,6 +831,40 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker, profile: Str
 }
 
 impl Worker {
+    fn new(ws: WebSocket<TcpStream>, host: String, scale: f32, native_pdf: Option<bool>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Worker {
+        Worker {
+            ws,
+            host,
+            next: 0,
+            pending: HashMap::new(),
+            tabs: HashMap::new(),
+            sessions: HashMap::new(),
+            shown: None,
+            viewport: (0., 0., 1.),
+            scale,
+            pressed: false,
+            hovering: false,
+            hover_next: None,
+            recording: None,
+            tracking: None,
+            track_busy: false,
+            downloads: HashMap::new(),
+            agent_downloads: HashMap::new(),
+            crashes: HashMap::new(),
+            native_pdf,
+            snaps: HashMap::new(),
+            snap_next: 0,
+            lives: HashMap::new(),
+            opening: Vec::new(),
+            popups: HashSet::new(),
+            button: "left",
+            modifiers: 0,
+            modified: None,
+            shared,
+            waker,
+        }
+    }
+
     fn send(&mut self, session: Option<&str>, method: &str, params: Value, reply: Option<Reply>) {
         self.next += 1;
         let mut msg = json!({ "id": self.next, "method": method, "params": params });
@@ -889,11 +902,8 @@ impl Worker {
         }
     }
 
-    /// Without Chrome's own viewer, a PDF page's response is replaced with the bundled one.
-    fn pdf_viewer(&mut self, session: &str, native: bool) {
-        if !native {
-            self.send(Some(session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*.pdf*", "resourceType": "Document", "requestStage": "Response" }] }), None);
-        }
+    fn intercept(&mut self, session: &str, native: bool) {
+        self.send(Some(session), "Fetch.enable", json!({ "patterns": intercepted(native), "handleAuthRequests": true }), None);
     }
 
     fn metrics(&mut self, tab: TabId) {
@@ -1528,7 +1538,10 @@ impl Worker {
                 }
             }
             "Runtime.bindingCalled" if p["name"] == "__s5Page" => {
-                if let Some(event) = page_message(tab, p["payload"].as_str().unwrap_or_default()) {
+                let payload = p["payload"].as_str().unwrap_or_default();
+                if let Some(title) = page_title(payload) {
+                    self.update(tab, |s| s.title = title);
+                } else if let Some(event) = page_message(tab, payload) {
                     self.event(event);
                 }
             }
@@ -1548,6 +1561,11 @@ impl Worker {
                     self.send(Some(&session), "Fetch.continueRequest", json!({ "requestId": p["requestId"] }), None);
                 }
             }
+            // Electron with no `login` handler cancels a sign-in, so the server's own 401 page shows.
+            "Fetch.authRequired" => {
+                let session = v["sessionId"].as_str().unwrap_or_default().to_string();
+                self.send(Some(&session), "Fetch.continueWithAuth", json!({ "requestId": p["requestId"], "authChallengeResponse": { "response": "CancelAuth" } }), None);
+            }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.windowOpen" => {
                 let features: Vec<&str> = p["windowFeatures"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -1562,6 +1580,12 @@ impl Worker {
                 self.history(tab);
                 if method == "Page.loadEventFired" {
                     self.call(tab, "Runtime.evaluate", json!({ "expression": FAVICON_JS, "returnByValue": true }), Some(Reply::Favicon(tab)));
+                    // Chrome 158's screencast can miss a new document until it restarts (a popup
+                    // attached before its page, a PDF's viewer), so a shown page that loads
+                    // restarts it, as switching tabs does, and paints its frame at once.
+                    if self.shown == Some(tab) {
+                        self.screencast(tab);
+                    }
                 }
             }
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
@@ -1733,10 +1757,12 @@ impl Worker {
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
                 self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Page" }), None);
                 self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": PAGE_JS, "runImmediately": true }), None);
+                // Headless has no location provider: a granted position fails at once, not never.
+                self.send(Some(&session), "Emulation.setGeolocationOverride", json!({}), None);
                 // A Chrome with its own PDF viewer shows PDFs itself; the headless shell has none,
                 // so there a PDF page arrives as the bundled pdf.js.
                 match self.native_pdf {
-                    Some(native) => self.pdf_viewer(&session, native),
+                    Some(native) => self.intercept(&session, native),
                     None => self.send(Some(&session), "Runtime.evaluate", json!({ "expression": "navigator.pdfViewerEnabled === true", "returnByValue": true }), Some(Reply::PdfViewer(session.clone()))),
                 }
                 self.metrics(tab);
@@ -1933,7 +1959,7 @@ impl Worker {
             Reply::PdfViewer(session) => {
                 let native = r["result"]["value"].as_bool().unwrap_or(false);
                 self.native_pdf = Some(native);
-                self.pdf_viewer(&session, native);
+                self.intercept(&session, native);
             }
             Reply::Enclosed(tab, rect) => {
                 let elements = r["result"]["value"].as_str().and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok()).unwrap_or_default();
@@ -2361,8 +2387,18 @@ const MARKS_JS: &str = r##"window.__s5Marks = window.__s5Marks || (() => {
 })()"##;
 
 /// Whether a paused response is a PDF, by its `Content-Type`.
+/// The document requests paused: each one's request, so a server's sign-in challenge reaches
+/// `Fetch.authRequired`, and without Chrome's own viewer each response, whatever its address, so
+/// a PDF's can be replaced with the bundled one.
+fn intercepted(native_pdf: bool) -> Value {
+    let stage = |stage: &str| json!({ "urlPattern": "*", "resourceType": "Document", "requestStage": stage });
+    Value::Array(if native_pdf { vec![stage("Request")] } else { vec![stage("Request"), stage("Response")] })
+}
+
+/// A PDF shown inline; one sent as an attachment downloads, as Chrome's viewer leaves it.
 fn pdf_response(headers: &Value) -> bool {
-    headers.as_array().into_iter().flatten().any(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("content-type")) && h["value"].as_str().is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("application/pdf")))
+    let header = |name: &str| headers.as_array().into_iter().flatten().find(|h| h["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))).and_then(|h| h["value"].as_str()).map(|v| v.trim().to_ascii_lowercase());
+    header("content-type").is_some_and(|v| v.starts_with("application/pdf")) && !header("content-disposition").is_some_and(|v| v.starts_with("attachment"))
 }
 
 /// The page a PDF shows as, at the PDF's own address: pdf.js draws each page, fetching the
@@ -2384,13 +2420,19 @@ const PDF_VIEWER: &str = r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{title}</title>
 <style>
 html,body{margin:0;background:#525659;color:#fff;font:13px system-ui,sans-serif}
+#bar{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:12px;height:40px;padding:0 12px;background:#323639;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+#name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#count{color:#c8c8c8}
+#save{font:inherit;color:#fff;background:transparent;border:1px solid #5f6368;border-radius:4px;padding:4px 10px;cursor:pointer}
+#save:hover{background:#45484b}
 #pages{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
 canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;height:auto!important}
 #status{padding:16px;text-align:center}
 </style>
 <script>{pdfjs}</script>
 <script type="text/plain" id="pdfjs-worker">{worker}</script>
-</head><body><div id="status">Loading PDF…</div><div id="pages"></div>
+</head><body><div id="bar"><span id="name">{title}</span><span id="count"></span><button id="save" hidden>Download</button></div>
+<div id="status">Loading PDF…</div><div id="pages"></div>
 <script>
 (async () => {
   const status = document.getElementById("status");
@@ -2401,6 +2443,16 @@ canvas{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.45);max-width:100%;heigh
   try {
     const doc = await lib.getDocument({ url: location.href, withCredentials: true }).promise;
     status.remove();
+    document.getElementById("count").textContent = doc.numPages === 1 ? "1 page" : doc.numPages + " pages";
+    // The bytes pdf.js holds, as a blob: fetching the address again would get this page.
+    const save = document.getElementById("save");
+    save.hidden = false;
+    save.onclick = async () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([await doc.getData()], { type: "application/pdf" }));
+      a.download = /\.pdf$/i.test(document.title) ? document.title : (document.title || "document") + ".pdf";
+      a.click();
+    };
     const pages = document.getElementById("pages");
     const ratio = window.devicePixelRatio || 1;
     for (let n = 1; n <= doc.numPages; n++) {
@@ -2435,6 +2487,12 @@ fn page_message(tab: TabId, payload: &str) -> Option<Event> {
     }
 }
 
+/// A title the page set after loading, which the headless shell never reports itself.
+fn page_title(payload: &str) -> Option<String> {
+    let m: Value = serde_json::from_str(payload).ok()?;
+    (m["kind"] == "title").then(|| m["title"].as_str().map(|t| t.trim().chars().take(512).collect()))?
+}
+
 /// Electron's clipboard and external-protocol hooks, which the headless shell lacks: copies
 /// reach the system clipboard, reads ask first, and links to other applications are confirmed.
 const PAGE_JS: &str = r#"(() => {
@@ -2467,6 +2525,12 @@ const PAGE_JS: &str = r#"(() => {
   for (const type of ["copy", "cut"]) {
     addEventListener(type, () => { set = null; }, true);
     addEventListener(type, (e) => { const text = e.defaultPrevented ? set : String(getSelection() || ""); if (text) send({ kind: "copy", text }); });
+  }
+  // Electron's page-title-updated: the headless shell sends no title change, so the page does.
+  if (window === top) {
+    let title = null;
+    const report = () => { if (document.title !== title) { title = document.title; send({ kind: "title", title }); } };
+    new MutationObserver(report).observe(document, { subtree: true, childList: true, characterData: true });
   }
   // Electron's window-open handler returns no window for a scheme it denies or keeps in place.
   const open = window.open;
@@ -2768,6 +2832,48 @@ mod tests {
         }
     }
 
+    /// A worker on a fake DevTools socket: what it sends comes back once it drops.
+    fn fake_chrome(test: impl FnOnce(&mut Worker)) -> Vec<Value> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let chrome = std::thread::spawn(move || {
+            let mut ws = tungstenite::accept(listener.accept().unwrap().0).unwrap();
+            let mut sent = Vec::new();
+            while let Ok(Message::Text(text)) = ws.read() {
+                sent.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            sent
+        });
+        let url = format!("ws://{addr}/devtools/browser/x");
+        let (ws, _) = tungstenite::client(url.as_str(), TcpStream::connect(addr).unwrap()).unwrap();
+        let mut worker = Worker::new(ws, addr.to_string(), 1., Some(false), Arc::default(), Arc::new(|| {}));
+        test(&mut worker);
+        drop(worker);
+        chrome.join().unwrap()
+    }
+
+    #[test]
+    fn a_shown_page_that_loads_restarts_its_screencast() {
+        let sent = fake_chrome(|w| {
+            w.viewport = (539., 731., 1.);
+            for (tab, session) in [(1, "shown"), (2, "hidden")] {
+                w.tabs.insert(tab, Tab { pixels: Some(Pixels::new()), zoom: 1., session: Some(session.into()), target: Some(format!("t{tab}")), ..Default::default() });
+                w.sessions.insert(session.into(), tab);
+            }
+            w.shown = Some(1);
+            // An adopted popup, or a PDF's viewer, finishing its load in each tab.
+            for session in ["shown", "hidden"] {
+                w.message(json!({ "method": "Page.loadEventFired", "sessionId": session, "params": {} }));
+            }
+        });
+        let calls = |session: &str| sent.iter().filter(|m| m["sessionId"] == session).map(|m| m["method"].as_str().unwrap_or_default().to_owned()).collect::<Vec<_>>();
+        let shown = calls("shown");
+        let at = shown.iter().position(|m| m == "Page.startScreencast").expect("the shown page's screencast restarts");
+        assert_eq!(shown[at - 1], "Page.stopScreencast");
+        assert_eq!(shown[at + 1], "Page.captureScreenshot");
+        assert!(!calls("hidden").iter().any(|m| m.contains("Screencast") || m == "Page.captureScreenshot"));
+    }
+
     #[test]
     fn an_inline_shot_fits_its_page_within_its_caps() {
         // htmlRenderFrameHeight's live fit: at least 80, whole pixels up.
@@ -2797,6 +2903,10 @@ mod tests {
     fn the_page_script_reports_copies_reads_and_links_to_other_apps() {
         assert!(matches!(page_message(1, r#"{"kind":"copy","text":"npm i"}"#), Some(Event::Clipboard(t)) if t == "npm i"));
         assert!(page_message(1, r#"{"kind":"copy","text":""}"#).is_none());
+        // A title set after load reaches the tab; it is no event of its own.
+        assert_eq!(page_title(r#"{"kind":"title","title":"  Inbox (3) "}"#).as_deref(), Some("Inbox (3)"));
+        assert_eq!(page_title(r#"{"kind":"copy","text":"x"}"#), None);
+        assert!(page_message(1, r#"{"kind":"title","title":"Inbox"}"#).is_none());
         assert!(matches!(page_message(2, r#"{"kind":"read","id":7,"origin":"http://localhost:5173"}"#), Some(Event::ClipboardRead { tab: 2, id: 7, origin }) if origin == "http://localhost:5173"));
         assert!(page_message(2, r#"{"kind":"read","id":7,"origin":"null"}"#).is_none(), "an opaque origin is refused, as Electron does");
         assert!(matches!(page_message(3, r#"{"kind":"external","url":"mailto:dev@example.com"}"#), Some(Event::External { tab: 3, url }) if url == "mailto:dev@example.com"));
@@ -2889,6 +2999,13 @@ mod tests {
         assert!(pdf_response(&pdf));
         assert!(!pdf_response(&json!([{ "name": "Content-Type", "value": "text/html" }])));
         assert!(!pdf_response(&Value::Null));
+        // An attachment downloads instead; any address is looked at, not only `.pdf` ones.
+        let attachment = json!([{ "name": "Content-Type", "value": "application/pdf" }, { "name": "content-disposition", "value": " Attachment; filename=a.pdf" }]);
+        assert!(!pdf_response(&attachment));
+        assert!(pdf_response(&json!([{ "name": "Content-Type", "value": "application/pdf" }, { "name": "Content-Disposition", "value": "inline" }])));
+        assert_eq!(intercepted(false)[1], json!({ "urlPattern": "*", "resourceType": "Document", "requestStage": "Response" }));
+        // Every document request pauses, so sign-in challenges reach `Fetch.authRequired`.
+        assert_eq!(intercepted(true), json!([{ "urlPattern": "*", "resourceType": "Document", "requestStage": "Request" }]));
         let page = pdf_viewer("http://127.0.0.1:3773/api/assets/abc/My%20%3Cplan%3E.pdf?x=1");
         assert!(page.contains("<title>My &lt;plan&gt;.pdf</title>"), "{page}");
         assert!(page.contains("getDocument({ url: location.href"));

@@ -53,6 +53,8 @@ pub struct Ui {
     pub custom: TextEdit,
     pub adding: bool,
     pub error: Option<String>,
+    /// `server.updateSettings` requests that save one instance, which fail with their own toast.
+    pub upserts: std::collections::HashSet<u64>,
     pub env_draft: Option<EnvDraft>,
     /// `(instance id, reset)` awaiting the remove or reset confirmation.
     pub confirm: Option<(String, bool)>,
@@ -190,7 +192,9 @@ fn upsert_payload(id: &str, instance: Value, patch: Value) -> Value {
 }
 
 fn upsert(s: &mut App, id: &str, instance: Value, patch: Value) {
-    request(s, "server.updateSettings", upsert_payload(id, instance, patch));
+    if let Some(reply) = super::request_id(s, "server.updateSettings", upsert_payload(id, instance, patch)) {
+        s.ui.settings.providers_ui.upserts.insert(reply);
+    }
 }
 
 /// Folds what `request` sends beyond a plain patch into the optimistic settings copy.
@@ -707,6 +711,11 @@ pub(super) fn scene_custom_model(s: &mut App, slug: &str, open: usize) {
     let id = s.ui.settings.provider.clone().unwrap_or_default();
     custom_models::toggle(s, &id, slug);
     custom_models::scene_open_preset(s, open);
+}
+
+/// Scenes: the open custom model editor's "Copy from…" list.
+pub(super) fn scene_copy_from(s: &mut App) {
+    custom_models::scene_open_copy(s);
 }
 
 /// Whether this session may add, edit, or remove provider instances.

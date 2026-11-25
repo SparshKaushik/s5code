@@ -11,6 +11,11 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_os = "macos"))]
+mod mp4;
+#[cfg(not(target_os = "macos"))]
+mod soft;
+
 const IMAGE_EXTENSIONS: [&str; 13] = ["avif", "bmp", "gif", "ico", "heic", "heif", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"];
 const VIDEO_EXTENSIONS: [&str; 7] = ["avi", "m4v", "mkv", "mov", "mp4", "ogv", "webm"];
 const AUDIO_EXTENSIONS: [&str; 11] = ["mp3", "wav", "ogg", "oga", "flac", "aac", "m4a", "opus", "aiff", "webm-audio", "weba"];
@@ -27,6 +32,7 @@ pub const MARKDOWN_DECODE: u32 = 960;
 pub enum Kind {
     Image,
     Video,
+    Audio,
 }
 
 impl Kind {
@@ -34,6 +40,7 @@ impl Kind {
         match self {
             Kind::Image => "image",
             Kind::Video => "video",
+            Kind::Audio => "audio",
         }
     }
 }
@@ -70,12 +77,24 @@ pub struct Loaded {
     pub pixels: Pixels,
     broken: Arc<AtomicBool>,
     player: Option<Player>,
+    /// Off macOS, where Rune's player can't play: MP4 and QuickTime H.264, decoded here.
+    #[cfg(not(target_os = "macos"))]
+    soft: Option<soft::SoftPlayer>,
 }
 
 impl Loaded {
     /// `side`: the longest side a picture decodes to.
     pub fn new(url: String, name: String, kind: Option<Kind>, side: u32, waker: Option<rune::Waker>) -> Self {
-        let mut loaded = Self { url, name, kind, pixels: Pixels::new(), broken: Arc::default(), player: None };
+        let mut loaded = Self {
+            url,
+            name,
+            kind,
+            pixels: Pixels::new(),
+            broken: Arc::default(),
+            player: None,
+            #[cfg(not(target_os = "macos"))]
+            soft: None,
+        };
         match kind {
             Some(Kind::Image) => {
                 let (url, pixels, broken) = (loaded.url.clone(), loaded.pixels.clone(), loaded.broken.clone());
@@ -89,6 +108,9 @@ impl Loaded {
                     }
                 });
             }
+            #[cfg(not(target_os = "macos"))]
+            Some(Kind::Video) => loaded.soft = Some(soft::SoftPlayer::url(loaded.url.clone(), waker)),
+            #[cfg(target_os = "macos")]
             Some(Kind::Video) => {
                 let player = Player::url(loaded.url.clone());
                 if let Some(wake) = waker {
@@ -96,20 +118,39 @@ impl Loaded {
                 }
                 loaded.player = Some(player);
             }
+            Some(Kind::Audio) => {
+                let player = Player::audio(loaded.url.clone());
+                if let Some(wake) = waker {
+                    player.set_waker(wake);
+                }
+                // Its length shows before it plays, as web's preload="metadata".
+                player.preload();
+                loaded.player = Some(player);
+            }
             None => {}
         }
         loaded
     }
 
+    pub fn player(&self) -> Option<&Player> {
+        self.player.as_ref()
+    }
+
     /// The picture could not be read, or the video cannot play here.
     pub fn failed(&self) -> bool {
-        self.broken.load(Ordering::Relaxed) || self.player.as_ref().is_some_and(|p| matches!(p.state(), PlayerState::Failed(_)))
+        #[cfg(not(target_os = "macos"))]
+        let soft = self.soft.as_ref().is_some_and(|p| matches!(p.status(), soft::Status::Failed(_)));
+        #[cfg(target_os = "macos")]
+        let soft = false;
+        soft || self.broken.load(Ordering::Relaxed) || self.player.as_ref().is_some_and(|p| matches!(p.state(), PlayerState::Failed(_)))
     }
 
 
     /// What a memoized view of this media reads, so it rebuilds when it changes.
     fn stamp(&self) -> String {
         let player = self.player.as_ref().map(|p| format!("{:?}{}{:?}", p.state(), p.is_playing(), p.natural_size()));
+        #[cfg(not(target_os = "macos"))]
+        let player = player.or_else(|| self.soft.as_ref().map(|p| format!("{:?}{}{:?}", p.status(), p.is_playing(), p.natural_size())));
         format!("{}:{:?}:{player:?}", self.failed(), self.pixels.size())
     }
 }
@@ -194,7 +235,7 @@ fn get(url: &str) -> Result<ureq::Response, String> {
 }
 
 /// `downloadMedia`, to a path the save dialog picked; a video streams to disk.
-fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
     if url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
         return std::fs::write(path, fetch(url)?).map_err(|e| e.to_string());
     }
@@ -239,7 +280,10 @@ pub fn attachment_kind(mime: &str, name: &str) -> Option<Kind> {
         return Some(Kind::Image);
     }
     let generic = mime.is_empty() || mime == "application/octet-stream";
-    (mime.starts_with("video/") || (generic && kind(name) == Some("video"))).then_some(Kind::Video)
+    if mime.starts_with("video/") || (generic && kind(name) == Some("video")) {
+        return Some(Kind::Video);
+    }
+    (mime.starts_with("audio/") || (generic && kind(name) == Some("audio"))).then_some(Kind::Audio)
 }
 
 fn windows_absolute(path: &str) -> bool {
@@ -398,15 +442,17 @@ pub fn actions(media: &Media, available: bool) -> Vec<(Action, String, bool)> {
     items
 }
 
+/// An asset is signed by `env`'s server (the active one when `None`); a pull request's host media
+/// falls back to its own URL when that fails or can't be asked, as web's assets do.
 #[derive(Clone)]
 enum Access {
     Direct(String),
-    Asset(Value),
+    Asset { resource: Value, env: Option<String>, fallback: Option<String> },
 }
 
 struct Entry {
     media: Media,
-    request: Option<u64>,
+    request: Option<(u64, Option<String>, Option<String>)>,
     loaded: Option<Loaded>,
     failed: bool,
 }
@@ -432,43 +478,54 @@ impl State {
     }
 }
 
+fn net_for<'a>(app: &'a mut App, env: Option<&str>) -> Option<&'a mut s5_net::Net> {
+    match env {
+        Some(env) => crate::env::net_of(app, env),
+        None => app.src.net(),
+    }
+}
+
 /// Starts loading the media views asked for, folds in signed URLs, and copies the images read.
 /// Called from `attachments::poll`.
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let waker = app.ui.panel.waker.clone();
     let wanted = std::mem::take(app.ui.chat.timeline.assets.media.wanted.get_mut());
-    let mut net = app.src.net();
-    let state = &mut app.ui.chat.timeline.assets.media;
     let mut changed = false;
     for (key, media, access) in wanted {
-        if state.entries.contains_key(&key) {
+        if app.ui.chat.timeline.assets.media.entries.contains_key(&key) {
             continue;
         }
         let mut entry = Entry { media, request: None, loaded: None, failed: false };
         match access {
             Access::Direct(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
-            Access::Asset(resource) => match net.as_deref_mut() {
-                Some(net) => entry.request = Some(net.request("assets.createUrl", json!({ "resource": resource }))),
-                None => entry.failed = true,
+            Access::Asset { resource, env, fallback } => match (net_for(app, env.as_deref()), fallback) {
+                (Some(net), fallback) => entry.request = Some((net.request("assets.createUrl", json!({ "resource": resource })), env, fallback)),
+                (None, Some(url)) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
+                (None, None) => entry.failed = true,
             },
         }
-        state.entries.insert(key, entry);
+        app.ui.chat.timeline.assets.media.entries.insert(key, entry);
         changed = true;
     }
-    if let Some(net) = net {
-        for entry in state.entries.values_mut() {
-            let Some(reply) = entry.request.and_then(|id| net.take_reply(id)) else { continue };
-            entry.request = None;
-            changed = true;
-            match reply {
-                Ok(reply) => {
-                    let url = format!("{}{}", net.base_url().trim_end_matches('/'), s(&reply, "relativeUrl"));
-                    entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone()));
-                }
-                Err(_) => entry.failed = true,
-            }
+    let pending: Vec<(String, u64, Option<String>)> =
+        app.ui.chat.timeline.assets.media.entries.iter().filter_map(|(k, e)| e.request.as_ref().map(|(id, env, _)| (k.clone(), *id, env.clone()))).collect();
+    for (key, id, env) in pending {
+        let Some(net) = net_for(app, env.as_deref()) else { continue };
+        let Some(reply) = net.take_reply(id) else { continue };
+        let base = net.base_url().trim_end_matches('/').to_owned();
+        let Some(entry) = app.ui.chat.timeline.assets.media.entries.get_mut(&key) else { continue };
+        let fallback = entry.request.take().and_then(|(_, _, fallback)| fallback);
+        changed = true;
+        let url = match reply {
+            Ok(reply) => Some(format!("{base}{}", s(&reply, "relativeUrl"))),
+            Err(_) => fallback,
+        };
+        match url {
+            Some(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
+            None => entry.failed = true,
         }
     }
+    let state = &mut app.ui.chat.timeline.assets.media;
     let errors = state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
     let copied = state.copied.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
     for (title, description) in errors {
@@ -530,7 +587,7 @@ fn retry(app: &mut App, key: &str) {
 }
 
 /// The `![alt](src)` images of a paragraph holding nothing else.
-fn images(block: &str) -> Option<Vec<(String, String)>> {
+pub fn images(block: &str) -> Option<Vec<(String, String)>> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut out = Vec::new();
     let mut open: Option<(String, String)> = None;
@@ -579,7 +636,7 @@ fn resolve(alt: &str, src: &str, root: Option<&str>, thread: Option<&str>) -> Op
                 Reference::Url(_) => None,
             };
             let resource = json!({"_tag": "media-file", "threadId": thread, "path": path});
-            (format!("media:{thread}:{path}"), Media { kind, name: alt.to_owned(), reference: Some(reference), open_file }, Access::Asset(resource))
+            (format!("media:{thread}:{path}"), Media { kind, name: alt.to_owned(), reference: Some(reference), open_file }, Access::Asset { resource, env: None, fallback: None })
         }
     })
 }
@@ -600,7 +657,7 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
     let mut out = col().w_full().gap(8.0);
     for (key, media, access) in resolved {
         let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
-        let framed = matches!(access, Access::Asset(_));
+        let framed = matches!(access, Access::Asset { .. });
         if entry.is_none() {
             want(app, &key, &media, access);
         }
@@ -615,10 +672,46 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
                 };
                 col().w_full().max_w(MAX_SIDE).child(video(&key, &media.name, loaded, failed, original, t))
             }
+            // `resolve` leaves audio with the Markdown text.
+            Kind::Audio => continue,
         };
         out = out.child(with_actions(shown, &key, &media, true));
     }
     Some(out)
+}
+
+/// ChatMarkdownImage in prose, which web draws inline-block: a paragraph of words and images as
+/// one text, once each image has loaded. Until then, or when one can't load, rune_kit's
+/// Markdown draws it.
+pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t: &T) -> Option<El> {
+    if !block.contains("![") {
+        return None;
+    }
+    let root = super::workspace_root(app);
+    let thread = match app.frame_route() {
+        Route::Thread(id) => Some(id.clone()),
+        _ => None,
+    };
+    let image = |alt: &str, src: &str| {
+        let (key, media, access) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
+        if media.kind != Kind::Image {
+            return None;
+        }
+        let Some(entry) = app.ui.chat.timeline.assets.media.entries.get(&key) else {
+            want(app, &key, &media, access);
+            return None;
+        };
+        let loaded = entry.loaded.as_ref().filter(|l| !entry.failed && !l.failed())?;
+        let (w, h) = loaded.pixels.size();
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let ratio = w as f32 / h as f32;
+        let width = (w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio);
+        let label = alt.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, width / ratio], copy: format!("![{label}]({src})"), open: Some(key) })
+    };
+    super::inline::paragraph(block, Vec::new(), &image, font, ink, t)
 }
 
 /// `ChatMarkdownImage` standalone: the picture at its size within 30rem, a muted frame while it
@@ -660,8 +753,8 @@ fn unavailable_label(what: &str, alt: &str, font: rune::TextStyle, t: &T) -> El 
         .child(text(label).font(font).color(t.c.muted_foreground).shrink().min_w(0.0))
 }
 
-/// MediaVideoPlayer: the video, pressed to play or pause. One that can't play (Rune plays video
-/// only on macOS) shows web's failure card: Retry video, and Open in browser for a web URL.
+/// MediaVideoPlayer: the video, pressed to play or pause. One that can't play (off macOS, all but
+/// MP4 and QuickTime H.264) shows web's failure card: Retry video, and Open in browser for a web URL.
 pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, original: Option<&str>, t: &T) -> El {
     if failed || loaded.is_some_and(Loaded::failed) {
         let src = loaded.map(|l| l.url.as_str());
@@ -693,64 +786,77 @@ pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, orig
             .child(unavailable_label("Video unavailable", label, theme::TEXT_SM, t))
             .child(buttons);
     }
-    let Some(player) = loaded.and_then(|l| l.player.clone()) else {
-        return el().w_full().aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading video");
-    };
-    let (w, h) = player.natural_size().unwrap_or((16, 9));
-    let playing = player.is_playing();
+    let loading = || el().w_full().aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading video");
+    #[cfg(not(target_os = "macos"))]
+    if let Some(player) = loaded.and_then(|l| l.soft.clone()) {
+        let Some(size) = player.natural_size() else { return loading() };
+        let playing = player.is_playing();
+        let surface = el().fill(Color::BLACK).pixels_fit(player.pixels(), SurfaceFit::Fit);
+        return player_frame(surface, size, playing, label).on_press(move |_: &mut App| if player.is_playing() { player.pause() } else { player.play() });
+    }
+    let Some(player) = loaded.and_then(|l| l.player.clone()) else { return loading() };
+    let size = player.natural_size().unwrap_or((16, 9));
+    let surface = el().fill(Color::BLACK).video(&player, SurfaceFit::Fit);
+    player_frame(surface, size, player.is_playing(), label).on_press(move |_: &mut App| if player.is_playing() { player.pause() } else { player.play() })
+}
+
+/// The video's frame at its aspect ratio, pressed to play or pause, with a play badge while paused.
+fn player_frame(surface: El, (w, h): (u32, u32), playing: bool, label: &str) -> El {
     let name = if label.trim().is_empty() { "Play video".to_owned() } else { format!("Play {label}") };
-    let toggle = player.clone();
-    let mut shown = el()
+    let mut shown = surface
         .w_full()
         .aspect_ratio(w as f32 / h.max(1) as f32)
         .radius(8.0)
         .clip_rounded(8.0)
-        .fill(Color::BLACK)
-        .video(&player, SurfaceFit::Fit)
         .center()
         .focusable(true)
         .role("button")
         .cursor(rune::Cursor::Pointer)
-        .label(if playing { "Pause video".to_owned() } else { name })
-        .on_press(move |_: &mut App| if toggle.is_playing() { toggle.pause() } else { toggle.play() });
+        .label(if playing { "Pause video".to_owned() } else { name });
     if !playing {
         shown = shown.child(el().size(32.0, 32.0).center().radius(theme::radius::FULL).fill(Color::BLACK.alpha(0.5)).child(icon(&icons::PLAY, 16.0).color(Color::WHITE)));
     }
     shown
 }
 
-/// A pull request's linked picture or video (PullRequestMarkdown). `host` is the cwd and fetch URL
-/// of media its host keeps behind a credential, read through the server. Chat's lightbox and
-/// actions menu aren't drawn on the pull request pages, so a picture opens its URL instead.
-pub fn linked(app: &App, url: &str, kind: Kind, host: Option<(&str, &str)>, t: &T) -> El {
-    let name = if kind == Kind::Video { "Pull request video" } else { "" };
+/// Where a pull request's media is read when its host keeps it behind a credential: `fetch`
+/// through `env`'s server, with the credential it holds for the checkout at `cwd`.
+pub struct Host<'a> {
+    pub env: &'a str,
+    pub cwd: &'a str,
+    pub fetch: &'a str,
+}
+
+/// The entry `linked` files a URL under, for the lightbox's gallery.
+pub fn linked_key(url: &str, host: Option<&Host>) -> String {
+    match host {
+        Some(h) => format!("media:{}:{}:{}", h.env, h.cwd, h.fetch),
+        None => format!("media:{url}"),
+    }
+}
+
+/// A pull request's linked picture or video (PullRequestMarkdown): a picture opens in the
+/// lightbox among `gallery`, the body's other pictures.
+pub fn linked(app: &App, url: &str, name: &str, kind: Kind, host: Option<&Host>, gallery: &[String], t: &T) -> El {
+    let name = if kind == Kind::Video && name.trim().is_empty() { "Pull request video" } else { name };
     let media = Media { kind, name: name.to_owned(), reference: url_reference(url), open_file: None };
-    let (key, access) = match host {
-        Some((cwd, fetch)) => (format!("media:{cwd}:{fetch}"), Access::Asset(json!({"_tag": "github-media", "cwd": cwd, "url": fetch}))),
-        None => (format!("media:{url}"), Access::Direct(url.to_owned())),
+    let key = linked_key(url, host);
+    let access = match host {
+        Some(h) => Access::Asset { resource: json!({"_tag": "github-media", "cwd": h.cwd, "url": h.fetch}), env: Some(h.env.to_owned()), fallback: Some(h.fetch.to_owned()) },
+        None => Access::Direct(url.to_owned()),
     };
     let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
     if entry.is_none() {
         want(app, &key, &media, access);
     }
     let loaded = entry.and_then(|e| e.loaded.as_ref());
-    let failed = entry.is_some_and(|e| e.failed) || loaded.is_some_and(Loaded::failed);
-    if kind == Kind::Video {
-        return col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)).help(url.to_owned());
-    }
-    let size = loaded.map(|l| l.pixels.size()).filter(|(w, h)| *w > 0 && *h > 0);
-    let shown = match (loaded, size) {
-        _ if failed => col().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).center().padding(8.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("alert").child(unavailable_label("Image unavailable", "", theme::TEXT_XS, t)),
-        (Some(loaded), Some((w, h))) => {
-            let ratio = w as f32 / h as f32;
-            el().w_full().max_w((w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio)).aspect_ratio(ratio).pixels_fit(&loaded.pixels, SurfaceFit::Fit)
-        }
-        _ => return el().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading image"),
+    let failed = entry.is_some_and(|e| e.failed);
+    let shown = match kind {
+        // Pull requests only link pictures and videos; the player also plays sound.
+        Kind::Video | Kind::Audio => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
+        Kind::Image => picture(&key, &media, loaded, failed, false, gallery, t),
     };
-    let open = url.to_owned();
-    shown.focusable(true).role("link").cursor(rune::Cursor::Pointer).label("Open image").help(url.to_owned()).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-        let _ = tx.open_url(&open);
-    })
+    with_actions(shown, &key, &media, true)
 }
 
 /// MediaActions' trigger: the source as a tooltip, and right-click for the actions.
@@ -878,20 +984,92 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
         _ => None,
     };
     let (key, media, _) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
-    let loaded = (!failed).then(|| {
-        let loaded = Loaded::new(String::new(), media.name.clone(), None, MARKDOWN_DECODE, None);
-        let (w, h) = (640u32, 360u32);
-        let rgba = (0..w * h).flat_map(|i| if (i % w / 40 + i / w / 40) % 2 == 0 { [96, 125, 180, 255] } else { [140, 170, 220, 255] }).collect();
-        loaded.pixels.set(w, h, rgba);
-        Loaded { kind: Some(media.kind), ..loaded }
-    });
+    let loaded = (!failed).then(|| scene_loaded(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.clone(), Entry { media, request: None, loaded, failed });
     Some(key)
+}
+
+/// Scenes: a pull request's linked media under `key` (`linked_key`), drawn without loading; a
+/// video is a clip made here, where it can play.
+pub fn scene_linked(app: &mut App, key: &str, name: &str, kind: Kind, failed: bool) {
+    let media = Media { kind, name: name.to_owned(), reference: None, open_file: None };
+    let loaded = (!failed).then(|| scene_loaded(&media));
+    app.ui.chat.timeline.assets.media.entries.insert(key.to_owned(), Entry { media, request: None, loaded, failed });
+}
+
+/// Scenes: the lightbox open on the first of `gallery`.
+pub fn scene_open(app: &mut App, gallery: Vec<String>) {
+    let assets = &mut app.ui.chat.timeline.assets;
+    assets.open = gallery.first().cloned();
+    assets.gallery = gallery;
+}
+
+/// Scenes: a test picture, or for a video a clip made here where it can play.
+fn scene_loaded(media: &Media) -> Loaded {
+    match media.kind {
+        #[cfg(target_os = "linux")]
+        Kind::Video => Loaded { soft: Some(soft::SoftPlayer::bytes(scene_clip(), None)), ..checker(media) },
+        _ => checker(media),
+    }
+}
+
+/// A short H.264 clip, encoded here: a square crossing a gradient (scenes and tests).
+#[cfg(target_os = "linux")]
+pub(crate) fn scene_clip() -> Vec<u8> {
+    use openh264::encoder::Encoder;
+    use openh264::formats::{RgbSliceU8, YUVBuffer};
+    let (w, h) = (320usize, 176usize);
+    let Ok(mut encoder) = Encoder::new() else { return Vec::new() };
+    let units: Vec<Vec<u8>> = (0..30usize)
+        .filter_map(|f| {
+            let rgb: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let square = (20 + f * 8..60 + f * 8).contains(&x) && (68..108).contains(&y);
+                    if square { [240, 240, 250] } else { [(40 + x * 90 / w) as u8, 52, (120 + y * 80 / h) as u8] }
+                })
+                .collect();
+            let bits = encoder.encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)))).ok()?.to_vec();
+            (!bits.is_empty()).then_some(bits)
+        })
+        .collect();
+    mp4::write(&units, w as u16, h as u16, 30)
+}
+
+fn checker(media: &Media) -> Loaded {
+    let loaded = Loaded::new(String::new(), media.name.clone(), None, MARKDOWN_DECODE, None);
+    let (w, h) = (640u32, 360u32);
+    let rgba = (0..w * h).flat_map(|i| if (i % w / 40 + i / w / 40) % 2 == 0 { [96, 125, 180, 255] } else { [140, 170, 220, 255] }).collect();
+    loaded.pixels.set(w, h, rgba);
+    Loaded { kind: Some(media.kind), ..loaded }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_media_signs_on_its_environment_and_falls_back_to_the_host_url() {
+        let mut app = App::new();
+        app.src = crate::data::Source::Fixture(crate::data::empty_state());
+        app.ui.env.active = crate::env::LOCAL.into();
+        // An offline client refuses every request at once: its worker is stopped.
+        crate::env::park(&mut app, "far", crate::data::Source::Live(s5_net::Net::offline()));
+        let host = Host { env: "far", cwd: "/srv/app", fetch: "https://example.invalid/user-attachments/assets/ab" };
+        let key = linked_key("https://example.invalid/user-attachments/assets/ab?x=1", Some(&host));
+        let media = Media { kind: Kind::Image, name: String::new(), reference: None, open_file: None };
+        let asset = |env: &str, fallback: Option<&str>| Access::Asset { resource: json!({}), env: Some(env.into()), fallback: fallback.map(str::to_owned) };
+        want(&app, &key, &media, asset("far", Some(host.fetch)));
+        want(&app, "media:gone", &media, asset("gone", None));
+        want(&app, "media:gone-fallback", &media, asset("gone", Some("https://example.invalid/b")));
+        poll(&mut app, &mut Tx::default());
+        let entries = &app.ui.chat.timeline.assets.media.entries;
+        let url = |k: &str| entries[k].loaded.as_ref().map(|l| l.url.clone());
+        assert_eq!(url(key.as_str()).as_deref(), Some(host.fetch), "FAILED: far refused, so the picture reads the host's URL");
+        assert!(entries["media:gone"].failed && url("media:gone").is_none(), "FAILED: not connected, nothing to fall back to");
+        assert_eq!(url("media:gone-fallback").as_deref(), Some("https://example.invalid/b"));
+        assert!(entries.values().all(|e| e.request.is_none()));
+    }
 
     #[test]
     fn media_kinds_follow_the_extension() {
@@ -904,6 +1082,8 @@ mod tests {
         assert_eq!(attachment_kind("video/quicktime", "a.mov"), Some(Kind::Video));
         assert_eq!(attachment_kind("", "a.webm"), Some(Kind::Video));
         assert_eq!(attachment_kind("application/pdf", "a.mp4"), None);
+        assert_eq!(attachment_kind("audio/mpeg", "memo.mp3"), Some(Kind::Audio));
+        assert_eq!(attachment_kind("", "memo.m4a"), Some(Kind::Audio));
         assert_eq!(attachment_kind("image/png", "a.png"), Some(Kind::Image));
     }
 

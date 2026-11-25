@@ -83,7 +83,7 @@ fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: 
             .is_some_and(|line| line.contains("---") && line.contains('|'));
         // Find counts matches in rendered Markdown, so a marked block keeps rune_kit's rendering.
         let own = !is_table && marks.is_none();
-        let pictures = if own { media::block(app, block, t) } else { None };
+        let pictures = if own { media::block(app, block, t).or_else(|| media::inline(app, block, theme::TEXT_SM.lh(22.75), ink, t)) } else { None };
         let chips = if own && pictures.is_none() { md_links::inline_block(app, block, format!("md-block-{key}-{index}"), t, ink, theme::TEXT_SM.lh(22.75), &parents) } else { None };
         let content = if let Some(pictures) = pictures {
             pictures
@@ -125,7 +125,7 @@ fn typeset(app: &App, source: &str, key: &str, t: &T, ink: rune::Color) -> El {
     for block in super::math::blocks(source.trim()) {
         let picture = match &block {
             Block::Display(tex) => display_math(app, tex, ink),
-            Block::Inline(parts) => super::katex::flow(app, parts, font, ink),
+            Block::Inline(parts) => super::katex::flow(app, parts, font, ink, t),
             Block::Text(_) => None,
         };
         match picture {

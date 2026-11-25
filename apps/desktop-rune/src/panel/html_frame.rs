@@ -65,6 +65,8 @@ struct Frame {
     /// The laid-out width; zero before the first layout.
     width: f32,
     visible: bool,
+    /// Its row left the timeline's virtual list, which unmounts it with no layout to say so.
+    unlisted: bool,
     /// The theme the row is drawn in, as `htmlRenderTheme` JSON.
     theme: String,
     dark: bool,
@@ -101,6 +103,7 @@ impl Frames {
             }
         };
         let mut frame = self.frames.remove(index);
+        let visible = visible && !frame.unlisted;
         let mut changed = (frame.width - width.round()).abs() >= 1.;
         frame.width = width.round();
         frame.visible = visible;
@@ -110,12 +113,7 @@ impl Frames {
             frame.dark = dark;
         }
         if !visible {
-            changed |= frame.shown.take().is_some() | frame.pending.take().is_some();
-            frame.wants_live = false;
-            if let Some(live) = frame.live.take() {
-                self.closing.push(live.id);
-                changed = true;
-            }
+            changed |= frame.let_go(&mut self.closing);
         }
         let want = frame.wants();
         if visible {
@@ -125,6 +123,26 @@ impl Frames {
         }
         self.evict();
         (changed, want)
+    }
+
+    /// Marks the frames whose rows (timeline index, frame id) left the visible `rows`, letting
+    /// their pages go; their next layout back in the list takes a fresh shot.
+    fn listed(&mut self, frames: &[(usize, String)], rows: std::ops::Range<usize>) -> bool {
+        let mut changed = false;
+        for (row, id) in frames {
+            let Some(frame) = self.frames.iter_mut().find(|f| f.id == *id) else { continue };
+            let unlisted = !rows.contains(row);
+            if frame.unlisted == unlisted {
+                continue;
+            }
+            frame.unlisted = unlisted;
+            changed = true;
+            if unlisted {
+                frame.visible = false;
+                frame.let_go(&mut self.closing);
+            }
+        }
+        changed
     }
 
     /// Lets the oldest off-screen pictures go past `KEEP`.
@@ -158,6 +176,13 @@ impl Frames {
 }
 
 impl Frame {
+    /// Off screen: the picture and the live page go, the measured height stays.
+    fn let_go(&mut self, closing: &mut Vec<u64>) -> bool {
+        self.wants_live = false;
+        let live = self.live.take().map(|live| closing.push(live.id)).is_some();
+        self.shown.take().is_some() | self.pending.take().is_some() | live
+    }
+
     fn wants(&self) -> bool {
         let current = |(shot, theme): &(Shot, String)| shot.width == self.width as u32 && *theme == self.theme;
         self.visible && self.width >= 1. && !self.failed && !self.still && self.request.is_none() && self.pending.is_none() && !self.shown.as_ref().is_some_and(current)
@@ -187,6 +212,13 @@ fn layout(s: &mut App, id: &str, title: &str, theme: &str, dark: bool, [_, y, w,
         super::preview::inline_frame_cmd(s, Cmd::LiveEval(live.id, MEASURE.to_owned()));
     }
     changed || want
+}
+
+/// The timeline's visible rows: frames whose rows left the list let their pages go.
+pub fn in_view(s: &mut App, frames: &[(usize, String)], rows: std::ops::Range<usize>) -> bool {
+    let changed = s.ui.panel.html_frames.listed(frames, rows);
+    close_released(s);
+    changed
 }
 
 fn close_released(s: &mut App) {
@@ -654,6 +686,31 @@ mod tests {
         assert_eq!(frames.seen("b", "B", 700., false, "dark", true).0, true);
         assert_eq!(frames.closing, [b.id]);
         assert!(!frames.get("b").unwrap().wants_live);
+    }
+
+    #[test]
+    fn rows_leaving_the_list_let_their_pages_go_and_come_back() {
+        let mut frames = Frames::default();
+        frames.seen("a", "A", 700., true, "dark", true);
+        frames.seen("b", "B", 700., true, "dark", true);
+        let live = Live::new("u".into(), 700, 400, true);
+        let a = frames.frames.iter_mut().find(|f| f.id == "a").unwrap();
+        a.live = Some(live.clone());
+        a.shown = Some((Shot::new("u".into(), 700, true), "dark".into()));
+        a.content = Some(420.);
+        // Row 3 unmounts from the virtual list with no layout of its own: its page goes.
+        let rows = [(3, "a".to_owned()), (4, "b".to_owned())];
+        assert!(frames.listed(&rows, 4..9));
+        assert_eq!(frames.closing, [live.id]);
+        let a = frames.get("a").unwrap();
+        assert!(a.live.is_none() && a.shown.is_none() && !a.visible && a.content == Some(420.));
+        assert!(frames.get("b").unwrap().visible);
+        // A stale layout while it's out doesn't take it again; the same list changes nothing.
+        assert!(!frames.seen("a", "A", 700., true, "dark", true).1);
+        assert!(!frames.listed(&rows, 4..9));
+        // Back in the list, its next layout takes a fresh shot.
+        assert!(frames.listed(&rows, 2..9));
+        assert!(frames.seen("a", "A", 700., true, "dark", true).1);
     }
 
     #[test]

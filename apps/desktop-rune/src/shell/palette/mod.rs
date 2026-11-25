@@ -361,7 +361,7 @@ fn theme_saved(s: &mut App) -> bool {
     if s.client_settings.error.is_none() {
         return true;
     }
-    toast_error(s, "Couldn't save theme selection", Some("Try again."));
+    toast_error(s, "Couldn\u{2019}t save theme selection", Some("Try again."));
     false
 }
 /// "Change appearance": System, Light and Dark, the saved mode marked Current.
@@ -504,6 +504,10 @@ pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
 /// be read.
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Error, Vec::new(), None);
+}
+/// `toast_error` with actions, such as Copy trace ID.
+pub(crate) fn toast_error_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
+    raise(s, title, description, Kind::Error, actions, None);
 }
 /// A plain toast that stays until dismissed (`timeout: 0` on web), for a result worth reading.
 pub(crate) fn toast_warning_sticky(s: &mut App, title: &str, description: Option<&str>) {
@@ -2546,7 +2550,7 @@ mod tests {
         assert_eq!(toast_title(&s), None);
         s.client_settings.error = Some("Could not save client settings: denied".into());
         execute(&mut s, grove, &mut Tx::default());
-        assert_eq!(toast_title(&s), Some("Couldn't save theme selection"));
+        assert_eq!(toast_title(&s), Some("Couldn\u{2019}t save theme selection"));
     }
 
     #[test]
@@ -2788,7 +2792,7 @@ mod tests {
     }
 }
 
-fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
+pub(crate) fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
     let key = row()
         .role("note")
         .center()
@@ -2803,7 +2807,7 @@ fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
     }
 }
 
-fn footer_label(label: &str, t: &T) -> El {
+pub(crate) fn footer_label(label: &str, t: &T) -> El {
     text(label)
         .font(theme::SM_MEDIUM)
         .color(t.c.contrast_muted_foreground)

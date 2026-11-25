@@ -445,17 +445,28 @@ fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
     let size = spec["size"].as_str().unwrap_or("");
     let (min, max) = (spec["min"].as_u64().unwrap_or(10), spec["max"].as_u64().unwrap_or(20));
     let options: Vec<(Value, String)> = (min..=max).map(|px| (json!(px), format!("{px} px"))).collect();
-    let placeholder = font_placeholder(&value(s, "fontFamilySans"), spec["placeholder"].as_str().unwrap_or(""));
+    let placeholder = default_family(s, spec);
+    // `FontFamilyPicker` once the installed families are known; until then, or when none were
+    // found, web's free-text field.
+    let family = match super::font_picker::families(s) {
+        Some(families) => super::font_picker::picker(s, t, key, title, &placeholder, &families, &mut Vec::new()),
+        None => input(s, t, key, 176.0, &placeholder, false),
+    };
     let control = row()
         .gap(8.0)
         .center_y()
-        .child(input(s, t, key, 176.0, &placeholder, false))
+        .child(family)
         .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)));
     let hint = matches!(key, "fontFamilySans" | "fontFamilyCode" | "fontFamilyComposer").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
     match hint {
         Some(hint) => col().gap(4.0).items_end().child(control).child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         None => control,
     }
+}
+
+/// The family a font row falls back to when its setting is empty.
+pub(super) fn default_family(s: &App, spec: &Value) -> String {
+    font_placeholder(&value(s, "fontFamilySans"), spec["placeholder"].as_str().unwrap_or(""))
 }
 
 /// The default family a font field falls back to: the platform's sans or monospace face, or
