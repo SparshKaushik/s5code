@@ -638,7 +638,7 @@ fn verdict_row(s: &App, t: &T, e: &Event<'_>, item: &Item<'_>, stale: bool) -> E
     }
     let mut content = col().w_full().child(head);
     if let Some(body) = visible_body(field(c, "body")) {
-        content = content.child(col().w_full().mt(12.0).child(pr_detail::markdown(t, &body)));
+        content = content.child(col().w_full().mt(12.0).child(super::pr_media::view(s, t, &body)));
     }
     let mark = if e.actor.is_object() { avatar(&s.ui.pages.avatars, &e.actor, 28.0, t) } else { icon(outcome_glyph(verdict), 14.0).color(outcome_tone(t, verdict)) };
     beside(marker(mark).mt(8.0), content).key(format!("pr-conversation-{}", item.id))

@@ -1948,7 +1948,7 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         let body = match &c.editing {
             Some((on, draft)) if *on == cid => comment_editor(s, t, draft),
             _ => {
-                let mut line = row().w_full().gap(4.0).items_start().child(super::pr_detail::markdown(t, field(comment, "body")).grow(1.0).shrink().min_w(0.0));
+                let mut line = row().w_full().gap(4.0).items_start().child(super::pr_media::view(s, t, field(comment, "body")).grow(1.0).shrink().min_w(0.0));
                 if can_edit(s, comment) {
                     let shown = field(comment, "body").to_owned();
                     line = line.child(super::pr_edit::pencil(t, "Edit comment", move |s: &mut App| start_edit(s, &cid, &shown)));

@@ -8,6 +8,7 @@ pub mod pr_conversation;
 pub mod pr_detail;
 pub mod pr_edit;
 pub mod pr_filters;
+pub mod pr_media;
 pub mod pr_meta;
 pub mod pr_guide;
 pub mod pr_route;
@@ -672,6 +673,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-code-condensed", |s| open_detail(s, 2, |u| u.condense.set(2, true))),
     ("pull-requests-detail-closed", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["state"] = json!("closed"); d["autoMergeEnabled"] = json!(false); })),
     ("pull-requests-detail-draft", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["isDraft"] = json!(true); d["autoMergeEnabled"] = json!(false); })),
+    ("pull-requests-detail-media", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["body"] = json!("Adds the demo.\n\nhttps://github.com/user-attachments/assets/0f1e2d3c-demo\n\n[screenshot](https://example.com/shot.png)\n\nThanks!"); })),
     ("pull-requests-detail-app-access", |s| open_detail(s, 0, |u| u.app_access.2 = Some("not-covered".into()))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {

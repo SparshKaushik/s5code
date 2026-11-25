@@ -643,7 +643,7 @@ fn environment_picker(s: &App, menu: Menu) -> Menu {
 
 /// The checkout's folder: the picked environment's copy, else the pull request's workspace, else
 /// its project's.
-fn checkout_root(s: &App, d: &Value) -> Option<String> {
+pub(super) fn checkout_root(s: &App, d: &Value) -> Option<String> {
     let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
     let picked = acting(s).map(|a| a.root);
     [picked.as_deref(), d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
@@ -1940,7 +1940,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let mut out = col().w_full().pb(48.0).child(meta).child(rule(t));
     let body = field(d, "body").trim().to_string();
     out = out.child(section(t, "description", "Description".into(), !u.description_closed, |s| ui(s).description_closed = !ui(s).description_closed, None, || {
-        super::pr_edit::description(s, t, d, markdown(t, if body.is_empty() { "_No description provided._" } else { &body }))
+        super::pr_edit::description(s, t, d, super::pr_media::view(s, t, if body.is_empty() { "_No description provided._" } else { &body }))
     }));
     let checks = d["checks"].as_array().cloned().unwrap_or_default();
     let stale = checks_rollup(s, d).1;
@@ -2133,7 +2133,7 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
         }
         return card.children(conv::more_replies(t, item).map(|m| m.mt(8.0)));
     }
-    let shown = body.map(|b| super::pr_code::clipped_comment(s, t, field(c, "id"), markdown(t, &b)));
+    let shown = body.map(|b| super::pr_code::clipped_comment(s, t, field(c, "id"), super::pr_media::view(s, t, &b)));
     if let Some(body) = super::pr_edit::comment_body(s, t, c, shown) {
         card = card.child(col().w_full().mt(8.0).child(body));
     }
@@ -2300,7 +2300,7 @@ fn reply_thread(s: &App, t: &T, replies: &[Cow<Value>], surface: Surface<'_>) ->
     let mut thread = col().w_full().gap(12.0);
     for r in replies {
         let r = &**r;
-        let shown = markdown(t, field(r, "body").trim());
+        let shown = super::pr_media::view(s, t, field(r, "body").trim());
         let shown = if matches!(surface, Surface::Summary(_)) { super::pr_code::clipped_comment(s, t, field(r, "id"), shown) } else { shown };
         thread = thread.child(col().w_full().gap(6.0).child(head_line(s, t, r, surface, None, None)).children(super::pr_edit::comment_body(s, t, r, Some(shown))));
     }
@@ -2324,7 +2324,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
         .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(s, t, c, surface, path, fix)))
         .children(at.map(|at| at.px(12.0).pt(8.0)));
     let summary = matches!(surface, Surface::Summary(_));
-    let rendered = conv::visible_body(field(c, "body")).map(|b| markdown(t, &b)).map(|b| if summary { super::pr_code::clipped_comment(s, t, field(c, "id"), b) } else { b });
+    let rendered = conv::visible_body(field(c, "body")).map(|b| super::pr_media::view(s, t, &b)).map(|b| if summary { super::pr_code::clipped_comment(s, t, field(c, "id"), b) } else { b });
     if let Some(body) = super::pr_edit::comment_body(s, t, c, rendered) {
         card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(body));
     }
