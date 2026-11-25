@@ -2,7 +2,7 @@
 //! thread, and the opened iOS simulator's screen from serve-sim's `stream.mjpeg`, driven through
 //! serve-sim's input socket. Every other stream is H.264, which this app can't decode.
 
-mod h264;
+pub(crate) mod h264;
 mod input;
 mod inspect;
 mod video;
