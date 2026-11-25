@@ -112,6 +112,8 @@ struct Stream {
     /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
     flat: bool,
     pose: model::Pose,
+    /// Web's Magic Keyboard on an iPad Pro 13-inch's 3D view.
+    keyboard: bool,
     /// The phone springing back to rest after a turn, and the frame it last moved at.
     spring: Option<(model::Spring, Instant)>,
     /// When a wheel turn that sent no end of its gesture counts as let go (web's 1.2 s).
@@ -343,6 +345,7 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         stand_vertical: None,
         flat: false,
         pose: model::Pose::default(),
+        keyboard: false,
         spring: None,
         wheel_until: None,
         grab: None,
@@ -404,6 +407,7 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         stand_vertical: None,
         flat: false,
         pose: model::Pose::default(),
+        keyboard: false,
         spring: None,
         wheel_until: None,
         grab: None,
@@ -709,13 +713,19 @@ fn sync_phone(app: &mut App) -> bool {
     let Some(stream) = app.ui.panel.device.stream.as_ref() else { return false };
     let name = device_name(app, stream).to_owned();
     let now = app.ui.panel.device.fixture.is_some();
-    let wake = app.ui.panel.waker.clone();
-    let wake = move || {
-        if let Some(wake) = &wake {
-            wake();
+    let waker = app.ui.panel.waker.clone();
+    let wake = || {
+        let waker = waker.clone();
+        move || {
+            if let Some(wake) = &waker {
+                wake();
+            }
         }
     };
-    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (model::model_id(stream.android, &name).and_then(|id| model::model(id, now, wake)), fold_angle(stream)) {
+    let id = model::model_id(stream.android, &name);
+    // The bare iPad shows while the one with its keyboard loads.
+    let keyboard = (stream.keyboard && id == Some(KEYBOARD_FOR)).then(|| model::model(model::KEYBOARD, now, wake())).flatten();
+    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (keyboard.or_else(|| id.and_then(|id| model::model(id, now, wake()))), fold_angle(stream)) {
         (Some(model), _) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
         (None, Some(angle)) => {
             let (w, h) = stream.pixels.size();
@@ -849,16 +859,36 @@ fn step_3d(stream: &mut Stream, tx: &mut Tx) -> bool {
     true
 }
 
-/// Web's `resetView`: the phone springs upright and facing the camera, and the device goes back to portrait.
+/// The device web's `deviceKeyboard` attaches the Magic Keyboard to.
+const KEYBOARD_FOR: &str = "ipad-pro-13-m5";
+
+/// Web's Attach and Detach Magic Keyboard: attaching turns the iPad to landscape right.
+fn toggle_keyboard(app: &mut App) {
+    let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
+    if let (Some(Grab::Touch(u, v)), Some(input)) = (stream.grab.take(), &stream.input) {
+        input.touch("end", u, v);
+    }
+    if !stream.keyboard
+        && let Some(input) = &stream.input
+        && screen_state(stream).is_none_or(|s| s.orientation != "landscape_right")
+    {
+        input.orient("landscape_right");
+    }
+    stream.keyboard ^= true;
+}
+
+/// Web's `resetView`: the phone springs upright and facing the camera, and the device goes back
+/// to portrait (landscape right with the Magic Keyboard).
 fn restore_3d(app: &mut App) {
     let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
     stream.spring = Some((model::Spring::toward(&stream.pose, model::Pose::default()), Instant::now()));
     stream.wheel_until = None;
     stream.grab = None;
+    let rest = if stream.keyboard { "landscape_right" } else { "portrait" };
     if let Some(input) = &stream.input
-        && screen_state(stream).is_some_and(|s| s.orientation != "portrait")
+        && screen_state(stream).is_some_and(|s| s.orientation != rest)
     {
-        input.orient("portrait");
+        input.orient(rest);
     }
 }
 
@@ -1375,6 +1405,11 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
             .help("Flat view")
             .checked(!phone);
         pill = pill.child(el().w(20.).h(1.).fill(t.c.border)).child(three).child(flat);
+        if phone && model::model_id(stream.android, device_name(app, stream)) == Some(KEYBOARD_FOR) {
+            let label = if stream.keyboard { "Detach Magic Keyboard" } else { "Attach Magic Keyboard" };
+            let keyboard = kit::Button::new(label).icon(&icons::KEYBOARD).variant(if stream.keyboard { "secondary" } else { "ghost" }).size("icon-sm").on_press(toggle_keyboard).build(t).help(label).checked(stream.keyboard);
+            pill = pill.child(keyboard);
+        }
         if phone {
             pill = pill.child(rail_button("Restore 3D view", &icons::MAXIMIZE, false, t, restore_3d));
         }

@@ -120,8 +120,31 @@ fn glb(id: &str) -> Option<&'static [u8]> {
         "iphone-18-pro" => include_bytes!("../../../../web/src/components/device/models/iphone-18-pro.glb"),
         "iphone-18-pro-max" => include_bytes!("../../../../web/src/components/device/models/iphone-18-pro-max.glb"),
         "ipad-pro-13-m5" => include_bytes!("../../../../web/src/components/device/models/ipad-pro-13-m5.glb"),
+        "ipad-pro-13-m5-magic-keyboard" => include_bytes!("../../../../web/src/components/device/models/ipad-pro-13-m5-magic-keyboard.glb"),
         _ => return None,
     })
+}
+
+/// Web's `deviceKeyboard`: the iPad Pro 13-inch with its Magic Keyboard attached, which web adds
+/// to the iPad's orientation group, so it turns with the iPad.
+pub const KEYBOARD: &str = "ipad-pro-13-m5+magic-keyboard";
+
+fn load(id: &str) -> Option<Result<Model, String>> {
+    if id == KEYBOARD {
+        let (ipad, keyboard) = (glb("ipad-pro-13-m5")?, glb("ipad-pro-13-m5-magic-keyboard")?);
+        return Some(parse_glb(ipad).and_then(|ipad| Ok(attach(ipad, parse(keyboard, false).map_err(|e| format!("Magic Keyboard: {e}"))?))));
+    }
+    glb(id).map(parse_glb)
+}
+
+/// `model` with `accessory`'s meshes added in its own space.
+fn attach(mut model: Model, accessory: Model) -> Model {
+    let (materials, images) = (model.materials.len(), model.images.len());
+    model.images.extend(accessory.images);
+    model.materials.extend(accessory.materials.into_iter().map(|m| Material { texture: m.texture.map(|t| t + images), ..m }));
+    model.meshes.extend(accessory.meshes.into_iter().map(|m| Mesh { material: m.material + materials, screen: false, ..m }));
+    model.bounds();
+    model
 }
 
 enum Slot {
@@ -139,7 +162,9 @@ fn models() -> &'static Mutex<HashMap<&'static str, Slot>> {
 /// it's ready (or at once with `now`, for scenes). A model that fails keeps the procedural phone,
 /// as web's `onModelError` does.
 pub fn model(id: &'static str, now: bool, wake: impl Fn() + Send + 'static) -> Option<Arc<Model>> {
-    let bytes = glb(id)?;
+    if id != KEYBOARD {
+        glb(id)?;
+    }
     let mut slots = models().lock().unwrap_or_else(|e| e.into_inner());
     match slots.get(id) {
         Some(Slot::Ready(model)) => return Some(model.clone()),
@@ -147,7 +172,7 @@ pub fn model(id: &'static str, now: bool, wake: impl Fn() + Send + 'static) -> O
         None => {}
     }
     if now {
-        let slot = parse_glb(bytes).map(Arc::new).map_or(Slot::Failed, Slot::Ready);
+        let slot = load(id)?.map(Arc::new).map_or(Slot::Failed, Slot::Ready);
         let ready = if let Slot::Ready(m) = &slot { Some(m.clone()) } else { None };
         slots.insert(id, slot);
         return ready;
@@ -155,7 +180,7 @@ pub fn model(id: &'static str, now: bool, wake: impl Fn() + Send + 'static) -> O
     slots.insert(id, Slot::Loading);
     drop(slots);
     std::thread::spawn(move || {
-        let slot = parse_glb(bytes).map(Arc::new).map_or(Slot::Failed, Slot::Ready);
+        let slot = load(id).and_then(Result::ok).map(Arc::new).map_or(Slot::Failed, Slot::Ready);
         models().lock().unwrap_or_else(|e| e.into_inner()).insert(id, slot);
         wake();
     });
@@ -318,6 +343,11 @@ impl Glb<'_> {
 /// A binary glTF as world-space meshes, its base colour textures decoded. Web's loader keeps
 /// clearcoat and the other PBR maps; this keeps base colour, metalness and roughness.
 pub fn parse_glb(bytes: &[u8]) -> Result<Model, String> {
+    parse(bytes, true)
+}
+
+/// A glTF that has a normalized display (a device) or none (an accessory).
+fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
     let word = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
     if bytes.get(0..4) != Some(b"glTF") || word(4) != Some(2) {
         return Err("Not a binary glTF 2.0 file".into());
@@ -435,6 +465,11 @@ pub fn parse_glb(bytes: &[u8]) -> Result<Model, String> {
         }
     }
     let (width, height) = (max[0] - min[0], max[1] - min[1]);
+    if !display {
+        let mut model = Model { meshes, materials, images, screen: [0.; 3], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
+        model.bounds();
+        return Some(model).filter(|m| m.min[0].is_finite()).ok_or_else(|| "Device accessory has invalid bounds".to_owned());
+    }
     // `createImportedPhoneScene`'s check: one flat display, 2.2 tall, centred on the origin.
     if !width.is_finite() || width <= 0. || (height - SCREEN_HEIGHT).abs() > 0.001 || (min[0] + max[0]).abs() > 0.001 || (min[1] + max[1]).abs() > 0.001 || max[2] - min[2] > 0.001 {
         return Err("Device model display is not normalized".into());
@@ -1067,6 +1102,12 @@ mod tests {
             assert!(model.meshes.iter().filter_map(|m| model.materials[m.material].texture).all(|t| model.images[t].rgba.len() == (model.images[t].width * model.images[t].height * 4) as usize));
             assert!(model.min[2] < model.screen[2] && model.screen[2] <= model.max[2]);
         }
+        let ipad = load("ipad-pro-13-m5").unwrap().unwrap();
+        let keyboard = load(KEYBOARD).unwrap().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(keyboard.screen, ipad.screen, "the keyboard leaves the iPad's display where it was");
+        assert!(keyboard.meshes.len() > ipad.meshes.len() && keyboard.meshes.iter().filter(|m| m.screen).count() == ipad.meshes.iter().filter(|m| m.screen).count());
+        assert!(keyboard.meshes.iter().all(|m| m.material < keyboard.materials.len()) && keyboard.materials.iter().filter_map(|m| m.texture).all(|t| t < keyboard.images.len()));
+        assert!((0..3).all(|k| keyboard.min[k] <= ipad.min[k] && keyboard.max[k] >= ipad.max[k]) && (0..3).any(|k| keyboard.min[k] < ipad.min[k] - 0.1 || keyboard.max[k] > ipad.max[k] + 0.1), "it adds to the iPad's bounds");
         assert_eq!(model_id(false, "iPhone 18 Pro"), Some("iphone-18-pro"));
         assert_eq!(model_id(true, "iPhone 18 Pro"), None);
         assert_eq!(model_id(false, "iPhone 16 Pro"), None);
