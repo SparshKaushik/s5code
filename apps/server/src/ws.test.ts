@@ -2063,7 +2063,6 @@ it.effect(
                 method: "browser-session-cookie",
                 scopes: [...scopes],
               },
-              {},
               browser,
               () => Effect.void,
               { secretReferences: true },

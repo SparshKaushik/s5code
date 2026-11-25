@@ -17,7 +17,6 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
-import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";

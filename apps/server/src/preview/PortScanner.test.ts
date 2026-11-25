@@ -882,7 +882,7 @@ effectIt.effect.each(["linux", "darwin"] as const)(
           FetchHttpClient.layer.pipe(
             Layer.provide(
               Layer.succeed(FetchHttpClient.Fetch, (() =>
-                Promise.reject(new Error())) as typeof fetch),
+                Promise.reject(new Error())) as unknown as typeof fetch),
             ),
           ),
         ),
@@ -1124,7 +1124,7 @@ effectIt.effect(
           FetchHttpClient.layer.pipe(
             Layer.provide(
               Layer.succeed(FetchHttpClient.Fetch, (() =>
-                Promise.reject(new Error())) as typeof fetch),
+                Promise.reject(new Error())) as unknown as typeof fetch),
             ),
           ),
         ),

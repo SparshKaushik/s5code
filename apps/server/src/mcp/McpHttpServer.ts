@@ -23,7 +23,6 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationError,
   ProviderInteractionMode,
-  type RunId,
   RuntimeMode,
   OrchestrationV2LinkedSender,
   ThreadId,
@@ -42,7 +41,6 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as PullRequestWatchService from "../pullRequest/PullRequestWatchService.ts";
-import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
