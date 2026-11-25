@@ -208,7 +208,12 @@ pub fn banner(app: &App, t: &T) -> Option<El> {
 /// The composer's primary action while a plan is ready: Refine with a draft, else Implement.
 pub fn action(app: &App, t: &T, typed: bool) -> Option<El> {
     follow_up(app)?;
-    let label = if typed { "Refine" } else { "Implement" };
+    let busy = crate::chat::composer::send_busy(app);
+    let label = match () {
+        _ if busy => "Sending...",
+        _ if typed => "Refine",
+        _ => "Implement",
+    };
     let main = row()
         .key("plan-implement")
         .h(28.0)
@@ -218,8 +223,8 @@ pub fn action(app: &App, t: &T, typed: bool) -> Option<El> {
         .hover(t.c.message_action_hover)
         .cursor(Cursor::Pointer)
         .label(label)
-        .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_action_foreground))
-        .on_press(crate::chat::composer::act(app, crate::chat::composer::submit));
+        .child(text(label).font(theme::SM_MEDIUM).color(t.c.message_action_foreground));
+    let main = if busy { main.disabled(true) } else { main.on_press(crate::chat::composer::act(app, crate::chat::composer::submit)) };
     if typed {
         return Some(main.radius(radius::FULL));
     }
@@ -237,6 +242,7 @@ pub fn action(app: &App, t: &T, typed: bool) -> Option<El> {
         .label("Implementation actions")
         .child(icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.message_action_foreground))
         .on_press(move |app: &mut App| app.ui.chat.timeline.plan.menu = Some(menu.clone()));
+    let more = if busy { more.disabled(true) } else { more };
     Some(row().gap(1.0).child(main.corners([radius::FULL, 0.0, 0.0, radius::FULL])).child(more))
 }
 
@@ -324,7 +330,7 @@ pub fn poll(app: &mut App) -> bool {
                 state.save = None;
                 crate::shell::palette::toast(app, "Plan saved to workspace", v["relativePath"].as_str());
             }
-            Err(e) => crate::shell::palette::toast(app, "Could not save plan", Some(&e.to_string())),
+            Err(e) => crate::shell::palette::toast(app, "Could not save plan", Some(&crate::shell::palette::error_message(&e, "An error occurred while saving."))),
         }
     }
     if let Some(reply) = created {
@@ -337,7 +343,7 @@ pub fn poll(app: &mut App) -> bool {
                 }
                 app.navigate(Route::Thread(thread));
             }
-            Err(e) => crate::shell::palette::toast(app, "Could not start implementation thread", Some(&e.to_string())),
+            Err(e) => crate::shell::palette::toast(app, "Could not start implementation thread", Some(&crate::shell::palette::error_message(&e, "An error occurred while creating the new thread."))),
         }
     }
     changed
@@ -385,15 +391,15 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
                     app.ui.chat.timeline.plan.menu = None;
                     download(down.clone(), tx);
                 }));
-            if super::workspace_root(app).is_some() {
-                menu = menu.item(MenuItem::new("Save to workspace").on_select(move |app: &mut App| {
-                    let state = &mut app.ui.chat.timeline.plan;
-                    state.menu = None;
-                    let mut path = TextEdit::new(filename(&keep));
-                    path.focused = true;
-                    state.save = Some((keep.clone(), path));
-                }));
-            }
+            // Web keeps it in the menu, disabled, while there is nowhere to save.
+            let writable = super::workspace_root(app).is_some() && state.saving.is_none();
+            menu = menu.item(MenuItem::new("Save to workspace").disabled(!writable).on_select(move |app: &mut App| {
+                let state = &mut app.ui.chat.timeline.plan;
+                state.menu = None;
+                let mut path = TextEdit::new(filename(&keep));
+                path.focused = true;
+                state.save = Some((keep.clone(), path));
+            }));
             menu.overlay(&crate::kit::theme(t), &mut layers);
         }
         _ => {}

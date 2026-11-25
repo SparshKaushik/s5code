@@ -2859,7 +2859,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2936,7 +2936,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "pulldown-cmark",
  "rune",
@@ -2948,7 +2948,7 @@ dependencies = [
 [[package]]
 name = "rune-mac"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
@@ -2957,7 +2957,7 @@ dependencies = [
 [[package]]
 name = "rune-mermaid"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "rune",
 ]
@@ -2965,12 +2965,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "wgpu",
 ]
@@ -2978,7 +2978,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/SparshKaushik/rune?rev=547f05d5e6f614e2a7ff8e1c4f5b934509c6c293#547f05d5e6f614e2a7ff8e1c4f5b934509c6c293"
+source = "git+https://github.com/SparshKaushik/rune?rev=0a8fe291f9f3bb8a257cebd5747d5a20467fefa7#0a8fe291f9f3bb8a257cebd5747d5a20467fefa7"
 dependencies = [
  "taffy",
 ]

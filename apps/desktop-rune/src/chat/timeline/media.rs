@@ -671,6 +671,7 @@ pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t:
         if media.kind != Kind::Image {
             return None;
         }
+        let framed = matches!(access, Access::Asset { .. });
         let Some(entry) = app.ui.chat.timeline.assets.media.entries.get(&key) else {
             want(app, &key, &media, access);
             return None;
@@ -683,7 +684,9 @@ pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t:
         let ratio = w as f32 / h as f32;
         let width = (w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio);
         let label = alt.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
-        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, width / ratio], copy: format!("![{label}]({src})"), open: Some(key) })
+        // An inline-block image's baseline is its bottom edge.
+        let height = width / ratio;
+        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, height], copy: format!("![{label}]({src})"), open: Some(key), baseline: Some(height), framed })
     };
     super::inline::paragraph(block, Vec::new(), &image, font, ink, t)
 }
