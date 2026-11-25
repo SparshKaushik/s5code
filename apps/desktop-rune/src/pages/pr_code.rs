@@ -118,6 +118,8 @@ pub struct Ui {
     pub(crate) find_edit: TextEdit,
     /// A finished turn's reread of the diff's first page, and the scope it was asked for.
     refetch: Option<(u64, String)>,
+    /// The shown first page's `page_mark`, which a reread compares against.
+    pub(super) first_mark: Option<u64>,
     /// Pages the parser read no file from, shown as text (getRenderablePatch's raw kind).
     pub(super) raw: Vec<String>,
 }
@@ -882,7 +884,7 @@ pub fn answer_reveal(s: &mut App, tx: &mut Tx) -> bool {
 }
 
 /// backgroundRefreshToken: a finished turn reads the diff's first page and the viewed ticks
-/// again, the shown diff staying until the new one lands.
+/// again, keeping the pages read so far while the first is unchanged.
 pub(super) fn turn_finished(s: &mut App) {
     s.ui.pages.code.viewed.refresh = true;
     if s.ui.pages.detail.files.is_none() || s.ui.pages.code.refetch.is_some() {
@@ -908,8 +910,32 @@ fn sync_refetch(s: &mut App, entry: &Value) -> bool {
         return true;
     }
     if let Ok(d) = got {
-        first_page(s, &d);
+        merge_first_page(s, &d);
     }
+    true
+}
+
+/// What decides whether a reread page changed (the slice comparison): its patch, truncation,
+/// next cursor and omitted file stats.
+pub(super) fn page_mark(d: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for key in ["patch", "truncated", "nextCursor", "omittedFileStats"] {
+        match &d[key] {
+            Value::String(text) => text.hash(&mut h),
+            other => other.to_string().hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
+/// The page merge: an unchanged first page keeps the diff and every page read after it, so the
+/// scroll stays; a changed one replaces them, since later cursors target the old diff.
+fn merge_first_page(s: &mut App, d: &Value) -> bool {
+    if s.ui.pages.code.first_mark == Some(page_mark(d)) {
+        return false;
+    }
+    first_page(s, d);
     true
 }
 
@@ -923,6 +949,7 @@ fn first_page(s: &mut App, d: &Value) {
     u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
     let c = &mut s.ui.pages.code;
     c.next = d["nextCursor"].as_str().map(str::to_owned);
+    c.first_mark = Some(page_mark(d));
     c.fresh = true;
 }
 
@@ -2031,7 +2058,7 @@ fn diff_view(s: &App, t: &T) -> El {
             let changed = s.ui.pages.code.diff.set_visible_rows(rows);
             (near_end && load_more(s)) || changed
         });
-    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
+    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
     let footer = s.ui.pages.code.next.is_some().then(|| page_footer(s, t));
     let mut root = col().key("pr-code-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
@@ -2889,12 +2916,25 @@ mod tests {
         turn_finished(&mut s);
         assert!(s.ui.pages.code.viewed.refresh, "the viewed ticks read again");
         let p = "src/a.rs";
-        first_page(&mut s, &json!({"patch": format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n"), "truncated": false, "nextCursor": "c2"}));
+        let page = json!({"patch": format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n"), "truncated": false, "nextCursor": "c2"});
+        assert!(merge_first_page(&mut s, &page));
         poll(&mut s);
         let shown: Vec<&str> = s.ui.pages.code.diff.files().iter().map(FileDiff::path).collect();
         assert_eq!(shown, [p]);
         assert!(s.ui.pages.code.pages.is_empty(), "pages read for the old diff go");
         assert_eq!(s.ui.pages.code.next.as_deref(), Some("c2"));
+
+        // The page merge: the same first page again keeps the pages read after it.
+        s.ui.pages.code.pages = vec![1];
+        s.ui.pages.code.next = None;
+        assert!(!merge_first_page(&mut s, &page.clone()));
+        poll(&mut s);
+        assert_eq!((s.ui.pages.code.pages.as_slice(), s.ui.pages.code.next.as_deref()), (&[1][..], None), "an unchanged first page keeps the later pages");
+        let mut moved = page.clone();
+        moved["nextCursor"] = json!("c3");
+        assert!(merge_first_page(&mut s, &moved), "a changed page replaces them");
+        poll(&mut s);
+        assert!(s.ui.pages.code.pages.is_empty());
     }
 
     #[test]

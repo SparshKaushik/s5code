@@ -420,7 +420,12 @@ fn inline(app: &App, src: &str, key: &str, t: &T, ink: rune::Color, font: TextSt
                 spans.retain(|s| (s.start as usize) < start);
                 shown.truncate(start);
                 shown.push_str(&label);
-                let (accent, glyph) = crate::chat::composer::chips::look(glyph_kind, None).unwrap_or((ink, &icons::FILE));
+                let (accent, mut glyph) = crate::chat::composer::chips::look(glyph_kind, None).unwrap_or((ink, &icons::FILE));
+                if let Target::File { path, .. } = &target
+                    && !path.ends_with('/')
+                {
+                    glyph = crate::panel::diff::file_glyph(path);
+                }
                 pills.push((start..shown.len(), PillStyle::new().bg(t.c.foreground.alpha_mul(0.08)).fg(accent).icon(glyph)));
                 let help = help(&url).unwrap_or_default();
                 links.push(Link::new(start..shown.len(), url).hover(LinkPaint::new().bg(t.c.foreground.alpha_mul(0.14))).help(help));

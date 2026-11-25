@@ -563,13 +563,13 @@ pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
     let (title, description, action) = if network {
         (
             "Enable network access?",
-            "Let your other devices connect to S5 Code over the network. Pair devices to give them access. S5 Code's server will restart.",
+            "Let your other devices connect to T3 Code over the network. Pair devices to give them access. T3 Code will restart.",
             "Restart and enable",
         )
     } else {
         (
             "Disable network access?",
-            "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. S5 Code's server will restart.",
+            "Devices connected over your local network will disconnect. Existing tunnels, such as T3 Connect or Tailscale HTTPS, keep working. T3 Code will restart.",
             "Restart and disable",
         )
     };
@@ -596,7 +596,7 @@ fn serve_confirm(s: &App, t: &T, layers: &mut Vec<El>) {
         Some(ServeDialog::Disable) => kit::Dialog::new("tailscale-serve-disable", "Disable Tailscale HTTPS?")
             .open(true)
             .alert()
-            .description("S5 Code will restart the local backend without Tailscale Serve.")
+            .description("T3 Code will restart the local backend without Tailscale Serve.")
             .on_close(close)
             .child(
                 row()
@@ -643,7 +643,7 @@ fn serve_confirm(s: &App, t: &T, layers: &mut Vec<El>) {
             kit::Dialog::new("tailscale-serve-setup", "Set up Tailscale HTTPS?")
                 .open(true)
                 .width(448.0)
-                .description("S5 Code will restart the local backend with Tailscale Serve enabled and ask Tailscale to proxy HTTPS traffic to this backend.")
+                .description("T3 Code will restart the local backend with Tailscale Serve enabled and ask Tailscale to proxy HTTPS traffic to this backend.")
                 .on_close(close)
                 .child(col().w_full().gap(12.0).child(field).child(endpoint))
                 .child(

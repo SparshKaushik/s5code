@@ -152,6 +152,26 @@ pub fn create(s: &mut App, dark: bool) {
     open(s, template, dark, false);
 }
 
+/// Scenes: the editor open on a builtin's copy, picking from the app, or moved and resized with
+/// the accent field selected.
+pub fn scene(s: &mut App, state: &str) {
+    let template = builtins().first().cloned().unwrap_or_else(|| json!({}));
+    edit(s, template, true);
+    let session = session_mut(s);
+    match state {
+        "inspecting" => {
+            session["inspecting"] = json!(true);
+            session["pointer"] = json!([180.0, 220.0]);
+        }
+        "resized" => {
+            session["pos"] = json!([420.0, 48.0]);
+            session["size"] = json!([560.0, 600.0]);
+            session["selected"] = json!("accent");
+        }
+        _ => {}
+    }
+}
+
 fn close(s: &mut App) {
     s.ui.settings.theme_editor = None;
 }
@@ -293,6 +313,11 @@ fn clamp_pos([x, y]: [f32; 2], width: f32, [vw, vh]: [f32; 2]) -> [f32; 2] {
 }
 
 /// The resize handle's bounds: the minimum size, and the window's edge past the panel's corner.
+/// Web's `max-h-[min(42rem,calc(100dvh-6rem))]`, never below the resize minimum.
+fn default_height(window: Option<[f32; 2]>) -> f32 {
+    window.map_or(672.0, |[_, vh]| (vh - 96.0).clamp(MIN_H, 672.0))
+}
+
 fn clamp_size([w, h]: [f32; 2], [x, y]: [f32; 2], [vw, vh]: [f32; 2]) -> [f32; 2] {
     [w.clamp(MIN_W, (vw - MARGIN - x).max(MIN_W)), h.clamp(MIN_H, (vh - MARGIN - y).max(MIN_H))]
 }
@@ -356,6 +381,46 @@ fn inspected_role(path: &str) -> &'static str {
         return role;
     }
     "canvas"
+}
+
+/// `getThemeRoleLabel`: a few roles read differently; the rest split their camelCase.
+fn role_label(role: &str) -> String {
+    const LABELS: [(&str, &str); 14] = [
+        ("canvas", "Background"),
+        ("toolbar", "Toolbar background"),
+        ("toolbarForeground", "Toolbar text"),
+        ("toolbarBorder", "Toolbar border"),
+        ("toolbarControl", "Toolbar control"),
+        ("toolbarControlForeground", "Toolbar control text"),
+        ("toolbarControlHover", "Toolbar control hover"),
+        ("accent", "Accent color"),
+        ("errorForeground", "Error text"),
+        ("errorSurface", "Error background"),
+        ("warningForeground", "Warning text"),
+        ("warningSurface", "Warning background"),
+        ("updateForeground", "Update text"),
+        ("updateSurface", "Update background"),
+    ];
+    if let Some((_, label)) = LABELS.iter().find(|(r, _)| *r == role) {
+        return (*label).to_owned();
+    }
+    let mut out = String::new();
+    for (i, c) in role.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else if c.is_ascii_uppercase() {
+            out.push(' ');
+            out.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The family filter: its label and its roles' labels, as web's `renderColorFields`.
+fn family_matches(label: &str, roles: &[&str], query: &str) -> bool {
+    query.is_empty() || std::iter::once(label.to_owned()).chain(roles.iter().map(|r| role_label(r))).collect::<Vec<_>>().join(" ").to_lowercase().contains(query)
 }
 
 fn family_label(role: &str) -> &'static str {
@@ -478,7 +543,7 @@ fn fields(s: &App, t: &T, advanced: bool) -> El {
     let mut out = col().w_full().gap(20.0);
     let mut any = false;
     for (title, families) in GROUPS {
-        let shown: Vec<&Family> = families.iter().filter(|(label, _, roles)| query.is_empty() || format!("{label} {}", roles.join(" ")).to_lowercase().contains(&query)).collect();
+        let shown: Vec<&Family> = families.iter().filter(|(label, _, roles)| family_matches(label, roles, &query)).collect();
         if shown.is_empty() {
             continue;
         }
@@ -618,7 +683,9 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         .child(header);
     panel = match size {
         Some([_, h]) if !minimized => panel.h(h),
-        _ => panel.max_h(s.ui.desktop.window_size().map_or(672.0, |[_, vh]| (vh - 2.0 * MARGIN).min(672.0))),
+        // The scrolling body has no intrinsic height, so the open panel takes web's cap.
+        _ if !minimized => panel.h(default_height(s.ui.desktop.window_size())),
+        _ => panel,
     };
     if !minimized {
         let save_button = Button::new(if editing.is_some() { "Save changes" } else { "Create theme" }).size("sm").disabled(s.ui.settings.theme_name.text.trim().is_empty()).on_press(save);
@@ -673,7 +740,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_color_filter_reads_role_labels_like_web() {
+        assert_eq!(role_label("toolbarForeground"), "Toolbar text");
+        assert_eq!(role_label("sidebarBorder"), "Sidebar Border", "others split their camelCase");
+        let text: Vec<&str> = vec!["text", "toolbarForeground", "toolbarControlForeground"];
+        assert!(family_matches("Text", &text, "toolbar text"), "a role's label matches");
+        assert!(!family_matches("Text", &text, "toolbarforeground"), "its id doesn't");
+        assert!(family_matches("Text", &text, ""));
+    }
+
+    #[test]
     fn the_panel_stays_inside_the_window_and_resizes_within_it() {
+        assert_eq!(default_height(Some([1200.0, 900.0])), 672.0, "42rem on a tall window");
+        assert_eq!(default_height(Some([1200.0, 600.0])), 504.0, "the viewport less 6rem");
+        assert_eq!(default_height(Some([800.0, 260.0])), MIN_H);
         let window = [1200.0, 800.0];
         assert_eq!(clamp_pos([-40.0, -5.0], WIDTH, window), [MARGIN, MARGIN]);
         assert_eq!(clamp_pos([1100.0, 900.0], WIDTH, window), [1200.0 - WIDTH - MARGIN, 800.0 - 48.0]);

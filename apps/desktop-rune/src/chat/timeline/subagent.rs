@@ -186,7 +186,7 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
     if detail.is_some() && (event.is_some() || state != Some("completed")) {
         body = body.child(text(label).font(theme::TEXT_XS).color(tone));
     }
-    body = body.child(text(time).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    body = body.child(text(time.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground));
     if let Some((key, thread)) = target {
         body = body
             .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)))
@@ -196,7 +196,9 @@ fn link(app: &App, agent: &Value, item: &Value, id: &str, child: &str, event: Op
             .hover(t.c.accent.alpha_mul(0.2))
             .on_press(move |app: &mut App| open(app, key.as_deref(), &thread));
     }
-    body.help(label)
+    // SubagentTooltipContent's facts: the task, its model, and how it stands.
+    let standing = if time.is_empty() { label.to_owned() } else { format!("{label} · {time}") };
+    body.help([name.as_str(), pick("model"), standing.as_str()].into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n"))
 }
 
 /// The thread a task's row opens, with the environment to open it on: a task in a linked

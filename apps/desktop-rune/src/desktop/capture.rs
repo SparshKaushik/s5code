@@ -280,6 +280,11 @@ pub struct State {
     pub linux_error: Option<String>,
     /// Linux: the portal is asking the user to approve the shortcut.
     pub shortcut_pending: bool,
+    /// Niri and Hyprland: the binding to add to the compositor's config.
+    pub shortcut_binding: Option<String>,
+    pub shortcut_config_path: Option<String>,
+    /// Niri and Hyprland: the action the binding calls is served (unknown while connecting).
+    pub shortcut_action_registered: Option<bool>,
 }
 
 /// The registration the settings ask for.
@@ -290,6 +295,8 @@ pub enum Plan {
     Pair(&'static str),
     Chord(String),
     Invalid,
+    /// The compositor's config binds the keys; T3 Code serves the action it calls.
+    Managed(crate::desktop::capture_config::Desktop),
 }
 
 enum Event {
@@ -302,6 +309,7 @@ enum Event {
     LinuxChecked(Result<crate::desktop::capture_linux::Setup, String>),
     LinuxActed(Result<(), String>),
     Registered(u64, Result<rune::ShortcutId, rune::ShortcutError>),
+    Managed(u64, crate::desktop::capture_config::Desktop, Result<bool, String>),
 }
 
 #[derive(Default)]
@@ -310,6 +318,8 @@ enum Registration {
     None,
     Chord(rune::ShortcutId),
     Pair(Child),
+    /// Stops the Niri endpoint or Hyprland portal session.
+    Managed(std::sync::Arc<std::sync::atomic::AtomicBool>),
 }
 
 #[derive(Default)]
@@ -805,7 +815,37 @@ fn release(live: &mut Live) {
             let _ = child.kill();
             let _ = child.wait();
         }
+        Registration::Managed(stop) => stop.store(true, std::sync::atomic::Ordering::Relaxed),
         Registration::None => {}
+    }
+}
+
+/// Niri and Hyprland bind capture in their own config (Electron's `startNiriCaptureShortcut` and
+/// `PortalCaptureShortcut` managed by Hyprland), whatever shortcut the settings hold. Until the
+/// backend is known nothing registers, so the portal isn't asked for a chord it won't use.
+fn linux_plan(wanted: Plan, backend: Option<crate::desktop::capture_linux::Backend>, checking: bool) -> Plan {
+    use crate::desktop::{capture_config::Desktop, capture_linux::Backend};
+    match (wanted, backend) {
+        (w @ (Plan::Off | Plan::Blocked), _) => w,
+        (_, Some(Backend::Niri)) => Plan::Managed(Desktop::Niri),
+        (_, Some(Backend::Hyprland)) => Plan::Managed(Desktop::Hyprland),
+        (_, None) if checking => Plan::Off,
+        (w, _) => w,
+    }
+}
+
+const HYPRLAND_CONNECTING: &str = "Connecting to Hyprland shortcuts…";
+
+/// The state a managed shortcut's serving result leaves: whether its action is registered, and
+/// Electron's message.
+fn managed_status(desktop: crate::desktop::capture_config::Desktop, result: &Result<bool, String>) -> (bool, &'static str) {
+    use crate::desktop::capture_config::Desktop;
+    match (desktop, result) {
+        (Desktop::Niri, Ok(_)) => (true, "Set up the shortcut to add it to your Niri config."),
+        (Desktop::Niri, Err(_)) => (false, "Could not start the Niri capture endpoint. Another T3 Code instance may be using it."),
+        (Desktop::Hyprland, Ok(true)) => (true, "Managed by Hyprland. Add the binding to your config and save it."),
+        (Desktop::Hyprland, Ok(false)) => (false, "Hyprland did not register the capture action. Check that xdg-desktop-portal-hyprland is running, then restart T3 Code."),
+        (Desktop::Hyprland, Err(_)) => (false, "Couldn't connect to Hyprland shortcuts. Make sure xdg-desktop-portal-hyprland is running, then restart T3 Code."),
     }
 }
 
@@ -845,8 +885,28 @@ fn apply(live: &mut Live, plan: Plan, waker: Option<Waker>) {
     state.shortcut_registered = false;
     state.shortcut_message = None;
     state.shortcut_pending = false;
+    state.shortcut_binding = None;
+    state.shortcut_config_path = None;
+    state.shortcut_action_registered = None;
     match &plan {
         Plan::Off => {}
+        Plan::Managed(desktop) => {
+            let desktop = *desktop;
+            let (path, lua) = crate::desktop::capture_config::default_path(desktop);
+            state.shortcut_binding = Some(crate::desktop::capture_config::manual_binding(desktop, crate::desktop::capture_linux::APP_ID, lua));
+            state.shortcut_config_path = Some(path.display().to_string());
+            state.shortcut_pending = true;
+            if desktop == crate::desktop::capture_config::Desktop::Hyprland {
+                state.shortcut_message = Some(HYPRLAND_CONNECTING.into());
+            }
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            live.registration = Registration::Managed(stop.clone());
+            std::thread::spawn(move || {
+                let presses = waker.clone();
+                let trigger: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || push(Event::Triggered(generation), &presses));
+                crate::desktop::capture_linux::serve_shortcut(desktop, &stop, &|result| push(Event::Managed(generation, desktop, result), &waker), trigger);
+            });
+        }
         Plan::Blocked => state.message = Some(SCREEN_RECORDING_MESSAGE.into()),
         Plan::Invalid => state.shortcut_message = Some(SHORTCUT_TAKEN.into()),
         Plan::Pair(_) if linux() => live.state.shortcut_message = Some(crate::desktop::capture_linux::MODIFIER_PAIR_UNAVAILABLE.into()),
@@ -1209,6 +1269,16 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                     Err(error) => live.state.shortcut_message = Some(registration_message(&error).into()),
                 }
             }),
+            Event::Managed(generation, desktop, result) => LIVE.with(|live| {
+                let mut live = live.borrow_mut();
+                if live.generation != generation {
+                    return;
+                }
+                let (registered, message) = managed_status(desktop, &result);
+                live.state.shortcut_pending = false;
+                live.state.shortcut_action_registered = Some(registered);
+                live.state.shortcut_message = Some(message.into());
+            }),
             Event::Tested(result) => {
                 let passed = result.is_ok();
                 LIVE.with(|live| live.borrow_mut().state.test = result.map_or_else(|(step, status)| Test::Failed(test_message(step, status)), |()| Test::Passed));
@@ -1245,7 +1315,11 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let waker = s.ui.panel.waker.clone();
     changed |= LIVE.with(|live| {
         let mut live = live.borrow_mut();
-        let wanted = plan(enabled(s), live.state.permissions, suppressed, &shortcut);
+        let mut wanted = plan(enabled(s), live.state.permissions, suppressed, &shortcut);
+        if linux() {
+            let checking = live.state.linux.is_none() && live.state.message.is_none();
+            wanted = linux_plan(wanted, live.state.linux.as_ref().map(|l| l.backend), checking);
+        }
         // A pair that died stays released until the settings change.
         if live.applied.as_ref() == Some(&wanted) {
             return false;
@@ -1348,6 +1422,24 @@ pub fn pair_shortcut(modifier: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niri_and_hyprland_serve_their_config_binding() {
+        use crate::desktop::{capture_config::Desktop, capture_linux::Backend};
+        let chord = || Plan::Chord("Ctrl+Shift+2".into());
+        assert_eq!(linux_plan(chord(), Some(Backend::Niri), false), Plan::Managed(Desktop::Niri));
+        assert_eq!(linux_plan(Plan::Pair("shift"), Some(Backend::Hyprland), false), Plan::Managed(Desktop::Hyprland), "the settings' keys don't matter");
+        assert_eq!(linux_plan(Plan::Off, Some(Backend::Niri), false), Plan::Off, "capture off stops serving");
+        assert_eq!(linux_plan(Plan::Blocked, Some(Backend::Hyprland), false), Plan::Blocked);
+        assert_eq!(linux_plan(chord(), None, true), Plan::Off, "nothing registers until the backend is known");
+        assert_eq!(linux_plan(chord(), Some(Backend::Kde), false), chord(), "other desktops use the portal");
+        assert_eq!(linux_plan(chord(), None, false), chord(), "a failed check keeps the portal");
+
+        assert_eq!(managed_status(Desktop::Hyprland, &Ok(true)), (true, "Managed by Hyprland. Add the binding to your config and save it."));
+        assert!(!managed_status(Desktop::Hyprland, &Ok(false)).0, "Hyprland refused the action");
+        assert!(managed_status(Desktop::Hyprland, &Err("x".into())).1.starts_with("Couldn't connect to Hyprland shortcuts."));
+        assert_eq!(managed_status(Desktop::Niri, &Err("taken".into())), (false, "Could not start the Niri capture endpoint. Another T3 Code instance may be using it."));
+    }
 
     fn window(id: u64, title: &str, (x, y, width, height): (f64, f64, f64, f64)) -> Candidate {
         Candidate { id, title: title.into(), bounds: Bounds { x, y, width, height }, alpha: 1.0 }

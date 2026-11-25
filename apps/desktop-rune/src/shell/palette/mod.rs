@@ -2184,17 +2184,9 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
     };
     let state = s.state();
     let thread = v.thread.and_then(|at| state.threads.get(at)).map(|value| (value, crate::shell::sidebar::logic::Thread::from_shell(value)));
-    // `titleLeadingContent` / `titleTrailingContent` sit on the title line, beside the title.
-    let title = match (&v.trailing, &thread) {
-        (Trailing::Theme(current, theme, modes), _) => {
-            let mut line = row().gap(8.0).center_y().min_w(0.0).child(title.shrink());
-            if *current {
-                line = line.child(text("Current").font(theme::TEXT_XS).color(muted.alpha_mul(0.7)));
-            }
-            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
-            line.child(row().gap(4.0).center_y().children(circles))
-        }
-        (_, Some((_, th))) => match thread_row::leading(t, th) {
+    // `titleLeadingContent` sits on the title line; `titleTrailingContent` follows the flex-1 title, at the row's end.
+    let title = match &thread {
+        Some((_, th)) => match thread_row::leading(t, th) {
             Some(leading) => row().gap(6.0).center_y().min_w(0.0).child(leading).child(title.shrink()),
             None => title,
         },
@@ -2281,7 +2273,14 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         Trailing::Picked => entry = entry.child(icon(&icons::CHECK, 14.).color(t.c.contrast_icon_muted)),
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
-        Trailing::Theme(..) => {}
+        Trailing::Theme(current, theme, modes) => {
+            let mut end = row().gap(8.0).center_y();
+            if *current {
+                end = end.child(text("Current").font(theme::TEXT_XS).color(muted.alpha_mul(0.7)));
+            }
+            let circles = modes.iter().map(|mode| crate::settings::themes::preview_circle(theme, *mode == "dark", 12.0));
+            entry = entry.child(end.child(row().gap(4.0).center_y().children(circles)));
+        }
         Trailing::Pin(members, pinned) if *pinned || selected => {
             let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
