@@ -651,8 +651,8 @@ fn meter(usage: Usage, alert: bool, t: &T) -> El {
 
 pub(crate) const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
 
-/// Web `TunnelLimitAlert`. Rune has no account page, so linking T3 Chat or managing tunnels
-/// offers no button; an upgrade opens the T3 Chat subscription.
+/// Web `TunnelLimitAlert`: link T3 Chat, upgrade the plan, or manage the account's tunnels under
+/// Settings → Environments' registered environments.
 fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
     let description = match upgrade {
         Some("link") => "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
@@ -676,9 +676,12 @@ fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
                 .child(text("You\u{2019}re out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground))
                 .child(text(description).font(theme::TEXT_XS).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
         );
-    if matches!(upgrade, Some("pro" | "premier")) {
-        alert = alert.child(kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)).build(t));
-    }
+    let action = match upgrade {
+        Some("link") => kit::Button::new("Link T3 Chat").size("sm").on_press(crate::cloud::account::link_t3chat),
+        Some("pro" | "premier") => kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)),
+        _ => kit::Button::new("Manage tunnels").variant("outline").size("sm").on_press(|s: &mut App| s.navigate(crate::Route::Settings("connections".into()))),
+    };
+    alert = alert.child(action.build(t));
     alert.mt(6.0)
 }
 
@@ -722,6 +725,13 @@ pub fn scene(s: &mut App, state: Value) {
     crate::cloud::scene_signed_in(s);
     s.ui.settings.connect.state = Some(Ok(state));
     s.ui.settings.connect.usage = Some(Usage { used: 2, limit: 3, upgrade: Some("link") });
+}
+
+/// Scenes: the relay refused a tunnel at a cap linking T3 Chat would raise.
+pub fn scene_limit(s: &mut App) {
+    let ui = &mut s.ui.settings.connect;
+    (ui.tunnel_limit, ui.used_at_refusal) = (Some(3), Some(3));
+    ui.usage = Some(Usage { used: 3, limit: 3, upgrade: Some("link") });
 }
 
 /// Scenes: signed out, with the sign-in prompt open.

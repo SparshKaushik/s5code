@@ -1661,6 +1661,12 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         connect::scene(s, json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": true, "holdWebhooksWhileOffline": false,
             "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
     }),
+    ("settings-access-t3-connect-limit", |s| {
+        scene(s, "access");
+        s.ui.settings.loaded_page = Some("access".into());
+        connect::scene(s, json!({"linked": true, "managedTunnelActive": false, "publishAgentActivity": true}));
+        connect::scene_limit(s);
+    }),
     ("settings-access-t3-connect-signed-out", |s| scene(s, "access")),
     ("settings-access-t3-connect-sign-in", |s| {
         scene(s, "access");
