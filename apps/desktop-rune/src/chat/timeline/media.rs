@@ -641,6 +641,40 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
     Some(out)
 }
 
+/// ChatMarkdownImage in prose, which web draws inline-block: a paragraph of words and images as
+/// one text, once each image has loaded. Until then, or when one can't load, rune_kit's
+/// Markdown draws it.
+pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t: &T) -> Option<El> {
+    if !block.contains("![") {
+        return None;
+    }
+    let root = super::workspace_root(app);
+    let thread = match app.frame_route() {
+        Route::Thread(id) => Some(id.clone()),
+        _ => None,
+    };
+    let image = |alt: &str, src: &str| {
+        let (key, media, access) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
+        if media.kind != Kind::Image {
+            return None;
+        }
+        let Some(entry) = app.ui.chat.timeline.assets.media.entries.get(&key) else {
+            want(app, &key, &media, access);
+            return None;
+        };
+        let loaded = entry.loaded.as_ref().filter(|l| !entry.failed && !l.failed())?;
+        let (w, h) = loaded.pixels.size();
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let ratio = w as f32 / h as f32;
+        let width = (w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio);
+        let label = alt.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, width / ratio], copy: format!("![{label}]({src})"), open: Some(key) })
+    };
+    super::inline::paragraph(block, Vec::new(), &image, font, ink, t)
+}
+
 /// `ChatMarkdownImage` standalone: the picture at its size within 30rem, a muted frame while it
 /// loads, and "Image unavailable" when it can't.
 fn picture(key: &str, media: &Media, loaded: Option<&Loaded>, failed: bool, framed: bool, gallery: &[String], t: &T) -> El {

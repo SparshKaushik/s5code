@@ -308,6 +308,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("chat-width-full", |app| chat_width(app, "full")),
     ("timeline-math", math),
     ("timeline-math-typeset", math_typeset),
+    ("timeline-inline-image", inline_image),
 ];
 
 /// The showcase under a Chat width other than Comfortable: the timeline and composer widen.
@@ -327,17 +328,28 @@ fn context_strip(app: &mut App) {
 fn math(app: &mut App) {
     showcase(app);
     app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
-    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation](https://example.com/mse)). It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
+    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation of $\\hat y$](https://example.com/mse)). It costs $5 and $10 a run, and **each epoch** re-reads `train.csv` before $n$ batches settle the weights.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 
-/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph lays
-/// out a word at a time.
+/// A picture among a paragraph's words, in its line as web draws it inline-block.
+fn inline_image(app: &mut App) {
+    showcase(app);
+    let root = super::workspace_root(app).unwrap_or_else(|| "/tmp".into());
+    let src = format!("{}/docs/latency.png", root.trim_end_matches('/'));
+    let text = format!("The latency jump ![Latency]({src}) lines up with the deploy at 14:02, so see [the deploy log](https://example.com/log) before rolling back.");
+    push_visible(app, vec![serde_json::json!({"id": "scene-inline-image", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    super::media::scene_entry(app, "Latency", &src, false);
+}
+
+/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph is
+/// one text with them in its lines, one inside a link.
 fn math_typeset(app: &mut App) {
     math(app);
     super::katex::scene_typeset(app, &[
         ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false),
         ("n", false),
+        ("\\hat y", false),
         ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true),
         ("e^{i\\pi} + 1 = 0", true),
     ]);
