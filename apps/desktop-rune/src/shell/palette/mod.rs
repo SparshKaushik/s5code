@@ -1861,6 +1861,20 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     false
 }
+/// `chat.find` over the open palette on a thread: closes it and opens the find bar, or says the
+/// server can't search threads.
+fn find_key(s: &mut App, e: &KeyEvent) -> bool {
+    if !matches!(s.route, Route::Thread(_)) || !crate::panel::shortcut(s, e, "chat.find") {
+        return false;
+    }
+    s.ui.shell.palette.open = false;
+    if actions::supports_thread_find(s) {
+        actions::find(s);
+    } else {
+        toast(s, "Thread search is unavailable on this server.", Some("Update the server to enable it."));
+    }
+    true
+}
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if toggle_key(s, e) {
         let open = !s.ui.shell.palette.open;
@@ -1889,6 +1903,9 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         for project in members {
             actions::pin_project(s, project, !pinned);
         }
+        return true;
+    }
+    if find_key(s, e) {
         return true;
     }
     match &e.key {
@@ -2691,6 +2708,28 @@ mod tests {
         assert_eq!(find_query("Cafeteria near the Café", "the cafe"), "Cafe");
         assert_eq!(find_query("needles and a Needle.", "needle"), "Needle");
         assert_eq!(find_query("nothing here", "zz"), "zz");
+    }
+    #[test]
+    fn find_over_the_open_palette_opens_the_bar_or_says_the_server_cannot() {
+        let mut s = App::new();
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!("fixture") };
+        state.config = Some(serde_json::json!({"keybindings": [{"command": "chat.find", "shortcut": {"key": "f", "modKey": true}}]}));
+        let thread = crate::data::s(&state.threads[0], "id").to_owned();
+        let mut press = KeyEvent::from(Key::Command('f'));
+        press.mods.cmd = true;
+        press.mods.ctrl = !cfg!(target_os = "macos");
+        s.ui.shell.palette.open = true;
+        assert!(!find_key(&mut s, &press), "FAILED: off a thread the key is not the palette's");
+        s.route = Route::Thread(thread);
+        assert!(find_key(&mut s, &press));
+        assert!(!s.ui.shell.palette.open && !s.ui.chat.timeline.find.open);
+        assert_eq!(toast_title(&s), Some("Thread search is unavailable on this server."));
+        assert_eq!(toast_description(&s), Some("Update the server to enable it."));
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!("fixture") };
+        state.config.as_mut().expect("config")["threadFind"] = serde_json::json!(true);
+        s.ui.shell.palette.open = true;
+        assert!(find_key(&mut s, &press));
+        assert!(!s.ui.shell.palette.open && s.ui.chat.timeline.find.open, "FAILED: a capable server opens the find bar");
     }
     #[test]
     fn configured_shortcut_replaces_default_and_requires_exact_modifiers() {

@@ -965,12 +965,16 @@ fn toggle_computer(s: &mut App, env: &str) {
 
 fn connect(s: &App, t: &T) -> El {
     let mut body = col().w_full().gap(8.).child(heading("Connect your computers", Some("Choose one or more computers. We’ll set up agents and projects on each."), t)).child(rune::el().h(12.));
-    for env in crate::env::keys(s) {
+    // The web's `fieldset` with its screen-reader legend.
+    let mut computers = col().w_full().gap(8.).role("group").label("Computers to set up");
+    let keys = crate::env::keys(s);
+    let listed = !keys.is_empty();
+    for env in keys {
         let checked = s.ui.wizard.chosen.contains(&env);
         let label = crate::env::label(s, &env);
         let state = if s.ui.env.off.contains(&env) { "Off" } else { crate::env::short_status(s, &env) };
         let toggle = env.clone();
-        body = body.child(
+        computers = computers.child(
             card(t)
                 .cursor(rune::Cursor::Pointer)
                 .child(kit::Checkbox::new(checked).hide_label().label(label.clone()).build(&kit::theme(t)))
@@ -987,6 +991,9 @@ fn connect(s: &App, t: &T) -> El {
                 .child(text(state).font(theme::TEXT_XS).color(t.c.muted_foreground).help(crate::env::status(s, &env)))
                 .on_press(move |s: &mut App| toggle_computer(s, &toggle)),
         );
+    }
+    if listed {
+        body = body.child(computers);
     }
     let open = s.ui.wizard.pairing_open;
     let mut pairing = col().w_full().radius(8.).border(1., t.c.border).fill(t.c.background).child(
