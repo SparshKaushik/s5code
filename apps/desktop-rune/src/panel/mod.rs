@@ -47,13 +47,6 @@ impl Surface {
             Self::Device => "Device",
         }
     }
-    /// Its tab's key in the strip, to scroll it into view.
-    fn tab_key(self) -> String {
-        match self {
-            Self::Browser(tab) => format!("panel-tab-browser-{tab}"),
-            _ => format!("panel-tab-{}", self.title()),
-        }
-    }
     fn glyph(self) -> &'static rune::Icon {
         match self {
             Self::Browser(_) => &icons::GLOBE,
@@ -82,8 +75,6 @@ pub struct Ui {
     launcher_profiles: bool,
     /// The tab strip's right-click menu: its tab and window point.
     tab_menu: Option<(Surface, (f32, f32))>,
-    /// The active tab last scrolled into view in the strip.
-    revealed: Option<Surface>,
     thread: String,
     pub(crate) closed: closed::Store,
     /// Each thread's surfaces, as web's right panel state is per thread; browser tabs stay
@@ -124,7 +115,6 @@ impl Default for Ui {
             add_profiles: false,
             launcher_profiles: false,
             tab_menu: None,
-            revealed: None,
             thread: String::new(),
             closed: Default::default(),
             stash: Default::default(),
@@ -656,13 +646,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
 
     pull_requests::want_avatars(app);
-    // Web scrolls a newly active tab into the strip's view.
-    if app.ui.panel.revealed != app.ui.panel.active {
-        app.ui.panel.revealed = app.ui.panel.active;
-        if let Some(surface) = app.ui.panel.active {
-            tx.scroll_into_view_in(TAB_STRIP, surface.tab_key());
-        }
-    }
     let changed = diff::poll(app)
         | diff::reveal(app, tx)
         | files::poll(app, tx)
@@ -1003,8 +986,6 @@ fn picker(app: &App, t: &T) -> El {
         .pb(52.)
         .child(list)
 }
-const TAB_STRIP: &str = "panel-tab-scroll";
-
 /// `RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY`: at this width or less the panel is a sheet.
 const SHEET_BELOW: f32 = 980.;
 
@@ -1045,7 +1026,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let sheet = viewport.and_then(sheet_width);
     let width = sheet.unwrap_or_else(|| app.ui.panel.width.min(viewport.map_or(1000., |w| w * 0.7)));
     // Web's RightPanelTabs: 24pt tabs whose surface icon turns into the close button on hover.
-    let mut tabs = row().h_full().gap(4.).center_y().role("tablist");
+    let mut tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y().role("tablist");
     for &surface in &app.ui.panel.surfaces {
         let active = app.ui.panel.active == Some(surface);
         let title = match surface {
@@ -1100,7 +1081,6 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         };
         tabs = tabs.child(
             row()
-                .key(surface.tab_key())
                 .h(24.)
                 .max_w(144.)
                 .pl(6.)
@@ -1133,15 +1113,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 ),
         );
     }
-    // The tabs scroll sideways once they overflow, as web's ScrollArea; + and the panel toggle
-    // stay outside it, so a full strip never pushes them out.
-    let tabs = row()
-        .h(51.)
-        .gap(4.)
-        .pl(8.)
-        .pr(12.)
-        .center_y()
-        .child(row().key(TAB_STRIP).shrink().min_w(0.).h_full().scroll_x().scroll_edge_fade(24.).child(tabs))
+    tabs = tabs
         .child(
             el().key("panel-add").child(
                 action(t, "Add panel surface", &icons::PLUS)
@@ -1251,12 +1223,6 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-pdf-chrome", |s| browser_page_scene(s, "/reports/q3", "q3")),
     ("browser-auth-chrome", |s| browser_page_scene(s, "/staging", "401 Unauthorized")),
     ("browser-permissions-chrome", |s| browser_page_scene(s, "/permissions", "Permissions ready")),
-    ("panel-tabs-overflow", |s| {
-        scene(s, None);
-        for tab in preview::scene_tabs(s) {
-            activate(s, Surface::Browser(tab));
-        }
-    }),
     ("browser-popup-chrome", |s| {
         scene(s, None);
         if let Some(tab) = preview::scene_popup(s) {

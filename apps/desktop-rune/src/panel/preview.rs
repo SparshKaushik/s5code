@@ -1987,24 +1987,6 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
     tab
 }
 
-/// The live check's overflowing strip: four browser tabs, the last active.
-pub fn scene_tabs(app: &mut App) -> Vec<TabId> {
-    let ui = &mut app.ui.panel.browser;
-    let titles = [("http://localhost:8000/popup.html", "localhost:8000"), ("https://example.com/", "Example Domain"), ("https://example.org/", "Example Domain"), ("https://example.net/", "Example Domain")];
-    titles
-        .into_iter()
-        .map(|(url, title)| {
-            ui.next += 1;
-            let tab = ui.next;
-            let mut fresh = Tab::new(Pixels::new());
-            fresh.bar.replace_text(url);
-            ui.tabs.insert(tab, fresh);
-            ui.browser.shared.lock().unwrap().tabs.insert(tab, Status { url: url.into(), title: title.into(), painted: true, ..Default::default() });
-            tab
-        })
-        .collect()
-}
-
 /// A two-page PDF for the `browser-pdf-chrome` scene, its text in Helvetica.
 fn scene_pdf_bytes() -> Vec<u8> {
     let page = |lines: &[&str]| {
