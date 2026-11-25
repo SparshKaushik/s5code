@@ -208,6 +208,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-secret-request", secret_request),
     ("timeline-link-request", link_request),
     ("timeline-changed-expand-all", changed_expand_all),
+    ("timeline-changed-sticky", changed_sticky),
     ("timeline-provider-banner", provider_banner),
     ("timeline-usage-limit-banner", usage_limit_banner),
     ("timeline-child-approval", child_approval),
@@ -277,6 +278,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-media-actions", media_actions),
     ("timeline-run-in-terminal", run_in_terminal),
     ("timeline-video-fallback", video_fallback),
+    ("timeline-video-playable", video_playable),
+    ("timeline-video-high-profile", video_high_profile),
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
     ("timeline-mcp-app", mcp_app),
@@ -308,6 +311,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("chat-width-full", |app| chat_width(app, "full")),
     ("timeline-math", math),
     ("timeline-math-typeset", math_typeset),
+    ("timeline-inline-image", inline_image),
 ];
 
 /// The showcase under a Chat width other than Comfortable: the timeline and composer widen.
@@ -327,17 +331,28 @@ fn context_strip(app: &mut App) {
 fn math(app: &mut App) {
     showcase(app);
     app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
-    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation](https://example.com/mse)). It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
+    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation of $\\hat y$](https://example.com/mse)). It costs $5 and $10 a run, and **each epoch** re-reads `train.csv` before $n$ batches settle the weights.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 
-/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph lays
-/// out a word at a time.
+/// A picture among a paragraph's words, in its line as web draws it inline-block.
+fn inline_image(app: &mut App) {
+    showcase(app);
+    let root = super::workspace_root(app).unwrap_or_else(|| "/tmp".into());
+    let src = format!("{}/docs/latency.png", root.trim_end_matches('/'));
+    let text = format!("The latency jump ![Latency]({src}) lines up with the deploy at 14:02, so see [the deploy log](https://example.com/log) before rolling back.");
+    push_visible(app, vec![serde_json::json!({"id": "scene-inline-image", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    super::media::scene_entry(app, "Latency", &src, false);
+}
+
+/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph is
+/// one text with them in its lines, one inside a link.
 fn math_typeset(app: &mut App) {
     math(app);
     super::katex::scene_typeset(app, &[
         ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false),
         ("n", false),
+        ("\\hat y", false),
         ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true),
         ("e^{i\\pi} + 1 = 0", true),
     ]);
@@ -379,7 +394,7 @@ fn file_card(app: &mut App) {
     let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
 }
-/// Sent audio: one clip signed (on Linux it can't play, so it reads Unavailable) and one still
+/// Sent audio: one clip signed (a local WAV, so it opens and shows its length) and one still
 /// signing, under a file card.
 fn audio(app: &mut App) {
     use serde_json::json;
@@ -388,8 +403,20 @@ fn audio(app: &mut App) {
         "text": "Transcribe these voice notes.", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
             {"type": "file", "id": "scene-audio-signed", "name": "standup-notes.m4a", "mimeType": "audio/mp4", "sizeBytes": 812_000},
             {"type": "file", "id": "scene-audio-signing", "name": "follow-up.mp3", "mimeType": "audio/mpeg", "sizeBytes": 240_000}]})]);
-    let signed = super::media::Loaded::new("https://example.com/standup-notes.m4a".into(), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
+    let signed = super::media::Loaded::new(silent_wav(83), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-audio-signed".into(), signed);
+}
+/// A `file://` URL of `seconds` of 8 kHz mono silence, written to the temp directory.
+fn silent_wav(seconds: u32) -> String {
+    let bytes = seconds * 8_000 * 2;
+    let mut wav = Vec::with_capacity(44 + bytes as usize);
+    for field in [&b"RIFF"[..], &(36 + bytes).to_le_bytes(), b"WAVEfmt ", &16u32.to_le_bytes(), &1u16.to_le_bytes(), &1u16.to_le_bytes(), &8_000u32.to_le_bytes(), &16_000u32.to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes(), b"data", &bytes.to_le_bytes()] {
+        wav.extend_from_slice(field);
+    }
+    wav.resize(44 + bytes as usize, 0);
+    let path = std::env::temp_dir().join(format!("s5code-scene-silence-{seconds}.wav"));
+    let _ = std::fs::write(&path, wav);
+    format!("file://{}", path.display())
 }
 /// A sent snapshot (SnapShotAttachmentDetails), its accessibility popover open.
 fn snapshot(app: &mut App) {
@@ -510,6 +537,23 @@ fn video_fallback(app: &mut App) {
     ]);
     app.ui.chat.timeline.assets.failed.insert("scene-video-attachment".into());
     super::media::scene_entry(app, "Demo recording", src, true);
+}
+
+/// A Markdown MP4 off macOS: its first frame, paused, from the software player.
+fn video_playable(app: &mut App) {
+    showcase(app);
+    let src = "https://example.com/media/demo-recording.mp4";
+    push_visible(app, vec![serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
+        "text": format!("Recorded the fix:\n\n![Demo recording]({src})"), "createdAt": "2026-01-01T00:00:01Z"})]);
+    super::media::scene_entry(app, "Demo recording", src, false);
+}
+
+fn video_high_profile(app: &mut App) {
+    showcase(app);
+    let (alt, src) = (super::media::SCENE_HIGH_PROFILE, "https://example.com/media/high-bframes-fragmented.mp4");
+    push_visible(app, vec![serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
+        "text": format!("A High-profile clip with B-frames, fragmented:\n\n![{alt}]({src})"), "createdAt": "2026-01-01T00:00:01Z"})]);
+    super::media::scene_entry(app, alt, src, false);
 }
 
 /// A turn item of `run` that ended at `end` seconds past `at(0)`, with `fields` merged in.
@@ -664,6 +708,17 @@ fn link_request(app: &mut App) {
         serde_json::json!({"position": 101, "item": pending.clone()}),
     ]);
     super::link::open(app, &pending);
+}
+/// A changed-files card taller than the timeline, scrolled to its end: its header holds at the top.
+fn changed_sticky(app: &mut App) {
+    showcase(app);
+    let reply = serde_json::json!({"id": "scene-sticky-reply", "type": "assistant_message", "runId": "scene-sticky-run",
+        "text": "Done. Every handler now returns typed errors.", "createdAt": "2026-01-01T00:00:00Z"});
+    push_items(app, "turnItems", vec![reply.clone()]);
+    push_items(app, "visibleTurnItems", vec![serde_json::json!({"position": 100, "item": reply})]);
+    let files: Vec<_> = (1..=36).map(|n| serde_json::json!({"path": format!("src/handlers/route_{n:02}.rs"), "additions": n * 3, "deletions": n % 5})).collect();
+    push_items(app, "checkpoints", vec![serde_json::json!({"runId": "scene-sticky-run", "appRunOrdinal": 99, "status": "ready", "files": files})]);
+    app.ui.chat.timeline.expanded.insert("changed-all:scene-sticky-run".into());
 }
 fn changed_expand_all(app: &mut App) {
     showcase(app);
@@ -1227,7 +1282,7 @@ fn side_pane(app: &mut App) {
             state.thread_views.insert("scene-side".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
         }
     }
-    app.ui.chat.side.open.insert(parent, "scene-side".into());
+    crate::panel::open_side_chat(app, &parent, "scene-side");
 }
 /// The side chat's composer with a typed follow-up and a file queued, the caret in it.
 fn side_pane_composer(app: &mut App) {
@@ -1255,7 +1310,7 @@ fn side_pane_stop(app: &mut App) {
 /// A closed side chat opened again from its parent (openSideChatTab), the caret in its composer.
 fn side_reopen(app: &mut App) {
     side_pane(app);
-    app.ui.chat.side.open.clear();
+    crate::panel::close_side_chat(app, "scene-side", false);
     crate::chat::side::open_tab(app, "scene-side");
 }
 /// The details card's "Side chats": eight of the showcase's side chats in each state, one

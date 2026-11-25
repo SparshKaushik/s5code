@@ -18,6 +18,12 @@ mod backend {
         pub fn decode(&mut self, _: &[&[u8]]) -> Result<Option<super::Frame>, String> {
             Ok(None)
         }
+        pub fn reordering(params: &super::Params) -> Result<Self, String> {
+            Self::new(params)
+        }
+        pub fn finish(&mut self) -> Result<Vec<super::Frame>, String> {
+            Ok(vec![])
+        }
     }
 }
 
@@ -178,9 +184,20 @@ impl Decoder {
         backend::Decoder::new(params).map(Decoder)
     }
 
+    /// For a file, whose B-frames come back in display order, the last of them from `finish`.
+    #[cfg(not(target_os = "macos"))]
+    pub fn reordering(params: &Params) -> Result<Self, String> {
+        backend::Decoder::reordering(params).map(Decoder)
+    }
+
     /// One access unit's NAL units, without start codes or lengths; a frame when one is ready.
     pub fn decode(&mut self, nals: &[&[u8]]) -> Result<Option<Frame>, String> {
         self.0.decode(nals)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn finish(&mut self) -> Result<Vec<Frame>, String> {
+        self.0.finish()
     }
 }
 

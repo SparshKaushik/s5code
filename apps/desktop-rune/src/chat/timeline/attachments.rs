@@ -176,16 +176,26 @@ fn format_bytes(value: f64) -> String {
 /// "{EXT} · {size}".
 fn file_label(attachment: &Value) -> (String, String) {
     let name = s(attachment, "name");
+    let pasted = s(&attachment["source"], "_tag") == "pasted-text";
+    let label = if pasted { "Pasted text" } else { name }.to_owned();
+    if sending(attachment) {
+        return (label, "Sending\u{2026}".to_owned());
+    }
     let size = format_bytes(attachment["sizeBytes"].as_f64().unwrap_or(0.0));
-    if s(&attachment["source"], "_tag") == "pasted-text" {
-        return ("Pasted text".to_owned(), size);
+    if pasted {
+        return (label, size);
     }
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext)
         .filter(|ext| (1..=8).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()))
         .map_or_else(|| "File".to_owned(), str::to_uppercase);
-    (name.to_owned(), format!("{ext} · {size}"))
+    (label, format!("{ext} · {size}"))
+}
+
+/// Still uploading with its message: it can't be opened or saved yet.
+fn sending(attachment: &Value) -> bool {
+    attachment["downloadable"] == false
 }
 
 pub fn view(app: &App, attachment: &Value, t: &T) -> El {
@@ -245,7 +255,7 @@ fn audio_time(seconds: f64) -> String {
 const AUDIO_CHIP_WIDTH: f32 = 256.0;
 
 /// InlineAudioPreview's chip: play or pause, the name (pressed to preview the file), and the
-/// time over a progress fill; "Unavailable" when it can't play (Rune plays audio only on macOS).
+/// time over a progress fill; "Unavailable" when it can't play.
 fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El {
     let name = s(attachment, "name").to_owned();
     let accent = crate::chat::composer::chips::look("file", None).map_or(t.c.info_foreground, |(accent, _)| accent);
@@ -313,6 +323,7 @@ fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El 
 /// once its URL is signed.
 fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
     let (label, size) = file_label(attachment);
+    let url = url.filter(|_| !sending(attachment));
     let identity = row()
         .grow(1.0)
         .min_w(0.0)
@@ -327,25 +338,25 @@ fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
                 .child(text(label.clone()).font(theme::SM_MEDIUM).color(t.c.message_foreground).truncate())
                 .child(text(size).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         );
-    let download_label = format!("Download {label}");
+    let download_label = if sending(attachment) { "Sending attachment".to_owned() } else { format!("Download {label}") };
     let download = row()
         .size(24.0, 24.0)
         .center()
         .radius(6.0)
         .role("button")
         .label(download_label.clone())
-        .help(download_label)
         .child(icon(&icons::DOWNLOAD, 12.0).color(t.c.muted_foreground));
+    let download = if sending(attachment) { download } else { download.help(download_label) };
     let (identity, download) = match url {
         Some(url) => {
-            let (preview, name) = (url.clone(), s(attachment, "name").to_owned());
+            let (id, name) = (s(attachment, "id").to_owned(), s(attachment, "name").to_owned());
             (
                 identity
                     .focusable(true)
                     .role("button")
                     .cursor(rune::Cursor::Pointer)
                     .label(format!("Preview {label}"))
-                    .on_press(move |app: &mut App| crate::panel::open_preview(app, &preview)),
+                    .on_press(move |app: &mut App| crate::panel::open_attachment(app, &id)),
                 download
                     .focusable(true)
                     .cursor(rune::Cursor::Pointer)
@@ -356,6 +367,33 @@ fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
         None => (identity, download.disabled(true).opacity(0.64)),
     };
     row().w(256.0).gap(4.0).py(8.0).pl(8.0).pr(4.0).center_y().radius(16.0).fill(t.c.message_surface).child(identity).child(download)
+}
+
+pub(crate) fn panel_name<'a>(app: &'a App, id: &str) -> Option<&'a str> {
+    app.ui.chat.timeline.assets.ready.get(id).map(|loaded| loaded.name.as_str())
+}
+
+pub(crate) fn panel_view(app: &App, id: &str, t: &T) -> El {
+    let assets = &app.ui.chat.timeline.assets;
+    let mut content = col().grow(1.).min_h(0.).w_full().center().gap(8.).padding(16.);
+    let id = id.to_owned();
+    let Some(loaded) = assets.ready.get(&id) else {
+        let message = if assets.failed.contains(&id) { "Unable to load attachment." } else { "Loading attachment…" };
+        return content.child(text(message).font(theme::TEXT_SM).color(t.c.muted_foreground));
+    };
+    let (url, name) = (loaded.url.clone(), loaded.name.clone());
+    let browser = url.clone();
+    content = match loaded.kind {
+        Some(Kind::Image) => content.child(el().w_full().grow(1.).min_h(0.).pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit)),
+        Some(Kind::Video) => content.child(media::video(&id, &name, Some(loaded), false, None, t)),
+        Some(Kind::Audio) => content.child(audio(&json!({"id": id, "name": name}), Some(loaded), false, t)),
+        None => content.child(text(&name).font(theme::SM_MEDIUM).color(t.c.foreground)),
+    };
+    content.child(row().gap(6.)
+        .child(crate::kit::Button::new("Open in preview browser").variant("outline").size("xs")
+            .on_press(move |s: &mut App| crate::panel::open_preview(s, &browser)).build(t))
+        .child(crate::kit::Button::new("Download").variant("outline").size("xs").build(t)
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| media::save_attachment(s, url.clone(), name.clone(), tx))))
 }
 
 /// The pictures sent with the message holding attachment `id`, in order.
@@ -780,5 +818,7 @@ mod tests {
         assert_eq!(file_label(&file("Makefile")).1, "File · 2.00 KB");
         let pasted = json!({"name": "pasted-1.txt", "sizeBytes": 300, "source": {"_tag": "pasted-text"}});
         assert_eq!(file_label(&pasted), ("Pasted text".to_owned(), "300 B".to_owned()));
+        let sending = json!({"name": "notes.md", "sizeBytes": 2048, "downloadable": false});
+        assert_eq!(file_label(&sending), ("notes.md".to_owned(), "Sending\u{2026}".to_owned()));
     }
 }

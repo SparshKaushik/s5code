@@ -2,9 +2,11 @@
 
 pub mod chatgpt_welcome;
 pub mod confirm;
+pub mod lifecycle;
 pub mod sidebar;
 pub mod palette;
 pub mod quit;
+pub mod slow_requests;
 pub mod swipe;
 pub mod toast;
 pub(crate) mod workspace;
@@ -24,6 +26,8 @@ pub struct Ui {
     pub toasts: toast::Stack,
     pub swipe: swipe::Swipe,
     pub chatgpt_welcome: chatgpt_welcome::Ui,
+    pub lifecycle: lifecycle::Ui,
+    pub slow_requests: slow_requests::Ui,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -66,6 +70,18 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_titled(s, "Replay showcase");
         chatgpt_welcome::scene(s);
     }),
+    ("lifecycle-toasts", |s| {
+        open_titled(s, "Replay showcase");
+        lifecycle::scene(s);
+        slow_requests::scene(s);
+    }),
+    ("palette-publish-host", |s| {
+        open_titled(s, "Replay showcase");
+        palette::add_project::scene_host(s);
+    }),
+    ("update-everything-confirm", |s| sidebar::everything::scene(s, "confirm")),
+    ("update-capsule", |s| sidebar::everything::scene(s, "capsule")),
+    ("update-release-notes", |s| sidebar::everything::scene(s, "notes")),
     ("sidebar-regenerating", |s| {
         open_titled(s, "Replay showcase");
         if let crate::data::Source::Fixture(state) = &mut s.src {

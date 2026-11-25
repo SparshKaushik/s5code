@@ -101,6 +101,7 @@ pub enum Event {
     Status(String, Result<Status, Failure>),
     Devices(Result<Vec<relay::Device>, Failure>),
     Deregistered(Linked, Result<(), Failure>),
+    T3ChatLink(Result<String, Failure>),
     SignedOut,
 }
 
@@ -569,6 +570,7 @@ fn land(s: &mut App, event: Event) {
         }
         Event::Devices(result) => account::devices_landed(s, result),
         Event::Deregistered(linked, result) => account::deregistered(s, linked, result),
+        Event::T3ChatLink(result) => account::t3chat_link_landed(s, result),
     }
 }
 
@@ -663,7 +665,7 @@ fn muted(copy: impl Into<String>, t: &T) -> El {
     text(copy).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()
 }
 
-fn provider_buttons(s: &App, t: &T, busy: bool) -> El {
+pub(crate) fn provider_buttons(s: &App, t: &T, busy: bool) -> El {
     let mut buttons = row().gap(8.0).flex_wrap();
     for (strategy, name) in providers(s) {
         buttons = buttons.child(kit::Button::new(format!("Continue with {name}")).variant("outline").size("sm").disabled(busy).on_press(move |s: &mut App| sign_in(s, &strategy)).build(t));

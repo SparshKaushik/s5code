@@ -122,6 +122,9 @@ impl App {
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
+        if route != self.route {
+            panel::flush_file(self);
+        }
         env::follow(self, &route);
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
@@ -184,6 +187,8 @@ fn poll_host(s: &mut App) -> bool {
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = poll_host(s);
     changed |= env::drain(s);
+    // Before the server update reads the lifecycle events it buffers.
+    changed |= shell::lifecycle::poll(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
     changed |= settings::browser_profiles::poll(s, tx);
@@ -202,6 +207,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
+    changed |= shell::slow_requests::poll(s, tx);
+    changed |= shell::sidebar::everything::poll(s, tx);
     changed |= shell::toast::poll(s, tx);
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);

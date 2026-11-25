@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 const RESUME_TIMEOUT_MS: i64 = 32 * 60 * 1000;
 /// Desktop commits tried before giving up on the app installing the prepared update.
 const MAX_COMMITS: u8 = 3;
-const LIFECYCLE: &str = "subscribeServerLifecycle";
+use crate::shell::lifecycle::METHOD as LIFECYCLE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -203,6 +203,9 @@ pub fn poll(app: &mut App) -> bool {
         return false;
     }
     let now = app.now_ms;
+    let key = app.ui.env.active.clone();
+    let primary = key == crate::env::LOCAL;
+    let lifecycle = &mut app.ui.shell.lifecycle;
     let Some(net) = app.src.net() else { return false };
     let state = &mut app.ui.chat.server_update;
     let (from, target) = match &state.status {
@@ -235,7 +238,7 @@ pub fn poll(app: &mut App) -> bool {
                                 state.commits = 1;
                                 state.step = Step::Commit(net.request("server.commitDesktopUpdate", json!({"requestId": token})), result);
                             }
-                            None => resume(state, net, result, &from, now),
+                            None => resume(state, net, lifecycle, &key, result, &from, now),
                         },
                     }
                 }
@@ -249,12 +252,12 @@ pub fn poll(app: &mut App) -> bool {
             }
             Some(_) => {
                 changed = true;
-                resume(state, net, result, &from, now);
+                resume(state, net, lifecycle, &key, result, &from, now);
             }
         },
         Step::Resume { result, deadline, mut disconnected, mut nudged } => {
             if now > deadline {
-                net.unwatch_resource(LIFECYCLE, json!({}));
+                release(net, primary);
                 fail(state, format!("Could not confirm that the server resumed on t3@{target}. Reconnect to check the update outcome."));
                 return true;
             }
@@ -268,16 +271,16 @@ pub fn poll(app: &mut App) -> bool {
             } else if net.state().conn == s5_net::Conn::Connecting {
                 disconnected = true;
             }
-            for event in net.take_resource_events(LIFECYCLE, json!({})) {
+            for event in crate::shell::lifecycle::take(lifecycle, &key) {
                 match ready(&result, &event, disconnected) {
                     Ready::Skip => {}
                     Ready::Done => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         *state = State::default();
                         return true;
                     }
                     Ready::Failed(message) => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         fail(state, message);
                         return true;
                     }
@@ -288,7 +291,7 @@ pub fn poll(app: &mut App) -> bool {
                         return true;
                     }
                     Ready::Recommit => {
-                        net.unwatch_resource(LIFECYCLE, json!({}));
+                        release(net, primary);
                         fail(state, "The desktop app resumed without installing the prepared update.".to_owned());
                         return true;
                     }
@@ -301,7 +304,14 @@ pub fn poll(app: &mut App) -> bool {
 }
 
 /// The update was accepted: wait for the server to come back on it.
-fn resume(state: &mut State, net: &mut s5_net::Net, result: Value, from: &str, now: i64) {
+/// Ends the update's lifecycle subscription, unless it is the primary server's standing one.
+fn release(net: &mut s5_net::Net, primary: bool) {
+    if !primary {
+        net.unwatch_resource(LIFECYCLE, json!({}));
+    }
+}
+
+fn resume(state: &mut State, net: &mut s5_net::Net, lifecycle: &mut crate::shell::lifecycle::Ui, key: &str, result: Value, from: &str, now: i64) {
     let target = s(&result, "targetVersion").to_owned();
     // A track switch's desktop host already on its newest build only saved the track.
     if s(&result, "method") == "desktop-app" && s(&result, "desktopUpdateToken").is_empty() && target == from {
@@ -315,6 +325,7 @@ fn resume(state: &mut State, net: &mut s5_net::Net, result: Value, from: &str, n
     net.watch_resource(LIFECYCLE, json!({}));
     // Events from before this point belong to the old server.
     let _ = net.take_resource_events(LIFECYCLE, json!({}));
+    let _ = crate::shell::lifecycle::take(lifecycle, key);
     state.step = Step::Resume { result, deadline: now + RESUME_TIMEOUT_MS, disconnected: false, nudged: now };
 }
 

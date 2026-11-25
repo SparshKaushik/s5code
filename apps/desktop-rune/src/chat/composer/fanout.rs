@@ -221,7 +221,7 @@ pub(super) fn settle(state: &mut State, key: &str, outcome: Result<(), &Value>, 
     {
         uncertain.entry(retry_key(&batch.key, &slot.0)).or_insert_with(|| thread.clone());
     }
-    slot.1 = Some(outcome.map_err(|e| palette::error_message(e, "Failed to send message.")));
+    slot.1 = Some(outcome.map_err(|e| palette::error_message(e, "Failed to send messages.")));
     true
 }
 

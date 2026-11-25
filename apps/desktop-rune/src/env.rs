@@ -1225,6 +1225,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("wizard-chatgpt-account", crate::wizard::scene_chatgpt),
     ("t3-connect-onboarding", |s| crate::cloud::onboarding::scene(s, true)),
     ("t3-connect-onboarding-devices", |s| crate::cloud::onboarding::scene(s, false)),
+    ("t3-connect-onboarding-tunnel-limit", |s| crate::cloud::onboarding::scene_tunnel_limit(s, None)),
+    ("t3-connect-onboarding-tunnel-limit-link", |s| crate::cloud::onboarding::scene_tunnel_limit(s, Some("link"))),
+    ("t3-connect-onboarding-tunnel-limit-upgrade", |s| crate::cloud::onboarding::scene_tunnel_limit(s, Some("premier"))),
 ];
 
 #[cfg(test)]

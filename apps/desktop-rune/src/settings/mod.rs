@@ -23,7 +23,7 @@ mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
-mod connect;
+pub(crate) mod connect;
 mod font_picker;
 mod keybindings;
 pub(crate) use keybindings::unshift;
@@ -37,7 +37,7 @@ mod qr;
 pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
-mod providers;
+pub(crate) mod providers;
 mod scope;
 pub mod search;
 pub(crate) mod snapshots;
@@ -68,6 +68,8 @@ pub struct Ui {
     pub theme_import: TextEdit,
     /// Shown inside the import dialog, which covers the page's error banner.
     pub theme_import_error: Option<String>,
+    /// The imported theme whose id a custom theme already has (web `conflicts`).
+    pub theme_conflict: Option<Value>,
     pub theme_search: themes::Search,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
@@ -105,6 +107,8 @@ pub struct Ui {
     pub open_select: Option<String>,
     /// The installed-font menus' search and open state, by setting key.
     pub font_pickers: HashMap<String, crate::kit::ComboboxState>,
+    /// Scenes only: a snapshot is one frame, before a reveal can scroll, so the page opens at its end.
+    pub scene_bottom: bool,
     pub search: TextEdit,
     /// The highlighted search result (web's `activeResultIndex`).
     pub search_active: usize,
@@ -289,6 +293,9 @@ pub fn value(s: &App, key: &str) -> Value {
     if let Some(key) = key.strip_prefix("snooze::") {
         return snooze::value(s, key);
     }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        return value(s, "browserDefaultViewport")[axis].clone();
+    }
     if let Some(key) = key.strip_prefix("profile::") {
         return browser_profiles::value(s, key);
     }
@@ -343,6 +350,12 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if let Some(key) = key.strip_prefix("snooze::") {
         snooze::set(s, key, value);
+        return;
+    }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        if let Some(next) = browser_profiles::resize(&self::value(s, "browserDefaultViewport"), axis, &value) {
+            update(s, "browserDefaultViewport", next);
+        }
         return;
     }
     if let Some(key) = key.strip_prefix("profile::") {
@@ -639,6 +652,10 @@ pub fn poll(s: &mut App) -> bool {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
             let provider_upsert = s.ui.settings.providers_ui.upserts.remove(&id);
+            if browser_profiles::answered(s, id, reply.is_ok()) {
+                changed = true;
+                continue;
+            }
             let toast = reply.as_ref().err().and(failure_toast(&method, provider_upsert));
             match reply {
                 Ok(result) => {
@@ -991,6 +1008,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let mut nav = col().w_full().px(8.0).pb(8.0).gap(16.0);
     let search = rune::text_input(&s.ui.settings.search, theme::SM_MEDIUM.lh(21.0))
         .key("settings-search")
+        .label("Search settings")
         .single_line()
         .placeholder("Search", t.sb.muted_foreground)
         .grow(1.0)
@@ -1171,7 +1189,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .w_full()
         .items_center()
         .scroll(rune::ScrollSpec {
-            stick_bottom: false,
+            stick_bottom: s.ui.settings.scene_bottom,
         })
         .child(page);
     // A marker keyed by the target, since `on_layout` reports only a new or moved element: a
@@ -1240,6 +1258,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
     snapshots::overlays(s, t, &mut overlays);
+    connect::overlays(s, t, &mut overlays);
     font_picker::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
@@ -1488,6 +1507,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "appearance");
         s.ui.settings.theme_import_open = true;
     }),
+    ("settings-appearance-theme-import-conflict", |s| {
+        scene(s, "appearance");
+        s.ui.settings.theme_import_open = true;
+        themes::scene_conflict(s);
+    }),
     ("settings-appearance-thread-details", |s| {
         scene(s, "appearance");
         s.ui.settings.thread_details_open = true;
@@ -1566,6 +1590,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-browser-profiles", |s| browser_profiles_scene(s, false, None)),
     ("settings-browser-profiles-light", |s| browser_profiles_scene(s, true, None)),
+    ("settings-browser-profile-clear-failed", |s| {
+        browser_profiles_scene(s, false, None);
+        s.ui.settings.profiles.clearing.insert(1, "Work".into());
+        browser_profiles::answered(s, 1, false);
+    }),
+    ("settings-browser-viewport", |s| {
+        scene(s, "browser");
+        s.client_settings.values.insert("browserDefaultViewport".into(), json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"}));
+        open_setting(s, "browser", "Default browser viewport");
+    }),
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
     ("settings-browser-add-profile-menu", |s| browser_profiles_scene(s, false, Some("add"))),
@@ -1635,7 +1669,17 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         connect::scene(s, json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": true, "holdWebhooksWhileOffline": false,
             "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
     }),
+    ("settings-access-t3-connect-limit", |s| {
+        scene(s, "access");
+        s.ui.settings.loaded_page = Some("access".into());
+        connect::scene(s, json!({"linked": true, "managedTunnelActive": false, "publishAgentActivity": true}));
+        connect::scene_limit(s);
+    }),
     ("settings-access-t3-connect-signed-out", |s| scene(s, "access")),
+    ("settings-access-t3-connect-sign-in", |s| {
+        scene(s, "access");
+        connect::scene_prompt(s);
+    }),
 ];
 
 /// Typography's Monospace font menu open over a fixed font list.
@@ -1646,9 +1690,7 @@ fn appearance_font_picker(s: &mut App) {
             .into_iter()
             .map(|name| font_picker::Family { name: name.into(), mono: !matches!(name, "Geist" | "Inter" | "Noto Sans") }),
     ));
-    s.ui.settings.reveal = Some("Monospace font".into());
-    // The first poll would treat the page as newly opened and drop the reveal.
-    s.ui.settings.loaded_page = Some("appearance".into());
+    s.ui.settings.scene_bottom = true;
     let picker = s.ui.settings.font_pickers.entry("fontFamilyCode".into()).or_default();
     picker.open = true;
     picker.search.focused = true;
@@ -2087,8 +2129,10 @@ mod reveal_tests {
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
     const UNBUILT: &[&str] = &[];
     /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
-    /// Linked environments behind its Labs flag, and Cursor's keychain usage on macOS.
-    const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];
+    /// Linked environments behind its Labs flag, Cursor's keychain usage on macOS, and T3 Connect's
+    /// rows while signed in.
+    const HIDDEN_HERE: &[&str] =
+        &["Cursor account usage", "Hold webhooks while offline", "Linked environments", "Local environment", "Publish agent activity", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {

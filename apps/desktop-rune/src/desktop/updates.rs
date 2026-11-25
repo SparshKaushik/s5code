@@ -30,6 +30,11 @@ fn stamped() -> Option<&'static str> {
     option_env!("S5_RUNE_VERSION").filter(|v| !v.is_empty())
 }
 
+/// The GitHub release page of a Rune `version`.
+pub fn release_page(version: &str) -> String {
+    format!("https://github.com/{REPO}/releases/tag/{TAG_PREFIX}{version}")
+}
+
 pub fn version() -> &'static str {
     stamped().unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -494,8 +499,11 @@ pub fn download_update(s: &mut App) {
     });
 }
 
-fn install(s: &mut App) {
+pub(crate) fn install(s: &mut App) {
     let Some(archive) = s.ui.desktop.updates.staged.clone() else { return };
+    if let Some(release) = &s.ui.desktop.updates.release {
+        crate::shell::sidebar::everything::note_install(&release.version);
+    }
     s.ui.desktop.updates.confirm = false;
     s.ui.desktop.updates.status = Status::Installing;
     spawn(s, move |send| send(Event::Prepared(prepare(&archive))));
@@ -668,9 +676,10 @@ pub fn about(s: &App) -> (String, Option<&'static str>) {
         return (reason, None);
     }
     let label = match action(ui) {
-        Action::Install => Some("Restart to Update"),
-        Action::Download => Some("Download Update"),
+        Action::Install => Some("Install"),
+        Action::Download => Some("Download"),
         Action::None if matches!(ui.status, Status::Downloading(_) | Status::Installing | Status::Checking) => None,
+        Action::None if matches!(ui.status, Status::UpToDate) => Some("Up to Date"),
         Action::None => Some("Check for Updates"),
     };
     let text = match &ui.status {
@@ -678,6 +687,15 @@ pub fn about(s: &App) -> (String, Option<&'static str>) {
         _ => summary(s),
     };
     (text, label)
+}
+
+/// Settings › About's inert button while the updater works: web's `statusLabel`.
+pub fn about_busy_label(s: &App) -> &'static str {
+    match s.ui.desktop.updates.status {
+        Status::Checking => "Checking…",
+        Status::Downloading(_) => "Downloading…",
+        _ => "Check for Updates",
+    }
 }
 
 /// Web's install confirmation (`getDesktopUpdateInstallConfirmationMessage`), with the
@@ -759,6 +777,21 @@ fn fixture(s: &mut App, status: Status, staged: bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn about_s_button_reads_as_web_s() {
+        let mut s = App::new();
+        let label = |s: &mut App, status: Status, staged: bool| {
+            fixture(s, status, staged);
+            about(s).1.unwrap_or_else(|| about_busy_label(s))
+        };
+        assert_eq!(label(&mut s, Status::Available, false), "Download");
+        assert_eq!(label(&mut s, Status::Downloaded, true), "Install");
+        assert_eq!(label(&mut s, Status::Downloading(42.0), false), "Downloading…");
+        assert_eq!(label(&mut s, Status::Checking, false), "Checking…");
+        assert_eq!(label(&mut s, Status::UpToDate, false), "Up to Date");
+        assert_eq!(label(&mut s, Status::Idle, false), "Check for Updates");
+    }
 
     #[test]
     fn versions_order_as_semver() {

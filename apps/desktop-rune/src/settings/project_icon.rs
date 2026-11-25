@@ -530,7 +530,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
             let icons = filter(&d.query.text);
             let ink = ink(t, &d.color);
             body = body.child(
-                kit::Input::new(&d.query).placeholder("Search all Lucide icons").on_edit(|s: &mut App| &mut draft(s).query).build(t).single_line(),
+                kit::Input::new(&d.query).placeholder("Search all Lucide icons").on_edit(|s: &mut App| &mut draft(s).query).build(t).single_line().label("Search Lucide icons"),
             );
             if icons.is_empty() {
                 body = body.child(el().w_full().py(32.0).center().child(text("No icons found.").font(theme::TEXT_SM).color(t.c.muted_foreground)));
@@ -593,7 +593,8 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                                 }
                             })
                             .build(t)
-                            .single_line(),
+                            .single_line()
+                            .label("Custom emoji"),
                     ),
             );
         }

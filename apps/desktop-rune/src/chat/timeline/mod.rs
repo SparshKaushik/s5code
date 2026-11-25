@@ -24,6 +24,7 @@ mod history;
 pub(crate) mod md_links;
 mod math;
 mod katex;
+mod inline;
 mod announcer;
 pub(crate) mod citation;
 pub mod media;
@@ -826,7 +827,7 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
         };
         changed = true;
         if let Err(error) = reply {
-            ui.response_errors.insert(id.clone(), error.to_string());
+            ui.response_errors.insert(id.clone(), crate::shell::palette::error_message(&error, "An error occurred."));
         }
         false
     });
@@ -834,13 +835,14 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
 }
 
 /// An approval's icon and name by request kind (TimelinePendingApprovalRow APPROVAL_PRESENTATION).
-fn approval_presentation(kind: &str) -> (&'static rune::Icon, &'static str) {
+/// Its glyph, its row's name and its detail's name (APPROVAL_PRESENTATION).
+fn approval_presentation(kind: &str) -> (&'static rune::Icon, &'static str, &'static str) {
     match kind {
-        "file-change" => (&icons::SQUARE_PEN, "File change approval"),
-        "file-read" => (&icons::EYE, "File read approval"),
-        "permission" => (&icons::WRENCH, "App permission approval"),
-        "mcp-elicitation" => (&icons::HAMMER, "App access approval"),
-        _ => (&icons::TERMINAL, "Command approval"),
+        "file-change" => (&icons::SQUARE_PEN, "File change approval", "File change"),
+        "file-read" => (&icons::EYE, "File read approval", "File to read"),
+        "permission" => (&icons::WRENCH, "App permission approval", "Permission request"),
+        "mcp-elicitation" => (&icons::HAMMER, "App access approval", "App access request"),
+        _ => (&icons::TERMINAL, "Command approval", "Command"),
     }
 }
 
@@ -862,7 +864,7 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
     let request_id = s(request, "id");
     let live = s(&request["responseCapability"], "type") == "live";
     let kind = [s(item, "requestKind"), s(request, "kind")].into_iter().find(|k| !k.is_empty()).unwrap_or("command");
-    let (glyph, name) = approval_presentation(kind);
+    let (glyph, name, detail_name) = approval_presentation(kind);
     let detail = ["prompt", "detail", "command", "input"]
         .iter()
         .find_map(|k| item[*k].as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned).or_else(|| (!item[*k].is_null() && !item[*k].is_string()).then(|| item[*k].to_string())))
@@ -873,7 +875,7 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
             .w_full()
             .gap(12.0)
             .child(icon(glyph, 16.0).color(t.c.icon_muted))
-            .child(text(detail).font(theme::MONO_XS.lh(20.0)).color(t.c.foreground).selectable(true).grow(1.0).shrink().min_w(0.0)),
+            .child(text(detail).font(theme::MONO_XS.lh(20.0)).color(t.c.foreground).selectable(true).label(detail_name).grow(1.0).shrink().min_w(0.0)),
     );
     let mut notes = col().pl(28.0).pb(4.0).gap(4.0);
     for key in ["appName", "reason"] {
@@ -1365,7 +1367,7 @@ mod tests {
         let mut app = crate::App::new();
         app.route = crate::Route::Thread("parent".into());
         assert!(!super::in_side_pane(&app, "side"));
-        app.ui.chat.side.open.insert("parent".into(), "side".into());
+        crate::panel::open_side_chat(&mut app, "parent", "side");
         assert!(super::in_side_pane(&app, "side"));
         assert!(!super::in_side_pane(&app, "parent"), "the chat keeps its own follow state");
         app.route = crate::Route::Thread("other".into());

@@ -33,6 +33,8 @@ pub struct Ui {
     pub import: Option<Import>,
     /// Full Disk Access as last checked, and when: web's `usePermissionStatus`.
     access: Option<(std::time::Instant, bool)>,
+    /// Clear requests in flight, by reply id, with the profile's name for web's toasts.
+    pub clearing: std::collections::HashMap<u64, String>,
 }
 
 /// Web's `BrowserImportWizard`.
@@ -218,9 +220,25 @@ pub fn rename(s: &mut App, id: &str, next: Value) {
 }
 
 /// Clears the profile on its server and in this computer's Chrome, as Electron clears both.
-fn clear_data(s: &mut App, id: &str) {
-    request(s, "preview.clearProfile", json!({"profileId": id}));
+fn clear_data(s: &mut App, id: &str, name: &str) {
+    match super::request_id(s, "preview.clearProfile", json!({"profileId": id})) {
+        Some(reply) => {
+            s.ui.settings.profiles.clearing.insert(reply, name.to_owned());
+        }
+        None => crate::shell::palette::toast_error(s, &format!("Could not clear {name}'s data"), Some("You're not connected to a server yet.")),
+    }
     crate::panel::preview::clear_profile(s, id, false);
+}
+
+/// Web's toasts once a clear request answers; false when reply `id` isn't a clear.
+pub fn answered(s: &mut App, id: u64, ok: bool) -> bool {
+    let Some(name) = s.ui.settings.profiles.clearing.remove(&id) else { return false };
+    if ok {
+        crate::shell::palette::toast(s, &format!("Cleared {name}'s cookies and cache"), None);
+    } else {
+        crate::shell::palette::toast_error(s, &format!("Could not clear {name}'s data"), None);
+    }
+    true
 }
 
 fn remove(s: &mut App, id: &str) {
@@ -397,7 +415,8 @@ pub fn overlays(s: &App, t: &T, scale: f32, layers: &mut Vec<El>) {
             .build(t, layers);
     }
     if let Some((id, name)) = s.ui.settings.profiles.clear.clone() {
-        kit::Dialog::new("clear-profile", format!("Clear “{name}”’s cookies and cache?"))
+        let title = format!("Clear “{name}”’s cookies and cache?");
+        kit::Dialog::new("clear-profile", title)
             .open(true)
             .alert()
             .description("You are signed out of its sites. Server browser tabs open in this profile close now.")
@@ -405,7 +424,7 @@ pub fn overlays(s: &App, t: &T, scale: f32, layers: &mut Vec<El>) {
             .child(footer(
                 "Clear data",
                 Box::new(move |s: &mut App| {
-                    clear_data(s, &id);
+                    clear_data(s, &id, &name);
                     s.ui.settings.profiles.clear = None;
                 }),
                 |s| s.ui.settings.profiles.clear = None,
@@ -667,6 +686,56 @@ const VIEWPORT_PRESETS: [(&str, &str, u32, u32); 17] = [
     ("nest-hub-max", "Nest Hub Max", 1280, 800),
 ];
 
+/// Contracts `PREVIEW_VIEWPORT_MIN_DIMENSION`..`MAX_DIMENSION` and `PREVIEW_VIEWPORT_MAX_AREA`.
+const VIEWPORT_DIMENSIONS: std::ops::RangeInclusive<u64> = 240..=3840;
+const VIEWPORT_MAX_AREA: u64 = 3840 * 2160;
+
+/// Web `commitDimension`: a whole size in range makes the viewport freeform; anything else, an
+/// area past the cap, or the same size, keeps it.
+pub(crate) fn resize(current: &Value, axis: &str, next: &Value) -> Option<Value> {
+    let size = next.as_u64().filter(|v| VIEWPORT_DIMENSIONS.contains(v))?;
+    if current["_tag"] == "fill" || current.get(axis).is_none() {
+        return None;
+    }
+    let mut out = json!({"_tag": "freeform", "width": current["width"], "height": current["height"]});
+    out[axis] = json!(size);
+    let area = out["width"].as_u64()? * out["height"].as_u64()?;
+    (area <= VIEWPORT_MAX_AREA && (out["width"] != current["width"] || out["height"] != current["height"])).then_some(out)
+}
+
+/// Web `rotateViewport`: the same viewport with its sides swapped.
+fn rotate(current: &Value) -> Value {
+    let mut out = current.clone();
+    (out["width"], out["height"]) = (current["height"].clone(), current["width"].clone());
+    out
+}
+
+/// Web `BrowserViewportSetting`'s control: the select, then a sized viewport's width × height
+/// and rotate.
+pub(crate) fn viewport_control(s: &App, t: &T, select: El) -> El {
+    let current = setting(s, "browserDefaultViewport");
+    let (Some(width), Some(height)) = (current["width"].as_u64(), current["height"].as_u64()) else { return select };
+    if current["_tag"] == "fill" {
+        return select;
+    }
+    let field = |axis: &str, label: &str| controls::input(s, t, &format!("viewport::{axis}"), 80.0, "", false).label(label.to_owned());
+    let rotated = rotate(&current);
+    let rotate = kit::Button::new(format!("Rotate to {}", if height >= width { "landscape" } else { "portrait" }))
+        .variant("ghost-muted")
+        .size("icon-sm")
+        .icon(&crate::panel::preview::ROTATE_ICON)
+        .on_press(move |s: &mut App| update(s, "browserDefaultViewport", rotated.clone()))
+        .build(t);
+    let size = row()
+        .gap(4.0)
+        .center_y()
+        .child(field("width", "Default viewport width"))
+        .child(text("\u{d7}").font(theme::TEXT_XS).color(t.c.muted_foreground))
+        .child(field("height", "Default viewport height"))
+        .child(super::permissions::tip("viewport-rotate", rotate, "Rotate".into()));
+    row().gap(8.0).center_y().child(select).child(size)
+}
+
 /// `RESPONSIVE_SEED_SIZE`: what Responsive starts at from Fill panel.
 const RESPONSIVE_SEED: (u32, u32) = (1280, 800);
 
@@ -721,6 +790,33 @@ mod tests {
         close_import(&mut s);
         assert!(!poll_with(&mut s, &mut tx, start, || panic!("FAILED: closed")));
         assert!(s.ui.settings.profiles.access.is_none());
+    }
+
+    #[test]
+    fn a_clear_reply_toasts_only_for_its_own_request() {
+        let mut s = App::new();
+        s.ui.settings.profiles.clearing.insert(7, "Work".into());
+        assert!(!answered(&mut s, 8, true), "another request's reply");
+        assert_eq!(crate::shell::palette::toast_title(&s), None);
+        assert!(answered(&mut s, 7, false));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not clear Work's data"));
+        assert!(!answered(&mut s, 7, true), "each request toasts once");
+        s.ui.settings.profiles.clearing.insert(9, "Work".into());
+        assert!(answered(&mut s, 9, true));
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Cleared Work's cookies and cache"));
+    }
+
+    #[test]
+    fn viewport_fields_commit_whole_sizes_in_range_and_rotate_swaps() {
+        let preset = json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"});
+        assert_eq!(resize(&preset, "width", &json!(500)), Some(json!({"_tag": "freeform", "width": 500, "height": 844})));
+        assert_eq!(resize(&preset, "width", &json!(390)), None, "the same size");
+        assert_eq!(resize(&preset, "height", &json!(239)), None);
+        assert_eq!(resize(&preset, "height", &json!(500.5)), None);
+        let wide = json!({"_tag": "freeform", "width": 3840, "height": 2000});
+        assert_eq!(resize(&wide, "height", &json!(2200)), None, "past the area cap");
+        assert_eq!(resize(&json!({"_tag": "fill"}), "width", &json!(800)), None);
+        assert_eq!(rotate(&preset), json!({"_tag": "preset", "width": 844, "height": 390, "presetId": "iphone-12-pro"}));
     }
 
     #[test]

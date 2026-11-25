@@ -89,6 +89,23 @@ pub(crate) fn scene_results(s: &mut App) {
     s.ui.search.results = Results { params: params(s).unwrap_or_default(), matches, ..Results::default() };
 }
 
+/// Scene: enough matches in each file to scroll, for the headings that stick.
+pub(crate) fn scene_long(s: &mut App) {
+    scene_results(s);
+    s.ui.search.results.matches = ["src/lib.rs", "src/search/index.rs", "web/search.ts"]
+        .iter()
+        .flat_map(|path| (1..=8).map(move |i| json!({"path": path, "lineNumber": i * 7, "lineContent": format!("    let needle_{i} = haystack.find(needle);"), "matchRanges": [{"start": 8, "end": 14}]})))
+        .collect();
+}
+
+/// Scene: the search failed, so the status line carries the error.
+pub(crate) fn scene_error(s: &mut App) {
+    open(s);
+    s.ui.search.query = TextEdit::new("needle");
+    s.ui.search.query.focused = true;
+    s.ui.search.results = Results { params: params(s).unwrap_or_default(), error: Some("ripgrep exited with code 2.".into()), ..Results::default() };
+}
+
 fn close(s: &mut App) {
     s.ui.search.open = false;
     s.ui.search.pending = None;
@@ -182,7 +199,7 @@ fn back(s: &mut App) {
     s.ui.shell.palette.query.focused = true;
 }
 
-fn on_input_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
+fn on_input_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     let n = current(s).0.len();
     let ui = &mut s.ui.search;
     match e.key {
@@ -200,6 +217,9 @@ fn on_input_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     if ui.selected >= ui.visible {
         ui.visible = ui.selected + VISIBLE_WINDOW;
     }
+    if matches!(e.key, Key::Up | Key::Down) {
+        tx.scroll_into_view(format!("content-match-{}", ui.selected));
+    }
     true
 }
 
@@ -211,7 +231,8 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     s.ui.search.open && on_input_key(s, e, tx)
 }
 
-/// UTF-16 offsets (the server's JavaScript string indices) as byte offsets into `line`.
+/// UTF-16 offsets (the server's JavaScript string indices) as byte offsets into `line`, sorted
+/// and with overlaps merged (web `normalizeRanges`).
 fn byte_ranges(line: &str, ranges: &Value) -> Vec<(usize, usize)> {
     let at = |unit: u64| {
         let mut seen = 0u64;
@@ -223,10 +244,31 @@ fn byte_ranges(line: &str, ranges: &Value) -> Vec<(usize, usize)> {
         }
         line.len()
     };
-    ranges
-        .as_array()
-        .map(|rows| rows.iter().filter_map(|r| Some((at(r["start"].as_u64()?), at(r["end"].as_u64()?)))).filter(|(a, b)| b > a).collect())
-        .unwrap_or_default()
+    let mut sorted: Vec<(usize, usize)> =
+        ranges.as_array().map(|rows| rows.iter().filter_map(|r| Some((at(r["start"].as_u64()?), at(r["end"].as_u64()?)))).filter(|(a, b)| b > a).collect()).unwrap_or_default();
+    sorted.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
+    for (start, end) in sorted {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Web `groupMatches`: each path's matches under one heading, in the order paths first appear,
+/// with their indices in `matches`.
+fn groups(matches: &[Value]) -> Vec<(&str, Vec<usize>)> {
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (i, m) in matches.iter().enumerate() {
+        let path = data::s(m, "path");
+        match groups.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, rows)) => rows.push(i),
+            None => groups.push((path, vec![i])),
+        }
+    }
+    groups
 }
 
 fn option(label: &'static str, glyph: &'static str, on: bool, enabled: bool, flag: fn(&mut Ui) -> &mut bool, t: &T) -> El {
@@ -235,23 +277,18 @@ fn option(label: &'static str, glyph: &'static str, on: bool, enabled: bool, fla
     if glyph == "ab" {
         glyph_el = rich(glyph, vec![Span::new(0, 2).underline(fg)]).font(theme::mono(theme::XS_MEDIUM)).color(fg);
     }
-    let mut b = row()
-        .role("switch")
-        .label(label)
-        .help(label)
-        .h(24.)
-        .min_w(28.)
-        .px(6.)
-        .center()
-        .radius(6.)
-        .child(glyph_el);
+    // Web's `segmented` Toggle: borderless; pressed raises it onto the input surface.
+    let mut b = row().role("switch").label(label).help(label).h(24.).px(10.).center().radius(6.).child(glyph_el);
     if on {
-        b = b.fill(t.c.background).border(1., t.c.contrast_border.alpha_mul(0.6));
+        b = if t.dark { b.fill(t.c.contrast_input.alpha_mul(0.72)) } else { b.fill(t.c.background).shadow(1., 2., rune::Color::BLACK.alpha_mul(0.1)) };
     }
     if !enabled {
         return b.disabled(true).opacity(0.64);
     }
-    b.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle(s, flag))
+    if !on {
+        b = b.hover(if t.dark { t.c.contrast_input.alpha_mul(0.32) } else { t.c.background.alpha_mul(0.55) });
+    }
+    b.cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle(s, flag))
 }
 
 fn status_line(s: &App, t: &T) -> Option<El> {
@@ -329,9 +366,7 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
             "Checking file access…"
         } else if let Some(Some(Err(denied))) = &access {
             denied.as_str()
-        } else if let Some(error) = &ui.results.error {
-            error.as_str()
-        } else if !ui.query.text.trim().is_empty() && !pending {
+        } else if !ui.query.text.trim().is_empty() && !pending && ui.results.error.is_none() {
             "No results found."
         } else {
             "Type to search across your project."
@@ -349,16 +384,7 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
         });
         kit::scroll_area("content-search-results", list, t)
     };
-    let footer = row()
-        .w_full()
-        .h(40.)
-        .pl(17.)
-        .pr(16.)
-        .gap(12.)
-        .center_y()
-        .child(hint("↑↓", "Navigate", t))
-        .child(hint("Enter", "Open file", t))
-        .child(hint("Esc", "Back", t));
+    let footer = footer(t);
     let mut panel = col()
         .key("content-search")
         .role("dialog")
@@ -377,33 +403,45 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
     if enabled && let Some(status) = status_line(s, t) {
         panel = panel.child(status);
     }
-    let panel = panel.child(body).child(el().w_full().h(1.).fill(t.c.contrast_border)).child(footer).modal(true, close);
+    let panel = panel.child(body).child(footer).modal(true, close);
     vec![
         kit::motion::scrim(t).key("content-search-backdrop"),
         col().key("content-search-layer").absolute(0., 0.).w_full().h_full().pt(90.).items_center().transition(rune::Transition::none()).child(kit::motion::popup(panel)),
     ]
 }
 
-fn hint(key: &str, label: &str, t: &T) -> El {
+/// `CommandPaletteContent`'s footer with this dialog's labels: Enter opens the file, Esc goes back.
+fn footer(t: &T) -> El {
+    use crate::shell::palette::{footer_key, footer_label};
+    let group = |key: El, label: &str| row().gap(4.).center_y().child(key).child(footer_label(label, t));
+    let arrows = row().gap(4.).center_y().child(footer_key(Some(&icons::ARROW_UP), "", t)).child(footer_key(Some(&icons::ARROW_DOWN), "", t)).child(footer_label("Navigate", t));
     row()
-        .gap(4.)
+        .w_full()
+        .h(41.)
+        .pl(17.)
+        .pr(16.)
+        .gap(12.)
         .center_y()
-        .child(row().center().h(20.).min_w(20.).px(4.).radius(4.).fill(t.c.contrast_foreground.alpha_mul(0.08)).child(text(key.to_string()).font(theme::XS_MEDIUM).color(t.c.contrast_foreground)))
-        .child(text(label.to_string()).font(theme::SM_MEDIUM).color(t.c.contrast_muted_foreground))
+        .fill(t.c.contrast_foreground.alpha_mul(0.025))
+        .border(1., t.c.contrast_foreground.alpha_mul(0.07))
+        .child(arrows)
+        .child(group(footer_key(None, "Enter", t), "Open file"))
+        .child(group(footer_key(None, "Esc", t), "Back"))
 }
 
 fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
     let ui = &s.ui.search;
     let can_open = !pending && ui.results.error.is_none();
     let mut list = col().w_full().py(8.);
-    let mut index = 0;
     let shown = &matches[..matches.len().min(ui.visible)];
-    while index < shown.len() {
-        let path = data::s(&shown[index], "path");
-        let end = shown[index..].iter().position(|m| data::s(m, "path") != path).map_or(shown.len(), |n| index + n);
+    for (path, rows) in groups(shown) {
         let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+        // Web `sticky top-0 bg-popover/95 backdrop-blur-sm`.
         let mut heading = row()
             .w_full()
+            .sticky_top(0.)
+            .fill(t.c.background.alpha_mul(0.95))
+            .backdrop_blur(4.)
             .h(32.)
             .px(12.)
             .gap(8.)
@@ -414,10 +452,11 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
             heading = heading.child(text(directory.to_string()).font(theme::TEXT_XS).color(t.c.contrast_muted_foreground).truncate().shrink().min_w(0.));
         }
         heading = heading.child(rune::spacer()).child(
-            row().px(6.).py(2.).radius(theme::radius::FULL).fill(t.c.muted).child(text((end - index).to_string()).font(theme::TEXT_3XS).color(t.c.contrast_muted_foreground)),
+            row().px(6.).py(2.).radius(theme::radius::FULL).fill(t.c.muted).child(text(rows.len().to_string()).font(theme::TEXT_3XS).color(t.c.contrast_muted_foreground)),
         );
         let mut section = col().w_full().pb(8.).child(heading);
-        for (i, m) in shown.iter().enumerate().take(end).skip(index) {
+        for i in rows {
+            let m = &shown[i];
             let line = data::s(m, "lineContent");
             let spans = line_spans(name, line, &m["matchRanges"], t.dark, t.c.primary.alpha_mul(0.25));
             let selected = i == ui.selected;
@@ -431,7 +470,7 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
                 .gap(12.)
                 .center_y()
                 .child(row().w(40.).justify_end().child(text(m["lineNumber"].to_string()).font(theme::MONO_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))))
-                .child(rich(line.to_string(), spans).font(theme::MONO_XS).color(t.c.contrast_foreground).truncate().grow(1.0).shrink().min_w(0.));
+                .child(rich(line.to_string(), spans).font(theme::MONO_XS).color(if selected { t.c.contrast_accent_foreground } else { t.c.contrast_foreground }).truncate().grow(1.0).shrink().min_w(0.));
             if selected {
                 r = r.fill(t.c.accent);
             }
@@ -445,7 +484,6 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
             section = section.child(r);
         }
         list = list.child(section);
-        index = end;
     }
     list
 }
@@ -471,6 +509,14 @@ mod tests {
         assert_eq!(&line[7..13], "needle");
         assert!(byte_ranges(line, &json!([{"start": 3, "end": 3}])).is_empty());
         assert_eq!(byte_ranges("abc", &json!([{"start": 1, "end": 99}])), vec![(1, 3)]);
+        assert_eq!(byte_ranges("abcdefgh", &json!([{"start": 5, "end": 7}, {"start": 0, "end": 2}, {"start": 1, "end": 4}])), vec![(0, 4), (5, 7)], "sorted and merged like web");
+    }
+
+    #[test]
+    fn matches_group_by_path_in_first_seen_order() {
+        let at = |path: &str| json!({"path": path});
+        let matches = [at("a.rs"), at("b.rs"), at("a.rs"), at("c.rs")];
+        assert_eq!(groups(&matches), vec![("a.rs", vec![0, 2]), ("b.rs", vec![1]), ("c.rs", vec![3])]);
     }
 
     #[test]

@@ -269,6 +269,9 @@ pub fn access(s: &App, t: &T) -> El {
 /// Web `ConnectionsSettings` view "environments".
 pub fn view(s: &App, t: &T) -> El {
     let mut page = col().w_full().gap(32.0);
+    if s.ui.cloud.account.isolated {
+        return page.children(crate::cloud::account::sections(s, t));
+    }
     if crate::host::managed() {
         page = page.child(c::section("This app", vec![local_row(s, t)], t));
     }
@@ -564,7 +567,9 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
         );
     let mut body = col().key(format!("saved-env-{}", saved.id)).w_full().px(16.0).py(10.0).child(line);
     if let Some(d) = diagnosis.filter(|_| diagnosis_open) {
-        body = body.child(diagnosis_panel(t, saved, d).ml(28.0));
+        // Web `useConnectionDiagnosis` `relayOnly`: the T3 Connect route is its only one.
+        let relay_only = matches!(env::routes(s, &saved.id).as_slice(), [only] if only.bearer == env::T3_CONNECT);
+        body = body.child(diagnosis_panel(t, saved, d, relay_only).ml(28.0));
     }
     if routes_open {
         body = body.child(routes_list(s, t, saved).ml(28.0));
@@ -579,7 +584,7 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
 }
 
 /// Web `ConnectionDiagnosisPanel`: hops in order, what to try, the facts, and the actions.
-fn diagnosis_panel(t: &T, saved: &Saved, d: super::connection_diagnosis::Diagnosis) -> El {
+fn diagnosis_panel(t: &T, saved: &Saved, d: super::connection_diagnosis::Diagnosis, relay_only: bool) -> El {
     use super::connection_diagnosis::Hop;
     let muted = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let mut hops = col().w_full().gap(2.0);
@@ -614,13 +619,17 @@ fn diagnosis_panel(t: &T, saved: &Saved, d: super::connection_diagnosis::Diagnos
     }
     let key = saved.id.clone();
     let report = super::connection_diagnosis::text(&saved.label, &d);
-    let actions = row()
+    let mut actions = row()
         .gap(8.0)
         .child(kit::Button::new("Retry now").variant("outline").size("xs").on_press(move |s: &mut App| retry_now(s, &key)).build(t))
         .child(kit::Button::new("Copy diagnostics").variant("outline").size("xs").build(t).on_press_tx(move |s: &mut App, tx| {
             tx.copy(report.clone());
             toast(s, "Diagnostics copied", None);
         }));
+    if relay_only {
+        let target = saved.id.clone();
+        actions = actions.child(kit::Button::new("Add direct route").variant("outline").size("xs").on_press(move |s: &mut App| add_route(s, &target)).build(t));
+    }
     col()
         .w_full()
         .mt(8.0)
@@ -797,16 +806,19 @@ fn routes_list(s: &App, t: &T, saved: &Saved) -> El {
                     .variant("ghost-muted")
                     .size("xs")
                     .icon(&icons::PLUS)
-                    .on_press(move |s: &mut App| {
-                        s.ui.env.error = None;
-                        let ui = &mut s.ui.settings.connections;
-                        ui.route_target = Some(target.clone());
-                        ui.ssh = false;
-                        ui.adding = Some(s.ui.env.saved.clone());
-                    })
+                    .on_press(move |s: &mut App| add_route(s, &target))
                     .build(t),
             ),
         ))
+}
+
+/// Web's `onAddRoute`: the add dialog, pairing `target`'s machine at another address.
+fn add_route(s: &mut App, target: &str) {
+    s.ui.env.error = None;
+    let ui = &mut s.ui.settings.connections;
+    ui.route_target = Some(target.to_owned());
+    ui.ssh = false;
+    ui.adding = Some(s.ui.env.saved.clone());
 }
 
 /// Web's confirm before `removeRoute`.
@@ -1820,10 +1832,15 @@ pub(super) fn scene(s: &mut App, open: &str) {
             }
         }
         "t3-connect" => crate::cloud::scene_signed_in(s),
-        "t3-connect-account" | "t3-connect-mobile" => {
+        "t3-connect-account" => {
             crate::cloud::scene_signed_in(s);
             crate::cloud::account::scene(s);
-            s.ui.settings.reveal = Some(if open == "t3-connect-mobile" { "Mobile clients" } else { "Registered environments" }.into());
+            s.ui.settings.reveal = Some("Registered environments".into());
+        }
+        "t3-connect-mobile" => {
+            crate::cloud::scene_signed_in(s);
+            crate::cloud::account::scene(s);
+            s.ui.cloud.account.isolated = true;
         }
         "t3-connect-signing-in" => crate::cloud::scene_signing_in(s),
         "t3-connect-route" => {

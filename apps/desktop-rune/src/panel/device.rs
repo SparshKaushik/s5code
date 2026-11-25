@@ -2,7 +2,7 @@
 //! thread, and the opened iOS simulator's screen from serve-sim's `stream.mjpeg`, driven through
 //! serve-sim's input socket. Every other stream is H.264, which this app can't decode.
 
-mod h264;
+pub(crate) mod h264;
 mod input;
 mod inspect;
 mod video;
@@ -28,7 +28,7 @@ const WEBRTC: &str = "This device streams over WebRTC, which this app can't show
 #[derive(Default)]
 pub struct Ui {
     /// `device.open` in flight: its request, the device's key and whether it was running.
-    opening: Option<(u64, String, bool)>,
+    opening: Vec<(u64, String, bool)>,
     listing: Option<u64>,
     error: Option<String>,
     /// The device this panel shows, once picked; otherwise the thread's newest session.
@@ -40,7 +40,7 @@ pub struct Ui {
     fixture: Option<Value>,
     menu: Option<Menu>,
     /// `device.close` with shutdown in flight.
-    powering_off: Option<u64>,
+    powering_off: Option<(u64, super::Surface, String)>,
     /// The Device tools side panel and its fields.
     tools: Option<Tools>,
     /// The device floating over the chat (web's mini player).
@@ -143,7 +143,7 @@ fn session<'a>(state: &'a Value, thread: &str, selected: Option<&str>) -> Option
     let mut sessions: Vec<&Value> = state["sessions"].as_array().into_iter().flatten().filter(|s| s["threadId"] == thread).collect();
     sessions.sort_by_key(|s| std::cmp::Reverse(data::s(s, "openedAt").to_owned()));
     let picked = selected.and_then(|k| sessions.iter().copied().find(|s| key(data::s(s, "hostId"), data::s(s, "deviceId")) == k));
-    picked.or(sessions.first().copied())
+    if selected.is_some() { picked } else { sessions.first().copied() }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,15 +257,49 @@ fn open(app: &mut App, device: &Value) {
     let Some((thread, _)) = super::context(app) else { return };
     let (host, id) = (data::s(device, "hostId").to_owned(), data::s(device, "id").to_owned());
     let payload = json!({"threadId": thread, "hostId": host, "deviceId": id, "platform": device["platform"]});
-    let ui = &mut app.ui.panel.device;
-    ui.selected = Some(key(&host, &id));
-    ui.browsing = false;
-    ui.error = None;
+    let target = super::tabs::Target::Device {
+        host: host.clone(), device: id.clone(), name: data::s(device, "name").to_owned(), title: None,
+    };
+    let device_key = key(&host, &id);
+    let before = app.ui.panel.surfaces.len();
+    let tab_id = super::tabs::open(app, target);
+    let surfaces = &mut app.ui.panel.surfaces;
+    let appended = surfaces.len() > before;
+    if let Some(index) = surfaces.iter().position(|&surface| surface == super::Surface::Device) {
+        let tab = super::Surface::Tab(tab_id);
+        surfaces.remove(index);
+        if appended && surfaces.last() == Some(&tab) {
+            surfaces.pop();
+            surfaces.insert(index, tab);
+        }
+    }
+    if app.ui.panel.device.opening.iter().any(|(_, pending, _)| pending == &device_key) {
+        return;
+    }
     let booted = device["booted"] == true;
     if let Some(request) = request(app, "device.open", payload) {
-        app.ui.panel.device.opening = Some((request, key(&host, &id), booted));
+        app.ui.panel.device.opening.push((request, device_key, booted));
     }
 }
+
+pub(super) fn browse(app: &mut App) {
+    let ui = &mut app.ui.panel.device;
+    ui.selected = None;
+    ui.browsing = true;
+    ui.error = None;
+}
+
+pub(super) fn select_tab(app: &mut App, host: &str, device: &str) {
+    let ui = &mut app.ui.panel.device;
+    let selected = key(host, device);
+    if ui.selected.as_ref() != Some(&selected) {
+        ui.error = None;
+        ui.tools = None;
+    }
+    ui.selected = Some(selected);
+    ui.browsing = false;
+}
+
 
 fn refresh(app: &mut App) {
     app.ui.panel.device.error = None;
@@ -274,7 +308,7 @@ fn refresh(app: &mut App) {
 
 /// Keeps one stream for the shown session while the Device surface is on screen.
 fn sync_stream(app: &mut App, tx: &mut Tx) {
-    let in_panel = app.ui.shell.panel_open && app.ui.panel.active == Some(super::Surface::Device) && !app.ui.panel.device.browsing;
+    let in_panel = app.ui.shell.panel_open && app.ui.panel.active.is_some_and(|surface| super::tabs::is_device(app, surface)) && !app.ui.panel.device.browsing;
     let floating = app.ui.panel.device.float.as_ref().map(|f| f.key.clone());
     let wanted = (in_panel || floating.is_some())
         .then(|| {
@@ -456,7 +490,10 @@ fn power_off(app: &mut App) {
     let Some((thread, _)) = super::context(app) else { return };
     let Some((host, device)) = app.ui.panel.device.stream.as_ref().and_then(|s| s.key.split_once('\u{0}')).map(|(h, d)| (h.to_owned(), d.to_owned())) else { return };
     app.ui.panel.device.menu = None;
-    app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}));
+    if let Some(surface) = app.ui.panel.active {
+        app.ui.panel.device.powering_off = request(app, "device.close", json!({"threadId": thread, "hostId": host, "deviceId": device, "shutdown": true}))
+            .map(|request| (request, surface, thread));
+    }
 }
 
 /// Web's `DeviceDuoGlyph`: the Duo's fold shapes (upright, or a quarter turn for a flat phone)
@@ -686,14 +723,21 @@ fn host_diagnostics<'a>(state: &'a Value, host_id: &str) -> Option<&'a str> {
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    if let Some((id, _, _)) = app.ui.panel.device.opening
-        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
-    {
-        app.ui.panel.device.opening = None;
-        if let Err(e) = reply {
-            app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not open the device."));
+    for (id, key, booted) in std::mem::take(&mut app.ui.panel.device.opening) {
+        match app.src.net().and_then(|n| n.take_reply(id)) {
+            Some(reply) => {
+                if let Err(e) = reply {
+                    let error = crate::shell::palette::error_message(&e, "Could not open the device.");
+                    if app.ui.panel.device.selected.as_ref() == Some(&key) {
+                        app.ui.panel.device.error = Some(error);
+                    } else {
+                        crate::shell::palette::toast_error_brief(app, "Could not open the device.", Some(&error));
+                    }
+                }
+                changed = true;
+            }
+            None => app.ui.panel.device.opening.push((id, key, booted)),
         }
-        changed = true;
     }
     if let Some(id) = app.ui.panel.device.listing
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
@@ -704,12 +748,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    if let Some(id) = app.ui.panel.device.powering_off
+    if let Some((id, surface, thread)) = app.ui.panel.device.powering_off.clone()
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
     {
         app.ui.panel.device.powering_off = None;
         match reply {
-            Ok(_) => super::close(app, super::Surface::Device),
+            Ok(_) if super::context(app).is_some_and(|(current, _)| current == thread) => super::close(app, surface),
+            Ok(_) => {},
             Err(e) => app.ui.panel.device.error = Some(crate::shell::palette::error_message(&e, "Could not power off the device.")),
         }
         changed = true;
@@ -1089,7 +1134,7 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
         kit::MenuItem::new("Float device over chat").icon(&icons::PICTURE_IN_PICTURE_2).on_select(float_device),
         kit::MenuItem::new("Close device panel").icon(&icons::X).on_select(|s: &mut App| {
             s.ui.panel.device.menu = None;
-            super::close(s, super::Surface::Device);
+            if let Some(surface) = s.ui.panel.active { super::close(s, surface); }
         }),
         kit::MenuItem::new(if kind == "simlock" { "Return device to the pool" } else { "Power off device" }).icon(&icons::POWER).variant("destructive").disabled(app.ui.panel.device.powering_off.is_some()).on_select(power_off),
     ];
@@ -1186,9 +1231,12 @@ fn float_device(app: &mut App) {
 
 fn dock_float(app: &mut App) {
     if let Some(float) = app.ui.panel.device.float.take() {
-        app.ui.panel.device.selected = Some(float.key);
-        app.ui.panel.device.browsing = false;
-        super::activate(app, super::Surface::Device);
+        if let Some((host, device)) = float.key.split_once('\u{0}') {
+            let name = state(app).and_then(|state| state["devices"].as_array())
+                .and_then(|devices| devices.iter().find(|row| row["id"] == device && row["hostId"] == host))
+                .map(|row| data::s(row, "name").to_owned()).unwrap_or_default();
+            super::tabs::open(app, super::tabs::Target::Device { host: host.into(), device: device.into(), name, title: None });
+        }
     }
 }
 
@@ -1518,7 +1566,7 @@ fn tools_panel(stream: Option<&Stream>, tools: &Tools, diagnostics: Option<&str>
 fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>) -> El {
     let device = state["devices"].as_array().into_iter().flatten().find(|d| d["id"] == session["deviceId"] && d["hostId"] == session["hostId"]);
     let name = device.map_or_else(|| data::s(session, "deviceId").to_owned(), |d| data::s(d, "name").to_owned());
-    let back = icon_button("Back to devices", &icons::ARROW_LEFT).on_press(|s: &mut App| s.ui.panel.device.browsing = true).build(t).help("Back to devices");
+    let back = icon_button("Back to devices", &icons::ARROW_LEFT).on_press(|s: &mut App| super::activate(s, super::Surface::Device)).build(t).help("Back to devices");
     let reconnect = icon_button("Reconnect", &icons::REFRESH_CW).on_press(|s: &mut App| s.ui.panel.device.stream = None).build(t).help("Reconnect");
     let streams = transport(state, session) != Transport::WebRtc;
     let title = text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).single_line().truncate();
@@ -1578,7 +1626,7 @@ pub fn view(app: &App, t: &T, stage: Option<(f32, f32)>, overlays: &mut Vec<El>)
             ],
         );
     }
-    if let Some((_, _, booted)) = &ui.opening {
+    if let Some((_, _, booted)) = ui.opening.iter().find(|(_, key, _)| ui.selected.as_ref() == Some(key)) {
         return centered(vec![spinner(t), note(if *booted { "Opening device\u{2026}" } else { "Starting device\u{2026}" }, t)]);
     }
     let thread = super::context(app).map(|(id, _)| id).unwrap_or_default();

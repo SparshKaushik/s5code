@@ -712,6 +712,16 @@ mod tests {
     use crate::data;
     use serde_json::json;
 
+    /// Rune opens them on this platform: AVFoundation on macOS, its own decoder on Linux.
+    #[test]
+    fn the_notification_sounds_open() {
+        for name in ["notification-completion.mp3", "notification-input.mp3"] {
+            let clip = rune::Player::audio(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join(name));
+            assert_eq!(clip.state(), rune::PlayerState::Ready, "{name}");
+            assert!(clip.duration().is_some_and(|d| d > 0.1), "{name}: {:?}", clip.duration());
+        }
+    }
+
     #[test]
     fn the_windows_badge_draws_webs_disc_and_count_as_an_icon() {
         let side = os::BADGE_SIDE;

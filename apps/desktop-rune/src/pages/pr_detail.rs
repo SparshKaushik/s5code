@@ -27,6 +27,7 @@ const TABS: [&str; 4] = ["Summary", "Timeline", "Code", "Guide"];
 pub struct Ui {
     /// The list entry this state describes; its reference addresses every request.
     pub entry: Option<Value>,
+    embedded: bool,
     pub detail: Option<Value>,
     pub activity: Option<Value>,
     pub files: Option<Vec<FileDiff>>,
@@ -206,40 +207,42 @@ pub fn action_payload(entry: &Value, action: &str, merge_method: Option<&str>) -
 }
 
 fn selected_entry(s: &App) -> Option<Value> {
+    if let Some(entry) = crate::panel::active_pull_request(s) {
+        return Some(entry.clone());
+    }
     let url = s.ui.pages.pull_requests.selected.as_deref()?;
     s.ui.pages.pull_requests.result.as_ref()?["entries"].as_array()?.iter().find(|e| field(e, "url") == url).cloned()
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let on = matches!(s.frame_route(), Route::PullRequests);
+    let embedded = crate::panel::active_pull_request(s).cloned();
+    let is_embedded = embedded.is_some();
+    let page = matches!(s.frame_route(), Route::PullRequests);
+    let on = page || is_embedded;
     let blurred = s.ui.notify.background;
     let mut changed = release_confirms(ui(s), crate::data::now_ms(), blurred);
     changed |= poll_checkout(s);
-    changed |= live_refresh(s, on);
-    changed |= sync_app_access(s);
     if !on {
         return changed;
     }
-    let selected = s.ui.pages.pull_requests.selected.clone();
-    let current = ui(s).entry.as_ref().map(|e| field(e, "url").to_string());
-    // A row that leaves the list after an action (closed under the Open filter) stays open here,
-    // and the panel toggle hides the open one without dropping it, so a stack layer the list
-    // doesn't hold reopens too.
-    let hidden = s.ui.pages.pull_requests.hidden.is_some() && s.ui.pages.pull_requests.hidden == current;
+    let selected = embedded.as_ref().map(|entry| field(entry, "url").to_owned()).or_else(|| s.ui.pages.pull_requests.selected.clone());
+    let current = ui(s).entry.as_ref().map(|e| field(e, "url").to_owned());
+    let hidden = !is_embedded && s.ui.pages.pull_requests.hidden.is_some() && s.ui.pages.pull_requests.hidden == current;
     let wanted = match &selected {
         None if hidden => None,
         None => Some(None),
-        Some(_) => selected_entry(s).map(Some),
+        Some(_) => embedded.or_else(|| selected_entry(s)).map(Some),
     };
-    if selected != current
+    if (selected != current || ui(s).embedded != is_embedded)
         && let Some(entry) = wanted
     {
-        // A different pull request keeps the tab, as the web panel does between rows.
-        let tab = ui(s).tab;
-        *ui(s) = Ui { entry, tab, ..Ui::default() };
+        let tab = if is_embedded { entry.as_ref().and_then(|e| e["detailTab"].as_u64()).unwrap_or(0).min(3) as usize } else { ui(s).tab };
+        *ui(s) = Ui { entry, tab, embedded: is_embedded, ..Ui::default() };
         load(s);
         changed = true;
     }
+    changed |= live_refresh(s, on);
+    changed |= sync_app_access(s);
     let mut detail_loaded = false;
     let mut revised = false;
     if let Some(net) = s.src.net() {
@@ -373,7 +376,7 @@ pub(super) fn refresh(s: &mut App) {
 /// useLiveRefresh(detailQuery.refresh), keyed by the pull request: the open one reads again on
 /// the same clock as the list while its panel shows.
 fn live_refresh(s: &mut App, on: bool) -> bool {
-    let shown = on && s.ui.pages.pull_requests.selected.is_some();
+    let shown = on && (crate::panel::active_pull_request(s).is_some() || s.ui.pages.pull_requests.selected.is_some());
     let (now, background) = (crate::data::now_ms(), s.ui.notify.background);
     let u = ui(s);
     let due = u.live.due(shown && u.entry.is_some(), now, background);
@@ -740,7 +743,7 @@ fn poll_checkout(s: &mut App) -> bool {
         None => super::pr_actions::checkout_toast(mode, term, on_head),
     };
     if on_head {
-        crate::shell::palette::toast(s, &title, Some(&description));
+        crate::shell::palette::toast_success(s, &title, Some(&description));
     } else {
         crate::shell::palette::toast_warning(s, &title, Some(&description), Vec::new(), false);
     }
@@ -785,7 +788,7 @@ fn refresh_from_host(s: &mut App) {
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
-    if !matches!(s.route, Route::PullRequests) {
+    if !matches!(s.route, Route::PullRequests) && !(matches!(s.route, Route::Thread(_)) && crate::panel::active_pull_request(s).is_some()) {
         return false;
     }
     // The Summary and Timeline hold the markdown editors.
@@ -804,7 +807,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     // The open panel's `pullRequest.copyNumber`; the palette keeps the keys while open.
-    if s.ui.shell.palette.open || s.ui.pages.pull_requests.selected.is_none() || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
+    if s.ui.shell.palette.open || (s.ui.pages.pull_requests.selected.is_none() && crate::panel::active_pull_request(s).is_none()) || !crate::panel::shortcut(s, e, "pullRequest.copyNumber") {
         return false;
     }
     let Some(entry) = ui(s).entry.clone() else { return false };
@@ -1744,6 +1747,7 @@ fn tab_bar(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let tabs = ToggleGroup::new(&labels[..], &[at])
         .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
             ui(s).tab = order[n];
+            crate::panel::set_pull_request_section(s, order[n]);
         })
         .build(&k);
     let mut bar = row().w_full().px(16.0).py(8.0).gap(8.0).center_y().role("navigation").label("Pull request tabs").child(tabs).child(spacer());
@@ -1891,14 +1895,15 @@ fn section(t: &T, key: &str, title: String, open: bool, toggle: fn(&mut App), ri
         .cursor(Cursor::Pointer)
         .role("button")
         .label(title.clone())
-        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground).rotate(if open { 90f32.to_radians() } else { 0.0 }))
         .child(text(title).font(theme::XS_MEDIUM).color(t.c.muted_foreground))
+        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)).rotate(if open { 90f32.to_radians() } else { 0.0 }))
         .child(spacer())
         .on_press(move |s: &mut App| toggle(s));
     if let Some(right) = right {
         head = head.child(right);
     }
-    let mut out = col().w_full().child(head);
+    // Held at the top while its section scrolls under it.
+    let mut out = col().w_full().child(head.fill(t.c.background).sticky_top(0.0));
     if open {
         out = out.child(col().w_full().px(16.0).pb(16.0).child(body()));
     }
@@ -2365,6 +2370,7 @@ fn timeline(s: &App, t: &T) -> El {
 pub(super) fn open_commit(s: &mut App, oid: String) {
     scope_commit(s, Some(oid));
     ui(s).tab = 2;
+    crate::panel::set_pull_request_section(s, 2);
 }
 
 /// selectCodeCommit: a new scope drops the other scope's diff and any read still in flight.
@@ -2426,17 +2432,19 @@ fn ghost(t: &T, term: &str) -> El {
         .pt(16.0)
         .child(meta_row(t, &i::USERS, "Reviewers", row().gap(6.0).center_y().child(block(40.0, 12.0)).child(waiting(&i::USER_PLUS, "Reviewers loading"))))
         .child(meta_row(t, &i::TAG, "Labels", row().gap(4.0).center_y().child(block(96.0, 18.0)).child(waiting(&i::TAG, "Labels loading"))));
-    col()
+    let top = col().w_full().px(16.0).pt(12.0).pb(8.0).gap(10.0).child(line(22.0, 0.7)).child(line(14.0, 0.4)).child(line(14.0, 0.55).mt(8.0)).child(meta);
+    let muted = t.c.muted_foreground;
+    let heading = row()
         .w_full()
         .px(16.0)
-        .pt(12.0)
-        .gap(10.0)
-        .role("status")
-        .label(format!("Loading {term}"))
-        .child(line(22.0, 0.7))
-        .child(line(14.0, 0.4))
-        .child(line(14.0, 0.55).mt(8.0))
-        .child(meta)
+        .py(12.0)
+        .gap(6.0)
+        .center_y()
+        .child(text("Description").font(theme::XS_MEDIUM).color(muted))
+        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(muted.alpha_mul(0.6)).rotate(90f32.to_radians()));
+    let lines = col().w_full().gap(8.0).child(line(16.0, 1.0)).child(line(16.0, 11.0 / 12.0)).child(line(16.0, 0.8)).child(line(16.0, 2.0 / 3.0));
+    let description = col().w_full().px(16.0).pb(16.0).gap(12.0).child(block(160.0, 20.0)).child(lines);
+    col().w_full().role("status").label(format!("Loading {term}")).child(top).child(rule(t)).child(heading).child(description)
 }
 
 /// PullRequestsUnavailableState, naming a pull request the host doesn't have.

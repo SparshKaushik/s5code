@@ -240,6 +240,11 @@ fn locked_by<'a>(policy: Option<&'a Value>, path: &str) -> Option<&'a str> {
 /// Web's `inertControl`: the control at half opacity, unreachable, with `message` on hover.
 /// `key` must be unique on the page; [`overlays`] mounts the tooltip.
 pub fn inert(key: &str, control: El, message: String) -> El {
+    tip(key, control.disabled(true).inert().opacity(0.5), message)
+}
+
+/// Web `Tooltip` around a settings control: `message` while the pointer is over it.
+pub fn tip(key: &str, control: El, message: String) -> El {
     let owned = key.to_owned();
     rune::row()
         .key(format!("inert-{key}-trigger"))
@@ -251,7 +256,7 @@ pub fn inert(key: &str, control: El, message: String) -> El {
                 *tip = None;
             }
         })
-        .child(control.disabled(true).inert().opacity(0.5))
+        .child(control)
 }
 
 /// `inert` when `message` is set, else the control as-is.
