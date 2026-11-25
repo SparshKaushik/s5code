@@ -37,7 +37,7 @@ mod qr;
 pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
-mod providers;
+pub(crate) mod providers;
 mod scope;
 pub mod search;
 pub(crate) mod snapshots;
