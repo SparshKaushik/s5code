@@ -261,6 +261,12 @@ fn same_slug(raw: &Value, slug: &str) -> bool {
     raw.as_str().or(raw["slug"].as_str()).map(str::trim) == Some(slug)
 }
 
+pub fn scene_open_copy(s: &mut App) {
+    if let Some(draft) = s.ui.settings.providers_ui.editing.as_mut() {
+        (draft.preset_open, draft.copy_open) = (None, true);
+    }
+}
+
 pub fn scene_open_preset(s: &mut App, option: usize) {
     if let Some(draft) = s.ui.settings.providers_ui.editing.as_mut() {
         draft.preset_open = Some(option);

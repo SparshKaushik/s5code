@@ -97,6 +97,8 @@ fn filtered(options: &[ComboboxOption], query: &str) -> Vec<usize> {
 type Access<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut ComboboxState>;
 type Choose<S> = Rc<dyn Fn(&mut S, &str, &mut Tx)>;
 type Trailing = Rc<dyn Fn(&ComboboxOption) -> Option<El>>;
+/// Which options a query shows, in order.
+pub type Filter = fn(&[ComboboxOption], &str) -> Vec<usize>;
 
 /// `Combobox::new("models", &s.combo, &options, |s: &mut App| &mut s.combo)`.
 /// Selection is app-controlled through `current` and `on_choose`; search/open/highlight
@@ -119,6 +121,7 @@ pub struct Combobox<S> {
     label: Option<String>,
     trailing: Option<Trailing>,
     header: Option<El>,
+    filter: Filter,
 }
 impl<S: 'static> Combobox<S> {
     pub fn new(
@@ -145,11 +148,17 @@ impl<S: 'static> Combobox<S> {
             label: None,
             trailing: None,
             header: None,
+            filter: filtered,
         }
     }
     /// A control after an option's label, such as a switch; its own press doesn't choose the row.
     pub fn trailing(mut self, trailing: impl Fn(&ComboboxOption) -> Option<El> + 'static) -> Self {
         self.trailing = Some(Rc::new(trailing));
+        self
+    }
+    /// Replaces the ranked subsequence match, for lists that must filter the way another UI does.
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = filter;
         self
     }
     /// A row between the search and the results, such as column titles for `trailing` controls.
@@ -257,7 +266,8 @@ impl<S: 'static> Combobox<S> {
         if !self.state.open || self.disabled {
             return popover.build(k, layer);
         }
-        let choices = filtered(&self.options, &self.state.search.text);
+        let filter = self.filter;
+        let choices = filter(&self.options, &self.state.search.text);
         let active = self.state.active_index(&self.options, &choices);
         let access = self.access.clone();
         let key_access = self.access.clone();
@@ -290,7 +300,7 @@ impl<S: 'static> Combobox<S> {
                 let state = change_access(s);
                 state.active = None;
                 state.query = state.search.text.clone();
-                if let Some(i) = filtered(&change_options, &state.search.text)
+                if let Some(i) = filter(&change_options, &state.search.text)
                     .into_iter()
                     .find(|i| !change_options[*i].disabled)
                 {
@@ -311,7 +321,7 @@ impl<S: 'static> Combobox<S> {
                 if ev.mods.alt || ev.mods.logo {
                     return false;
                 }
-                let choices = filtered(&options, &state.search.text);
+                let choices = filter(&options, &state.search.text);
                 let enabled: Vec<_> = choices
                     .into_iter()
                     .filter(|i| !options[*i].disabled)

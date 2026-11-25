@@ -169,7 +169,7 @@ fn new_threads(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
     let rows = [
         json!({"key": "defaultModelSelection", "title": "Model", "kind": "model", "options": [],
             "description": "Model for new threads in this project."}),
-        json!({"key": "defaultThreadEnvMode", "title": "Workspace", "kind": "select",
+        json!({"key": "defaultThreadEnvMode", "title": "Workspace", "ariaLabel": "Default workspace", "kind": "select",
             "options": [["local", "Current checkout"], ["worktree", "New worktree"]],
             "description": "Where new threads in this project start."}),
     ];
