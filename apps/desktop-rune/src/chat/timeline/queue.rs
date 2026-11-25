@@ -42,7 +42,7 @@ fn compaction(message: &Value) -> bool {
         && array(message, "attachments").is_empty()
 }
 
-fn session<'a>(p: &'a Value, active: Option<&'a Value>) -> Option<&'a Value> {
+pub(crate) fn session<'a>(p: &'a Value, active: Option<&'a Value>) -> Option<&'a Value> {
     let (threads, sessions, thread) = (array(p, "providerThreads"), array(p, "providerSessions"), &p["thread"]);
     let wanted = active.map(|r| s(r, "providerThreadId")).filter(|id| !id.is_empty()).unwrap_or(s(thread, "activeProviderThreadId"));
     let attached = threads

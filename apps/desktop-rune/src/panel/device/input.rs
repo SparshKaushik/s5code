@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rune::Key;
 use serde_json::{Value, json};
@@ -22,11 +22,17 @@ const ORIENTATIONS: [&str; 4] = ["portrait", "landscape_left", "portrait_upside_
 /// serve-emu's `MAX_TEXT_BYTES` (expo-device-hub 0.15.3 input.js).
 const ANDROID_TEXT_BYTES: usize = 300;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Screen {
     pub width: f64,
     pub height: f64,
     pub orientation: String,
+    /// The iPhone Duo's hinge: which panel shows (1 is the cover), whether it folds, its angle
+    /// and stand (`closed`, `book`, `open`, `laptop` or `tent`).
+    pub screen_id: Option<u32>,
+    pub supports_hinge: bool,
+    pub hinge_angle: Option<f64>,
+    pub hinge_pose: Option<String>,
 }
 
 #[derive(Default)]
@@ -34,6 +40,132 @@ pub struct State {
     pub admitted: bool,
     pub unavailable: bool,
     pub screen: Option<Screen>,
+    pub duo: Duo,
+    /// Bumped on each change the panel shows, since a still screen sends no frames.
+    pub rev: u64,
+}
+
+const DUO_COMMAND: u8 = 0x10;
+const DUO_REPLY: u8 = 0x90;
+const DUO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Web's `createDuoControl`: one hinge command in flight, the latest queued behind it, and the
+/// error that left the device's position unknown.
+#[derive(Default)]
+pub struct Duo {
+    next: u64,
+    active: Option<(u64, Value, Instant)>,
+    queued: Option<Value>,
+    /// The orientation command a screen config answers, since serve-sim sends no reply for it.
+    orientation: Option<u64>,
+    pub error: Option<String>,
+    /// Messages for the socket.
+    outbox: Vec<Vec<u8>>,
+}
+
+impl Duo {
+    pub fn pending(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// The command waiting or in flight, newest first.
+    pub fn requested(&self) -> Option<&Value> {
+        self.queued.as_ref().or(self.active.as_ref().map(|a| &a.1))
+    }
+
+    fn enqueue(&mut self, command: Value, now: Instant) {
+        if command["control"] == "angle" && !command["value"].as_f64().is_some_and(|v| (0. ..=180.).contains(&v)) {
+            return;
+        }
+        self.queued = Some(command);
+        self.error = None;
+        self.drain(now);
+    }
+
+    fn drain(&mut self, now: Instant) {
+        if self.active.is_some() {
+            return;
+        }
+        let Some(command) = self.queued.take() else { return };
+        self.next += 1;
+        let id = self.next;
+        self.orientation = None;
+        self.outbox.push(if command["control"] == "orientation" {
+            self.orientation = Some(id);
+            tagged(ORIENTATION, &json!({"orientation": command["value"]}))
+        } else {
+            tagged(DUO_COMMAND, &json!({"requestId": id, "command": command}))
+        });
+        self.active = Some((id, command, now));
+    }
+
+    fn receive(&mut self, id: u64, ok: bool, error: Option<&str>, now: Instant) {
+        if self.active.as_ref().is_none_or(|a| a.0 != id) {
+            return;
+        }
+        self.active = None;
+        if !ok {
+            return self.clear(Some(error.unwrap_or("Device control failed. Its position is unknown.").to_owned()));
+        }
+        self.drain(now);
+    }
+
+    fn clear(&mut self, error: Option<String>) {
+        (self.active, self.queued, self.orientation, self.error) = (None, None, None, error);
+        self.outbox.clear();
+    }
+
+    /// When the command in flight gives up.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.active.as_ref().map(|a| a.2 + DUO_TIMEOUT)
+    }
+
+    /// Gives up on a command unanswered past its deadline; true when it did.
+    pub fn expire(&mut self, now: Instant) -> bool {
+        let late = self.deadline().is_some_and(|at| now >= at);
+        if late {
+            self.clear(Some("Device control timed out. Its position is unknown.".into()));
+        }
+        late
+    }
+}
+
+/// Web's `duoFoldState`. The inner panel is mounted a quarter turn from the cover, so its
+/// landscape means a vertical phone; a fold across closed hands off in steps, and only a settled
+/// screen's orientation says how the phone is held.
+#[derive(Debug, PartialEq)]
+pub struct DuoFold {
+    pub fold: &'static str,
+    pub stand: bool,
+    pub phone_vertical: bool,
+    pub settled: bool,
+}
+
+pub fn duo_fold(screen: &Screen) -> DuoFold {
+    let cover = screen.screen_id == Some(1);
+    let angle = screen.hinge_angle.unwrap_or(if cover { 0. } else { 180. });
+    let landscape = screen.orientation.starts_with("landscape");
+    DuoFold {
+        fold: if angle == 0. {
+            "closed"
+        } else if angle == 180. {
+            "open"
+        } else {
+            "half"
+        },
+        stand: matches!(screen.hinge_pose.as_deref(), Some("laptop" | "tent")),
+        phone_vertical: if cover { !landscape } else { landscape },
+        settled: cover == (angle == 0.),
+    }
+}
+
+/// Web's `duoHoldOrientation`: the orientation that holds a phone in a stand upright or flat.
+pub fn duo_hold(vertical: bool, screen_id: Option<u32>) -> &'static str {
+    match (screen_id == Some(1), vertical) {
+        (true, true) => "portrait",
+        (true, false) | (false, true) => "landscape_left",
+        (false, false) => "portrait_upside_down",
+    }
 }
 
 impl State {
@@ -51,11 +183,11 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn open(base: String, bearer: String, host: &str, device: &str, wake: impl Fn() + Send + 'static) -> Input {
+    pub fn open(base: String, auth: s5_net::Auth, host: &str, device: &str, wake: impl Fn() + Send + 'static) -> Input {
         let (input, rx) = Input::channel(false);
         let query = format!("device={}&hostId={}", super::encode(device), super::encode(host));
         let shared = input.state.clone();
-        std::thread::spawn(move || run(&base, &bearer, &query, &rx, &shared, &wake));
+        std::thread::spawn(move || run(&base, &auth, &query, &rx, &shared, &wake));
         input
     }
 
@@ -101,6 +233,19 @@ impl Input {
             _ => return,
         };
         self.send(Message::Binary(tagged(BUTTON, &json!({"button": name}))));
+    }
+
+    /// A hinge command (`{control, value}`) for an iPhone Duo, queued behind the one in flight.
+    pub fn duo(&self, command: Value) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let hinged = state.ready() && state.screen.as_ref().is_some_and(|s| s.supports_hinge);
+        state.duo.enqueue(command, Instant::now());
+        state.rev += 1;
+        for message in std::mem::take(&mut state.duo.outbox) {
+            if !hinged || self.tx.send(Message::Binary(message)).is_err() {
+                state.duo.clear(Some("Device is disconnected.".into()));
+            }
+        }
     }
 
     pub fn rotate(&self) {
@@ -175,7 +320,25 @@ fn inbound(bytes: &[u8], state: &mut State) -> bool {
             let Ok(config) = serde_json::from_slice::<Value>(json) else { return false };
             let (Some(width), Some(height)) = (config["width"].as_f64(), config["height"].as_f64()) else { return false };
             state.unavailable = config["inputUnavailable"] == true;
-            state.screen = Some(Screen { width, height, orientation: config["orientation"].as_str().unwrap_or("portrait").to_owned() });
+            state.screen = Some(Screen {
+                width,
+                height,
+                orientation: config["orientation"].as_str().unwrap_or("portrait").to_owned(),
+                screen_id: config["screenId"].as_u64().map(|id| id as u32),
+                supports_hinge: config["supportsHingeAngle"] == true,
+                hinge_angle: config["hingeAngle"].as_f64().filter(|a| (0. ..=180.).contains(a)),
+                hinge_pose: config["hingePose"].as_str().map(str::to_owned),
+            });
+            // A new config is the receipt for an orientation command.
+            if let Some(id) = state.duo.orientation.take() {
+                state.duo.receive(id, true, None, Instant::now());
+            }
+            true
+        }
+        Some((&DUO_REPLY, json)) => {
+            let Ok(reply) = serde_json::from_slice::<Value>(json) else { return false };
+            let (Some(id), Some(ok)) = (reply["requestId"].as_u64(), reply["ok"].as_bool()) else { return false };
+            state.duo.receive(id, ok, reply["error"].as_str(), Instant::now());
             true
         }
         _ => false,
@@ -260,9 +423,9 @@ fn press(usage: u8, shift: bool) -> Vec<Vec<u8>> {
 }
 
 /// Keeps the socket open until `Input` drops, reconnecting after a second when it is lost.
-fn run(base: &str, bearer: &str, query: &str, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) {
+fn run(base: &str, auth: &s5_net::Auth, query: &str, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) {
     loop {
-        if let Ok(mut socket) = s5_net::api_socket(base, bearer, PATH, query, Duration::from_millis(15))
+        if let Ok(mut socket) = s5_net::api_socket(base, auth, PATH, query, Duration::from_millis(15))
             && pump(&mut socket, rx, state, wake)
         {
             return;
@@ -297,7 +460,16 @@ fn pump<S: std::io::Read + std::io::Write>(socket: &mut tungstenite::WebSocket<S
         }
         match socket.read() {
             Ok(Message::Binary(bytes)) => {
-                if inbound(&bytes, &mut state.lock().unwrap_or_else(|e| e.into_inner())) {
+                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = inbound(&bytes, &mut state);
+                state.rev += u64::from(changed);
+                for message in std::mem::take(&mut state.duo.outbox) {
+                    if socket.send(Message::Binary(message)).is_err() {
+                        return false;
+                    }
+                }
+                drop(state);
+                if changed {
                     wake();
                 }
             }
@@ -321,26 +493,70 @@ mod tests {
     fn serve_sim_admits_input_and_reports_the_screen() {
         let mut state = State::default();
         assert!(!state.ready());
-        assert!(!inbound(&[0x90, b'{', b'}'], &mut state), "control replies are not input state");
+        assert!(!inbound(&[0x90, b'{', b'}'], &mut state), "an unreadable control reply changes nothing");
         assert!(inbound(&[ADMITTED], &mut state));
         assert!(state.ready());
         let mut config = vec![SCREEN_CONFIG];
         config.extend_from_slice(br#"{"width":1179,"height":2556,"orientation":"landscape_left","inputUnavailable":true}"#);
         assert!(inbound(&config, &mut state));
         assert!(!state.ready(), "Simulator input is unavailable");
-        assert_eq!(state.screen, Some(Screen { width: 1179., height: 2556., orientation: "landscape_left".into() }));
+        assert_eq!(state.screen, Some(Screen { width: 1179., height: 2556., orientation: "landscape_left".into(), ..Default::default() }));
         assert!(!inbound(&[SCREEN_CONFIG, b'x'], &mut state), "unreadable config keeps the last one");
     }
 
     #[test]
+    fn duo_commands_go_one_at_a_time_and_a_lost_one_leaves_the_position_unknown() {
+        let now = Instant::now();
+        let mut state = State::default();
+        let mut config = vec![SCREEN_CONFIG];
+        config.extend_from_slice(br#"{"width":2868,"height":1320,"orientation":"landscape_left","screenId":2,"supportsHingeAngle":true,"hingeAngle":90,"hingePose":"book"}"#);
+        assert!(inbound(&config, &mut state));
+        let screen = state.screen.clone().unwrap();
+        assert_eq!((screen.screen_id, screen.supports_hinge, screen.hinge_angle, screen.hinge_pose.as_deref()), (Some(2), true, Some(90.), Some("book")));
+        // A stand's orientation goes first; the angle waits behind it, and a newer one replaces it.
+        let duo = &mut state.duo;
+        duo.enqueue(json!({"control": "orientation", "value": "portrait"}), now);
+        duo.enqueue(json!({"control": "angle", "value": 90}), now);
+        duo.enqueue(json!({"control": "angle", "value": 180}), now);
+        duo.enqueue(json!({"control": "angle", "value": 270}), now);
+        assert_eq!(std::mem::take(&mut duo.outbox).iter().map(|m| decoded(m)).collect::<Vec<_>>(), [(ORIENTATION, json!({"orientation": "portrait"}))]);
+        assert!(duo.pending() && duo.requested() == Some(&json!({"control": "angle", "value": 180})));
+        // The next screen config is the orientation's receipt, which sends the angle.
+        assert!(inbound(&config, &mut state));
+        assert_eq!(std::mem::take(&mut state.duo.outbox).iter().map(|m| decoded(m)).collect::<Vec<_>>(), [(DUO_COMMAND, json!({"requestId": 2, "command": {"control": "angle", "value": 180}}))]);
+        // A stale reply is ignored; a failure clears the queue with serve-sim's reason.
+        let reply = |body: &str| [&[DUO_REPLY][..], body.as_bytes()].concat();
+        inbound(&reply(r#"{"requestId":1,"ok":false}"#), &mut state);
+        assert!(state.duo.pending());
+        inbound(&reply(r#"{"requestId":2,"ok":false,"error":"Hinge is busy"}"#), &mut state);
+        assert!(!state.duo.pending() && state.duo.error.as_deref() == Some("Hinge is busy"));
+        // A command nobody answers times out after five seconds.
+        state.duo.enqueue(json!({"control": "pose", "value": "tent"}), now);
+        assert!(state.duo.error.is_none() && !state.duo.expire(now + Duration::from_secs(4)));
+        assert!(state.duo.expire(now + Duration::from_secs(5)));
+        assert_eq!(state.duo.error.as_deref(), Some("Device control timed out. Its position is unknown."));
+    }
+
+    #[test]
+    fn a_duo_reads_its_fold_from_the_panel_that_shows() {
+        let screen = |id: u32, orientation: &str, angle: Option<f64>, pose: Option<&str>| Screen { orientation: orientation.into(), screen_id: Some(id), hinge_angle: angle, hinge_pose: pose.map(str::to_owned), ..Default::default() };
+        let fold = |fold, stand, phone_vertical, settled| DuoFold { fold, stand, phone_vertical, settled };
+        assert_eq!(duo_fold(&screen(1, "portrait", None, None)), fold("closed", false, true, true), "the cover upright, closed");
+        assert_eq!(duo_fold(&screen(2, "landscape_left", Some(90.), Some("book"))), fold("half", false, true, true), "the inner panel's landscape is a vertical book");
+        assert_eq!(duo_fold(&screen(2, "portrait", None, Some("laptop"))), fold("open", true, false, true));
+        assert_eq!(duo_fold(&screen(1, "portrait", Some(30.), Some("tent"))), fold("half", true, true, false), "a tent resting on the cover is unsettled");
+        assert_eq!([duo_hold(true, Some(1)), duo_hold(false, Some(1)), duo_hold(true, Some(2)), duo_hold(false, None)], ["portrait", "landscape_left", "landscape_left", "portrait_upside_down"]);
+    }
+
+    #[test]
     fn rotated_portrait_framebuffers_take_input_in_raw_space() {
-        let portrait = |orientation: &str| Screen { width: 1179., height: 2556., orientation: orientation.into() };
+        let portrait = |orientation: &str| Screen { width: 1179., height: 2556., orientation: orientation.into(), ..Default::default() };
         assert_eq!(raw_point(None, 0.2, 0.3), (0.2, 0.3));
         assert_eq!(raw_point(Some(&portrait("portrait")), 0.2, 0.3), (0.2, 0.3));
         assert_eq!(raw_point(Some(&portrait("landscape_left")), 0.25, 0.5), (0.5, 0.75));
         assert_eq!(raw_point(Some(&portrait("landscape_right")), 0.25, 0.5), (0.5, 0.25));
         assert_eq!(raw_point(Some(&portrait("portrait_upside_down")), 0.25, 0.5), (0.75, 0.5));
-        let landscape = Screen { width: 2556., height: 1179., orientation: "landscape_left".into() };
+        let landscape = Screen { width: 2556., height: 1179., orientation: "landscape_left".into(), ..Default::default() };
         assert_eq!(raw_point(Some(&landscape), 0.25, 0.5), (0.25, 0.5), "a landscape framebuffer is already upright");
         assert_eq!(next_orientation(Some("portrait")), "landscape_left");
         assert_eq!(next_orientation(Some("landscape_right")), "portrait");

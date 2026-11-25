@@ -171,7 +171,8 @@ fn save(s: &App) -> Result<(), String> {
     write(&path, &ui.saved, &ui.off, &ui.alternates, &ui.outdated)?;
     let saved = &ui.saved;
     let ssh: Vec<catalog::SshEntry> = ssh::targets(s).iter().filter_map(|(id, target)| Some((id.clone(), saved.iter().find(|e| &e.id == id)?.label.clone(), target.clone()))).collect();
-    catalog::export(&old, saved, &ssh);
+    let relay: Vec<String> = saved.iter().filter(|e| reached_by_relay(s, &e.id)).map(|e| e.id.clone()).collect();
+    catalog::export(&old, saved, &ssh, &relay);
     Ok(())
 }
 
@@ -202,7 +203,7 @@ fn connect_to(s: &App, id: &str, base: &str, bearer: &str) -> Source {
         }
     };
     Source::Live(if bearer == T3_CONNECT {
-        s5_net::Net::connect_with(base, crate::cloud::socket_auth(id), wake)
+        s5_net::Net::connect_with(base, crate::cloud::auth(id), wake)
     } else if s.ui.env.outdated.contains_key(id) {
         s5_net::Net::connect_requests_only(base, bearer, wake)
     } else {
@@ -230,27 +231,29 @@ pub fn start(s: &mut App) {
 }
 
 /// Electron's saved connections, read off the UI thread at launch.
-static CATALOG: std::sync::Mutex<Option<(Vec<Saved>, Vec<catalog::SshEntry>)>> = std::sync::Mutex::new(None);
+static CATALOG: std::sync::Mutex<Option<catalog::Read>> = std::sync::Mutex::new(None);
 
 /// Connections paired in the Electron app that this list lacks join it, and connect.
 fn adopt_catalog(s: &mut App) -> bool {
-    let Some((found, ssh_found)) = CATALOG.lock().unwrap().take() else { return false };
+    let Some(catalog::Read { bearers: found, ssh: ssh_found, relays }) = CATALOG.lock().unwrap().take() else { return false };
     for (id, _, target) in ssh_found {
         if !s.ui.env.saved.iter().any(|x| x.id == id) {
             ssh::adopt(s, target);
         }
     }
     let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
-    if new.is_empty() {
-        return false;
-    }
+    let adopted = !new.is_empty();
     for env in new {
         let src = connect(s, &env);
         s.ui.env.parked.push((env.id.clone(), src));
         s.ui.env.saved.push(env);
     }
-    s.ui.env.error = save(s).err().map(|e| format!("Could not save environments: {e}"));
-    true
+    if adopted {
+        s.ui.env.error = save(s).err().map(|e| format!("Could not save environments: {e}"));
+    }
+    // After the bearer routes, so a relay route joins its environment as a fallback.
+    crate::cloud::import(s, relays);
+    adopted
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.
@@ -467,11 +470,11 @@ pub fn adopt(s: &mut App, id: &str, key: &str) {
     s.ui.env.owners.insert(id.to_owned(), key.to_owned());
 }
 
-/// Each connected environment's base URL and bearer, on screen or parked.
-pub fn credentials(s: &mut App) -> Vec<(String, String)> {
+/// Each connected environment's base URL and credential, on screen or parked.
+pub fn credentials(s: &mut App) -> Vec<(String, s5_net::Auth)> {
     let mut nets: Vec<&mut s5_net::Net> = s.src.net().into_iter().collect();
     nets.extend(s.ui.env.parked.iter_mut().filter_map(|(_, src)| src.net()));
-    nets.into_iter().filter(|net| !net.bearer().is_empty()).map(|net| (net.base_url().to_owned(), net.bearer().to_owned())).collect()
+    nets.into_iter().map(|net| (net.base_url().to_owned(), net.auth().clone())).collect()
 }
 
 /// Sends one request to every connected environment; each reply reaches `App::src` (see [`drain`]).
@@ -1213,13 +1216,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("wizard-t3-connect", |s| {
         scene_failing(s);
         crate::wizard::scene_computers(s);
-        crate::cloud::scene_signed_in(s);
+        crate::wizard::scene_t3_connect(s);
     }),
     ("wizard-t3-connect-signed-out", |s| {
         scene_failing(s);
         crate::wizard::scene_computers(s);
     }),
     ("wizard-chatgpt-account", crate::wizard::scene_chatgpt),
+    ("t3-connect-onboarding", |s| crate::cloud::onboarding::scene(s, true)),
+    ("t3-connect-onboarding-devices", |s| crate::cloud::onboarding::scene(s, false)),
 ];
 
 #[cfg(test)]

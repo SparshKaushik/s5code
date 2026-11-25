@@ -1,5 +1,6 @@
 //! The window's frame: sidebar, the main column the route fills, and the right panel.
 
+pub mod chatgpt_welcome;
 pub mod confirm;
 pub mod sidebar;
 pub mod palette;
@@ -22,6 +23,7 @@ pub struct Ui {
     pub quit: quit::QuitHold,
     pub toasts: toast::Stack,
     pub swipe: swipe::Swipe,
+    pub chatgpt_welcome: chatgpt_welcome::Ui,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -59,6 +61,19 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("toasts-expanded", |s| {
         open_titled(s, "Replay showcase");
         toast::scene(s, true);
+    }),
+    ("chatgpt-welcome", |s| {
+        open_titled(s, "Replay showcase");
+        chatgpt_welcome::scene(s);
+    }),
+    ("sidebar-regenerating", |s| {
+        open_titled(s, "Replay showcase");
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            for t in state.threads.iter_mut().filter(|t| t["title"] != "Replay showcase").take(3) {
+                t["titleRegeneration"] = serde_json::json!({"requestedAt": "2026-01-01T00:00:00.000Z"});
+            }
+        }
+        palette::toast(s, "Thread search is unavailable on this server.", Some("Update the server to enable it."));
     }),
 ];
 
@@ -130,10 +145,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
     confirm::view(s, t, &mut overlays);
+    chatgpt_welcome::view(s, t, &mut overlays);
     overlays.extend(crate::search::overlay(s, t));
     crate::links::overlays(s, t, &mut overlays);
     crate::add_to_machine::overlays(s, t, &mut overlays);
     crate::wizard::overlays(s, t, &mut overlays);
+    crate::cloud::onboarding::overlay(s, t, &mut overlays);
+    crate::cloud::relay_client::overlay(s, t, &mut overlays);
     crate::desktop::updates::confirm(s, t, &mut overlays);
     overlays.extend(quit::overlay(s, t));
     rune_kit::root(body, overlays)

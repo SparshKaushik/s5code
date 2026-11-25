@@ -788,6 +788,9 @@ fn remove_theme(s: &mut App, id: &str) {
         }
     }
     super::update(s, "customThemes", json!(library));
+    if s.client_settings.error.is_some() {
+        crate::shell::palette::toast_error(s, "Couldn\u{2019}t remove theme", Some("Try again."));
+    }
 }
 
 /// Web's theme removal `AlertDialog` for a single theme.

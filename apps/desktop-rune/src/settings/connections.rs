@@ -291,6 +291,7 @@ pub fn view(s: &App, t: &T) -> El {
     let actions = super::machines::update_all_button(s, t).into_iter().chain([add]).collect();
     page = page.child(c::section_with_actions("Environments", actions, rows, t));
     page = page.children(crate::cloud::section(s, t));
+    page = page.children(crate::cloud::account::sections(s, t));
     if offers_links(s) {
         page = page.child(linked(s, t));
     }
@@ -1819,6 +1820,11 @@ pub(super) fn scene(s: &mut App, open: &str) {
             }
         }
         "t3-connect" => crate::cloud::scene_signed_in(s),
+        "t3-connect-account" | "t3-connect-mobile" => {
+            crate::cloud::scene_signed_in(s);
+            crate::cloud::account::scene(s);
+            s.ui.settings.reveal = Some(if open == "t3-connect-mobile" { "Mobile clients" } else { "Registered environments" }.into());
+        }
         "t3-connect-signing-in" => crate::cloud::scene_signing_in(s),
         "t3-connect-route" => {
             crate::cloud::scene_signed_in(s);

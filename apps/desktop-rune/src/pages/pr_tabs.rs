@@ -431,6 +431,11 @@ pub(super) fn panel(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<E
         tab_menu(s, t, url, *x, *y, overlays);
     }
     let body = col().grow(1.0).min_w(0.0).h_full().fill(t.c.background).child(strip(s, cx, t)).child(super::pr_detail::view(s, t, overlays));
+    // Chat draws these over its timeline; here they serve the bodies' pictures (pr_media).
+    match crate::chat::timeline::attachments::lightbox(s) {
+        Some(lightbox) => overlays.push(lightbox),
+        None => crate::chat::timeline::media::menu(s, &crate::kit::theme(t), overlays),
+    }
     if u.maximized {
         return body.key("pr-panel");
     }
