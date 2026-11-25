@@ -525,8 +525,15 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             None => entry.failed = true,
         }
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let assets = &app.ui.chat.timeline.assets;
+        for player in assets.media.entries.values().filter_map(|e| e.loaded.as_ref()).chain(assets.ready.values()).filter_map(|l| l.soft.as_ref()) {
+            player.sync();
+        }
+    }
     let state = &mut app.ui.chat.timeline.assets.media;
-    let errors = state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
+    let errors =state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
     let copied = state.copied.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
     for (title, description) in errors {
         crate::shell::palette::toast_error(app, &title, Some(&description));
@@ -697,6 +704,7 @@ pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t:
         if media.kind != Kind::Image {
             return None;
         }
+        let framed = matches!(access, Access::Asset { .. });
         let Some(entry) = app.ui.chat.timeline.assets.media.entries.get(&key) else {
             want(app, &key, &media, access);
             return None;
@@ -709,7 +717,9 @@ pub fn inline(app: &App, block: &str, font: rune::tok::TextStyle, ink: Color, t:
         let ratio = w as f32 / h as f32;
         let width = (w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio);
         let label = alt.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
-        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, width / ratio], copy: format!("![{label}]({src})"), open: Some(key) })
+        // An inline-block image's baseline is its bottom edge.
+        let height = width / ratio;
+        Some(super::inline::Picture { pixels: loaded.pixels.clone(), size: [width, height], copy: format!("![{label}]({src})"), open: Some(key), baseline: Some(height), framed })
     };
     super::inline::paragraph(block, Vec::new(), &image, font, ink, t)
 }
@@ -1004,11 +1014,17 @@ pub fn scene_open(app: &mut App, gallery: Vec<String>) {
     assets.gallery = gallery;
 }
 
+/// The alt text that has a scene play the High-profile, B-frame, fragmented MP4 fixture.
+pub(super) const SCENE_HIGH_PROFILE: &str = "High profile clip";
+
 /// Scenes: a test picture, or for a video a clip made here where it can play.
 fn scene_loaded(media: &Media) -> Loaded {
     match media.kind {
         #[cfg(target_os = "linux")]
-        Kind::Video => Loaded { soft: Some(soft::SoftPlayer::bytes(scene_clip(), None)), ..checker(media) },
+        Kind::Video => {
+            let fixture = (media.name == SCENE_HIGH_PROFILE).then(|| std::fs::read(crate::data::fixtures_dir().join("video/high-bframes-fragmented.mp4")).ok()).flatten();
+            Loaded { soft: Some(soft::SoftPlayer::bytes(fixture.unwrap_or_else(scene_clip), None)), ..checker(media) }
+        }
         _ => checker(media),
     }
 }

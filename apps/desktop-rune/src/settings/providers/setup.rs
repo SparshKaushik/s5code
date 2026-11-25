@@ -69,7 +69,7 @@ pub fn poll(s: &mut App) -> bool {
     let ui = &mut s.ui.settings.providers_ui.setup;
     ui.pending = None;
     if let Err(error) = reply {
-        ui.error = Some(failure_detail(&error).unwrap_or_else(|| "Provider setup failed.".into()));
+        ui.error = Some(failure_detail(&error).unwrap_or_else(|| "Provider setup failed. Try again.".into()));
     }
     true
 }

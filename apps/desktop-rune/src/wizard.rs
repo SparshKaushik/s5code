@@ -62,6 +62,8 @@ pub struct Ui {
     toggled: HashSet<String>,
     import: Option<Import>,
     terminal: Option<Setup>,
+    /// The managed Codex instances whose sign-in and install the Agents step watches, by computer.
+    codex_watched: Vec<(String, String)>,
 }
 
 /// `AGENT_ONBOARDING_THREAD_ID`: setup terminals belong to no real thread.
@@ -271,6 +273,45 @@ fn retry_setup(s: &mut App) {
 
 /// Closes the terminal (left running when access was withdrawn), asks the computer for its
 /// agents again, and puts back the computer that was in focus.
+/// The computer's server settings: the optimistic copy on the focused computer, where a
+/// mode change lands first.
+fn settings_on<'a>(s: &'a App, env: &str) -> &'a Value {
+    if s.ui.env.active == env { crate::settings::server_settings(s) } else { config(s, env).map_or(&Value::Null, |c| &c["settings"]) }
+}
+
+/// Web `readCodexSetupMode`'s input: the instance's `setupMode`, when one was chosen.
+fn codex_mode<'a>(s: &'a App, env: &str, id: &str) -> Option<&'a str> {
+    settings_on(s, env)["providerInstances"][id]["config"]["setupMode"].as_str()
+}
+
+/// Opens the sign-in and install subscriptions of each managed Codex card on the Agents step,
+/// on its own computer, and closes them once the step is gone.
+fn watch_codex(s: &mut App) {
+    let mut wanted = vec![];
+    if s.ui.wizard.open && s.ui.wizard.step == Step::Agents {
+        for env in &s.ui.wizard.setup {
+            for p in providers_on(s, env).iter().filter(|p| data::s(p, "driver") == "codex") {
+                let id = data::s(p, "instanceId");
+                if codex_mode(s, env, id) == Some("managed") {
+                    wanted.push((env.clone(), id.to_owned()));
+                }
+            }
+        }
+    }
+    if wanted == s.ui.wizard.codex_watched {
+        return;
+    }
+    let old = std::mem::replace(&mut s.ui.wizard.codex_watched, wanted.clone());
+    let stale: Vec<_> = old.into_iter().filter(|w| !wanted.contains(w)).collect();
+    for ((env, id), watch) in stale.into_iter().map(|w| (w, false)).chain(wanted.into_iter().map(|w| (w, true))) {
+        if let Some(net) = crate::env::net_of(s, &env) {
+            for method in crate::settings::providers::codex::WATCHED {
+                if watch { net.watch_resource(method, json!({"instanceId": id})) } else { net.unwatch_resource(method, json!({"instanceId": id})) }
+            }
+        }
+    }
+}
+
 fn close_setup(s: &mut App) {
     let Some(setup) = s.ui.wizard.terminal.take() else { return };
     let here = s.ui.env.active == setup.env;
@@ -492,6 +533,7 @@ pub fn poll(s: &mut App) -> bool {
             }
         }
     }
+    watch_codex(s);
     if !s.ui.wizard.open {
         return changed;
     }
@@ -1105,7 +1147,7 @@ fn submit_link(s: &mut App) {
 fn pairing_form(s: &App, t: &T) -> El {
     let ui = &s.ui.wizard;
     let pairing = crate::env::pairing(s);
-    let error = s.ui.env.error.as_deref().filter(|_| ui.pairing_failed && !pairing);
+    let error = (ui.pairing_failed && !pairing).then(|| s.ui.env.error.as_deref().unwrap_or("Pairing failed."));
     let mut form = col()
         .key("wizard-pairing")
         .w_full()
@@ -1225,9 +1267,16 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
     }
     let open = s.ui.wizard.terminal.as_ref().filter(|setup| setup.env == env).map(|setup| setup.driver);
     let policy = config(s, env).map_or(&Value::Null, |c| &c["managedPolicy"]);
+    let chatgpt_denied = crate::settings::providers::policy::config_reason(policy, "codex", "setupMode");
     for (driver, name, p) in agent_cards(providers_on(s, env), policy) {
         let state = provider_state(p);
         let display = p.map(|p| data::s(p, "displayName")).filter(|n| !n.is_empty()).unwrap_or(name).to_owned();
+        let codex_id = p.map(|p| data::s(p, "instanceId")).filter(|id| !id.is_empty()).unwrap_or("codex");
+        // `OnboardingCodexSetup`: Codex signs in with ChatGPT here unless "Use existing CLI" was chosen.
+        if driver == "codex" && config(s, env).is_some() && codex_mode(s, env, codex_id) != Some("existing") {
+            list = list.child(codex_card(s, env, codex_id, p, &display, state, chatgpt_denied.as_deref(), t));
+            continue;
+        }
         let status: El = match state {
             "ready" => row().gap(6.).center_y().child(icon(&icons::CHECK, 14.).color(t.c.success_foreground)).child(text("Ready").font(theme::XS_MEDIUM).color(t.c.success_foreground)),
             "checking" => text("Checking...").font(theme::TEXT_XS).color(t.c.muted_foreground),
@@ -1264,7 +1313,7 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
     if let Some(setup) = s.ui.wizard.terminal.as_ref().filter(|setup| setup.env == env) {
         list = list.child(setup_terminal(s, setup, t));
     }
-    if providers_on(s, env).iter().any(|p| data::s(p, "driver") == "codex" && provider_state(Some(p)) == "ready") {
+    if chatgpt_denied.is_none() && providers_on(s, env).iter().any(|p| data::s(p, "driver") == "codex" && provider_state(Some(p)) == "ready") {
         let env = env.to_owned();
         list = list.child(
             row().mt(4.).child(
@@ -1277,6 +1326,61 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
         );
     }
     list
+}
+
+/// Web `CodexWelcomeCard`: Codex on the Agents step, before and while it signs in with ChatGPT.
+fn codex_card(s: &App, env: &str, id: &str, p: Option<&Value>, display: &str, state: &str, denied: Option<&str>, t: &T) -> El {
+    use crate::settings::providers::codex;
+    // Web's wizard passes no `readOnly`: the server refuses what this connection may not change.
+    let read_only = false;
+    let muted = |label: String| text(label).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+    let ready = || row().gap(6.).center_y().child(icon(&icons::CHECK, 14.).color(t.c.success_foreground)).child(text("Ready").font(theme::XS_MEDIUM).color(t.c.success_foreground));
+    let parts = if codex_mode(s, env, id) == Some("managed") {
+        codex::welcome(s, t, env, id, p, read_only)
+    } else {
+        // `CodexSetupSection` with `mode="existing"`: the CLI already here, or ChatGPT instead.
+        let enabled = p.is_none_or(|p| p["enabled"] != false);
+        let authenticated = p.is_some_and(|p| p["auth"]["status"] == "authenticated");
+        let email = p.and_then(|p| p["auth"]["email"].as_str()).map(str::trim).filter(|e| !e.is_empty());
+        let (ready_now, checking) = (enabled && state == "ready", state == "checking");
+        let description = if ready_now {
+            email.map_or_else(|| "Connected with your Codex CLI.".to_owned(), |e| format!("Signed in as {e}."))
+        } else if checking {
+            "Checking your Codex CLI...".to_owned()
+        } else if p.is_some_and(|p| p["installed"] == true) {
+            summary(p).0
+        } else {
+            "Code with your ChatGPT subscription.".to_owned()
+        };
+        let control = if ready_now {
+            ready()
+        } else if checking {
+            muted("Checking...".into())
+        } else if authenticated {
+            muted(summary(p).0)
+        } else {
+            let mut b = kit::Button::new("Continue with ChatGPT").size("sm").disabled(read_only || denied.is_some()).on_press(codex::choose_managed(env, id)).build(t);
+            if let Some(reason) = denied {
+                b = b.help(reason.to_owned());
+            }
+            b
+        };
+        let secondary = (!authenticated && !ready_now && !checking)
+            .then(|| kit::Button::new("Use existing CLI").variant("ghost-muted").size("sm").on_press(codex::choose_existing(env, id)).build(t));
+        codex::Welcome { description: muted(description), control: Some(control), secondary, footer: vec![] }
+    };
+    let mut head = row()
+        .w_full()
+        .gap(12.)
+        .center_y()
+        .flex_wrap()
+        .child(crate::chat::composer::provider_icon(t, "codex", 20.))
+        .child(col().grow(1.).shrink().min_w(0.).gap(2.).child(text(display.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground)).child(parts.description));
+    if parts.control.is_some() || parts.secondary.is_some() {
+        head = head.child(row().gap(8.).center_y().justify_end().children(parts.secondary).children(parts.control));
+    }
+    let body = if parts.footer.is_empty() { head } else { col().w_full().child(head).child(parts.footer.into_iter().fold(col().w_full().pl(32.).mt(8.).gap(8.), |c, e| c.child(e))) };
+    card(t).px(16.).py(16.).child(body)
 }
 
 /// Web `AddManagedCodexAccountDialog`: Settings' "Add ChatGPT account" dialog, on the computer
@@ -1474,6 +1578,32 @@ pub(crate) fn scene_setup_terminal(s: &mut App) {
     ui.step = Step::Agents;
     ui.open = true;
     ui.terminal = Some(Setup { env, driver: "claudeAgent", instance: "claudeAgent".into(), id, cwd: "/home/me".into(), command, back: None });
+}
+
+/// Headless scene: the Agents step with Codex set up through ChatGPT, `signed-out`, `waiting`
+/// on the browser, `signed-in` or `failed`.
+pub(crate) fn scene_codex(s: &mut App, state: &str) {
+    crate::scene_clock(s);
+    let env = s.ui.env.active.clone();
+    if let crate::data::Source::Fixture(st) = &mut s.src {
+        let config = st.config.get_or_insert_with(|| json!({}));
+        let mut providers = config["providers"].as_array().cloned().unwrap_or_default();
+        providers.retain(|p| data::s(p, "driver") != "codex");
+        let auth = if state == "signed-in" { json!({"status": "authenticated", "email": "ada@example.com"}) } else { json!({"status": "unauthenticated"}) };
+        providers.insert(0, json!({"instanceId": "codex", "driver": "codex", "displayName": "Codex", "enabled": true, "installed": true, "status": "ready", "auth": auth, "setup": {"canAuthenticate": true, "canInstall": true}}));
+        config["providers"] = json!(providers);
+        config["settings"]["providerInstances"]["codex"] = json!({"driver": "codex", "enabled": true, "config": {"enabled": true, "setupMode": "managed"}});
+    }
+    let auth = match state {
+        "waiting" => json!({"phase": "waiting", "flowId": "flow-1", "interaction": {"type": "browser", "url": "https://auth.openai.com/authorize?client_id=scene"}, "methods": []}),
+        "failed" => json!({"phase": "failed", "flowId": "flow-1", "message": "ChatGPT sign-in timed out. Try again.", "methods": []}),
+        _ => json!({"phase": "idle", "flowId": null, "methods": []}),
+    };
+    crate::settings::providers::codex::scene(s, auth, json!({"phase": "idle", "installedVersion": "0.9.0", "source": "managed"}));
+    let ui = &mut s.ui.wizard;
+    ui.setup = vec![env];
+    ui.step = Step::Agents;
+    ui.open = true;
 }
 
 /// Headless scene: the Agents step with "Connect another ChatGPT account" pressed.

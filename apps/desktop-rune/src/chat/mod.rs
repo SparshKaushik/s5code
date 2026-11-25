@@ -153,7 +153,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .children(s.ui.chat.drop_over.then(|| drop_overlay(t)));
     }
     main.child(topbar::view(s, cx, t))
-        .child(side::beside(s, cx, t, stack))
+        .child(stack)
         .children(crate::panel::drawer::view(s, cx, t))
 }
 

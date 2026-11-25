@@ -1210,6 +1210,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         crate::wizard::scene_computers(s);
     }),
     ("wizard-chatgpt-account", crate::wizard::scene_chatgpt),
+    ("wizard-codex-signed-out", |s| crate::wizard::scene_codex(s, "signed-out")),
+    ("wizard-codex-waiting", |s| crate::wizard::scene_codex(s, "waiting")),
+    ("wizard-codex-signed-in", |s| crate::wizard::scene_codex(s, "signed-in")),
+    ("wizard-codex-failed", |s| crate::wizard::scene_codex(s, "failed")),
     ("t3-connect-onboarding", |s| crate::cloud::onboarding::scene(s, true)),
     ("t3-connect-onboarding-devices", |s| crate::cloud::onboarding::scene(s, false)),
     ("t3-connect-onboarding-tunnel-limit", |s| crate::cloud::onboarding::scene_tunnel_limit(s, None)),

@@ -495,7 +495,13 @@ pub fn sign_out(s: &mut App) {
 /// one saved over another address.
 pub fn add(s: &mut App, linked: &Linked) {
     let label = if linked.label.is_empty() { linked.id.clone() } else { linked.label.clone() };
-    match crate::env::add_relay(s, linked) {
+    let added = crate::env::add_relay(s, linked);
+    // Web `connectRelayEnvironment`'s failure toast: the computer could not be saved.
+    if let Some(error) = s.ui.env.error.clone().filter(|_| added.is_some()) {
+        crate::shell::palette::toast_error(s, "Could not connect environment", Some(&error));
+        return;
+    }
+    match added {
         Some(true) => crate::shell::palette::toast(s, "Environment added", Some(&format!("Connecting to {label} through T3 Connect."))),
         Some(false) => crate::shell::palette::toast(s, "T3 Connect route added", Some(&format!("{label} falls back to T3 Connect when its other routes are unreachable."))),
         None => {}
