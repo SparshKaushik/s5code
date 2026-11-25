@@ -170,7 +170,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
 
 /// Web Maintenance's Diagnostics section: the way into the detail page.
 fn diagnostics_link(s: &App, t: &T) -> El {
-    let description = if s.ui.settings.environment_only {
+    let description = if s.ui.settings.machine.is_some() {
         "Inspect processes, resource use, and logs on this environment."
     } else {
         "Inspect processes, resource use, and logs on one environment at a time."

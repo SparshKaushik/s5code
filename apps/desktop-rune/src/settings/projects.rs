@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 pub const CANNOT_CHANGE: &str = "This connection cannot change this project.";
 
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
+    if let Some(message) = super::scope::unavailable(s) {
+        return unavailable(s, t, message);
+    }
     let selected =
         s.ui.settings
             .project
@@ -209,8 +212,8 @@ fn chooser(s: &App, t: &T) -> El {
                 )
                 .child(rune::icon(&crate::icons::CHEVRON_RIGHT, 16.0).color(t.c.muted_foreground))
                 .on_press(move |s: &mut App| {
-                    super::commit_edits(s, true);
-                    s.ui.settings.project = Some(id.clone());
+                    let machine = s.ui.settings.machine.clone();
+                    super::scope::select(s, Some(id.clone()), machine);
                 })
         })
         .collect();
@@ -222,6 +225,25 @@ fn chooser(s: &App, t: &T) -> El {
     );
     if !rows.is_empty() {
         page = page.child(c::card(rows, t));
+    }
+    page
+}
+
+/// Web `ProjectsSettings`' unavailable scope, with the way back to every environment.
+fn unavailable(s: &App, t: &T, message: &str) -> El {
+    let mut page = col().w_full().px(16.0).gap(12.0).child(text(message.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap());
+    if s.ui.settings.machine.is_some() {
+        page = page.child(row().child(
+            crate::kit::Button::new("Show all environments")
+                .variant("outline")
+                .size("xs")
+                .icon(&crate::icons::LAYERS)
+                .on_press(|s: &mut App| {
+                    let project = s.ui.settings.project.clone();
+                    super::scope::select(s, project, None);
+                })
+                .build(t),
+        ));
     }
     page
 }

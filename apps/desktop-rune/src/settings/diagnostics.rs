@@ -1565,6 +1565,21 @@ fn trace_tables(ui: &Ui, now: i64, t: &T) -> Vec<El> {
 
 /// Populated results for headless scenes: a provider tree, an hour of CPU buckets, and span
 /// tables with a failure, a slow span and warning logs.
+/// Scenes: enough span names that "Top Span Names" runs past the window, so its pinned header
+/// shows over the rows at the page's end.
+pub(super) fn fixture_long_spans(s: &mut App) {
+    let Some(trace) = s.ui.settings.diagnostics.trace.data.as_mut() else { return };
+    for i in 0..40 {
+        trace.top_spans.push(SpanSummary {
+            name: format!("projection.thread.step{i:02}"),
+            count: 900 - i * 17,
+            failure_count: i % 3,
+            average_ms: 3.0 + i as f64 * 1.5,
+            max_ms: 40.0 + i as f64 * 22.0,
+        });
+    }
+}
+
 pub fn fixture(s: &mut App) {
     let now = s.now_ms;
     let ago = |ms: i64| Some(now - ms);

@@ -10,6 +10,7 @@ mod editor;
 pub(crate) mod open_vsx;
 mod vscode;
 
+pub use editor::Picker;
 pub use editor::{edit, editor, escape as editor_escape, scene as editor_scene};
 pub use open_vsx::{Search, poll};
 

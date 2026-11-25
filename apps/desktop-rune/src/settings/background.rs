@@ -207,7 +207,7 @@ fn description(resolved: &Resolved) -> String {
 
 /// Web's `isEnvironmentScope`: one environment selected, or the only one there is.
 fn environment_scope(s: &App) -> bool {
-    s.ui.settings.environment_only || s.ui.env.saved.len() <= 1
+    s.ui.settings.machine.is_some() || s.ui.env.saved.len() <= 1
 }
 
 /// The interval minimum and the field's step, in seconds.

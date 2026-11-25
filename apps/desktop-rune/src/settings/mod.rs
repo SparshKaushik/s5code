@@ -72,6 +72,8 @@ pub struct Ui {
     pub theme_conflict: Option<Value>,
     pub theme_search: themes::Search,
     pub theme_editor: Option<Value>,
+    /// The theme editor's open color picker.
+    pub theme_picker: Option<themes::Picker>,
     pub theme_name: TextEdit,
     pub theme_colors: HashMap<String, TextEdit>,
     pub peer_url: TextEdit,
@@ -101,9 +103,16 @@ pub struct Ui {
     pub fonts_applied: Option<(String, String)>,
     pub provider: Option<String>,
     pub project: Option<String>,
-    pub environment_only: bool,
+    /// The environment settings are scoped to (web's `machine` search param); None is all of them.
+    pub machine: Option<String>,
     pub environment_scope_open: bool,
     pub scope_open: bool,
+    /// The open scope menu's search, once it lists more than six choices.
+    pub scope_search: TextEdit,
+    /// Web's "Write custom instructions for all" draft, while the writing style is mixed.
+    pub all_instructions: Option<TextEdit>,
+    /// Groups expanded in the inheritance popover when environments resolve differently.
+    pub inheritance_open: std::collections::HashSet<usize>,
     pub open_select: Option<String>,
     /// The installed-font menus' search and open state, by setting key.
     pub font_pickers: HashMap<String, crate::kit::ComboboxState>,
@@ -159,6 +168,11 @@ pub fn appearance(client: &client::ClientSettings) -> Appearance {
         Some("dark") => Appearance::Dark,
         _ => Appearance::System,
     }
+}
+
+/// The environment Settings talks to for its scope; `env::follow` keeps it in focus there.
+pub fn scoped_environment(s: &App) -> String {
+    scope::environment(s)
 }
 
 pub fn server_settings(s: &App) -> &Value {
@@ -241,7 +255,7 @@ pub fn nested_object(s: &App, parent: &str) -> Value {
     complete_object(parent, value(s, parent))
 }
 
-fn complete_object(parent: &str, stored: Value) -> Value {
+pub(super) fn complete_object(parent: &str, stored: Value) -> Value {
     let mut object = scope::defaults()[parent].clone();
     if !object.is_object() {
         object = json!({});
@@ -334,9 +348,11 @@ pub fn update(s: &mut App, key: &str, value: Value) {
         return update(s, AUTO_SETTLE_DAYS, if value == true { days } else { Value::Null });
     }
     if let Some((parent, field)) = nested(key) {
+        // Other environments get the field alone and merge it into their own object.
+        let fan = json!({field: value.clone()});
         let mut object = nested_object(s, parent);
         object[field] = value;
-        return update(s, parent, object);
+        return write_server(s, parent, object, fan);
     }
     if let Some(key) = key.strip_prefix("project::") {
         if let Some((id, field)) = key.split_once("::") {
@@ -389,17 +405,20 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        let patch = if let Some(project) =
-            s.ui.settings
-                .project
-                .as_ref()
-                .filter(|_| scope::project_key(key))
-        {
-            scope::override_patch(server_settings(s), project, key, Some(value))
-        } else {
-            json!({key:value})
-        };
-        request(s, "server.updateSettings", json!({"patch":patch}));
+        write_server(s, key, value.clone(), value);
+    }
+}
+
+/// Saves a server setting for the scope: a project override, or the environment's value, which
+/// "All environments" also sends to the other connected environments as `fan`.
+pub(super) fn write_server(s: &mut App, key: &str, value: Value, fan: Value) {
+    if let Some(project) = s.ui.settings.project.as_ref().filter(|_| scope::project_key(key)) {
+        let patch = scope::override_patch(server_settings(s), project, key, Some(value));
+        return request(s, "server.updateSettings", json!({"patch":patch}));
+    }
+    request(s, "server.updateSettings", json!({"patch": {key: value}}));
+    if s.ui.settings.project.is_none() {
+        scope::fan_out(s, move |_| json!({key: fan.clone()}));
     }
 }
 
@@ -960,7 +979,7 @@ pub fn pulsed(s: &App, t: &T, title: &str, row: El) -> El {
 
 /// Web's `SettingsScopeBoundary`: a server page scoped to one environment that isn't connected.
 fn reconnect_notice(s: &App, path: &str) -> Option<String> {
-    if scope::device_only(path) || path == "projects" || !s.ui.settings.environment_only {
+    if scope::device_only(path) || path == "projects" || s.ui.settings.machine.is_none() {
         return None;
     }
     if matches!(s.state().conn, s5_net::Conn::Open) {
@@ -1400,6 +1419,34 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-projects", |s| scene(s, "projects")),
     ("settings-source-control", |s| scene(s, "source-control")),
+    ("settings-scope-environment-menu", |s| {
+        scene(s, "source-control");
+        scope::scene_environments(s, [json!({}), json!({})]);
+        s.ui.env.saved.push(crate::env::Saved { id: "env-pi".into(), label: "Raspberry Pi".into(), base: "http://10.0.0.9:3773".into(), bearer: String::new() });
+        crate::env::park(s, "env-pi", crate::data::Source::Fixture(crate::data::empty_state()));
+        s.ui.settings.environment_scope_open = true;
+    }),
+    ("settings-source-control-mixed-style", |s| {
+        scene(s, "source-control");
+        scope::scene_environments(s, [json!({"sourceControlWritingStyle": {"mode": "custom", "customInstructions": "Keep titles short."}}), json!({})]);
+        s.ui.settings.all_instructions = Some(TextEdit::new("Write titles in the imperative mood."));
+    }),
+    ("settings-scope-inheritance-environments", |s| {
+        scene(s, "source-control");
+        scope::scene_environments(s, [json!({"sourceControlWritingStyle": {"mode": "custom", "customInstructions": "Keep titles short."}}), json!({})]);
+        s.ui.settings.inheritance = Some("sourceControlWritingStyle.mode".into());
+        s.ui.settings.inheritance_open.insert(0);
+    }),
+    ("settings-scope-same-on-all-machines", |s| {
+        scene(s, "source-control");
+        scope::scene_environments(s, [json!({}), json!({})]);
+        s.ui.settings.inheritance = Some("reviewGuidesEnabled".into());
+    }),
+    ("settings-projects-unavailable-environment", |s| {
+        scene(s, "projects");
+        scope::scene_environments(s, [json!({}), json!({})]);
+        s.ui.settings.machine = Some("env-gone".into());
+    }),
     ("settings-worktrees", |s| scene(s, "worktrees")),
     ("settings-connections", |s| scene(s, "connections")),
     ("settings-access", |s| scene(s, "access")),
@@ -1540,6 +1587,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         diagnostics::fixture(s);
         resource_telemetry::fixture(s);
     }),
+    ("settings-diagnostics-pinned-header", |s| {
+        scene(s, "diagnostics");
+        diagnostics::fixture(s);
+        resource_telemetry::fixture(s);
+        diagnostics::fixture_long_spans(s);
+        s.ui.settings.scene_bottom = true;
+    }),
     ("settings-open-source-licenses", |s| {
         scene(s, "open-source-licenses");
         licenses::scene(s, None);
@@ -1599,6 +1653,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "browser");
         s.client_settings.values.insert("browserDefaultViewport".into(), json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"}));
         open_setting(s, "browser", "Default browser viewport");
+        // One frame can't wait for the reveal's scroll; the open fold sits just above the page's end.
+        s.ui.settings.scene_bottom = true;
     }),
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
@@ -1648,6 +1704,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-theme-editor", |s| theme_editor_scene(s, "open")),
     ("settings-theme-editor-inspecting", |s| theme_editor_scene(s, "inspecting")),
     ("settings-theme-editor-resized", |s| theme_editor_scene(s, "resized")),
+    ("settings-theme-editor-picker", |s| theme_editor_scene(s, "picker")),
     ("settings-providers-codex-managed", providers_codex_managed),
     ("settings-providers-custom-model-options", providers_custom_model_options),
     ("settings-providers-custom-model-copy-from", |s| {
