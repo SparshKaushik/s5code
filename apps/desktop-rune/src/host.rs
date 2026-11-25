@@ -587,7 +587,7 @@ mod tests {
         child.wait().unwrap();
         let mut done = Some(child);
         assert!(matches!(exited(&mut done), Some(Some(_))));
-        assert_eq!(exit_reason(done.take().unwrap().wait().ok()), "killed by SIGKILL");
+        assert_eq!(exit_reason(done.take().unwrap().wait().ok()), if cfg!(unix) { "killed by SIGKILL" } else { "code=1" });
     }
 
     #[test]

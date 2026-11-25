@@ -1345,13 +1345,15 @@ mod tests {
 
     #[test]
     fn firefox_profiles_come_from_profile_blocks_and_stay_inside_the_root() {
-        let ini = "[Install4F96D1932A9F858E]\nDefault=Profiles/x.default-release\n\n[Profile1]\nName=work\nIsRelative=1\nPath=Profiles/abc.work\n\n[Profile0]\nName= default-release \nIsRelative=1\nPath=Profiles/x.default-release\n\n[Profile2]\nName=escape\nIsRelative=1\nPath=../../etc\n\n[Profile3]\nName=custom\nIsRelative=0\nPath=/data/ff\n\n[Profile4]\nIsRelative=0\nPath=relative/again\n\n[General]\nPath=ignored\n";
+        // An absolute path names a drive on Windows.
+        let absolute = if cfg!(windows) { "C:\\data\\ff" } else { "/data/ff" };
+        let ini = format!("[Install4F96D1932A9F858E]\nDefault=Profiles/x.default-release\n\n[Profile1]\nName=work\nIsRelative=1\nPath=Profiles/abc.work\n\n[Profile0]\nName= default-release \nIsRelative=1\nPath=Profiles/x.default-release\n\n[Profile2]\nName=escape\nIsRelative=1\nPath=../../etc\n\n[Profile3]\nName=custom\nIsRelative=0\nPath={absolute}\n\n[Profile4]\nIsRelative=0\nPath=relative/again\n\n[General]\nPath=ignored\n");
         assert_eq!(
-            firefox_profiles(ini),
+            firefox_profiles(&ini),
             vec![
                 ("Profiles/abc.work".to_owned(), "work".to_owned()),
                 ("Profiles/x.default-release".to_owned(), "default-release".to_owned()),
-                ("/data/ff".to_owned(), "custom".to_owned()),
+                (absolute.to_owned(), "custom".to_owned()),
             ]
         );
     }

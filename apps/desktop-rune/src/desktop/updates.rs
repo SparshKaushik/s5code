@@ -829,6 +829,8 @@ mod tests {
         assert_eq!(hex(ring::digest::digest(&ring::digest::SHA256, b"").as_ref()), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 
+    /// The install scripts are POSIX shell, for macOS and Linux.
+    #[cfg(unix)]
     #[test]
     fn install_scripts_wait_for_the_app_and_quote_paths() {
         let mac = mac_script(42, Path::new("/tmp/u/S5 Code (Rune).app"), Path::new("/Applications/S5 Code (Rune).app"), Path::new("/tmp/u"));

@@ -286,6 +286,7 @@ mod tests {
         assert_eq!(avcc.pending(), 0);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_platform_decoder_draws_the_clip() {
         let nals = annexb_nals(CLIP);
