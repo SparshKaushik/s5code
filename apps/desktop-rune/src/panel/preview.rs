@@ -2411,7 +2411,7 @@ pub fn note_focus(app: &mut App, tx: &Tx) {
 }
 
 /// The preview shortcuts: `preview.toggle` anywhere, the rest while the browser has focus.
-pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+pub fn on_key(app: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     if super::shortcut(app, e, "preview.toggle") {
         if panel_tab(app).is_some() {
             app.ui.shell.panel_open = false;
