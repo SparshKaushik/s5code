@@ -29,7 +29,10 @@ impl Default for ClientSettings {
 
 /// Keys only Rune reads. Electron's settings struct drops unknown keys when it saves the
 /// shared file, so these live beside it.
-const RUNE_ONLY: [&str; 5] = ["appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced"];
+const RUNE_ONLY: [&str; 6] = [
+    "appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced",
+    crate::panel::diff::HIDE_TESTS_KEY,
+];
 const RUNE_FILE: &str = "desktop-rune-client-settings.json";
 
 /// Electron's `decodeJsonResult` leniency: comments and trailing commas, outside strings.
@@ -213,6 +216,7 @@ mod tests {
         settings
             .values
             .insert("appearance".into(), serde_json::json!("dark"));
+        settings.values.insert(crate::panel::diff::HIDE_TESTS_KEY.into(), Value::Bool(true));
         settings.save();
         assert!(settings.error.is_none());
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -221,6 +225,7 @@ mod tests {
         let own = path.with_file_name(RUNE_FILE);
         let saved: Value = serde_json::from_slice(&std::fs::read(&own).unwrap()).unwrap();
         assert_eq!(saved["appearance"], "dark");
+        assert_eq!(saved[crate::panel::diff::HIDE_TESTS_KEY], true);
         settings
             .values
             .insert("appearance".into(), serde_json::json!("light"));
