@@ -37,21 +37,21 @@ impl Imports {
     }
 }
 
-fn fail(s: &mut App, name: &str, reason: &str) {
+fn fail(app: &mut App, name: &str, reason: &str) {
     let description = format!("{reason} Attach the file again.");
-    crate::shell::palette::toast_error_brief(s, &format!("Couldn't bring {name} into this message"), Some(&description));
+    crate::shell::palette::toast_error_brief(app, &format!("Couldn't bring {name} into this message"), Some(&description));
 }
 
 /// Signs, downloads, and adds each finished import to its draft.
-pub fn poll(s: &mut App) -> bool {
-    if s.ui.chat.composer.imports.0.is_empty() {
+pub fn poll(app: &mut App) -> bool {
+    if app.ui.chat.composer.imports.0.is_empty() {
         return false;
     }
-    let waker = s.ui.panel.waker.clone();
+    let waker = app.ui.panel.waker.clone();
     let mut done: Vec<(String, String, Result<PathBuf, String>)> = Vec::new();
-    let Some(net) = s.src.net() else { return false };
+    let Some(net) = app.src.net() else { return false };
     let base = net.base_url().trim_end_matches('/').to_owned();
-    let imports = &mut s.ui.chat.composer.imports.0;
+    let imports = &mut app.ui.chat.composer.imports.0;
     let mut i = 0;
     while i < imports.len() {
         let import = &mut imports[i];
@@ -94,13 +94,13 @@ pub fn poll(s: &mut App) -> bool {
         match result {
             // A draft sent or dropped meanwhile takes nothing.
             Ok(path) => {
-                if let Some(d) = s.ui.chat.composer.drafts.get_mut(&draft)
+                if let Some(d) = app.ui.chat.composer.drafts.get_mut(&draft)
                     && let Some(error) = super::attachments::intake(&mut d.attachments, [path.display().to_string()])
                 {
-                    fail(s, &name, &error);
+                    fail(app, &name, &error);
                 }
             }
-            Err(reason) => fail(s, &name, &reason),
+            Err(reason) => fail(app, &name, &reason),
         }
     }
     changed
