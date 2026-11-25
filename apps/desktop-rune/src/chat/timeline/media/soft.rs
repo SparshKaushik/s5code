@@ -1,6 +1,7 @@
 //! Video where Rune's player can't play it (everywhere but macOS): an MP4 or QuickTime file's
 //! H.264 track, demuxed here and decoded by the device panel's decoder (OpenH264 on Linux), its
-//! frames drawn as pixels on their presentation times. Silent until an audio stack lands.
+//! frames drawn as pixels on their presentation times. Its sound is Rune's audio player reading
+//! the same file (symphonia's MP4 and AAC on Linux), started and paused with the frames.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -21,11 +22,12 @@ pub enum Status {
     Failed(String),
 }
 
-#[derive(Default)]
 struct State {
     status: Status,
     playing: bool,
     size: Option<(u32, u32)>,
+    /// The next play starts from the first frame: nothing has played yet, or the clip ended.
+    at_start: bool,
     /// Every handle is gone: the worker stops.
     dropped: bool,
 }
@@ -68,6 +70,12 @@ impl Shared {
     }
 }
 
+impl Default for State {
+    fn default() -> Self {
+        State { status: Status::Loading, playing: false, size: None, at_start: true, dropped: false }
+    }
+}
+
 /// Stops the worker once the last player handle drops.
 struct Handle(Arc<Shared>);
 
@@ -83,6 +91,8 @@ impl Drop for Handle {
 pub struct SoftPlayer {
     shared: Arc<Shared>,
     _handle: Arc<Handle>,
+    /// The clip's sound; a clip without any, or a platform without audio, fails it quietly.
+    audio: Option<rune::Player>,
 }
 
 struct Clip {
@@ -94,12 +104,18 @@ struct Clip {
 impl SoftPlayer {
     fn new(waker: Option<rune::Waker>) -> Self {
         let shared = Arc::new(Shared { pixels: Pixels::new(), state: Mutex::default(), changed: Condvar::new(), waker });
-        SoftPlayer { _handle: Arc::new(Handle(shared.clone())), shared }
+        SoftPlayer { _handle: Arc::new(Handle(shared.clone())), shared, audio: None }
     }
 
     /// Reads the clip at `url` off-thread, shows its first frame, and waits for `play`.
     pub fn url(url: String, waker: Option<rune::Waker>) -> Self {
-        let player = Self::new(waker);
+        let mut player = Self::new(waker);
+        if url.contains("://") {
+            let audio = rune::Player::audio(url.clone());
+            // Decoded ahead, so it is ready by the first play and starts with the frames.
+            audio.preload();
+            player.audio = Some(audio);
+        }
         let shared = player.shared.clone();
         std::thread::spawn(move || match read(&url).and_then(open).and_then(|clip| poster(&shared, clip)) {
             Ok(clip) => serve(&shared, clip),
@@ -138,10 +154,19 @@ impl SoftPlayer {
     }
 
     pub fn play(&self) {
+        if let Some(audio) = &self.audio {
+            if self.shared.lock().at_start {
+                audio.seek(0.0);
+            }
+            audio.play();
+        }
         self.set_playing(true);
     }
 
     pub fn pause(&self) {
+        if let Some(audio) = &self.audio {
+            audio.pause();
+        }
         self.set_playing(false);
     }
 
@@ -180,13 +205,17 @@ fn serve(shared: &Shared, clip: Clip) {
         if state.dropped {
             return;
         }
+        let mut state = state;
+        state.at_start = false;
         drop(state);
         match pass(shared, &clip, false) {
             Ok(true) => return,
             Ok(false) => {}
             Err(why) => return shared.fail(why),
         }
-        shared.lock().playing = false;
+        let mut state = shared.lock();
+        (state.playing, state.at_start) = (false, true);
+        drop(state);
         shared.changed.notify_all();
         shared.wake();
     }
@@ -247,9 +276,9 @@ mod tests {
         assert_eq!((player.status(), player.natural_size(), player.pixels().size()), (Status::Ready, Some((320, 176)), (320, 176)), "FAILED: the poster shows before bytes returns");
         assert!(!player.is_playing(), "FAILED: the poster waits for play");
         player.play();
-        // The ended pass sets playing back to false and leaves the last frame up.
-        drop(player.shared.changed.wait_while(player.shared.lock(), |s| s.playing).unwrap());
-        assert_eq!(player.status(), Status::Ready);
+        // The ended pass sets playing back to false, leaves the last frame up, and rewinds.
+        let state = player.shared.changed.wait_while(player.shared.lock(), |s| s.playing).unwrap();
+        assert!(state.at_start && state.status == Status::Ready);
     }
 
     #[test]
