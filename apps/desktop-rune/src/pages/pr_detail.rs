@@ -1891,14 +1891,15 @@ fn section(t: &T, key: &str, title: String, open: bool, toggle: fn(&mut App), ri
         .cursor(Cursor::Pointer)
         .role("button")
         .label(title.clone())
-        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground).rotate(if open { 90f32.to_radians() } else { 0.0 }))
         .child(text(title).font(theme::XS_MEDIUM).color(t.c.muted_foreground))
+        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(t.c.muted_foreground.alpha_mul(0.6)).rotate(if open { 90f32.to_radians() } else { 0.0 }))
         .child(spacer())
         .on_press(move |s: &mut App| toggle(s));
     if let Some(right) = right {
         head = head.child(right);
     }
-    let mut out = col().w_full().child(head);
+    // Held at the top while its section scrolls under it.
+    let mut out = col().w_full().child(head.fill(t.c.background).sticky_top(0.0));
     if open {
         out = out.child(col().w_full().px(16.0).pb(16.0).child(body()));
     }
@@ -2426,17 +2427,19 @@ fn ghost(t: &T, term: &str) -> El {
         .pt(16.0)
         .child(meta_row(t, &i::USERS, "Reviewers", row().gap(6.0).center_y().child(block(40.0, 12.0)).child(waiting(&i::USER_PLUS, "Reviewers loading"))))
         .child(meta_row(t, &i::TAG, "Labels", row().gap(4.0).center_y().child(block(96.0, 18.0)).child(waiting(&i::TAG, "Labels loading"))));
-    col()
+    let top = col().w_full().px(16.0).pt(12.0).pb(8.0).gap(10.0).child(line(22.0, 0.7)).child(line(14.0, 0.4)).child(line(14.0, 0.55).mt(8.0)).child(meta);
+    let muted = t.c.muted_foreground;
+    let heading = row()
         .w_full()
         .px(16.0)
-        .pt(12.0)
-        .gap(10.0)
-        .role("status")
-        .label(format!("Loading {term}"))
-        .child(line(22.0, 0.7))
-        .child(line(14.0, 0.4))
-        .child(line(14.0, 0.55).mt(8.0))
-        .child(meta)
+        .py(12.0)
+        .gap(6.0)
+        .center_y()
+        .child(text("Description").font(theme::XS_MEDIUM).color(muted))
+        .child(icon(&i::CHEVRON_RIGHT, 14.0).color(muted.alpha_mul(0.6)).rotate(90f32.to_radians()));
+    let lines = col().w_full().gap(8.0).child(line(16.0, 1.0)).child(line(16.0, 11.0 / 12.0)).child(line(16.0, 0.8)).child(line(16.0, 2.0 / 3.0));
+    let description = col().w_full().px(16.0).pb(16.0).gap(12.0).child(block(160.0, 20.0)).child(lines);
+    col().w_full().role("status").label(format!("Loading {term}")).child(top).child(rule(t)).child(heading).child(description)
 }
 
 /// PullRequestsUnavailableState, naming a pull request the host doesn't have.

@@ -238,7 +238,8 @@ impl SoftPlayer {
                 (time, Sound::At(was, when)) if time == was => Sound::At(was, when),
                 (time, _) => Sound::At(time, Instant::now()),
             },
-            PlayerState::Ended | PlayerState::Failed(_) => Sound::Off,
+            // Ended or failed.
+            _ => Sound::Off,
         };
         if sound != state.sound {
             state.sound = sound;

@@ -278,6 +278,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-run-in-terminal", run_in_terminal),
     ("timeline-video-fallback", video_fallback),
     ("timeline-video-playable", video_playable),
+    ("timeline-video-high-profile", video_high_profile),
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
     ("timeline-mcp-app", mcp_app),
@@ -544,6 +545,14 @@ fn video_playable(app: &mut App) {
     push_visible(app, vec![serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
         "text": format!("Recorded the fix:\n\n![Demo recording]({src})"), "createdAt": "2026-01-01T00:00:01Z"})]);
     super::media::scene_entry(app, "Demo recording", src, false);
+}
+
+fn video_high_profile(app: &mut App) {
+    showcase(app);
+    let (alt, src) = (super::media::SCENE_HIGH_PROFILE, "https://example.com/media/high-bframes-fragmented.mp4");
+    push_visible(app, vec![serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
+        "text": format!("A High-profile clip with B-frames, fragmented:\n\n![{alt}]({src})"), "createdAt": "2026-01-01T00:00:01Z"})]);
+    super::media::scene_entry(app, alt, src, false);
 }
 
 /// A turn item of `run` that ended at `end` seconds past `at(0)`, with `fields` merged in.
