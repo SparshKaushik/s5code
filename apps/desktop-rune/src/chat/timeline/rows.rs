@@ -450,14 +450,19 @@ pub fn derive_with_meta(p: &Value, now: i64) -> (Vec<Row<'_>>, HashSet<&str>) {
             }
         }
     }
+    let newest_run = array(p, "runs").iter().max_by_key(|r| r["ordinal"].as_i64().unwrap_or(0)).map(|r| s(r, "id"));
     for (key, index) in folds {
         let run = runs.get(key).copied();
+        // The latest turn stopped without an interrupt item (those stay unfolded).
+        let stopped = run.is_some_and(|r| s(r, "status") == "interrupted") && newest_run == Some(key);
         let (first, last) = spans.get(key).copied().unwrap_or_default();
         let start = run.and_then(|r| ts(r, "startedAt")).or(first);
         let end = run.and_then(|r| ts(r, "completedAt")).or(last);
         if let Row::Work { label, .. } = &mut rows[index] {
-            *label = match (start, end) {
-                (Some(start), Some(end)) => format!("Worked for {}", duration(start, end)),
+            *label = match (start, end, stopped) {
+                (Some(start), Some(end), true) => format!("You stopped after {}", duration(start, end)),
+                (.., true) => "You stopped this response".to_owned(),
+                (Some(start), Some(end), false) => format!("Worked for {}", duration(start, end)),
                 _ => "Worked".to_owned(),
             };
         }
@@ -850,6 +855,9 @@ mod tests {
             matches!(&rows[1],Row::Work { label,items,.. } if label == "Worked for 22s" && items.len()==2)
         );
         assert!(matches!(&rows[2],Row::Assistant(v) if s(v,"id")=="final"));
+        let mut stopped = p.clone();
+        stopped["runs"][0]["status"] = json!("interrupted");
+        assert!(matches!(&derive(&stopped, 0)[1], Row::Work { label, .. } if label == "You stopped after 22s"));
     }
     #[test]
     fn a_page_rendered_after_the_final_reply_stays_out_of_the_fold() {

@@ -20,7 +20,10 @@ pub(crate) mod pull_requests;
 pub(crate) mod preview;
 pub mod browser_import;
 pub(crate) mod terminal;
+mod tabs;
 pub(crate) mod vt;
+
+pub(crate) use device::Viewport as DeviceViewport;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -29,7 +32,7 @@ use crate::{
 use rune::{Cx, El, Key, KeyEvent, Phase, Tx, Waker, col, el, icon, row, text};
 use serde_json::{Map, Value, json};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
     Browser(browser::TabId),
     Terminal,
@@ -37,6 +40,7 @@ pub enum Surface {
     Diff,
     PullRequests,
     Device,
+    Tab(usize),
 }
 impl Surface {
     fn title(self) -> &'static str {
@@ -47,6 +51,7 @@ impl Surface {
             Self::Diff => "Diff",
             Self::PullRequests => "Pull requests",
             Self::Device => "Device",
+            Self::Tab(_) => "",
         }
     }
     fn glyph(self) -> &'static rune::Icon {
@@ -57,16 +62,20 @@ impl Surface {
             Self::Diff => &icons::FILE_DIFF,
             Self::PullRequests => &icons::LINK,
             Self::Device => &icons::SMARTPHONE,
+            Self::Tab(_) => &icons::FILES,
         }
     }
 }
 pub struct Ui {
     width: f32,
+    tabs: tabs::Tabs,
     surfaces: Vec<Surface>,
     active: Option<Surface>,
     pub diff: diff::Ui,
     pub(crate) pull_requests: pull_requests::Ui,
     files: files::Ui,
+    /// The open attachment tab's format-aware viewer.
+    attachment: Option<(String, file_viewers::Viewer)>,
     device: device::Ui,
     terminal: terminal::Ui,
     drawer: drawer::Ui,
@@ -104,11 +113,13 @@ impl Default for Ui {
     fn default() -> Self {
         Self {
             width: 540.,
+            tabs: Default::default(),
             surfaces: vec![],
             active: None,
             diff: Default::default(),
             pull_requests: Default::default(),
             files: Default::default(),
+            attachment: None,
             device: Default::default(),
             terminal: Default::default(),
             drawer: Default::default(),
@@ -194,15 +205,71 @@ fn workspace(app: &App) -> Option<String> {
     }
     crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
 }
-/// The launcher's entries; Browser always opens a new tab, as web's.
-const LAUNCH: [(Surface, &str); 6] = [
-    (Surface::Browser(0), "B"),
-    (Surface::Terminal, "T"),
-    (Surface::Files, "F"),
-    (Surface::Diff, "D"),
-    (Surface::PullRequests, "L"),
-    (Surface::Device, "M"),
+#[derive(Clone, Copy)]
+enum Launcher {
+    Surface(Surface),
+    PullRequest,
+    SideChat,
+}
+
+const LAUNCH: [(Launcher, &str); 8] = [
+    (Launcher::Surface(Surface::Browser(0)), "B"),
+    (Launcher::Surface(Surface::Terminal), "T"),
+    (Launcher::Surface(Surface::Files), "F"),
+    (Launcher::Surface(Surface::Diff), "D"),
+    (Launcher::PullRequest, "P"),
+    (Launcher::Surface(Surface::PullRequests), "L"),
+    (Launcher::Surface(Surface::Device), "M"),
+    (Launcher::SideChat, "S"),
 ];
+
+impl Launcher {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Surface(Surface::PullRequests) => "Linked pull requests",
+            Self::Surface(surface) => surface.title(),
+            Self::PullRequest => "Pull request",
+            Self::SideChat => "Side chat",
+        }
+    }
+
+    fn glyph(self) -> &'static rune::Icon {
+        match self {
+            Self::Surface(surface) => surface.glyph(),
+            Self::PullRequest => &icons::GIT_PULL_REQUEST_ARROW,
+            Self::SideChat => &icons::MESSAGE_SQUARE,
+        }
+    }
+
+    fn available(self, app: &App) -> bool {
+        match self {
+            Self::Surface(surface) => launchable(app, surface),
+            Self::PullRequest => pull_requests::launcher_target(app).is_some(),
+            Self::SideChat => crate::chat::side::disabled_reason(app).is_none(),
+        }
+    }
+
+    fn open(self, app: &mut App) {
+        match self {
+            Self::Surface(surface) => add(app, surface),
+            Self::PullRequest => {
+                if let Some(entry) = pull_requests::launcher_target(app) { open_pull_request(app, entry); }
+            }
+            Self::SideChat => crate::chat::side::send_command(app, "/side", false),
+        }
+    }
+
+    fn hint(self, app: &App) -> Option<&'static str> {
+        if self.available(app) { return None; }
+        match self {
+            Self::Surface(Surface::Diff) if diff_context(app).is_some() => Some("Available for Git repositories."),
+            Self::Surface(Surface::PullRequests) => Some("No linked pull requests available."),
+            Self::SideChat => crate::chat::side::disabled_reason(app),
+            _ => None,
+        }
+    }
+}
+
 fn add_in_profile(app: &mut App, profile: &str) {
     let tab = preview::open_in(app, profile);
     activate(app, Surface::Browser(tab));
@@ -213,10 +280,18 @@ fn add(app: &mut App, surface: Surface) {
             let tab = preview::open(app);
             activate(app, Surface::Browser(tab));
         }
+        Surface::Terminal if app.ui.panel.surfaces.iter().any(|&s| tabs::is_terminal(app, s)) => drawer::new_terminal(app, drawer::Owner::Panel),
         _ => activate(app, surface),
     }
 }
 fn activate(app: &mut App, surface: Surface) {
+    let previous = app.ui.panel.active;
+    if previous != Some(surface) {
+        if let Some(tabs::Target::SideChat(side)) = previous.and_then(|s| app.ui.panel.tabs.target(s)).cloned() {
+            crate::chat::side::focus(app, &side, false);
+        }
+        tabs::finish_rename(app, true);
+    }
     app.ui.shell.panel_open = true;
     if !app.ui.panel.surfaces.contains(&surface) {
         app.ui.panel.surfaces.push(surface);
@@ -224,11 +299,16 @@ fn activate(app: &mut App, surface: Surface) {
     app.ui.panel.active = Some(surface);
     match surface {
         Surface::Diff => diff::load(app),
-        Surface::Files => files::load(app, "".into()),
+        Surface::Files => {
+            if previous != Some(surface) { files::back_to_tree(app); }
+            files::load(app, "".into());
+        },
         Surface::Terminal => {
             drawer::open_panel(app);
             drawer::focus_panel(app);
         }
+        Surface::Device => device::browse(app),
+        Surface::Tab(id) => tabs::activate(app, id, previous != Some(surface)),
         _ => {}
     }
 }
@@ -258,7 +338,7 @@ pub fn showing_browser(app: &App) -> bool {
 }
 /// The device state subscription, while a thread's panel has its Device surface.
 pub fn device_wanted(app: &App) -> Option<(String, Value)> {
-    app.ui.panel.surfaces.contains(&Surface::Device).then(|| (device::STATE.to_owned(), json!({})))
+    app.ui.panel.surfaces.iter().any(|&s| tabs::is_device(app, s)).then(|| (device::STATE.to_owned(), json!({})))
 }
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
@@ -298,7 +378,9 @@ fn field(app: &App, region: Region) -> Option<Field> {
             Surface::Browser(tab) => Some(Field::Bar(tab)),
             Surface::Files => files::field_focused(app).map(|_| Field::Files),
             Surface::Terminal => terminal(drawer::Owner::Panel),
-            Surface::Diff | Surface::PullRequests | Surface::Device => None,
+            Surface::Tab(id) if matches!(app.ui.panel.tabs.get(id), Some(tabs::Target::File(_))) => files::field_focused(app).map(|_| Field::Files),
+            Surface::Tab(id) if matches!(app.ui.panel.tabs.get(id), Some(tabs::Target::Terminal(_))) => terminal(drawer::Owner::Panel),
+            _ => None,
         },
     }
 }
@@ -325,18 +407,24 @@ pub fn focus_region(app: &mut App, region: Option<Region>) {
 }
 /// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
 pub fn terminal_active(app: &App) -> bool {
-    app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
+    app.ui.shell.panel_open && app.ui.panel.active.is_some_and(|s| tabs::is_terminal(app, s))
 }
 fn close(app: &mut App, surface: Surface) {
+    if !app.ui.panel.surfaces.contains(&surface) { return; }
+    if let Some(tabs::Target::Terminal(group)) = app.ui.panel.tabs.target(surface) {
+        drawer::request_close_groups(app, vec![group.clone()]);
+        return;
+    }
     if surface == Surface::Terminal {
         drawer::request_close_panel(app);
         return;
     }
     let view = match surface {
-        Surface::Files => Some(closed::View::Files(files::selected(app))),
+        Surface::Files => Some(closed::View::Files(String::new())),
         Surface::Diff => Some(closed::View::Diff),
         Surface::PullRequests => Some(closed::View::PullRequests),
         Surface::Browser(tab) => preview::url(app, tab).map(closed::View::Browser),
+        Surface::Tab(id) => app.ui.panel.tabs.get(id).and_then(tabs::Target::closed),
         Surface::Terminal | Surface::Device => None,
     };
     if let (Some(view), Some((thread, _))) = (view, context(app)) {
@@ -345,6 +433,7 @@ fn close(app: &mut App, surface: Surface) {
     match surface {
         Surface::Files => files::flush(app),
         Surface::Browser(tab) => preview::close(app, tab),
+        Surface::Tab(id) => tabs::closed(app, id),
         _ => {}
     }
     remove_surface(app, surface);
@@ -355,25 +444,37 @@ fn reopen_closed(app: &mut App, tx: &mut Tx) -> bool {
     let mut store = std::mem::take(&mut app.ui.panel.closed);
     let current = context(app).map(|(id, _)| id);
     let exists = |thread: &str| thread == closed::PAGE || app.state().threads.iter().any(|v| v["id"] == thread);
-    let next = store.next(exists, |c| match &c.view {
-        // A deleted side chat drops too; an open one is open whatever the panel shows.
-        closed::View::SideChat(side) => !exists(side.as_str()) || (current.as_deref() == Some(c.thread.as_str()) && crate::chat::side::open_beside(app) == Some(side.as_str())),
-        closed::View::PullRequest(entry) => crate::pages::pr_tabs::showing(app, entry),
-        view => {
-            app.ui.shell.panel_open
-                && current.as_deref() == Some(c.thread.as_str())
-                && match view {
-                    closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
-                    closed::View::PullRequests => app.ui.panel.surfaces.contains(&Surface::PullRequests),
-                    closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
-                    closed::View::Browser(_) | closed::View::SideChat(_) | closed::View::PullRequest(_) => false,
-                }
+    let next = store.next(exists, |c| {
+        if let closed::View::SideChat(side) = &c.view
+            && !exists(side)
+        {
+            return true;
         }
+        if let closed::View::PullRequest(entry) = &c.view
+            && c.thread == closed::PAGE
+        {
+            return crate::pages::pr_tabs::showing(app, entry);
+        }
+        let panel = &app.ui.panel;
+        let (surfaces, open) = if current.as_deref() == Some(c.thread.as_str()) {
+            (panel.surfaces.as_slice(), app.ui.shell.panel_open)
+        } else if let Some(stash) = panel.stash.get(&c.thread) {
+            (stash.surfaces.as_slice(), stash.open)
+        } else {
+            return false;
+        };
+        open && surfaces.iter().any(|&surface| match surface {
+            Surface::Diff => c.view == closed::View::Diff,
+            Surface::PullRequests => c.view == closed::View::PullRequests,
+            Surface::Files => c.view == closed::View::Files(String::new()),
+            Surface::Tab(id) => panel.tabs.get(id).and_then(tabs::Target::closed).as_ref().is_some_and(|view| view.same_target(&c.view)),
+            _ => false,
+        })
     });
     app.ui.panel.closed = store;
     let c = match next {
         None => return false,
-        Some(closed::Closed { view: closed::View::PullRequest(entry), .. }) => {
+        Some(closed::Closed { view: closed::View::PullRequest(entry), thread }) if thread == closed::PAGE => {
             let tab = crate::pages::pr_tabs::restore(app, entry);
             tx.scroll_into_view_in(crate::pages::pr_tabs::STRIP, tab);
             return true;
@@ -397,20 +498,132 @@ fn reopen_closed(app: &mut App, tx: &mut Tx) -> bool {
         closed::View::Files(path) => open_file(app, path),
         closed::View::Browser(url) => open_preview(app, &url),
         closed::View::SideChat(side) => crate::chat::side::reopen(app, &parent, &side),
-        closed::View::PullRequest(_) => {}
+        closed::View::PullRequest(entry) => open_pull_request(app, entry),
+        closed::View::Attachment(id) => open_attachment(app, &id),
+        closed::View::Device { host, device, name, title } => {
+            let id = tabs::open(app, tabs::Target::Device { host, device, name, title });
+            tx.scroll_into_view_in(tabs::STRIP, tabs::key(Surface::Tab(id)));
+        }
     }
     true
 }
-/// Records a side chat closed beside `thread`, for `view.reopenClosed`.
-pub fn record_closed_side_chat(app: &mut App, thread: &str, side: &str) {
-    app.ui.panel.closed.record(closed::Closed { thread: thread.to_owned(), view: closed::View::SideChat(side.to_owned()) });
-}
 fn remove_surface(app: &mut App, surface: Surface) {
-    app.ui.panel.surfaces.retain(|v| *v != surface);
-    if app.ui.panel.active == Some(surface) {
-        app.ui.panel.active = app.ui.panel.surfaces.last().copied();
+    let was_active = app.ui.panel.active == Some(surface);
+    if app.ui.panel.tabs.rename.as_ref().is_some_and(|(id, _)| Surface::Tab(*id) == surface) {
+        tabs::finish_rename(app, true);
+    }
+    let next = tabs::remove(&mut app.ui.panel.surfaces, surface);
+    if was_active {
+        app.ui.panel.active = None;
+        if let Some(next) = next {
+            activate(app, next);
+        }
     }
 }
+pub(crate) fn open_side_chat(app: &mut App, parent: &str, side: &str) {
+    switch_thread(app);
+    let target = tabs::Target::SideChat(side.to_owned());
+    if app.ui.panel.stash_key == parent {
+        tabs::open(app, target);
+    } else {
+        let panel = &mut app.ui.panel;
+        let surface = Surface::Tab(panel.tabs.intern(parent, target));
+        let stash = panel.stash.entry(parent.to_owned()).or_default();
+        if !stash.surfaces.contains(&surface) {
+            stash.surfaces.push(surface);
+        }
+        stash.active = Some(surface);
+        stash.open = true;
+    }
+}
+pub(crate) fn active_side_chat(app: &App) -> Option<&str> {
+    if !matches!(app.frame_route(), Route::Thread(parent) if parent == &app.ui.panel.stash_key) { return None; }
+    match active_target(app)? {
+        tabs::Target::SideChat(side) => Some(side),
+        _ => None,
+    }
+}
+pub(crate) fn close_side_chat(app: &mut App, side: &str, remember: bool) {
+    if let Some(surface) = app.ui.panel.surfaces.iter().copied().find(|&surface| {
+        matches!(app.ui.panel.tabs.target(surface), Some(tabs::Target::SideChat(id)) if id == side)
+    }) {
+        if remember { close(app, surface); } else { remove_surface(app, surface); }
+    }
+    for stash in app.ui.panel.stash.values_mut() {
+        if let Some(surface) = stash.surfaces.iter().copied().find(|&surface| {
+            matches!(app.ui.panel.tabs.target(surface), Some(tabs::Target::SideChat(id)) if id == side)
+        }) {
+            let next = tabs::remove(&mut stash.surfaces, surface);
+            if stash.active == Some(surface) {
+                stash.active = next;
+            }
+        }
+    }
+}
+pub(crate) fn open_pull_request(app: &mut App, entry: Value) {
+    tabs::open(app, tabs::Target::PullRequest(entry));
+}
+pub(crate) fn active_pull_request(app: &App) -> Option<&Value> {
+    if !matches!(app.frame_route(), Route::Thread(_)) { return None; }
+    match active_target(app)? {
+        tabs::Target::PullRequest(entry) => Some(entry),
+        _ => None,
+    }
+}
+pub(crate) fn set_pull_request_section(app: &mut App, section: usize) {
+    let Some(Surface::Tab(id)) = app.ui.panel.active.filter(|_| app.ui.shell.panel_open) else { return };
+    if let Some(tabs::Target::PullRequest(entry)) = app.ui.panel.tabs.get_mut(id) {
+        entry["detailTab"] = json!(section);
+    }
+}
+pub(crate) fn open_attachment(app: &mut App, id: &str) {
+    tabs::open(app, tabs::Target::Attachment(id.to_owned()));
+}
+fn active_target(app: &App) -> Option<&tabs::Target> {
+    app.ui.shell.panel_open.then(|| app.ui.panel.active).flatten().and_then(|surface| app.ui.panel.tabs.target(surface))
+}
+
+/// The Files tree or a file's own tab is on screen.
+pub(super) fn files_showing(app: &App) -> bool {
+    app.ui.shell.panel_open && (app.ui.panel.active == Some(Surface::Files) || matches!(active_target(app), Some(tabs::Target::File(_))))
+}
+
+fn sync_terminal_tabs(app: &mut App) {
+    let panel = &app.ui.panel;
+    let has_tab = panel.surfaces.iter().any(|&surface| tabs::is_terminal(app, surface));
+    if !has_tab { return; }
+    let groups: Vec<String> = drawer::panel_groups(app).into_iter().flat_map(|g| &g.groups).map(|g| g.id.clone()).collect();
+    let active = drawer::panel_groups(app).and_then(drawer::Groups::visible).map(|group| group.id.clone());
+    let panel = &mut app.ui.panel;
+    let scope = panel.stash_key.clone();
+    let keyed: Vec<(String, Surface)> = groups.into_iter().map(|group| {
+        let id = panel.tabs.intern(&scope, tabs::Target::Terminal(group.clone()));
+        (group, Surface::Tab(id))
+    }).collect();
+    let old = panel.surfaces.iter().position(|&surface| surface == Surface::Terminal);
+    if let Some(index) = old.filter(|_| !keyed.is_empty()) {
+        panel.surfaces.splice(index..=index, keyed.iter().map(|(_, surface)| *surface));
+        if panel.active == Some(Surface::Terminal) {
+            panel.active = active.as_ref().and_then(|active| keyed.iter().find(|(group, _)| group == active)).map(|(_, s)| *s);
+        }
+    }
+    let stale: Vec<Surface> = panel.surfaces.iter().copied().filter(|&surface| {
+        matches!(panel.tabs.target(surface), Some(tabs::Target::Terminal(_))) && !keyed.iter().any(|(_, s)| *s == surface)
+    }).collect();
+    let active_closed = stale.contains(&panel.active.unwrap_or(Surface::Terminal));
+    let mut next = None;
+    for surface in stale {
+        let neighbor = tabs::remove(&mut panel.surfaces, surface);
+        if panel.active == Some(surface) { next = neighbor; }
+    }
+    if active_closed {
+        app.ui.panel.active = None;
+        if let Some(surface) = next.filter(|s| app.ui.panel.surfaces.contains(s)) {
+            activate(app, surface);
+        }
+    }
+}
+
 /// Gives `thread`'s panel, on screen or put away, a browser tab, leaving the panel shut.
 /// Whether that panel is the one on screen.
 fn add_browser(app: &mut App, thread: &str, tab: browser::TabId, float: bool) -> bool {
@@ -451,12 +664,17 @@ pub fn open_file(app: &mut App, path: String) {
 }
 /// Opens `path` in the Files surface and centres 1-based `line` once it loads.
 pub fn open_file_at(app: &mut App, path: String, line: Option<usize>) {
-    app.ui.shell.panel_open = true;
-    if !app.ui.panel.surfaces.contains(&Surface::Files) {
-        app.ui.panel.surfaces.push(Surface::Files);
+    let path = tabs::file_path(&path);
+    if path == "." || path.is_empty() {
+        activate(app, Surface::Files);
+        return;
     }
-    app.ui.panel.active = Some(Surface::Files);
-    files::open(app, path, line);
+    let id = tabs::open(app, tabs::Target::File(path.clone()));
+    app.ui.panel.surfaces.retain(|&surface| surface != Surface::Files);
+    if let Some(line) = line {
+        files::reveal_line(app, &path, line);
+    }
+    app.ui.panel.tabs.reveal = Some(Surface::Tab(id));
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -492,7 +710,7 @@ impl Surface {
             Self::Files => Some("files"),
             Self::Diff => Some("diff"),
             Self::PullRequests => Some("pull-requests"),
-            Self::Browser(_) | Self::Device => None,
+            Self::Browser(_) | Self::Device | Self::Tab(_) => None,
         }
     }
     fn from_saved_id(id: &str) -> Option<Self> {
@@ -504,8 +722,8 @@ impl Ui {
     /// Web's `t3code:right-panel-state`: each thread's open flag, surfaces and active surface.
     fn to_json(&self, open: bool) -> Value {
         let entry = |surfaces: &[Surface], active: Option<Surface>, open: bool| {
-            let ids: Vec<&str> = surfaces.iter().filter_map(|s| s.saved_id()).collect();
-            (!ids.is_empty()).then(|| json!({"isOpen": open, "activeSurfaceId": active.and_then(Surface::saved_id), "surfaces": ids}))
+            let ids: Vec<Value> = surfaces.iter().filter_map(|&s| self.saved_surface(s)).collect();
+            (!ids.is_empty()).then(|| json!({"isOpen": open, "activeSurfaceId": active.and_then(|s| self.saved_surface(s)), "surfaces": ids}))
         };
         let mut threads = Map::new();
         for (key, stash) in &self.stash {
@@ -524,6 +742,18 @@ impl Ui {
         saved
     }
 
+    fn saved_surface(&self, surface: Surface) -> Option<Value> {
+        match surface {
+            Surface::Tab(id) => self.tabs.get(id).map(tabs::Target::encode),
+            _ => surface.saved_id().map(|id| json!(id)),
+        }
+    }
+    fn restore_surface(&mut self, scope: &str, value: &Value) -> Option<Surface> {
+        if let Some(id) = value.as_str() {
+            return Surface::from_saved_id(id);
+        }
+        tabs::Target::decode(value).map(|target| Surface::Tab(self.tabs.intern(scope, target)))
+    }
     /// Fills the stash, so the first switch to a thread brings its saved panel back.
     fn restore(&mut self, v: &Value) {
         if let Some(w) = v["diffFileTreeWidth"].as_f64() {
@@ -534,13 +764,13 @@ impl Ui {
                 continue;
             }
             let mut surfaces = vec![];
-            for surface in entry["surfaces"].as_array().into_iter().flatten().filter_map(|v| v.as_str().and_then(Surface::from_saved_id)) {
+            for surface in entry["surfaces"].as_array().into_iter().flatten().filter_map(|v| self.restore_surface(key, v)) {
                 if !surfaces.contains(&surface) {
                     surfaces.push(surface);
                 }
             }
             let Some(&last) = surfaces.last() else { continue };
-            let active = entry["activeSurfaceId"].as_str().and_then(Surface::from_saved_id).filter(|s| surfaces.contains(s)).unwrap_or(last);
+            let active = self.restore_surface(key, &entry["activeSurfaceId"]).filter(|s| surfaces.contains(s)).unwrap_or(last);
             let open = entry["isOpen"].as_bool().unwrap_or(false);
             self.stash.insert(key.clone(), Stash { surfaces, active: Some(active), open, pip: None });
         }
@@ -577,6 +807,10 @@ fn persist(app: &mut App) {
     }
 }
 
+pub(crate) fn flush_file(app: &mut App) {
+    files::flush(app);
+}
+
 /// Puts the panel away with the thread it belonged to and brings back the next thread's.
 fn switch_thread(app: &mut App) -> bool {
     let key = match app.frame_route() {
@@ -600,6 +834,9 @@ fn switch_thread(app: &mut App) -> bool {
     panel.active = next.active;
     panel.browser.pip = next.pip;
     panel.add_menu = false;
+    panel.tabs.rename = None;
+    panel.tabs.drag = None;
+    panel.tabs.reveal = next.active;
     app.ui.shell.panel_open = next.open;
     true
 }
@@ -609,8 +846,10 @@ fn switch_thread(app: &mut App) -> bool {
 pub fn adopt(app: &mut App, thread: &str) {
     let panel = &mut app.ui.panel;
     if panel.stash_key.is_empty() {
+        panel.tabs.adopt_scope("", thread);
         panel.stash_key = thread.to_owned();
     } else if let Some(draft) = panel.stash.remove("") {
+        panel.tabs.adopt_scope("", thread);
         panel.stash.insert(thread.to_owned(), draft);
     }
 }
@@ -636,17 +875,23 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                 match app.ui.panel.active {
                     Some(Surface::Diff) => diff::load(app),
                     Some(Surface::Files) => files::load(app, String::new()),
+                    Some(Surface::Tab(id)) => tabs::activate(app, id, true),
                     _ => {}
                 }
             }
             context_changed = true;
         }
-        if app.ui.panel.active == Some(Surface::Terminal) {
+        if terminal_active(app) {
             drawer::open_panel(app);
         }
         context_changed |= proactive::poll(app);
     }
 
+    tabs::poll_rename(app);
+    if matches!(app.src, crate::data::Source::Live(_)) { sync_terminal_tabs(app); }
+    if let Some(surface) = app.ui.panel.tabs.reveal.take() {
+        tx.scroll_into_view_in(tabs::STRIP, tabs::key(surface));
+    }
     pull_requests::want_avatars(app);
     let changed = diff::poll(app)
         | diff::reveal(app, tx)
@@ -820,7 +1065,7 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         return reopen_closed(app, tx);
     }
     if shortcut(app, e, "rightPanel.toggle") {
-        app.ui.shell.panel_open = !app.ui.shell.panel_open;
+        toggle_panel(app);
         return true;
     }
     if app.ui.shell.panel_open && matches!(app.frame_route(), Route::Thread(_)) && shortcut(app, e, "rightPanel.toggleMaximized") {
@@ -830,6 +1075,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.new") {
+        if let Some(side) = active_side_chat(app).map(str::to_owned) {
+            crate::chat::side::focus(app, &side, false);
+        }
         app.ui.panel.active = None;
         return true;
     }
@@ -868,8 +1116,8 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         if let Key::Text(v) = &e.key {
             let key = v.to_uppercase();
             if let Some(&(surface, _)) = LAUNCH.iter().find(|(_, k)| *k == key) {
-                if launchable(app, surface) {
-                    add(app, surface);
+                if surface.available(app) {
+                    surface.open(app);
                 }
                 return true;
             }
@@ -905,40 +1153,10 @@ fn picker(app: &App, t: &T) -> El {
             .color(t.c.contrast_foreground)
             .mb(10.),
     );
-    let unported = |title: &'static str, glyph: &'static rune::Icon, key: &'static str| {
-        row()
-            .h(32.)
-            .px(10.)
-            .gap(10.)
-            .center_y()
-            .opacity(0.5)
-            .role("button")
-            .label(title)
-            .disabled(true)
-            .child(
-                icon(glyph, 16.)
-                    .size(16., 16.)
-                    .color(t.c.contrast_foreground),
-            )
-            .child(
-                text(title)
-                    .font(theme::TEXT_SM)
-                    .color(t.c.contrast_foreground)
-                    .grow(1.),
-            )
-            .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
-    };
-    for (surface, key) in LAUNCH {
-        if surface == Surface::PullRequests {
-            list = list.child(unported("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"));
-        }
-        let available = launchable(app, surface);
-        let hint = match surface {
-            Surface::Diff if !available && diff_context(app).is_some() => Some("Available for Git repositories."),
-            Surface::PullRequests if !available => Some("No linked pull requests available."),
-            _ => None,
-        };
-        let title = if surface == Surface::PullRequests { "Linked pull requests" } else { surface.title() };
+    for (launcher, key) in LAUNCH {
+        let available = launcher.available(app);
+        let hint = launcher.hint(app);
+        let title = launcher.title();
         list = list.child(
             row()
                 .h(32.)
@@ -952,7 +1170,7 @@ fn picker(app: &App, t: &T) -> El {
                 .label(title)
                 .disabled(!available)
                 .child(
-                    icon(surface.glyph(), 16.)
+                    icon(launcher.glyph(), 16.)
                         .size(16., 16.)
                         .color(t.c.contrast_foreground),
                 )
@@ -963,7 +1181,7 @@ fn picker(app: &App, t: &T) -> El {
                         .grow(1.),
                 )
                 // Web's "Open browser in a profile" chevron.
-                .children(matches!(surface, Surface::Browser(_)).then(|| {
+                .children(matches!(launcher, Launcher::Surface(Surface::Browser(_))).then(|| {
                     el().key("panel-launcher-profiles").child(
                         kit::Button::new("Open browser in a profile")
                             .icon(&icons::CHEVRON_DOWN)
@@ -975,7 +1193,7 @@ fn picker(app: &App, t: &T) -> El {
                 }))
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
                 .help(hint.unwrap_or_default())
-                .on_press(move |s: &mut App| add(s, surface)),
+                .on_press(move |s: &mut App| launcher.open(s)),
         );
     }
     col()
@@ -1019,7 +1237,21 @@ fn toggle_maximized(app: &mut App) {
     }
 }
 
+fn toggle_panel(app: &mut App) {
+    if app.ui.shell.panel_open {
+        close_panel(app);
+    } else if let Some(surface) = app.ui.panel.active {
+        app.ui.panel.active = None;
+        activate(app, surface);
+    } else {
+        app.ui.shell.panel_open = true;
+    }
+}
 fn close_panel(s: &mut App) {
+    if let Some(side) = active_side_chat(s).map(str::to_owned) {
+        crate::chat::side::focus(s, &side, false);
+    }
+    tabs::finish_rename(s, true);
     s.ui.shell.panel_open = false;
 }
 
@@ -1028,13 +1260,27 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let sheet = viewport.and_then(sheet_width);
     let width = sheet.unwrap_or_else(|| app.ui.panel.width.min(viewport.map_or(1000., |w| w * 0.7)));
     // Web's RightPanelTabs: 24pt tabs whose surface icon turns into the close button on hover.
-    let mut tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y().role("tablist");
-    for &surface in &app.ui.panel.surfaces {
-        let active = app.ui.panel.active == Some(surface);
+    let mut tabs = row().h_full().gap(tabs::GAP).center_y().role("tablist");
+    let items: Vec<_> = app.ui.panel.surfaces.iter().map(|&surface| {
         let title = match surface {
             Surface::Browser(tab) => preview::title(app, tab),
+            Surface::Tab(id) => tabs::title(app, id),
             _ => surface.title().to_string(),
         };
+        let audio = match surface {
+            Surface::Browser(tab) => preview::audio(app, tab),
+            _ => None,
+        };
+        let renaming = app.ui.panel.tabs.rename.as_ref().is_some_and(|(id, _)| Surface::Tab(*id) == surface);
+        let width = tabs::tab_width(&title, audio.is_some(), renaming);
+        (surface, title, audio, width)
+    }).collect();
+    let spans = tabs::spans(items.iter().map(|item| item.3));
+    let control_count = if sheet.is_some() { 2. } else { 3. };
+    let available = (width - 1. - 20. - control_count * 24. - (control_count + 1.) * tabs::GAP).max(0.);
+    let (strip_width, max_scroll) = tabs::strip_width(&spans, available);
+    for (surface, title, audio, tab_width) in items {
+        let active = app.ui.panel.active == Some(surface);
         let fg = if active { t.c.contrast_foreground } else { t.c.muted_foreground };
         let mut glyph = el()
             .absolute(2., 2.)
@@ -1045,9 +1291,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                     Surface::Browser(tab) => preview::url(app, tab).and_then(|url| favicon::icon(app, &url, 12., 2.)),
                     _ => None,
                 }
-                .unwrap_or_else(|| icon(surface.glyph(), 12.).size(12., 12.).color(fg)),
+                .unwrap_or_else(|| icon(tabs::glyph(app, surface), 12.).size(12., 12.).color(fg)),
             );
-        if surface == Surface::Files && files::pending(app) {
+        if match app.ui.panel.tabs.target(surface) {
+            Some(tabs::Target::File(path)) => files::pending_path(app, path),
+            _ => surface == Surface::Files && files::pending(app),
+        } {
             glyph = glyph.child(el().absolute(8., 8.).size(5., 5.).radius(2.5).fill(t.c.muted_foreground));
         }
         // The hover fill sits on the X's own layer: a `hover` element is the hover group of what
@@ -1069,7 +1318,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             );
         // Web's speaker on a playing browser tab; a press mutes or unmutes it.
         let speaker = match surface {
-            Surface::Browser(tab) => preview::audio(app, tab).map(|muted| {
+            Surface::Browser(tab) => audio.map(|muted| {
                 el().size(16., 16.)
                     .radius(4.)
                     .center()
@@ -1081,10 +1330,12 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             }),
             _ => None,
         };
-        tabs = tabs.child(
-            row()
+        let tab_spans = spans.clone();
+        let name = tabs::label(app, t, surface, title.clone(), fg);
+        let tab = row()
+                .key(tabs::key(surface))
                 .h(24.)
-                .max_w(144.)
+                .w(tab_width)
                 .pl(6.)
                 .pr(8.)
                 .gap(2.)
@@ -1098,24 +1349,24 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
                 .focusable(true)
                 // Web closes a tab on a middle click.
                 .pointer_buttons([rune::PointerButton::Middle])
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| match tx.button() {
-                    rune::PointerButton::Middle => close(s, surface),
-                    _ => s.ui.panel.active = Some(surface),
+                .on_drag(move |s: &mut App, d: &mut rune::Drag, tx: &mut Tx| tabs::drag(s, surface, d, tx, &tab_spans))
+                .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| {
+                    let activate_key = e.key == Key::Enter || matches!(&e.key, Key::Text(k) if k == " ");
+                    if activate_key { activate(s, surface); }
+                    activate_key
                 })
                 .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
                 .children(speaker)
-                .child(
-                    text(title)
-                        .font(theme::TEXT_XS)
-                        .color(fg)
-                        .group_color(t.c.contrast_foreground)
-                        .truncate()
-                        .shrink(),
-                ),
-        );
+                .child(name);
+        let tab = if matches!(app.ui.panel.tabs.target(surface), Some(tabs::Target::Device { .. })) {
+            tab.on_double_press(move |s: &mut App| tabs::rename(s, surface))
+        } else { tab };
+        tabs = tabs.child(tabs::dragged(app, surface, tab));
     }
-    tabs = tabs
+    let tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y()
+        .child(tabs::strip(app, tabs, strip_width))
+        .children(tabs::overflow(app, t, max_scroll))
         .child(
             el().key("panel-add").child(
                 action(t, "Add panel surface", &icons::PLUS)
@@ -1138,6 +1389,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
         Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2]), cx.layout_with("file-image-viewport", |r| [r[2], r[3]])),
+        Some(Surface::Tab(id)) => tabs::view(app, cx, t, id, width, overlays),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
         Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Surface::Terminal) => col()
@@ -1225,6 +1477,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-pdf-chrome", |s| browser_page_scene(s, "/reports/q3", "q3")),
     ("browser-auth-chrome", |s| browser_page_scene(s, "/staging", "401 Unauthorized")),
     ("browser-permissions-chrome", |s| browser_page_scene(s, "/permissions", "Permissions ready")),
+    ("browser-title-chrome", |s| browser_page_scene(s, "/late-title", "Title set after load")),
     ("browser-popup-chrome", |s| {
         scene(s, None);
         if let Some(tab) = preview::scene_popup(s) {
@@ -1249,6 +1502,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-diff", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
+    }),
+    ("panel-diff-test-files-shown", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, false);
+    }),
+    ("panel-diff-test-files-hidden", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, true);
     }),
     ("panel-diff-tree", |s| {
         scene(s, Some(Surface::Diff));
@@ -1330,6 +1591,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-device-android", |s| {
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-3d-model", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-18", "platform": "ios"}]));
+    }),
+    ("panel-device-fold", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "fold", "platform": "android"}]));
+        device::fold_fixture(s);
+    }),
+    ("panel-device-duo", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "duo", "platform": "ios"}]));
+        device::duo_fixture(s);
     }),
     ("panel-device-tools", |s| {
         scene(s, Some(Surface::Device));
@@ -1449,6 +1724,47 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pull_requests_scene(s, pull_requests::fixture_links());
         s.ui.panel.pull_requests.menu = Some(("github.com/acme/app#20".into(), None));
     }),
+    ("panel-tabs-files", |s| {
+        scene(s, None);
+        for path in ["src/main.rs", "src/settings.rs", "src/lib.rs"] {
+            open_file(s, path.into());
+        }
+        files::preview_fixture(s, "src/lib.rs", "pub mod settings;\n", false);
+    }),
+    ("panel-tabs-terminal", |s| {
+        panel_terminal(s, TERMINAL_DEV);
+        drawer::fixture(s, drawer::Owner::Panel, &[(&[("term-1", TERMINAL_DEV), ("term-2", TERMINAL_VIM)], false), (&[("term-3", TERMINAL_HTOP)], false)], "term-1");
+        sync_terminal_tabs(s);
+    }),
+    ("panel-tabs-overflow", |s| {
+        scene(s, None);
+        for path in [
+            "src/orchestration/command-handler.rs", "src/orchestration/turn-projection.rs",
+            "src/checkpoint/checkpoint-manager.rs", "src/browser/browser-session.rs",
+            "src/settings/settings-persistence.rs", "src/preview/preview-attachment.rs",
+        ] {
+            open_file(s, path.into());
+        }
+        activate(s, s.ui.panel.surfaces[0]);
+        files::preview_fixture(s, "src/orchestration/command-handler.rs", "pub mod commands;\n", false);
+        s.ui.panel.tabs.reveal = None;
+    }),
+    ("panel-tabs-pull-request", |s| {
+        scene(s, None);
+        let Some(recorded) = crate::pages::fixture("pull-request-detail.json") else { return };
+        let entry = recorded["detail"].clone();
+        if entry["url"].is_string() {
+            open_pull_request(s, entry);
+            crate::pages::pr_detail::poll(s);
+        }
+    }),
+    ("panel-tabs-device-rename", |s| {
+        scene(s, None);
+        device::fixture(s, json!([{"hostId":"local","deviceId":"ios-16","platform":"ios"}, {"hostId":"local","deviceId":"pixel","platform":"android"}]));
+        tabs::open(s, tabs::Target::Device { host: "local".into(), device: "pixel".into(), name: "Pixel 9".into(), title: None });
+        let id = tabs::open(s, tabs::Target::Device { host: "local".into(), device: "ios-16".into(), name: "iPhone 16 Pro".into(), title: Some("iOS test device".into()) });
+        tabs::rename(s, Surface::Tab(id));
+    }),
     ("terminal-drawer-close", |s| {
         (crate::shell::SCENES[1].1)(s);
         drawer::fixture(s, drawer::Owner::Drawer, &[(&[("term-1", TERMINAL_DEV)], false)], "term-1");
@@ -1502,8 +1818,10 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
-        if app.ui.panel.active == Some(Surface::Files) {
+        if files_showing(app) {
             files::overlays(app, t, &mut out);
+        } else if matches!(active_target(app), Some(tabs::Target::Attachment(_))) {
+            file_viewers::overlays(app, t, &mut out);
         }
         preview::overlays(app, t, &mut out);
         if app.ui.panel.add_menu {
@@ -1532,13 +1850,25 @@ fn tab_menu(app: &App, t: &T, surface: Surface, at: (f32, f32), out: &mut Vec<El
             preview::set_muted(s, tab, !muted);
         }));
     }
+    if matches!(app.ui.panel.tabs.target(surface), Some(tabs::Target::Device { .. })) {
+        menu = menu.item(kit::MenuItem::new("Rename").on_select(move |s: &mut App| {
+            done(s);
+            tabs::rename(s, surface);
+        }));
+    }
     let close_where = move |keep: fn(usize, usize) -> bool| {
         move |s: &mut App| {
             done(s);
             let doomed: Vec<Surface> = s.ui.panel.surfaces.iter().enumerate().filter(|&(i, _)| !keep(i, index)).map(|(_, &v)| v).collect();
-            for v in doomed {
-                close(s, v);
+            let mut groups = Vec::new();
+            for surface in doomed {
+                if let Some(tabs::Target::Terminal(group)) = s.ui.panel.tabs.target(surface) {
+                    groups.push(group.clone());
+                } else {
+                    close(s, surface);
+                }
             }
+            drawer::request_close_groups(s, groups);
         }
     };
     menu.item(kit::MenuItem::new("Close").on_select(move |s: &mut App| {
@@ -1589,22 +1919,18 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
             s.ui.panel.add_menu = false;
             s.ui.panel.add_profiles = false;
         });
-    for (surface, key) in LAUNCH {
-        if surface == Surface::PullRequests {
-            menu = menu.item(kit::MenuItem::new("Pull request").icon(&icons::GIT_PULL_REQUEST_ARROW).shortcut("P").disabled(true));
-        }
-        let title = if surface == Surface::PullRequests { "Linked pull requests" } else { surface.title() };
-        let mut item = kit::MenuItem::new(title)
-            .icon(surface.glyph())
+    for (launcher, key) in LAUNCH {
+        let mut item = kit::MenuItem::new(launcher.title())
+            .icon(launcher.glyph())
             .shortcut(key)
-            .disabled(!launchable(app, surface))
+            .disabled(!launcher.available(app))
             .on_select(move |s: &mut App| {
                 s.ui.panel.add_menu = false;
                 s.ui.panel.add_profiles = false;
-                add(s, surface);
+                launcher.open(s);
             });
         // Web's Browser submenu: a new tab in any profile.
-        if matches!(surface, Surface::Browser(_)) {
+        if matches!(launcher, Launcher::Surface(Surface::Browser(_))) {
             let profiles = profile_items(app, |s| {
                 s.ui.panel.add_menu = false;
                 s.ui.panel.add_profiles = false;
@@ -1660,6 +1986,22 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_tabs_render_both_arrows_without_scrolling_first() {
+        fn view(s: &App, cx: &mut rune::Cx<App>) -> El {
+            super::view(s, cx, &crate::theme::theme(true), &mut Vec::new())
+        }
+        let mut app = App::new();
+        let scene = SCENES.iter().find(|(name, _)| *name == "panel-tabs-overflow").unwrap().1;
+        scene(&mut app);
+        let mut rt = rune::Runtime::new(app, view, (540., 640.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let nodes = rt.elements();
+        for key in ["panel-tabs-scroll-left", "panel-tabs-scroll-right"] {
+            assert!(nodes.iter().any(|e| e.key.as_deref() == Some(key) && e.rect[2] > 0.), "{key} is present on the first frame");
+        }
+    }
+
+    #[test]
     fn each_thread_gets_its_own_panel_back() {
         let mut app = App::new();
         let ids: Vec<String> = app.state().threads.iter().take(2).map(|v| data::s(v, "id").to_string()).collect();
@@ -1698,6 +2040,27 @@ mod tests {
         assert!(panel.stash[&ids[1]].surfaces == vec![Surface::Diff] && !panel.stash[&ids[1]].open);
         assert!(!panel.stash.contains_key("bad"));
         assert!(panel.stash["dupes"].surfaces == vec![Surface::Diff, Surface::Files] && panel.stash["dupes"].active == Some(Surface::Files));
+
+        open_file(&mut app, "src/first.rs".into());
+        let first = app.ui.panel.active.unwrap();
+        open_file(&mut app, "src/second.rs".into());
+        let second = app.ui.panel.active.unwrap();
+        open_file(&mut app, "src/first.rs/".into());
+        assert_eq!(app.ui.panel.active, Some(first));
+        assert_eq!(&app.ui.panel.surfaces[2..], &[first, second]);
+        app.ui.panel.surfaces.swap(2, 3);
+        let saved = app.ui.panel.to_json(true);
+        let rows = saved["byThreadKey"][&ids[0]]["surfaces"].as_array().unwrap();
+        assert_eq!(rows[1]["path"], "src/second.rs");
+        assert_eq!(rows[2]["path"], "src/first.rs");
+
+        let mut saved_tabs = App::new();
+        saved_tabs.ui.panel.restore(&saved);
+        saved_tabs.navigate(Route::Thread(ids[0].clone()));
+        assert!(switch_thread(&mut saved_tabs));
+        let targets: Vec<_> = saved_tabs.ui.panel.surfaces.iter().filter_map(|&surface| saved_tabs.ui.panel.tabs.target(surface)).cloned().collect();
+        assert_eq!(targets, vec![tabs::Target::File("src/second.rs".into()), tabs::Target::File("src/first.rs".into())]);
+        assert!(matches!(active_target(&saved_tabs), Some(tabs::Target::File(path)) if path == "src/first.rs"));
 
         app.navigate(Route::Home { project_id: None });
         assert!(switch_thread(&mut app));

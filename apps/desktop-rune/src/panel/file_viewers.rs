@@ -109,23 +109,68 @@ impl Viewer {
         }
     }
 
+    fn settle(&mut self) -> bool {
+        let Some(result) = self.job.as_ref().and_then(Job::take) else { return false };
+        self.job = None;
+        self.content = Some(result);
+        true
+    }
+
+    fn poll_content(&mut self) -> bool {
+        match self.content.as_mut().and_then(|content| content.as_mut().ok()) {
+            Some(Content::Sqlite(database)) => database.poll(),
+            Some(Content::Archive(archive)) => archive.poll(),
+            Some(Content::Browser(frame)) => frame.poll(),
+            Some(Content::Notebook(notebook)) => notebook.poll(),
+            _ => false,
+        }
+    }
+
     pub(super) fn loading_full_text(&self) -> bool {
         matches!(self.mode, Mode::Large(_)) && self.content.is_none()
     }
 }
 
+fn on_attachment(app: &App) -> bool {
+    matches!(super::active_target(app), Some(super::tabs::Target::Attachment(_)))
+}
+
+/// The viewer on screen: the active attachment tab's, otherwise the open file's.
 fn active(app: &App) -> Option<&Content> {
-    app.ui.panel.files.viewer.as_ref()?.content.as_ref()?.as_ref().ok()
+    let viewer = if on_attachment(app) { app.ui.panel.attachment.as_ref().map(|(_, viewer)| viewer) } else { app.ui.panel.files.viewer.as_ref() };
+    viewer?.content.as_ref()?.as_ref().ok()
 }
 
 fn active_mut(app: &mut App) -> Option<&mut Content> {
-    app.ui.panel.files.viewer.as_mut()?.content.as_mut()?.as_mut().ok()
+    let viewer = if on_attachment(app) { app.ui.panel.attachment.as_mut().map(|(_, viewer)| viewer) } else { app.ui.panel.files.viewer.as_mut() };
+    viewer?.content.as_mut()?.as_mut().ok()
+}
+
+/// The shown file's name, for labels inside a viewer.
+fn shown_name(app: &App) -> &str {
+    match super::active_target(app) {
+        Some(super::tabs::Target::Attachment(id)) => crate::chat::timeline::attachments::panel_name(app, id).unwrap_or_default(),
+        _ => app.ui.panel.files.selected.as_str(),
+    }
+}
+
+/// The line a search or link marked, which only workspace files have.
+fn shown_line(app: &App) -> Option<usize> {
+    if on_attachment(app) { None } else { app.ui.panel.files.line }
 }
 
 pub(super) fn full_text(app: &App) -> Option<&str> {
     match active(app) {
         Some(Content::Large(file)) => Some(file.contents()),
         _ => None,
+    }
+}
+
+/// Scrolls the open file to its marked line, in the full-text viewer when one is showing.
+pub(super) fn reveal(app: &App, tx: &mut Tx) {
+    match active(app) {
+        Some(Content::Large(file)) => file.reveal(app.ui.panel.files.line, tx),
+        _ => tx.scroll_center("file-line"),
     }
 }
 
@@ -136,25 +181,22 @@ pub(super) fn overlays(app: &App, t: &T, layers: &mut Vec<El>) {
 }
 
 pub(super) fn close(app: &mut App) {
-    if let Some(Content::Browser(frame)) = active_mut(app)
-        && let Some(live) = frame.live.take()
-    {
-        super::preview::inline_frame_cmd(app, Cmd::LiveClose(live.id));
-    }
+    hide_frame(app, false);
     app.ui.panel.files.viewer = None;
 }
 
 pub(super) fn poll(app: &mut App, tx: &mut Tx) -> bool {
-    if !(app.ui.shell.panel_open && app.ui.panel.active == Some(super::Surface::Files))
-        && let Some(Content::Browser(frame)) = active_mut(app)
-        && let Some(live) = frame.live.take()
-    {
-        frame.size = [0; 2];
-        super::preview::inline_frame_cmd(app, Cmd::LiveClose(live.id));
-        return true;
+    let mut changed = sync_attachment(app);
+    if !super::files_showing(app) {
+        changed |= hide_frame(app, false);
     }
-    let Some(viewer) = app.ui.panel.files.viewer.as_mut() else { return false };
-    let mut changed = false;
+    if !on_attachment(app) {
+        changed |= hide_frame(app, true);
+    }
+    if let Some((_, viewer)) = app.ui.panel.attachment.as_mut() {
+        changed |= viewer.settle() | viewer.poll_content();
+    }
+    let Some(viewer) = app.ui.panel.files.viewer.as_mut() else { return changed };
     if let Some(id) = viewer.pending
         && let Some(reply) = app.src.net().and_then(|net| net.take_reply(id))
     {
@@ -176,22 +218,59 @@ pub(super) fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         changed = true;
     }
-    if let Some(result) = viewer.job.as_ref().and_then(Job::take) {
-        viewer.job = None;
-        viewer.content = Some(result);
+    if viewer.settle() {
         if let Some(Ok(Content::Large(file))) = &viewer.content {
-            let reveal = app.ui.panel.files.line;
-            file.reveal(reveal, tx);
+            file.reveal(app.ui.panel.files.line, tx);
         }
         changed = true;
     }
-    changed | match viewer.content.as_mut().and_then(|content| content.as_mut().ok()) {
-        Some(Content::Sqlite(database)) => database.poll(),
-        Some(Content::Archive(archive)) => archive.poll(),
-        Some(Content::Browser(frame)) => frame.poll(),
-        Some(Content::Notebook(notebook)) => notebook.poll(),
-        _ => false,
+    changed | viewer.poll_content()
+}
+
+/// Closes the live browser behind a viewer that is no longer on screen.
+fn hide_frame(app: &mut App, attachment: bool) -> bool {
+    let viewer = if attachment { app.ui.panel.attachment.as_mut().map(|(_, viewer)| viewer) } else { app.ui.panel.files.viewer.as_mut() };
+    let Some(Ok(Content::Browser(frame))) = viewer.and_then(|viewer| viewer.content.as_mut()) else { return false };
+    let Some(live) = frame.live.take() else { return false };
+    frame.size = [0; 2];
+    super::preview::inline_frame_cmd(app, Cmd::LiveClose(live.id));
+    true
+}
+
+/// The format-aware mode for a chat attachment Rune can't show as a picture or player.
+fn attachment_mode(name: &str) -> Option<Mode> {
+    let kind = fp::kind(name);
+    Mode::for_file(kind, name, true).or(match kind {
+        Kind::Table(delimiter) => Some(Mode::Large(Some(delimiter))),
+        Kind::Text | Kind::Markdown | Kind::Mermaid => Some(Mode::Large(None)),
+        _ => None,
+    })
+}
+
+/// Starts the viewer for the active attachment tab once its URL is served.
+fn sync_attachment(app: &mut App) -> bool {
+    let Some(super::tabs::Target::Attachment(id)) = super::active_target(app) else { return false };
+    if app.ui.panel.attachment.as_ref().is_some_and(|(open, _)| open == id) {
+        return false;
     }
+    let Some((url, name)) = crate::chat::timeline::attachments::panel_file(app, id) else { return false };
+    let Some(mode) = attachment_mode(name) else { return false };
+    let (id, url, name) = (id.clone(), url.to_owned(), name.to_owned());
+    close_attachment(app);
+    let job = Job::spawn(app.ui.panel.waker.clone(), move || open(mode, &url, &name));
+    app.ui.panel.attachment = Some((id, Viewer { mode, pending: None, job: Some(job), content: None }));
+    true
+}
+
+pub(super) fn close_attachment(app: &mut App) {
+    hide_frame(app, true);
+    app.ui.panel.attachment = None;
+}
+
+/// The active attachment tab's viewer, when its format has one.
+pub(super) fn attachment_view(app: &App, id: &str, t: &T) -> Option<El> {
+    let (_, viewer) = app.ui.panel.attachment.as_ref().filter(|(open, _)| open == id)?;
+    Some(viewer.view(app, true, super::files::wrap_on(app), t))
 }
 
 fn open(mode: Mode, url: &str, name: &str) -> Result<Content, String> {
@@ -341,7 +420,7 @@ impl Frame {
 
     fn view(&self, app: &App, t: &T) -> El {
         if let Some(error) = &self.error { return failure(error, t) }
-        let title = app.ui.panel.files.selected.clone();
+        let title = shown_name(app).to_owned();
         let dark = t.dark;
         let layer = col().key("file-preview-browser").grow(1.0).min_w(0.0).min_h(0.0).label(title)
             .on_layout_tx(move |app: &mut App, rect, tx| {

@@ -22,6 +22,7 @@ pub struct Group {
     pub id: String,
     pub ids: Vec<String>,
     pub vertical: bool,
+    active: String,
 }
 
 /// One owner's terminals (`ThreadTerminalUiState`'s groups), in the web store's semantics.
@@ -57,6 +58,7 @@ impl Groups {
             id: group,
             ids: vec![id.into()],
             vertical: false,
+            active: id.into(),
         });
         self.active = id.into();
     }
@@ -73,15 +75,15 @@ impl Groups {
         let anchor = group.ids.iter().position(|v| *v == self.active);
         group.ids.insert(anchor.map_or(group.ids.len(), |a| a + 1), id.into());
         group.vertical = vertical;
+        group.active = id.into();
         self.active = id.into();
         true
     }
     pub fn activate(&mut self, id: &str) -> bool {
-        let known = self.ids().any(|v| v == id);
-        if known {
-            self.active = id.into();
-        }
-        known
+        let Some(group) = self.groups.iter_mut().find(|g| g.ids.iter().any(|v| v == id)) else { return false };
+        group.active = id.into();
+        self.active = id.into();
+        true
     }
     /// The next active terminal is the group neighbour after, else before, else the nearest.
     pub fn remove(&mut self, id: &str) {
@@ -105,6 +107,9 @@ impl Groups {
         }
         for group in &mut self.groups {
             group.ids.retain(|v| v != id);
+            if group.active == id {
+                group.active = group.ids.iter().find(|v| **v == self.active).or_else(|| group.ids.first()).cloned().unwrap_or_default();
+            }
         }
         self.groups.retain(|g| !g.ids.is_empty());
     }
@@ -116,7 +121,7 @@ impl Groups {
             .groups
             .iter()
             .map(|g| {
-                let mut v = json!({"id": g.id, "terminalIds": g.ids});
+                let mut v = json!({"id": g.id, "terminalIds": g.ids, "activeTerminalId": g.active});
                 if g.vertical {
                     v["splitDirection"] = json!("vertical");
                 }
@@ -146,10 +151,14 @@ impl Groups {
             while out.groups.iter().any(|g| g.id == id) {
                 id.push('-');
             }
-            out.groups.push(Group { id, ids, vertical: g["splitDirection"] == "vertical" });
+            let active = g["activeTerminalId"].as_str().filter(|a| ids.iter().any(|id| id == *a)).unwrap_or(first).to_owned();
+            out.groups.push(Group { id, ids, active, vertical: g["splitDirection"] == "vertical" });
         }
         let active = v["activeTerminalId"].as_str().unwrap_or_default();
-        out.active = if out.ids().any(|v| v == active) { active.into() } else { out.ids().next().cloned().unwrap_or_default() };
+        if !out.activate(active) {
+            let first = out.ids().next().cloned().unwrap_or_default();
+            out.active = first;
+        }
         out
     }
 }
@@ -174,6 +183,7 @@ enum Confirm {
     One(Owner, String, String),
     /// Closing the right panel's Terminal surface stops all of its terminals.
     Panel(String),
+    Groups { thread: String, groups: Vec<String> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -439,6 +449,12 @@ pub fn new_terminal(app: &mut App, owner: Owner) {
         app.ui.panel.drawer.threads.get_mut(&thread).unwrap().open = true;
     }
     start(app, &thread, &id, true);
+    if owner == Owner::Panel {
+        super::sync_terminal_tabs(app);
+        if let Some(group) = app.ui.panel.drawer.panel.get(&thread).and_then(Groups::visible).map(|g| g.id.clone()) {
+            super::tabs::open(app, super::tabs::Target::Terminal(group));
+        }
+    }
     sync_topbar(app);
 }
 
@@ -526,6 +542,40 @@ pub fn open_panel(app: &mut App) {
     for id in &ids {
         start(app, &thread, id, false);
     }
+}
+
+pub(super) fn panel_groups(app: &App) -> Option<&Groups> {
+    app.ui.panel.drawer.panel.get(&current_thread(app)?)
+}
+
+pub(super) fn group_title(app: &App, group: &str) -> String {
+    let Some(thread) = current_thread(app) else { return "Terminal".into() };
+    let Some(groups) = app.ui.panel.drawer.panel.get(&thread) else { return "Terminal".into() };
+    groups.groups.iter().find(|g| g.id == group).and_then(|g| g.ids.first())
+        .map_or_else(|| "Terminal".into(), |id| terminal::title(app, &thread, id))
+}
+
+pub(super) fn activate_group(app: &mut App, group: &str) {
+    let Some(thread) = current_thread(app) else { return };
+    let Some(groups) = app.ui.panel.drawer.panel.get_mut(&thread) else { return };
+    let Some(g) = groups.groups.iter().find(|g| g.id == group) else { return };
+    let id = g.active.clone();
+    groups.activate(&id);
+    open_panel(app);
+    terminal::focus(app, &thread, &id);
+}
+
+pub(super) fn request_close_groups(app: &mut App, groups: Vec<String>) {
+    if !groups.is_empty() && let Some(thread) = current_thread(app) {
+        app.ui.panel.drawer.confirm = Some(Confirm::Groups { thread, groups });
+    }
+}
+
+fn group_ids(ui: &Ui, thread: &str, selected: &[String]) -> Vec<String> {
+    ui.panel.get(thread).into_iter().flat_map(|layout| &layout.groups)
+        .filter(|group| selected.contains(&group.id))
+        .flat_map(|group| group.ids.iter().cloned())
+        .collect()
 }
 
 /// An activated Terminal surface takes the keyboard (web's `focusTerminal`).
@@ -640,7 +690,7 @@ pub fn shortcut(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
         Some("terminal.splitVertical") => split(app, owner, true),
         Some("terminal.new") => new_terminal(app, owner),
         Some("terminal.close") => request_close(app, owner, id),
-        Some(_) => app.ui.shell.panel_open = !app.ui.shell.panel_open,
+        Some(_) => super::toggle_panel(app),
         None => return false,
     }
     true
@@ -979,7 +1029,12 @@ fn close_layers(operable: bool) -> Vec<CloseLayer> {
 pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
     let thread = current_thread(app).unwrap_or_default();
     let empty = Groups::default();
-    let groups = app.ui.panel.drawer.groups(owner, &thread).unwrap_or(&empty);
+    let all = app.ui.panel.drawer.groups(owner, &thread).unwrap_or(&empty);
+    let scoped;
+    let groups = if owner == Owner::Panel && matches!(super::active_target(app), Some(super::tabs::Target::Terminal(_))) {
+        scoped = Groups { groups: all.visible().cloned().into_iter().collect(), active: all.active.clone() };
+        &scoped
+    } else { all };
     if groups.is_empty() {
         return col()
             .grow(1.)
@@ -1080,6 +1135,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     };
     let labels: Vec<String> = match &confirm {
         Confirm::One(_, thread, id) => vec![terminal::title(app, thread, id)],
+        Confirm::Groups { thread, groups } => group_ids(&app.ui.panel.drawer, thread, groups).into_iter()
+            .map(|id| terminal::title(app, thread, &id)).collect(),
         Confirm::Panel(thread) => app.ui.panel.drawer.panel.get(thread).map_or_else(Vec::new, |g| {
             let others = g.ids().filter(|id| **id != g.active).map(|id| terminal::title(app, thread, id));
             std::iter::once(terminal::title(app, thread, &g.active)).chain(others).collect()
@@ -1094,6 +1151,11 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .variant("destructive")
         .on_press(|s: &mut App| match s.ui.panel.drawer.confirm.take() {
             Some(Confirm::One(owner, thread, id)) => close_now(s, owner, &thread, &id),
+            Some(Confirm::Groups { thread, groups }) if current_thread(s).as_deref() == Some(thread.as_str()) => {
+                let ids = group_ids(&s.ui.panel.drawer, &thread, &groups);
+                for id in ids { close_now(s, Owner::Panel, &thread, &id); }
+                super::sync_terminal_tabs(s);
+            }
             Some(Confirm::Panel(thread)) if current_thread(s).as_deref() == Some(thread.as_str()) => {
                 close_panel(s);
                 super::remove_surface(s, super::Surface::Terminal);
@@ -1136,6 +1198,7 @@ pub fn fixture(app: &mut App, owner: Owner, groups: &[(&[(&str, &str)], bool)], 
         }
         state.groups.push(Group {
             id: format!("group-{}", ids[0]),
+            active: if ids.iter().any(|id| id == active) { active.to_owned() } else { ids[0].clone() },
             ids,
             vertical: *vertical,
         });
@@ -1206,6 +1269,9 @@ mod tests {
 
         let saved = ui.to_json();
         assert!(saved["terminalUiStateByThreadKey"].get("empty").is_none(), "{saved}");
+        let stored = &saved["terminalUiStateByThreadKey"]["t1"]["terminalGroups"];
+        assert_eq!(stored[0]["activeTerminalId"], "term-2");
+        assert_eq!(stored[1]["activeTerminalId"], "term-3");
         let mut back = Ui::default();
         back.restore(&saved);
         let t1 = &back.threads["t1"];

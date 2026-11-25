@@ -68,6 +68,8 @@ pub struct Ui {
     pub theme_import: TextEdit,
     /// Shown inside the import dialog, which covers the page's error banner.
     pub theme_import_error: Option<String>,
+    /// The imported theme whose id a custom theme already has (web `conflicts`).
+    pub theme_conflict: Option<Value>,
     pub theme_search: themes::Search,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
@@ -291,6 +293,9 @@ pub fn value(s: &App, key: &str) -> Value {
     if let Some(key) = key.strip_prefix("snooze::") {
         return snooze::value(s, key);
     }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        return value(s, "browserDefaultViewport")[axis].clone();
+    }
     if let Some(key) = key.strip_prefix("profile::") {
         return browser_profiles::value(s, key);
     }
@@ -345,6 +350,12 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if let Some(key) = key.strip_prefix("snooze::") {
         snooze::set(s, key, value);
+        return;
+    }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        if let Some(next) = browser_profiles::resize(&self::value(s, "browserDefaultViewport"), axis, &value) {
+            update(s, "browserDefaultViewport", next);
+        }
         return;
     }
     if let Some(key) = key.strip_prefix("profile::") {
@@ -532,7 +543,11 @@ pub fn failure_message(method: &str, environment: &str, cause: &Value) -> String
             .unwrap_or_else(|| "The save failed. Try reconnecting and saving again.".into());
         return format!("Setting not saved. Could not save on {environment}: {detail}");
     }
-    failure_detail(cause).unwrap_or_else(|| "The request failed. Try reconnecting and trying again.".into())
+    // Web `ProviderAuthenticationSection`'s `run`.
+    let fallback = if method == "provider.auth.respond" {
+        "The provider sign-in terminal is no longer available."
+    } else if method.starts_with("provider.auth.") { "Provider sign-in failed. Try again." } else { "The request failed. Try reconnecting and trying again." };
+    failure_detail(cause).unwrap_or_else(|| fallback.into())
 }
 
 pub fn resource<'a>(s: &'a App, method: &str, payload: Value) -> Option<&'a Value> {
@@ -641,8 +656,7 @@ pub fn poll(s: &mut App) -> bool {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
             let provider_upsert = s.ui.settings.providers_ui.upserts.remove(&id);
-            if let Some(name) = s.ui.settings.profiles.clearing.remove(&id) {
-                browser_profiles::cleared(s, &name, reply.is_ok());
+            if browser_profiles::answered(s, id, reply.is_ok()) {
                 changed = true;
                 continue;
             }
@@ -998,6 +1012,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let mut nav = col().w_full().px(8.0).pb(8.0).gap(16.0);
     let search = rune::text_input(&s.ui.settings.search, theme::SM_MEDIUM.lh(21.0))
         .key("settings-search")
+        .label("Search settings")
         .single_line()
         .placeholder("Search", t.sb.muted_foreground)
         .grow(1.0)
@@ -1496,6 +1511,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "appearance");
         s.ui.settings.theme_import_open = true;
     }),
+    ("settings-appearance-theme-import-conflict", |s| {
+        scene(s, "appearance");
+        s.ui.settings.theme_import_open = true;
+        themes::scene_conflict(s);
+    }),
     ("settings-appearance-thread-details", |s| {
         scene(s, "appearance");
         s.ui.settings.thread_details_open = true;
@@ -1574,6 +1594,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-browser-profiles", |s| browser_profiles_scene(s, false, None)),
     ("settings-browser-profiles-light", |s| browser_profiles_scene(s, true, None)),
+    ("settings-browser-profile-clear-failed", |s| {
+        browser_profiles_scene(s, false, None);
+        s.ui.settings.profiles.clearing.insert(1, "Work".into());
+        browser_profiles::answered(s, 1, false);
+    }),
+    ("settings-browser-viewport", |s| {
+        scene(s, "browser");
+        s.client_settings.values.insert("browserDefaultViewport".into(), json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"}));
+        open_setting(s, "browser", "Default browser viewport");
+    }),
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
     ("settings-browser-add-profile-menu", |s| browser_profiles_scene(s, false, Some("add"))),
@@ -1634,6 +1664,12 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.settings.loaded_page = Some("access".into());
         connect::scene(s, json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": true, "holdWebhooksWhileOffline": false,
             "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
+    }),
+    ("settings-access-t3-connect-limit", |s| {
+        scene(s, "access");
+        s.ui.settings.loaded_page = Some("access".into());
+        connect::scene(s, json!({"linked": true, "managedTunnelActive": false, "publishAgentActivity": true}));
+        connect::scene_limit(s);
     }),
     ("settings-access-t3-connect-signed-out", |s| scene(s, "access")),
     ("settings-access-t3-connect-sign-in", |s| {
@@ -2017,6 +2053,7 @@ mod patch_tests {
         assert_eq!(failure_message("scheduledTasks.upsert", "Mac", &typed), "No such task.");
         let setup = json!([{"_tag":"Fail","error":{"_tag":"ProviderSetupError","detail":"Sign-in expired."}}]);
         assert_eq!(failure_message("provider.auth.start", "Mac", &setup), "Sign-in expired.");
+        assert_eq!(failure_message("provider.auth.start", "Mac", &json!(null)), "Provider sign-in failed. Try again.");
     }
     #[test]
     fn the_reveal_pulse_blinks_twice_then_idles() {
@@ -2089,8 +2126,10 @@ mod reveal_tests {
     /// Web settings this client doesn't draw yet; their results open the page without scrolling.
     const UNBUILT: &[&str] = &[];
     /// Drawn only in other states: the desktop CLI row, the managed host's local environment,
-    /// Linked environments behind its Labs flag, and Cursor's keychain usage on macOS.
-    const HIDDEN_HERE: &[&str] = &["Cursor account usage", "Linked environments", "Local environment", "t3 command"];
+    /// Linked environments behind its Labs flag, Cursor's keychain usage on macOS, and T3 Connect's
+    /// rows while signed in.
+    const HIDDEN_HERE: &[&str] =
+        &["Cursor account usage", "Hold webhooks while offline", "Linked environments", "Local environment", "Publish agent activity", "t3 command"];
 
     #[test]
     fn every_search_result_has_a_keyed_setting_to_scroll_to() {

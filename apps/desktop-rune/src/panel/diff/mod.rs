@@ -134,7 +134,6 @@ pub struct Ui {
     refs_pending: Vec<u64>,
     refs_cwd: String,
     refs_combo: kit::ComboboxState,
-    hide_tests: bool,
     tree_open: bool,
     /// The Changes tree's dragged width; until dragged it takes 40% of the panel.
     pub(super) tree_w: Option<f32>,
@@ -190,7 +189,6 @@ impl Default for Ui {
             refs_pending: vec![],
             refs_cwd: String::new(),
             refs_combo: Default::default(),
-            hide_tests: false,
             tree_open: false,
             tree_w: None,
             folded_dirs: HashSet::new(),
@@ -229,12 +227,23 @@ fn save_setting(app: &mut App, key: &str, value: Value) {
     app.client_settings.save();
 }
 
+pub(crate) const HIDE_TESTS_KEY: &str = "diffHideTestFiles";
+
+pub(crate) fn hide_test_files(app: &App) -> bool {
+    setting(app, HIDE_TESTS_KEY, false)
+}
+
+pub(crate) fn set_hide_test_files(app: &mut App, hide: bool) {
+    save_setting(app, HIDE_TESTS_KEY, json!(hide));
+    apply(app);
+    crate::pages::pr_code::refresh_test_filter(app);
+}
+
 /// A new thread starts on "Changes"; the view preferences stay.
 pub fn reset(app: &mut App, previous: &str) {
     let mut old = std::mem::take(&mut app.ui.panel.diff);
     remember(&mut old, previous);
     let ui = &mut app.ui.panel.diff;
-    ui.hide_tests = old.hide_tests;
     ui.tree_open = old.tree_open;
     ui.remembered = old.remembered;
 }
@@ -439,9 +448,8 @@ fn load_commits(app: &mut App) {
 /// Puts the loaded files into the view, dropping tests when they are hidden.
 fn apply(app: &mut App) {
     let default_collapsed = setting(app, "diffFilesCollapsed", true);
-    let hide_tests = crate::settings::client::hide_test_files(&app.client_settings);
+    let hide_tests = hide_test_files(app);
     let ui = &mut app.ui.panel.diff;
-    ui.hide_tests = hide_tests;
     let files: Vec<FileDiff> = ui.files.iter().filter(|f| !hide_tests || !is_test_file(f.path())).cloned().collect();
     let collapsed = collapsed_for(&mut ui.folds, &ui.state, ui.touched, &files, default_collapsed);
     ui.state.set_files(files, &collapsed);
@@ -563,10 +571,6 @@ fn visible(app: &App) -> bool {
 
 pub fn poll(app: &mut App) -> bool {
     let mut changed = file_menu::poll(app);
-    if app.ui.panel.diff.hide_tests != crate::settings::client::hide_test_files(&app.client_settings) {
-        apply(app);
-        changed = true;
-    }
     if let Some(id) = app.ui.panel.diff.commits_pending
         && let Some(reply) = take(app, id)
     {
@@ -1431,12 +1435,18 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
         s.ui.panel.diff.ignore_ws = Some(!ignore);
         load(s);
     }));
-    if ui.files.iter().any(|f| is_test_file(f.path())) {
-        let hide = ui.hide_tests;
-        right = right.child(toggle(t, "panel-diff-tests", if hide { "Show test files" } else { "Hide test files" }, &icons::FLASK_CONICAL_OFF, hide, move |s: &mut App| {
-            crate::settings::client::set_hide_test_files(&mut s.client_settings, !hide);
-            apply(s);
-        }));
+    let test_count = ui.files.iter().filter(|f| is_test_file(f.path())).count();
+    if test_count > 0 {
+        let hide = hide_test_files(app);
+        let help = if hide {
+            let noun = if test_count == 1 { "file" } else { "files" };
+            format!("Show {test_count} hidden test {noun}")
+        } else {
+            "Hide test files".into()
+        };
+        right = right.child(toggle(t, "panel-diff-tests", &help, &icons::FLASK_CONICAL_OFF, hide, move |s: &mut App| {
+            set_hide_test_files(s, !hide);
+        }).label("Hide test files"));
     }
     if !ui.files.is_empty() {
         let open = ui.tree_open;
@@ -1920,6 +1930,14 @@ pub fn tree_fixture(app: &mut App) {
     app.ui.panel.diff.state.set_all_collapsed(false);
 }
 
+pub(super) fn test_filter_fixture(app: &mut App, hidden: bool) {
+    tree_fixture(app);
+    let patch = "diff --git a/src/greet.test.ts b/src/greet.test.ts\n--- a/src/greet.test.ts\n+++ b/src/greet.test.ts\n@@ -1 +1 @@\n-expect(greet('World')).toBe('Hello World');\n+expect(greet('World')).toBe('Hello, World!');\n";
+    app.ui.panel.diff.files.extend(rune_kit::diff::parse(patch));
+    app.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(hidden));
+    apply(app);
+}
+
 /// The tree fixture with a binary image, a partial file, a sent review comment and an open
 /// draft, for headless scenes.
 pub fn review_fixture(app: &mut App) {
@@ -2144,6 +2162,27 @@ mod tests {
         for path in ["src/main.rs", "src/latest.ts", "src/contest.py", "pnpm-lock.yaml", "dist/a.test.js", "src/mockingbird.ts", "src/footest.java"] {
             assert!(!is_test_file(path), "{path}");
         }
+    }
+
+    #[test]
+    fn test_filter_applies_to_both_loaded_diffs_and_survives_workspace_reset() {
+        let mut app = App::new();
+        app.client_settings.error = Some("Fixture settings are read-only".into());
+        test_filter_fixture(&mut app, false);
+        app.ui.pages.detail.files = Some(app.ui.panel.diff.files.clone());
+        crate::pages::pr_code::refresh_test_filter(&mut app);
+
+        for hidden in [true, false] {
+            set_hide_test_files(&mut app, hidden);
+            assert_eq!(app.client_settings.values[HIDE_TESTS_KEY], json!(hidden));
+            assert_eq!(app.ui.panel.diff.state.files().iter().any(|f| is_test_file(f.path())), !hidden);
+            assert_eq!(crate::pages::pr_code::test_file_shown(&app), !hidden);
+        }
+        set_hide_test_files(&mut app, true);
+        reset(&mut app, "thread");
+        fixture(&mut app);
+        assert!(hide_test_files(&app));
+        assert!(app.ui.panel.diff.state.files().iter().all(|f| !is_test_file(f.path())));
     }
 
     #[test]

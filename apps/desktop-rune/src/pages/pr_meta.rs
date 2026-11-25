@@ -115,7 +115,7 @@ fn submit(s: &mut App, method: &str, payload: Value, write: Write) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) || s.ui.pages.detail.entry.is_none() {
+    if (!matches!(s.frame_route(), Route::PullRequests) && crate::panel::active_pull_request(s).is_none()) || s.ui.pages.detail.entry.is_none() {
         return false;
     }
     let mut changed = keep_choice(s) | want_linked(s) | want_refs(s);
@@ -270,7 +270,7 @@ fn finish(s: &mut App, write: Write, reply: Result<Value, Value>) {
         }
         Ok(_) => {
             if let Some((title, description)) = success(&write, super::pr_row::provider_name(field(&entry, "provider"))) {
-                crate::shell::palette::toast(s, &title, description.as_deref());
+                crate::shell::palette::toast_success(s, &title, description.as_deref());
             }
             match write {
                 Write::Label { .. } => load_candidates(s, "labels"),

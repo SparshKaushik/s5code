@@ -34,7 +34,7 @@ const FLUSH_MS: i64 = 400;
 /// The web keeps this in localStorage (`t3code.pullRequestFileTreeOpen`).
 const TREE_KEY: &str = "pullRequestFileTreeOpen";
 /// The web keeps this in localStorage (`t3code.diffHideTestFiles`).
-use crate::settings::client::HIDE_TEST_FILES as HIDE_TESTS_KEY;
+use crate::panel::diff::HIDE_TESTS_KEY;
 const DRAFT: &str = "draft";
 /// Prefixes a review thread's note id.
 const THREAD: &str = "thread:";
@@ -85,7 +85,6 @@ pub struct Ui {
     page_failed: bool,
     /// Hide whitespace changes, seeded from `diffIgnoreWhitespace`.
     ignore_ws: Option<bool>,
-    hide_tests_applied: bool,
     /// Each file's counts before whitespace is hidden (sourceFileStats).
     counts: HashMap<String, (usize, usize)>,
     orphans_open: bool,
@@ -256,7 +255,7 @@ fn ignore_ws(s: &App) -> bool {
 }
 
 fn hide_tests(s: &App) -> bool {
-    crate::settings::client::hide_test_files(&s.client_settings)
+    crate::panel::diff::hide_test_files(s)
 }
 
 /// The files shown: tests dropped while hidden, except one a reveal asked for, and whitespace-only
@@ -812,7 +811,7 @@ pub(super) fn poll(s: &mut App) -> bool {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
     let commit = scoped_commit(&s.ui.pages.detail);
     let scope = json!([entry[TAG], review_key(&entry), commit]).to_string();
-    let (mode, wrap, hide) = (layout(s), wrap_on(s), hide_tests(s));
+    let (mode, wrap) = (layout(s), wrap_on(s));
     let mut changed = false;
     let c = &mut s.ui.pages.code;
     if c.scope != scope {
@@ -850,9 +849,6 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.paging = None;
         c.page_failed = false;
         c.viewed.refresh = true;
-        show(s);
-        changed = true;
-    } else if c.hide_tests_applied != hide {
         show(s);
         changed = true;
     }
@@ -999,7 +995,6 @@ fn show(s: &mut App) {
     let counts: HashMap<String, (usize, usize)> = source.iter().map(|f| (f.path().to_owned(), file_counts(f))).collect();
     let c = &mut s.ui.pages.code;
     c.counts = counts;
-    c.hide_tests_applied = hide;
     let collapsed: Vec<String> = files.iter().map(FileDiff::path).filter(|p| is_collapsed(p, default, &c.toggled)).map(str::to_owned).collect();
     c.diff.set_files(files, &collapsed);
     sync_notes(s);
@@ -1626,8 +1621,18 @@ fn set_ignore_ws(s: &mut App, on: bool) {
 }
 
 fn set_hide_tests(s: &mut App, hide: bool) {
-    crate::settings::client::set_hide_test_files(&mut s.client_settings, hide);
-    show(s);
+    crate::panel::diff::set_hide_test_files(s, hide);
+}
+
+pub(crate) fn refresh_test_filter(s: &mut App) {
+    if s.ui.pages.detail.files.is_some() {
+        show(s);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_file_shown(s: &App) -> bool {
+    s.ui.pages.code.diff.files().iter().any(|f| crate::panel::diff::is_test_file(f.path()))
 }
 
 fn set_tree(s: &mut App, open: bool) {
@@ -2891,16 +2896,6 @@ mod tests {
         assert!(no_changes(&s, &[]));
         s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
         assert!(no_changes(&s, &files), "every file is a hidden test");
-        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
-        let mut loaded = showing(&entry);
-        loaded.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(false));
-        loaded.ui.pages.detail.files = Some(files.clone());
-        show(&mut loaded);
-        assert_eq!(loaded.ui.pages.code.diff.files().len(), 2);
-        loaded.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
-        poll(&mut loaded);
-        assert!(loaded.ui.pages.code.diff.files().is_empty(), "an open PR diff follows the shared setting");
-
         s.ui.pages.code.revealed = Some("src/b.spec.ts".into());
         assert!(!no_changes(&s, &files), "a revealed test stays shown");
         s.ui.pages.code.revealed = None;

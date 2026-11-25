@@ -24,6 +24,7 @@ fn code(t: &T) -> TextStyle {
 /// A write in flight (`id`), or queued behind one to the same file (`None`).
 struct Write {
     id: Option<u64>,
+    environment: String,
     cwd: String,
     path: String,
     contents: String,
@@ -45,6 +46,7 @@ pub struct Ui {
     /// A row's right-click menu: the path and where it opened.
     menu: Option<(String, (f32, f32))>,
     pub(super) selected: String,
+    environment: String,
     cwd: String,
     reading: Option<u64>,
     editor: TextEdit,
@@ -61,14 +63,15 @@ pub struct Ui {
     columns: usize,
     due: Option<Instant>,
     writes: Vec<Write>,
-    /// Drafts whose write failed, by (cwd, path): reopening the file resumes them.
-    unsaved: HashMap<(String, String), String>,
+    /// Drafts whose write failed, by environment, cwd and path.
+    unsaved: HashMap<(String, String, String), String>,
     save_error: Option<String>,
     error: Option<String>,
     /// Why the open file could not be read; the tree's own failures stay in `error`.
     read_failure: Option<ReadFailure>,
     /// The search match to mark and centre in the open file.
     pub(super) line: Option<usize>,
+    reveal: bool,
     pub(super) viewer: Option<Viewer>,
     image: Option<Image>,
     /// Decodes previews off the UI thread, as the sidebar's favicons do.
@@ -164,6 +167,7 @@ impl Default for Ui {
             found: None,
             menu: None,
             selected: String::new(),
+            environment: String::new(),
             cwd: String::new(),
             reading: None,
             editor: TextEdit::new(""),
@@ -181,6 +185,7 @@ impl Default for Ui {
             error: None,
             read_failure: None,
             line: None,
+            reveal: false,
             viewer: None,
             image: None,
             images: None,
@@ -374,7 +379,9 @@ fn read_at(app: &mut App, path: String, line: Option<usize>) {
     ui.asset = None;
     ui.image = image;
     ui.selected = path;
+    ui.environment = app.ui.env.active.clone();
     ui.line = line;
+    ui.reveal = false;
     ui.read_failure = None;
     ui.cwd = cwd;
     ui.reading = request;
@@ -445,7 +452,7 @@ fn toggle_rendered(app: &mut App) {
     prepare(ui);
 }
 
-fn wrap_on(app: &App) -> bool {
+pub(super) fn wrap_on(app: &App) -> bool {
     app.ui.panel.files.wrap.unwrap_or_else(|| crate::settings::value(app, "wordWrap").as_bool() != Some(false))
 }
 
@@ -504,12 +511,30 @@ fn line_range(text: &str, line: usize) -> Option<std::ops::Range<usize>> {
     None
 }
 
-fn close_file(app: &mut App) {
+pub(super) fn reveal_line(app: &mut App, path: &str, line: usize) {
+    if app.ui.panel.files.selected != path {
+        return;
+    }
+    let kind = fp::kind(path);
+    if kind == Kind::Html && app.ui.panel.files.viewer.is_some() {
+        read_at(app, path.to_owned(), Some(line));
+    }
+    let ui = &mut app.ui.panel.files;
+    if matches!(kind, Kind::Table(_) | Kind::Markdown | Kind::Mermaid) {
+        ui.rendered = Some(false);
+        prepare(ui);
+    }
+    ui.line = Some(line);
+    ui.reveal = true;
+}
+
+pub(super) fn back_to_tree(app: &mut App) {
     flush(app);
     viewers::close(app);
     let ui = &mut app.ui.panel.files;
     ui.selected.clear();
     ui.line = None;
+    ui.reveal = false;
     ui.image = None;
     ui.read_failure = None;
     ui.reading = None;
@@ -521,10 +546,12 @@ fn close_file(app: &mut App) {
 
 /// Puts server contents in the editor, resuming a draft that failed to save.
 fn show(ui: &mut Ui, contents: String, truncated: bool) {
-    let draft = ui.unsaved.remove(&(ui.cwd.clone(), ui.selected.clone()));
+    let queued = ui.writes.iter().rfind(|write| write.environment == ui.environment && write.cwd == ui.cwd && write.path == ui.selected)
+        .map(|write| write.contents.clone());
+    let draft = ui.unsaved.remove(&(ui.environment.clone(), ui.cwd.clone(), ui.selected.clone()));
     ui.truncated = truncated;
-    ui.sent = contents.clone();
-    ui.editor = TextEdit::new(draft.unwrap_or_else(|| contents.clone()));
+    ui.sent = queued.clone().unwrap_or_else(|| contents.clone());
+    ui.editor = TextEdit::new(queued.or(draft).unwrap_or_else(|| contents.clone()));
     ui.saved = contents;
     ui.due = None;
     measure(ui);
@@ -568,6 +595,7 @@ pub fn flush(app: &mut App) {
     ui.sent = ui.editor.text.clone();
     let write = Write {
         id: None,
+        environment: ui.environment.clone(),
         cwd: ui.cwd.clone(),
         path: ui.selected.clone(),
         contents: ui.sent.clone(),
@@ -578,11 +606,12 @@ pub fn flush(app: &mut App) {
 /// One ordered write queue per file, like the web's save sessions.
 fn queue(app: &mut App, mut write: Write) {
     let ui = &mut app.ui.panel.files;
-    let same = |w: &Write| w.cwd == write.cwd && w.path == write.path;
+    let same = |w: &Write| w.environment == write.environment && w.cwd == write.cwd && w.path == write.path;
     ui.writes.retain(|w| !(w.id.is_none() && same(w)));
     if !ui.writes.iter().any(same) {
         let payload = json!({"cwd":write.cwd,"relativePath":write.path,"contents":write.contents});
-        let Some(id) = app.src.net().map(|n| n.request("projects.writeFile", payload)) else {
+        let Some(id) = crate::env::net_of(app, &write.environment).map(|n| n.request("projects.writeFile", payload)) else {
+            app.ui.panel.files.unsaved.insert((write.environment, write.cwd, write.path), write.contents);
             return;
         };
         write.id = Some(id);
@@ -605,8 +634,22 @@ pub fn pending(app: &App) -> bool {
     !ui.writes.is_empty() || !ui.unsaved.is_empty() || ui.editor.text != ui.saved
 }
 
+pub(super) fn pending_path(app: &App, path: &str) -> bool {
+    let ui = &app.ui.panel.files;
+    let Some(cwd) = super::workspace(app) else { return false };
+    (ui.selected == path && ui.editor.text != ui.saved)
+        || ui.writes.iter().any(|w| w.environment == app.ui.env.active && w.cwd == cwd && w.path == path)
+        || ui.unsaved.contains_key(&(app.ui.env.active.clone(), cwd, path.to_owned()))
+}
+
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = viewers::poll(app, tx);
+    let ui = &mut app.ui.panel.files;
+    if ui.reveal && ui.reading.is_none() && !ui.viewer.as_ref().is_some_and(viewers::Viewer::loading_full_text) {
+        ui.reveal = false;
+        viewers::reveal(app, tx);
+        changed = true;
+    }
     for (id, dir) in app.ui.panel.files.listings.clone() {
         let Some(reply) = app.src.net().and_then(|n| n.take_reply(id)) else { continue };
         let ui = &mut app.ui.panel.files;
@@ -697,7 +740,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     tx.instant();
                     tx.scroll_center("file-line");
                 }
-                if ui.editor.text != ui.saved {
+                if ui.editor.text != ui.sent {
                     ui.due = Some(Instant::now() + DEBOUNCE);
                     tx.wake_after(DEBOUNCE);
                 }
@@ -751,8 +794,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     for (i, reply) in done.into_iter().rev() {
         let w = ui.writes.remove(i);
-        let open = w.cwd == ui.cwd && w.path == ui.selected;
-        let key = (w.cwd.clone(), w.path.clone());
+        let open = w.environment == ui.environment && w.cwd == ui.cwd && w.path == ui.selected;
+        let key = (w.environment.clone(), w.cwd.clone(), w.path.clone());
         match reply {
             Ok(_) => {
                 ui.unsaved.remove(&key);
@@ -763,6 +806,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             }
             Err(e) => {
                 if open {
+                    if ui.reading.is_some() {
+                        ui.unsaved.insert(key, w.contents);
+                    }
                     ui.sent = ui.saved.clone();
                     ui.save_error = Some(format!("Couldn't save {}: {e}", w.path));
                 } else {
@@ -776,7 +822,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         .filter(|&i| {
             let w = &ui.writes[i];
             w.id.is_none()
-                && !ui.writes.iter().any(|o| o.id.is_some() && o.cwd == w.cwd && o.path == w.path)
+                && !ui.writes.iter().any(|o| o.id.is_some() && o.environment == w.environment && o.cwd == w.cwd && o.path == w.path)
         })
         .collect();
     if let Some((mode, cwd, path)) = load_full {
@@ -1052,7 +1098,7 @@ fn header(ui: &Ui, wrap: bool, t: &T) -> El {
     if !ui.selected.is_empty() {
         let kind = fp::kind(&ui.selected);
         let mut header = header
-            .child(button("Back to files", &icons::ARROW_LEFT).on_press(close_file).build(t).help("Back to files"))
+            .child(button("Back to files", &icons::ARROW_LEFT).on_press(|s: &mut App| super::activate(s, super::Surface::Files)).build(t).help("Back to files"))
             .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.));
         let text_shown = ui.reading.is_none() && !ui.binary && ui.read_failure.is_none() && kind.reads_text();
         let rendered = rendered_on(ui);
@@ -1172,7 +1218,7 @@ fn tree(ui: &Ui, t: &T) -> El {
         let (path, menu_path) = (r.path.clone(), r.path.clone());
         let dir = r.dir;
         line = line
-            .on_press(move |s: &mut App| if dir { toggle_dir(s, path.clone()) } else { read(s, path.clone()) })
+            .on_press(move |s: &mut App| if dir { toggle_dir(s, path.clone()) } else { super::open_file(s, path.clone()) })
             .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| {
                 s.ui.panel.files.menu = Some((menu_path.clone(), (at.x, at.y)));
             });
@@ -1503,11 +1549,21 @@ mod tests {
         ui.cwd = "/repo".into();
         ui.selected = "a.ts".into();
         ui.unsaved
-            .insert(("/repo".into(), "a.ts".into()), "draft".into());
+            .insert((String::new(), "/repo".into(), "a.ts".into()), "draft".into());
         show(&mut ui, "server".into(), false);
         assert_eq!(ui.editor.text, "draft");
         assert_eq!(ui.saved, "server");
         assert_eq!(ui.sent, "server");
         assert!(ui.unsaved.is_empty());
+
+        ui.environment = "remote".into();
+        ui.writes.push(Write { id: Some(1), environment: "local".into(), cwd: "/repo".into(), path: "a.ts".into(), contents: "local draft".into() });
+        show(&mut ui, "remote server".into(), false);
+        assert_eq!(ui.editor.text, "remote server");
+        ui.environment = "local".into();
+        show(&mut ui, "local server".into(), false);
+        assert_eq!(ui.editor.text, "local draft");
+        assert_eq!(ui.sent, "local draft");
+        assert_eq!(ui.saved, "local server");
     }
 }

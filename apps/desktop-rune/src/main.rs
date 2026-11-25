@@ -122,6 +122,9 @@ impl App {
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
+        if route != self.route {
+            panel::flush_file(self);
+        }
         env::follow(self, &route);
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
@@ -293,7 +296,7 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
+    let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url).compositor(panel::DeviceViewport::default());
     panel::popout::register(&mut app);
     desktop::capture::register(&mut app);
     notify::set_window(app.handle());

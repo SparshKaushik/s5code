@@ -173,7 +173,7 @@ impl LargeText {
         let actual = self.lines.record(&self.source, i).trim_start_matches('\u{feff}');
         let end = actual.floor_char_boundary(actual.len().min(16_384));
         let source = if end < actual.len() { format!("{}…", &actual[..end]) } else { actual.to_owned() };
-        let focused = app.ui.panel.files.line.is_some_and(|line| line.clamp(1, self.lines.count().max(1)) == i + 1);
+        let focused = super::shown_line(app).is_some_and(|line| line.clamp(1, self.lines.count().max(1)) == i + 1);
         let font = theme::mono(rune::TextStyle::new(t.code, 400.0).lh(LINE_HEIGHT));
         let content = text(source).font(font).color(t.c.foreground).selectable(true);
         let content = if wrap { content.grow(1.0).min_w(0.0).wrap_anywhere() } else { content.single_line() };

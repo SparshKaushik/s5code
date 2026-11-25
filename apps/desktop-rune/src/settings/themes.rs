@@ -521,7 +521,7 @@ fn wireframe(t: &T, light: &Value, dark: Option<&Value>) -> El {
         )
 }
 pub fn view(s: &App, t: &T) -> El {
-    let mut modes = row().w_full().gap(12.0);
+    let mut modes = row().w_full().gap(12.0).role("group").label("Appearance mode");
     let (light_colors, dark_colors) = (scheme_colors(s, false), scheme_colors(s, true));
     for (mode, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
         let selected = matches!(
@@ -578,7 +578,7 @@ pub fn view(s: &App, t: &T) -> El {
         for item in group {
             let id = item["id"].as_str().unwrap_or("").to_owned();
             let label = item["label"].as_str().unwrap_or("").to_owned();
-            let mut previews = row().w_full().h(68.0).gap(10.0).center();
+            let mut previews = row().w_full().h(68.0).gap(10.0).center().role("group").label("Light and dark theme variants");
             for dark in [false, true] {
                 let selected = s
                     .client_settings
@@ -639,43 +639,51 @@ pub fn view(s: &App, t: &T) -> El {
             let mut actions: Vec<El> = Vec::new();
             if item["id"] != builtins()[0]["id"] {
                 let template = item.clone();
-                actions.push(
+                actions.push(super::permissions::tip(
+                    &format!("theme-duplicate-{id}"),
                     crate::kit::Button::new(format!("Duplicate {label}"))
                         .variant("ghost")
                         .size("icon-xs")
                         .icon(&crate::icons::COPY)
                         .on_press(move |s: &mut App| duplicate(s, template.clone(), editor_dark))
                         .build(t),
-                );
+                    "Duplicate theme".into(),
+                ));
             }
             if custom {
                 let template = item.clone();
-                actions.push(
+                actions.push(super::permissions::tip(
+                    &format!("theme-edit-{id}"),
                     crate::kit::Button::new(format!("Edit {label}"))
                         .variant("ghost")
                         .size("icon-xs")
                         .icon(&crate::icons::PEN_LINE)
                         .on_press(move |s: &mut App| edit(s, template.clone(), editor_dark))
                         .build(t),
-                );
+                    "Edit theme".into(),
+                ));
                 let template = item.clone();
-                actions.push(
+                actions.push(super::permissions::tip(
+                    &format!("theme-export-{id}"),
                     crate::kit::Button::new(format!("Export {label}"))
                         .variant("ghost")
                         .size("icon-xs")
                         .icon(&crate::icons::DOWNLOAD)
                         .build(t)
                         .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| export(&template, tx)),
-                );
+                    "Export theme file".into(),
+                ));
                 let target = id.clone();
-                actions.push(
+                actions.push(super::permissions::tip(
+                    &format!("theme-remove-{id}"),
                     crate::kit::Button::new(format!("Remove {label}"))
                         .variant("ghost-destructive")
                         .size("icon-xs")
                         .icon(&crate::icons::TRASH_2)
                         .on_press(move |s: &mut App| s.ui.settings.theme_remove = Some(target.clone()))
                         .build(t),
-                );
+                    "Remove theme".into(),
+                ));
             }
             r = r.child(
                 col()
@@ -910,9 +918,7 @@ pub fn import_theme(raw: &str) -> Result<Value, String> {
     if let Ok(parsed) = vscode::jsonc(raw)
         && vscode::is_theme(&parsed)
     {
-        let mut theme = vscode::convert(&parsed, |dark| palette(&builtins()[0], dark).clone())?;
-        theme["id"] = json!(format!("custom-{}", s5_net::uuid()));
-        return Ok(theme);
+        return vscode::convert(&parsed, |dark| palette(&builtins()[0], dark).clone());
     }
     let mut theme: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let appearance = theme["appearance"]
@@ -940,7 +946,16 @@ pub fn import_theme(raw: &str) -> Result<Value, String> {
             .ok_or_else(|| format!("Invalid color for {role}. Use hex or oklch."))?;
         colors[role] = json!(css);
     }
-    theme["id"] = json!(format!("custom-{}", s5_net::uuid()));
+    // `parseThemeFile`: the file's id, else one from its name, so a theme imported again matches.
+    let id = theme["id"].as_str().map_or_else(|| vscode::theme_id(&label), str::to_owned);
+    let valid = id.len() <= 48 && id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()) && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        return Err("Theme ids may only contain lowercase letters, numbers, and hyphens.".into());
+    }
+    if RESERVED.contains(&id.as_str()) {
+        return Err(format!("The theme id \"{id}\" is reserved."));
+    }
+    theme["id"] = json!(id);
     theme["label"] = json!(label);
     theme["colors"] = colors;
     if let Some(variants) = theme["variants"].as_object() {
@@ -963,12 +978,17 @@ const MAX_THEME_FILE_BYTES: u64 = 256 * 1024;
 fn close_import(s: &mut App) {
     s.ui.settings.theme_import_open = false;
     s.ui.settings.theme_import_error = None;
+    s.ui.settings.theme_conflict = None;
     s.ui.settings.theme_import.clear();
     s.ui.settings.theme_search = Search::default();
 }
 
 fn add_imported(s: &mut App) {
     match import_theme(&s.ui.settings.theme_import.text) {
+        Ok(theme) if custom_themes(s).iter().any(|t| t["id"] == theme["id"]) => {
+            s.ui.settings.theme_import_error = None;
+            s.ui.settings.theme_conflict = Some(theme);
+        }
         Ok(theme) => {
             let mut library = custom_themes(s);
             let (id, label) = (theme["id"].clone(), theme["label"].as_str().unwrap_or("Theme").to_owned());
@@ -988,6 +1008,56 @@ fn add_imported(s: &mut App) {
         }
         Err(error) => s.ui.settings.theme_import_error = Some(error),
     }
+}
+
+/// Web `versionedCopy`: the theme as "Name (n)", the first n whose id is free.
+fn versioned_copy(library: &[Value], theme: &Value) -> Option<Value> {
+    let label = theme["label"].as_str().unwrap_or("Theme");
+    (1..100).find_map(|n| {
+        let suffix = format!(" ({n})");
+        let name = format!("{}{suffix}", label.chars().take(48 - suffix.len()).collect::<String>());
+        let id = vscode::theme_id(&name);
+        (!library.iter().any(|t| t["id"] == id.as_str())).then(|| {
+            let mut copy = theme.clone();
+            (copy["id"], copy["label"]) = (json!(id), json!(name));
+            copy
+        })
+    })
+}
+
+/// Web `resolveConflicts`: replace the installed theme (keeping its collection) or keep both.
+fn resolve_conflict(s: &mut App, update: bool) {
+    let Some(theme) = s.ui.settings.theme_conflict.take() else { return };
+    let mut library = custom_themes(s);
+    let resolved = if update {
+        let at = library.iter().position(|t| t["id"] == theme["id"]);
+        at.map(|at| {
+            let mut next = theme.clone();
+            if library[at]["collection"].is_object() {
+                next["collection"] = library[at]["collection"].clone();
+            }
+            library[at] = next.clone();
+            next
+        })
+    } else {
+        versioned_copy(&library, &theme).inspect(|copy| library.push(copy.clone()))
+    };
+    let Some(resolved) = resolved else {
+        let label = theme["label"].as_str().unwrap_or("Theme");
+        s.ui.settings.theme_import_error = Some(format!("{label}: Too many copies of \"{label}\"."));
+        return;
+    };
+    super::update(s, "customThemes", json!(library));
+    let label = resolved["label"].as_str().unwrap_or("Theme");
+    crate::shell::palette::toast(s, &format!("{label} {}", if update { "updated" } else { "added" }), Some(label));
+    close_import(s);
+}
+
+/// Scenes: importing a theme a custom theme already has the id of.
+pub fn scene_conflict(s: &mut App) {
+    let theme = json!({"id": "aurora", "label": "Aurora", "appearance": "dark", "colors": palette(&builtins()[0], true).clone()});
+    s.client_settings.values.insert("customThemes".into(), json!([theme.clone()]));
+    s.ui.settings.theme_conflict = Some(theme);
 }
 
 /// ThemeImportDialog's `formatByteSize`.
@@ -1031,6 +1101,27 @@ fn choose_theme_file(tx: &mut rune::Tx) {
 }
 
 /// Web's `ThemeImportDialog`: community search above, a theme file or pasted JSON below.
+/// Web's conflict step: what is already installed, then update it or keep both.
+fn conflict_body(theme: &Value, t: &T) -> El {
+    let installed = col()
+        .w_full()
+        .gap(4.0)
+        .padding(12.0)
+        .radius(12.0)
+        .border(1.0, t.c.border.alpha_mul(0.7))
+        .fill(t.c.muted.alpha_mul(0.2))
+        .child(text("Already installed").font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(theme["label"].as_str().unwrap_or("Theme").to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    let actions = row()
+        .gap(8.0)
+        .flex_wrap()
+        .child(crate::kit::Button::new("Update existing").size("sm").on_press(|s: &mut App| resolve_conflict(s, true)).build(t))
+        .child(crate::kit::Button::new("Keep both").variant("outline").size("sm").on_press(|s: &mut App| resolve_conflict(s, false)).build(t))
+        .child(crate::kit::Button::new("Back").variant("ghost").size("sm").on_press(|s: &mut App| s.ui.settings.theme_conflict = None).build(t))
+        .child(crate::kit::Button::new("Cancel").variant("ghost").size("sm").on_press(close_import).build(t));
+    col().w_full().gap(12.0).child(installed).child(actions)
+}
+
 pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     if !s.ui.settings.theme_import_open {
         return;
@@ -1110,6 +1201,9 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                         .build(t),
                 ),
         );
+    if let Some(conflict) = &s.ui.settings.theme_conflict {
+        body = conflict_body(conflict, t);
+    }
     if let Some(error) = &s.ui.settings.theme_import_error {
         body = body.child(text(error.clone()).role("alert").font(theme::TEXT_XS.lh(18.0)).color(t.c.destructive).wrap());
     }
@@ -1191,7 +1285,10 @@ mod tests {
             .is_err()
         );
         let vscode = import_theme(r##"{"name": "night-owl", "type": "dark", "colors": {"editor.background": "#011627"}} // VS Code"##).unwrap();
-        assert!(vscode["id"].as_str().unwrap().starts_with("custom-"), "a VS Code theme converts and gets its own id");
+        assert_eq!(vscode["id"], "night-owl", "a VS Code theme's id follows its name");
+        assert_eq!(theme["id"], "example", "a file without an id takes one from its name");
+        assert!(import_theme(r##"{"name":"Light","appearance":"light","colors":{}}"##).unwrap_err().contains("reserved"));
+        assert!(import_theme(r##"{"id":"Bad Id","name":"X","appearance":"light","colors":{}}"##).is_err());
         assert_eq!((vscode["label"].as_str(), vscode["appearance"].as_str()), (Some("Night Owl"), Some("dark")));
     }
 
@@ -1211,6 +1308,28 @@ mod tests {
         assert!(copy.get("collection").is_none(), "a copy leaves the collection");
         assert_eq!(app.ui.settings.form["form.themeEditor"]["advanced"], false, "a managed original opens with two colors");
         assert_eq!(copy["variants"]["light"]["accent"], "#654321");
+    }
+
+    #[test]
+    fn a_theme_imported_again_asks_then_updates_or_keeps_both() {
+        let mut s = App::new();
+        // An unreadable-file error keeps `save` from writing the real settings file.
+        s.client_settings.error = Some("tests do not write settings".into());
+        s.client_settings.values.insert("customThemes".into(), json!([{"id": "aurora", "label": "Aurora", "appearance": "dark", "colors": {}, "collection": {"id": "c", "label": "C"}}]));
+        s.ui.settings.theme_import = rune::TextEdit::new(r##"{"name":"Aurora","appearance":"dark","colors":{"accent":"#123456"}}"##);
+        add_imported(&mut s);
+        assert_eq!(s.ui.settings.theme_conflict.as_ref().map(|t| t["id"].clone()), Some(json!("aurora")), "nothing installs yet");
+        assert_eq!(custom_themes(&s).len(), 1);
+        resolve_conflict(&mut s, false);
+        let ids: Vec<Value> = custom_themes(&s).iter().map(|t| t["id"].clone()).collect();
+        assert_eq!(ids, [json!("aurora"), json!("aurora-1")]);
+        assert_eq!(custom_themes(&s)[1]["label"], "Aurora (1)");
+        s.ui.settings.theme_import = rune::TextEdit::new(r##"{"name":"Aurora","appearance":"dark","colors":{"accent":"#654321"}}"##);
+        add_imported(&mut s);
+        resolve_conflict(&mut s, true);
+        let updated = &custom_themes(&s)[0];
+        assert_eq!((updated["colors"]["accent"].as_str(), updated["collection"]["id"].as_str()), (Some("#654321"), Some("c")), "an update keeps the collection");
+        assert_eq!(custom_themes(&s).len(), 2);
     }
 
     #[test]

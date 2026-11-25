@@ -52,7 +52,7 @@ impl NotebookView {
     }
 
     pub(super) fn view(&self, app: &App, t: &T) -> El {
-        fp::notebook_view(app, &app.ui.panel.files.selected, &self.notebook, self.visible, t,
+        fp::notebook_view(app, super::shown_name(app), &self.notebook, self.visible, t,
             |cell, index, _| self.output_view(cell, index, t))
     }
 

@@ -24,10 +24,26 @@ pub(in crate::panel) const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-file-xlsx", xlsx),
     ("panel-file-pptx", pptx),
     ("panel-diff-hide-tests", hide_tests),
+    ("panel-attachment-sqlite", attachment_sqlite),
 ];
 
+fn attachment_sqlite(app: &mut App) {
+    panel::scene(app, None);
+    let id = "attachment-builds";
+    crate::chat::timeline::attachments::scene_file(app, id, "builds.sqlite");
+    panel::open_attachment(app, id);
+    app.ui.panel.attachment = Some((id.into(), Viewer::ready(Mode::Sqlite, Database::fixture().map(Content::Sqlite))));
+    if let crate::Route::Thread(thread) = app.frame_route() {
+        let thread = thread.clone();
+        app.ui.panel.maximized.insert(thread);
+    }
+}
+
 fn scene(app: &mut App, name: &str, rendered: bool) {
-    panel::scene(app, Some(Surface::Files));
+    panel::scene(app, None);
+    for path in ["README.md", name] {
+        panel::open_file(app, path.into());
+    }
     files::preview_fixture(app, name, "", rendered);
     if let crate::Route::Thread(id) = app.frame_route() {
         let id = id.clone();
@@ -239,6 +255,6 @@ fn pptx(app: &mut App) {
 
 fn hide_tests(app: &mut App) {
     panel::scene(app, Some(Surface::Diff));
-    app.client_settings.values.insert(crate::settings::client::HIDE_TEST_FILES.into(), true.into());
+    app.client_settings.values.insert(crate::panel::diff::HIDE_TESTS_KEY.into(), true.into());
     panel::diff::hide_tests_fixture(app);
 }
