@@ -1,7 +1,5 @@
 import * as Mime from "effect/http/Mime";
-import {
-  EnvironmentHttpApi,
-} from "@t3tools/contracts";
+import { EnvironmentHttpApi } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import {
   injectMcpAppCookieBootstrap,

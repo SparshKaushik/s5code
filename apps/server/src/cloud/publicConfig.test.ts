@@ -3,11 +3,7 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
-import {
-  hostedAppUrlConfig,
-  makeCloudCliOAuthConfig,
-  makeRelayUrlConfig,
-} from "./publicConfig.ts";
+import { hostedAppUrlConfig, makeCloudCliOAuthConfig, makeRelayUrlConfig } from "./publicConfig.ts";
 
 const provideEnv = (env: Readonly<Record<string, string>>) =>
   Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })));

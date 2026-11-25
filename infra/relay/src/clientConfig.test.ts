@@ -79,16 +79,22 @@ describe("PublishClientConfig", () => {
         ),
       );
 
-      yield* stack.deploy(PublishClientConfig(clientConfig("https://relay-v1.example.com"))).pipe(configured);
+      yield* stack
+        .deploy(PublishClientConfig(clientConfig("https://relay-v1.example.com")))
+        .pipe(configured);
       const first = yield* fs.readFileString(target);
       expect(first).toContain("KEEP=yes\n");
       expect(first).toContain("T3CODE_RELAY_URL=https://relay-v1.example.com\n");
 
       yield* fs.writeFileString(target, `${first}MANUAL=1\n`);
-      yield* stack.deploy(PublishClientConfig(clientConfig("https://relay-v1.example.com"))).pipe(configured);
+      yield* stack
+        .deploy(PublishClientConfig(clientConfig("https://relay-v1.example.com")))
+        .pipe(configured);
       expect(yield* fs.readFileString(target)).toContain("MANUAL=1\n");
 
-      yield* stack.deploy(PublishClientConfig(clientConfig("https://relay-v2.example.com"))).pipe(configured);
+      yield* stack
+        .deploy(PublishClientConfig(clientConfig("https://relay-v2.example.com")))
+        .pipe(configured);
       const third = yield* fs.readFileString(target);
       expect(third).toContain("T3CODE_RELAY_URL=https://relay-v2.example.com\n");
       expect(third).not.toContain("relay-v1");
