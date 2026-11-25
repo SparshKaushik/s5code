@@ -393,6 +393,11 @@ fn launch_notices(s: &mut App) -> bool {
 
 /// The footer's update control: the capsule while a run is on, else the combined button when
 /// providers wait, else `None` for the app's own pill.
+/// A run is showing the capsule, which takes the footer's free room (`flex-1` on web).
+pub fn running(s: &App) -> bool {
+    s.ui.shell.sidebar.everything.run.is_some()
+}
+
 pub fn control(s: &App, t: &T) -> Option<El> {
     if let Some(run) = &s.ui.shell.sidebar.everything.run {
         return Some(capsule(s, t, run));

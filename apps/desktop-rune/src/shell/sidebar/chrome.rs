@@ -547,7 +547,7 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
 /// `SidebarThreadUndoNotice`: fills the footer's free space, right-aligned, while an action can
 /// be undone.
 fn undo_notice(s: &App, t: &T) -> El {
-    let Some((action, count)) = s.ui.shell.sidebar.undos.notice(crate::data::now_ms()) else { return spacer() };
+    let Some((action, count)) = s.ui.shell.sidebar.undos.notice(crate::data::now_ms()) else { return if super::everything::running(s) { el() } else { spacer() } };
     let action = format!("{action:?}");
     let summary = if count == 1 { action } else { format!("{action} {count}") };
     let shortcut = crate::shell::palette::shortcut_label(s, "thread.undo");

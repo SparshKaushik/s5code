@@ -70,6 +70,10 @@ fn clock(at: i64) -> String {
 }
 
 pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
+    // A fixture has no connection to wait on; its scene stages the toast itself.
+    if matches!(s.src, crate::data::Source::Fixture(_)) {
+        return false;
+    }
     let now = crate::data::now_ms();
     let (requests, next) = slow(s, now);
     if let Some(at) = next {
