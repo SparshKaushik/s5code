@@ -1734,6 +1734,8 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
     } else {
         match &app.ui.panel.device.stream {
             Some(stream) => {
+                // Before `shared` locks: `shows_3d` reads it too.
+                let three = shows_3d(app, stream);
                 let shared = stream.shared.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(failed) = shared.failed.clone() {
                     centered(
@@ -1745,7 +1747,7 @@ fn stream_view(app: &App, state: &Value, session: &Value, t: &T, stage: Option<(
                 } else if shared.frames == 0 {
                     centered(vec![spinner(t), note("Connecting video\u{2026}", t)])
                 } else {
-                    screen(stream, shows_3d(app, stream), stage, &name, t)
+                    screen(stream, three, stage, &name, t)
                 }
             }
             None => centered(vec![spinner(t), note("Connecting video\u{2026}", t)]),
@@ -2033,6 +2035,23 @@ mod tests {
         assert_eq!(fold.read((1080, 1200), closed.clone()), Some(false), "a readout for another size is stale");
         assert_eq!(fold.read(size, closed), Some(true));
         assert_eq!((fold.angle, fold.state.as_ref().and_then(|f| f.posture.as_deref())), (Some(3.), Some("closed")));
+    }
+
+    #[test]
+    fn a_streaming_device_builds_its_3d_view_and_rail() {
+        // The view locks the stream's state; building it on a thread turns a deadlock into a failure.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut app = crate::App::new();
+            fixture(&mut app, json!([{"hostId": "local", "deviceId": "ios-16", "platform": "ios"}]));
+            let state = app.ui.panel.device.fixture.clone().unwrap();
+            let stream = app.ui.panel.device.stream.as_ref().unwrap();
+            let shows = shows_3d(&app, stream);
+            drop(stream_view(&app, &state, &state["sessions"][0], &crate::theme::theme(true), Some((800., 700.)), &mut Vec::new()));
+            let _ = tx.send(shows);
+        });
+        let shows = rx.recv_timeout(Duration::from_secs(20)).expect("the device view builds without deadlocking");
+        assert!(shows, "a streaming iPhone shows web's default 3D view");
     }
 
     #[test]
