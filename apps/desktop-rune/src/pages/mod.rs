@@ -682,6 +682,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-draft", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["isDraft"] = json!(true); d["autoMergeEnabled"] = json!(false); })),
     ("pull-requests-detail-media", |s| media_scene(s, false)),
     ("pull-requests-detail-media-lightbox", |s| media_scene(s, true)),
+    ("pull-requests-detail-media-edit-preview", |s| {
+        media_scene(s, false);
+        let u = &mut s.ui.pages.detail;
+        pr_edit::scene_caps(u);
+        let body = u.detail.as_ref().map(|d| crate::data::s(d, "body").to_string()).unwrap_or_default();
+        let mut draft = pr_edit::Draft::new(&body);
+        draft.preview = true;
+        u.edit.body = Some(draft);
+    }),
     ("pull-requests-detail-app-access", |s| open_detail(s, 0, |u| u.app_access.2 = Some("not-covered".into()))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
