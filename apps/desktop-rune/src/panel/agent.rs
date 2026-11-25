@@ -5,7 +5,7 @@
 //! pages' own DevTools sockets, as Electron's `CdpRelay` does over a webview's debugger.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
@@ -68,7 +68,7 @@ const AGENT_DOWNLOAD_WINDOW: Duration = Duration::from_secs(5);
 
 /// The server just started with these as its `desktopBrowserFd` peer (we write events) and its
 /// `desktopBrowserControlFd` peer (we read commands).
-pub fn connect(events: impl Write + Send + 'static, commands: impl Read + Send + 'static) {
+pub fn connect(events: impl Write + Send + 'static, commands: impl std::io::Read + Send + 'static) {
     let writer: Arc<Mutex<Writer>> = Arc::new(Mutex::new(Box::new(events)));
     *CHANNEL.lock().unwrap() = Some(Channel { writer: writer.clone(), targets: HashMap::new(), relays: HashMap::new() });
     *GENERATION.lock().unwrap() += 1;
@@ -172,7 +172,7 @@ fn write(writer: &Mutex<Writer>, event: &Value) {
     let _ = writer.lock().unwrap().write_all(format!("{event}\n").as_bytes());
 }
 
-fn read_commands(commands: impl Read, mine: Arc<Mutex<Writer>>) {
+fn read_commands(commands: impl std::io::Read, mine: Arc<Mutex<Writer>>) {
     let mut sequence = 0;
     for line in BufReader::new(commands).lines() {
         let Ok(line) = line else { break };
