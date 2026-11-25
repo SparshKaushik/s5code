@@ -41,7 +41,7 @@ const PRESETS: [(&str, u32, u32); 17] = [
 ];
 const DEVICE_TOOLBAR_H: f32 = 38.;
 /// Web's `ScreenRotationIcon`, with its rotated square drawn as a path.
-static ROTATE_ICON: rune::Icon = rune::Icon {
+pub(crate) static ROTATE_ICON: rune::Icon = rune::Icon {
     name: "screen-rotation",
     view: 24.0,
     body: "<path d=\"M12 5.28 L18.72 12 L12 18.72 L5.28 12 Z\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M12.5 2a10 10 0 0 1 8.4 5.4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M20.8 3.5v4h-4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M11.5 22a10 10 0 0 1-8.4-5.4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M3.2 20.5v-4h4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
@@ -2048,6 +2048,7 @@ fn scene_server() -> Option<u16> {
                 "/reports/q3" => ("200 OK", "Content-Type: application/pdf\r\n", scene_pdf_bytes()),
                 "/opener" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>Popup opener</title><button style=\"position:fixed;inset:0;font:24px system-ui\" onclick=\"window.open('/popped', 'p', 'width=500,height=400')\">Open a 500x400 popup</button>".to_vec()),
                 "/popped" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>The popup</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#dbeafe;font:28px system-ui\"><p>The popup painted</p>".to_vec()),
+                "/late-title" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>Loading</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;font:22px system-ui\"><p id=\"note\">The title changes after the load</p><script>addEventListener('load', () => setTimeout(() => { document.title = 'Title set after load'; note.textContent = 'document.title changed 1.5 s after load'; }, 1500));</script>".to_vec()),
                 "/staging" => ("401 Unauthorized", "Content-Type: text/html\r\nWWW-Authenticate: Basic realm=\"Staging\"\r\n", b"<!doctype html><title>401 Unauthorized</title><body style=\"font:16px system-ui,sans-serif;margin:24px\"><h1>401 Unauthorized</h1><p>The staging server's own page, shown once the sign-in is cancelled.</p>".to_vec()),
                 _ => ("200 OK", "Content-Type: text/html\r\n", SCENE_PERMISSIONS.as_bytes().to_vec()),
             };
@@ -3165,7 +3166,7 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
     };
     let preset = d.preset.map_or("Responsive", |i| PRESETS[i].0);
     let locked = d.lock.is_some();
-    let mut bar = row().w_full().h(DEVICE_TOOLBAR_H - 1.).px(6.).gap(2.).center_y();
+    let mut bar = row().h_full().pl(6.).pr(2.).gap(2.).center_y();
     if width >= 560. {
         bar = bar.child(text("Dimensions").font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground).mr(2.));
     }
@@ -3205,10 +3206,16 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
         // As web, a rotated preset stays selected and a locked ratio turns with it.
         let preset = device(s, tab).preset;
         set_device(s, tab, h, w, preset);
-    }).build(t))
-    .child(el().grow(1.))
-    .child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
-    col().w_full().fill(t.c.background.alpha_mul(0.95)).child(bar).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
+    }).build(t));
+    // As web's `sticky right-0`: a narrow panel scrolls the controls sideways under a close
+    // button that stays put.
+    let close = row().h_full().pr(6.).center_y().child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
+    let strip = row()
+        .w_full()
+        .h(DEVICE_TOOLBAR_H - 1.)
+        .child(el().key(format!("browser-device-toolbar-{tab}")).grow(1.).min_w(0.).h_full().scroll_x().scroll_edge_fade(16.).child(bar))
+        .child(close);
+    col().w_full().fill(t.c.background.alpha_mul(0.95)).child(strip).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
 }
 
 /// Floats the tab over the chat and closes the panel, or puts it back.

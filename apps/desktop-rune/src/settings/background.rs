@@ -315,14 +315,13 @@ pub fn view(s: &App, cx: &Cx<App>, t: &T) -> El {
         .center_y()
         .child(c::select(s, t, "bg::profile", "Background activity profile", &options(Some(advanced)), c::select_width("bg::profile")));
     if scoped && option(&resolved) == "advanced" {
-        control = control.child(
-            crate::kit::Button::new("Configure advanced background activity")
-                .variant("outline")
-                .size("icon-sm")
-                .icon(&icons::SETTINGS)
-                .on_press(|s: &mut App| s.ui.settings.maintenance.dialog = true)
-                .build(t),
-        );
+        let configure = crate::kit::Button::new("Configure advanced background activity")
+            .variant("outline")
+            .size("icon-sm")
+            .icon(&icons::SETTINGS)
+            .on_press(|s: &mut App| s.ui.settings.maintenance.dialog = true)
+            .build(t);
+        control = control.child(super::permissions::tip("background-configure", configure, "Configure background activity".into()));
     }
     // Environment-wide, like the page's other server settings under a project scope.
     if s.ui.settings.project.is_some() {

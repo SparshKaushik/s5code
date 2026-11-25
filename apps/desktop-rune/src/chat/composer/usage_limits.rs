@@ -393,7 +393,7 @@ fn bar_color(t: &T, account: &Account) -> Color {
 }
 
 /// WindowBar: the share left, with a tick where even spending would be.
-fn bar(cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) -> El {
+fn bar(s: &App, cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) -> El {
     let width = cx.layout_with(key.as_str(), |r| r[2]).unwrap_or(160.0);
     let remaining = remaining_percent(w);
     let time_left = elapsed_share(w, now).map(|e| ((1.0 - e) * 100.0).round() as i64);
@@ -411,7 +411,7 @@ fn bar(cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) 
         .h(24.0)
         .role("img")
         .label(summary)
-        .help(bar_help(remaining, time_left))
+        .help(bar_help(remaining, time_left, resets(s, w, now)))
         .child(el().absolute(0.0, 6.0).w(width).h(12.0).radius(radius::FULL).fill(t.c.muted));
     if remaining > 0 {
         track = track.child(el().absolute(0.0, 6.0).w(width * remaining as f32 / 100.0).h(12.0).radius(radius::FULL).fill(color));
@@ -423,16 +423,27 @@ fn bar(cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) 
     track
 }
 
-/// WindowBar's tooltip: what is left, and what the pace tick marks.
-fn bar_help(remaining: i64, time_left: Option<i64>) -> String {
-    match time_left {
+/// WindowBar's tooltip: what is left, what the pace tick marks, and when the window resets.
+fn bar_help(remaining: i64, time_left: Option<i64>, resets: Option<String>) -> String {
+    let mut lines = vec![match time_left {
         Some(p) => format!("{remaining}% left · {p}% of the window left\nThe line is where even spending would be."),
         None => format!("{remaining}% left"),
-    }
+    }];
+    lines.extend(resets);
+    lines.join("\n")
+}
+
+/// "Resets <when>", then " · resets in <duration>" when that is known.
+fn resets(s: &App, w: &Value, now: i64) -> Option<String> {
+    let at = data::s(w, "resetsAt");
+    (!at.is_empty()).then(|| {
+        let when = crate::chat::timeline::banners::upcoming_label(s, at);
+        format!("Resets {when}{}", resets_in(w, now).map(|r| format!(" · {r}")).unwrap_or_default())
+    })
 }
 
 /// LimitWindows, compact: label and share left, the bar, then pace and when it resets.
-fn limit_windows(cx: &mut Cx<App>, t: &T, account: &Account, index: usize, now: i64) -> El {
+fn limit_windows(s: &App, cx: &mut Cx<App>, t: &T, account: &Account, index: usize, now: i64) -> El {
     let color = bar_color(t, account);
     let tabular = theme::TEXT_XS.features("'tnum' 1");
     let mut rows = col().w_full().gap(2.0);
@@ -453,7 +464,7 @@ fn limit_windows(cx: &mut Cx<App>, t: &T, account: &Account, index: usize, now: 
         }
         tail = tail.child(text(resets_in(w, now).unwrap_or_default()).font(tabular).color(t.c.muted_foreground));
         let key = format!("usage-limits-bar-{index}-{id}");
-        rows = rows.child(row().w_full().gap(12.0).center_y().child(head).child(bar(cx, t, key, color, w, now)).child(tail));
+        rows = rows.child(row().w_full().gap(12.0).center_y().child(head).child(bar(s, cx, t, key, color, w, now)).child(tail));
     }
     rows
 }
@@ -506,7 +517,7 @@ pub(super) fn banner(s: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
         }
         entry = match limits_notice(&account.limits) {
             Some(notice) => entry.child(text(notice).font(theme::TEXT_XS).color(muted).wrap()),
-            None => entry.child(limit_windows(cx, t, account, i, now)),
+            None => entry.child(limit_windows(s, cx, t, account, i, now)),
         };
         if let Some(url) = text_of(&account.limits["externalUsage"]["url"]) {
             entry = entry.child(

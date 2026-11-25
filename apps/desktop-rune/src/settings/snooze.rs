@@ -317,7 +317,7 @@ fn amount_field(s: &App, t: &T, index: usize) -> El {
         .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
         .clip_rounded(theme::layout::CONTROL_RADIUS)
         .child(step(-1, &icons::MINUS, "Decrease"))
-        .child(controls::input(s, t, &key, 58.0, "", false).h(26.0).border(0.0, t.c.input).fill(rune::Color::TRANSPARENT).grow(1.0))
+        .child(controls::input(s, t, &key, 58.0, "", false).label("Amount").h(26.0).border(0.0, t.c.input).fill(rune::Color::TRANSPARENT).grow(1.0))
         .child(step(1, &icons::PLUS, "Increase"))
 }
 
