@@ -199,7 +199,7 @@ fn request(app: &mut App, targets: &[(String, String)], single_label: Option<&st
 fn manual_command(target: &str, installation: &Value) -> (String, bool) {
     let kind = s(installation, "kind");
     if kind == "npm-global" {
-        let prefix = s(installation, "prefix").replace(''', "'\\''");
+        let prefix = s(installation, "prefix").replace('\'', "'\\''");
         return (format!("npm install --global --prefix '{prefix}' t3@{target}"), true);
     }
     let runner = match kind {

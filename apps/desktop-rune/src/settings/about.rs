@@ -419,11 +419,11 @@ pub fn view(s: &App, t: &T) -> El {
             controls = controls.child(kit::Button::new(stage.label()).size("sm").variant("outline").disabled(true).build(t));
             format!("Version {version} · Updating to {target}")
         }
-        Status::Failed { target, message, .. } if !update::dismissed(s) => {
+        Status::Failed { target, message, .. } if !update::dismissed(s, &s.ui.env.active) => {
             let retry = target.clone();
             controls = controls
                 .child(c::button("Retry", t).disabled(!can_update).on_press(move |s: &mut App| update::start(s, &retry)))
-                .child(c::button("Dismiss", t).on_press(update::dismiss));
+                .child(c::button("Dismiss", t).on_press(|s: &mut App| update::dismiss(s, &s.ui.env.active.clone())));
             message.clone()
         }
         _ => {
