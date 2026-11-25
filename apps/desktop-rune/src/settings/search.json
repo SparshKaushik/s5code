@@ -1035,6 +1035,49 @@
   "terms": []
  },
  {
+  "id": "t3-connect",
+  "title": "T3 Connect",
+  "to": "access",
+  "target": "T3 Connect",
+  "terms": [
+   "managed tunnel cloud other devices remote tunnels limit t3 chat"
+  ]
+ },
+ {
+  "id": "hold-webhooks-while-offline",
+  "title": "Hold webhooks while offline",
+  "to": "access",
+  "target": "Hold webhooks while offline",
+  "terms": [
+   "webhook automations offline queue mailbox t3 connect"
+  ]
+ },
+ {
+  "id": "publish-agent-activity",
+  "title": "Publish agent activity",
+  "to": "access",
+  "target": "Publish agent activity",
+  "terms": [
+   "mobile push notifications live activities cloud tunnel"
+  ]
+ },
+ {
+  "id": "secret-providers",
+  "title": "Secret providers",
+  "to": "secrets",
+  "terms": [
+   "1password vault credentials api key"
+  ]
+ },
+ {
+  "id": "secret-providers-add",
+  "title": "Add secret provider",
+  "to": "secrets",
+  "terms": [
+   "new 1password vault op cli account"
+  ]
+ },
+ {
   "id": "archive",
   "title": "Archived threads",
   "to": "archived",

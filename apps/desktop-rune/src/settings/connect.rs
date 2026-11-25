@@ -160,6 +160,20 @@ fn signed_in(s: &App) -> bool {
     s.ui.cloud.identity.is_some()
 }
 
+/// Whether this machine's managed tunnel is on, once its link state is read.
+pub fn tunnel_on(s: &App) -> bool {
+    s.ui.settings.connect.state.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(managed_active)
+}
+
+/// Web `usePrimaryCloudLinkState().data.holdWebhooksWhileOffline`, once this machine's link state
+/// is read.
+pub fn holds_webhooks(s: &App) -> Option<bool> {
+    if s.ui.env.active != crate::env::LOCAL {
+        return None;
+    }
+    s.ui.settings.connect.state.as_ref()?.as_ref().ok().map(|state| state["holdWebhooksWhileOffline"] == true)
+}
+
 /// Reads the link state while the rows show; signed out there is nothing to read.
 fn refresh(s: &mut App) {
     if s.ui.settings.connect.read.is_some() {
@@ -427,14 +441,16 @@ fn fail(s: &mut App, failure: Failure) {
 
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
-    let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
+    let access = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
+    // Scheduled tasks say how T3 Connect delivers webhooks (web `WebhookDeliveryMode`).
+    let showing = access || matches!(&s.route, crate::Route::Settings(p) if p == "scheduled-tasks");
     let ready = showing && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read");
     let due = s.ui.settings.connect.next_read.is_some_and(|at| Instant::now() >= at);
     if ready && (s.ui.settings.connect.state.is_none() || due) {
         s.ui.settings.connect.next_read = None;
         refresh(s);
     }
-    if ready && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
+    if ready && access && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
         read_usage(s);
     }
     let usage = s.ui.settings.connect.usage_read.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
@@ -635,8 +651,8 @@ fn meter(usage: Usage, alert: bool, t: &T) -> El {
 
 pub(crate) const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
 
-/// Web `TunnelLimitAlert`. Rune has no account page, so linking T3 Chat or managing tunnels
-/// offers no button; an upgrade opens the T3 Chat subscription.
+/// Web `TunnelLimitAlert`: link T3 Chat, upgrade the plan, or manage the account's tunnels under
+/// Settings → Environments' registered environments.
 fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
     let description = match upgrade {
         Some("link") => "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
@@ -660,9 +676,12 @@ fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
                 .child(text("You\u{2019}re out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground))
                 .child(text(description).font(theme::TEXT_XS).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
         );
-    if matches!(upgrade, Some("pro" | "premier")) {
-        alert = alert.child(kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)).build(t));
-    }
+    let action = match upgrade {
+        Some("link") => kit::Button::new("Link T3 Chat").size("sm").on_press(crate::cloud::account::link_t3chat),
+        Some("pro" | "premier") => kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)),
+        _ => kit::Button::new("Manage tunnels").variant("outline").size("sm").on_press(|s: &mut App| s.navigate(crate::Route::Settings("connections".into()))),
+    };
+    alert = alert.child(action.build(t));
     alert.mt(6.0)
 }
 
@@ -706,6 +725,13 @@ pub fn scene(s: &mut App, state: Value) {
     crate::cloud::scene_signed_in(s);
     s.ui.settings.connect.state = Some(Ok(state));
     s.ui.settings.connect.usage = Some(Usage { used: 2, limit: 3, upgrade: Some("link") });
+}
+
+/// Scenes: the relay refused a tunnel at a cap linking T3 Chat would raise.
+pub fn scene_limit(s: &mut App) {
+    let ui = &mut s.ui.settings.connect;
+    (ui.tunnel_limit, ui.used_at_refusal) = (Some(3), Some(3));
+    ui.usage = Some(Usage { used: 3, limit: 3, upgrade: Some("link") });
 }
 
 /// Scenes: signed out, with the sign-in prompt open.

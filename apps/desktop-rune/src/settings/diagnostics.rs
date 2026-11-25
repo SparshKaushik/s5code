@@ -1030,7 +1030,9 @@ pub(super) fn table(t: &T, min_w: f32, pad: f32, top: bool, fixed: bool, columns
         cell(c, text(c.header.to_uppercase()).font(label_font()).color(t.c.muted_foreground.alpha_mul(0.7)).truncate(), 10.0)
     }));
     let rule = || el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.5));
-    let mut body = col().w_full().min_w(min_w).child(header).child(rule());
+    // Web `thead sticky top-0 bg-card border-b`: the column names stay while the rows scroll.
+    let header = col().w_full().sticky_top(0.0).fill(t.c.card).child(header).child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6)));
+    let mut body = col().w_full().min_w(min_w).child(header);
     let py = if top { 12.0 } else { 8.0 };
     for (i, cells) in rows.into_iter().enumerate() {
         if i > 0 {
