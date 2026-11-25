@@ -1580,6 +1580,32 @@ pub(crate) fn scene_setup_terminal(s: &mut App) {
     ui.terminal = Some(Setup { env, driver: "claudeAgent", instance: "claudeAgent".into(), id, cwd: "/home/me".into(), command, back: None });
 }
 
+/// Headless scene: the Agents step with Codex set up through ChatGPT, `signed-out`, `waiting`
+/// on the browser, `signed-in` or `failed`.
+pub(crate) fn scene_codex(s: &mut App, state: &str) {
+    crate::scene_clock(s);
+    let env = s.ui.env.active.clone();
+    if let crate::data::Source::Fixture(st) = &mut s.src {
+        let config = st.config.get_or_insert_with(|| json!({}));
+        let mut providers = config["providers"].as_array().cloned().unwrap_or_default();
+        providers.retain(|p| data::s(p, "driver") != "codex");
+        let auth = if state == "signed-in" { json!({"status": "authenticated", "email": "ada@example.com"}) } else { json!({"status": "unauthenticated"}) };
+        providers.insert(0, json!({"instanceId": "codex", "driver": "codex", "displayName": "Codex", "enabled": true, "installed": true, "status": "ready", "auth": auth, "setup": {"canAuthenticate": true, "canInstall": true}}));
+        config["providers"] = json!(providers);
+        config["settings"]["providerInstances"]["codex"] = json!({"driver": "codex", "enabled": true, "config": {"enabled": true, "setupMode": "managed"}});
+    }
+    let auth = match state {
+        "waiting" => json!({"phase": "waiting", "flowId": "flow-1", "interaction": {"type": "browser", "url": "https://auth.openai.com/authorize?client_id=scene"}, "methods": []}),
+        "failed" => json!({"phase": "failed", "flowId": "flow-1", "message": "ChatGPT sign-in timed out. Try again.", "methods": []}),
+        _ => json!({"phase": "idle", "flowId": null, "methods": []}),
+    };
+    crate::settings::providers::codex::scene(s, auth, json!({"phase": "idle", "installedVersion": "0.9.0", "source": "managed"}));
+    let ui = &mut s.ui.wizard;
+    ui.setup = vec![env];
+    ui.step = Step::Agents;
+    ui.open = true;
+}
+
 /// Headless scene: the Agents step with "Connect another ChatGPT account" pressed.
 pub(crate) fn scene_chatgpt(s: &mut App) {
     let env = s.ui.env.active.clone();

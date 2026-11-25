@@ -29,6 +29,8 @@ pub struct Ui {
     /// The attempt whose finished profile was sent to the environment.
     imported: Option<String>,
     transfer_failed: bool,
+    /// Scenes: the sign-in and install states a fixture computer, which watches nothing, shows.
+    scene: Option<(Value, Value)>,
 }
 
 #[derive(Clone)]
@@ -619,7 +621,10 @@ pub fn choose_existing(env: &str, id: &str) -> impl Fn(&mut App) + 'static {
 pub fn welcome(s: &App, t: &T, env: &str, id: &str, p: Option<&Value>, read_only: bool) -> Welcome {
     let p = p.unwrap_or(&Value::Null);
     let net = crate::env::source(s, env).and_then(|source| source.net_ref());
-    let watched = |method: &str| net.and_then(|n| n.resource(method, json!({"instanceId": id})));
+    let scene = s.ui.settings.providers_ui.codex.scene.as_ref();
+    let watched = |method: &str| {
+        net.and_then(|n| n.resource(method, json!({"instanceId": id}))).or_else(|| scene.map(|(auth, install)| if method == WATCHED[0] { auth } else { install }))
+    };
     let muted = |label: &str| text(label.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap();
     if p["setup"]["canAuthenticate"] != true {
         return Welcome {
@@ -741,6 +746,11 @@ pub fn welcome(s: &App, t: &T, env: &str, id: &str, p: Option<&Value>, read_only
         footer.push(text(error).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert"));
     }
     Welcome { description, control: Some(control), secondary, footer }
+}
+
+/// Scenes: the managed instance's sign-in (`auth`) and install states.
+pub(crate) fn scene(s: &mut App, auth: Value, install: Value) {
+    s.ui.settings.providers_ui.codex.scene = Some((auth, install));
 }
 
 pub fn escape(s: &mut App) -> bool {
