@@ -1906,6 +1906,23 @@ pub fn tree_fixture(app: &mut App) {
     app.ui.panel.diff.state.set_all_collapsed(false);
 }
 
+/// Three files of forty changed lines each, expanded, so a scroll pins a file's header.
+pub fn long_fixture(app: &mut App) {
+    let mut diff = String::new();
+    for name in ["src/alpha.ts", "src/beta.ts", "src/gamma.ts"] {
+        diff += &format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1,40 +1,40 @@\n");
+        for n in 1..=40 {
+            diff += &format!("-export const value{n} = {n};\n+export const value{n} = {};\n", n * 2);
+        }
+    }
+    let ui = &mut app.ui.panel.diff;
+    ui.files = rune_kit::diff::parse(&diff);
+    ui.touched = true;
+    ui.shown = Some(ui.scope.clone());
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+}
+
 /// The tree fixture with a binary image, a partial file, a sent review comment and an open
 /// draft, for headless scenes.
 pub fn review_fixture(app: &mut App) {
