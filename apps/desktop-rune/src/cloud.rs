@@ -349,7 +349,7 @@ pub fn auth(environment: &str) -> s5_net::Auth {
 }
 
 /// Whether this device is signed in to T3 Connect: the gate for account features on
-/// environment rows. Stable for other modules; [`session_jwt`] is what they send.
+/// environment rows. Stable for other modules; [`account_token`] is what they send.
 pub(crate) fn signed_in(s: &App) -> bool {
     s.ui.cloud.identity.is_some()
 }
