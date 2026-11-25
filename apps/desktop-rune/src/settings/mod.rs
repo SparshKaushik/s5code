@@ -23,7 +23,7 @@ mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
-mod connect;
+pub(crate) mod connect;
 mod font_picker;
 mod keybindings;
 pub(crate) use keybindings::unshift;

@@ -533,15 +533,23 @@ pub fn api_socket(
     url.set_path(path);
     url.set_query(Some(query).filter(|q| !q.is_empty()));
     url.set_fragment(None);
-    // The server checks an upgrade's proof against the request as HTTP.
-    url.set_scheme(http).map_err(|_| "invalid server URL")?;
-    let (headers, _) = auth.headers("GET", url.as_str(), None)?;
-    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
-    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
-    for (name, value) in headers {
-        req.headers_mut().insert(name, value.parse().map_err(|_| "invalid authorization header")?);
-    }
-    let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+    // As `auth::send`: a refused DPoP token is renewed and the upgrade tried once more.
+    let mut rejected: Option<String> = None;
+    let mut socket = loop {
+        // The server checks an upgrade's proof against the request as HTTP.
+        url.set_scheme(http).map_err(|_| "invalid server URL")?;
+        let (headers, token) = auth.headers("GET", url.as_str(), rejected.as_deref())?;
+        url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
+        let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
+        for (name, value) in headers {
+            req.headers_mut().insert(name, value.parse().map_err(|_| "invalid authorization header")?);
+        }
+        match tungstenite::connect(req) {
+            Ok((socket, _)) => break socket,
+            Err(tungstenite::Error::Http(response)) if response.status() == 401 && token.is_some() && rejected.is_none() => rejected = token,
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     let tcp = match socket.get_mut() {
         MaybeTlsStream::Plain(tcp) => tcp,
         MaybeTlsStream::Rustls(tls) => &mut tls.sock,

@@ -213,6 +213,12 @@ mod tests {
         let (base, server) = serve(&[401]);
         assert!(crate::api_get(&base, &Auth::Bearer("b".into()), "/api/assets/a.png", "", 1 << 10).is_err());
         assert_eq!(server.join().unwrap().len(), 1, "a bearer is not retried");
+
+        let (base, server) = serve(&[401, 401]);
+        assert!(crate::api_socket(&base, &Auth::Dpop(fake()), "/api/ws", "", Duration::from_secs(1)).is_err());
+        let heads = server.join().unwrap();
+        assert!(heads[0].contains("authorization: dpop tok-1") && heads[0].contains("upgrade: websocket"));
+        assert!(heads[1].contains("authorization: dpop tok-2"), "a refused socket upgrade retries with a renewed token: {}", heads[1]);
     }
 
     #[test]
