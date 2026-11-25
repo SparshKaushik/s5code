@@ -71,8 +71,8 @@ fn fetches(segments: &[Segment]) -> Vec<Option<String>> {
         .collect()
 }
 
-/// Scenes: the description's media drawn as loaded test pictures, and its videos as failed
-/// (the sandbox, like every platform but macOS, can't play them). `open` opens the first picture.
+/// Scenes: the description's media drawn as loaded test pictures, and its videos as a clip made
+/// on the spot. `open` opens the first picture.
 pub(super) fn scene(s: &mut App, open: bool) {
     let body = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "body").to_owned()).unwrap_or_default();
     let segments = segments(&body);
@@ -82,7 +82,7 @@ pub(super) fn scene(s: &mut App, open: bool) {
     for (seg, fetch) in segments.iter().zip(fetches(&segments)) {
         let Segment::Attachment { url, name, video } = seg else { continue };
         let key = media::linked_key(url, host(env.as_deref(), cwd.as_deref(), fetch.as_deref()).as_ref());
-        media::scene_linked(s, &key, name, if *video { Kind::Video } else { Kind::Image }, *video);
+        media::scene_linked(s, &key, name, if *video { Kind::Video } else { Kind::Image }, false);
         if !*video {
             gallery.push(key);
         }

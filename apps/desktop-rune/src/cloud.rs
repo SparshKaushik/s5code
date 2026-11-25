@@ -101,6 +101,7 @@ pub enum Event {
     Status(String, Result<Status, Failure>),
     Devices(Result<Vec<relay::Device>, Failure>),
     Deregistered(Linked, Result<(), Failure>),
+    T3ChatLink(Result<String, Failure>),
     SignedOut,
 }
 
@@ -569,6 +570,7 @@ fn land(s: &mut App, event: Event) {
         }
         Event::Devices(result) => account::devices_landed(s, result),
         Event::Deregistered(linked, result) => account::deregistered(s, linked, result),
+        Event::T3ChatLink(result) => account::t3chat_link_landed(s, result),
     }
 }
 
