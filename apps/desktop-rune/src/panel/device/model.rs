@@ -873,9 +873,9 @@ impl Pose {
     }
 
     /// `nearestDeviceView` over the one rest view.
-    pub fn settle(&mut self) {
+    pub fn settled(&self) -> Pose {
         let yaw = self.yaw.sin().atan2(self.yaw.cos());
-        *self = Pose { yaw: yaw.clamp(-YAW_LIMIT, YAW_LIMIT), pitch: 0. };
+        Pose { yaw: yaw.clamp(-YAW_LIMIT, YAW_LIMIT), pitch: 0. }
     }
 
     /// The root's rotation (pitch about x, then yaw about y) and the orientation group's turn.
@@ -887,6 +887,54 @@ impl Pose {
         let yaw: Mat4 = [cy, 0., -sy, 0., 0., 1., 0., 0., sy, 0., cy, 0., 0., 0., 0., 1.];
         let turn: Mat4 = [cz, sz, 0., 0., -sz, cz, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
         mul(&mul(&pitch, &yaw), &turn)
+    }
+}
+
+const SPRING_TICK: f32 = 1. / 120.;
+
+/// `deviceMotion`'s release spring: response 0.5 s and damping 0.78 in fixed 120 Hz ticks for
+/// at most two seconds, so a let-go phone comes to rest alike at any refresh rate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    target: Pose,
+    velocity: [f32; 2],
+    ticks: u32,
+    carry: f32,
+}
+
+impl Spring {
+    /// A spring from `pose` to `target`, the short way round.
+    pub fn toward(pose: &Pose, target: Pose) -> Spring {
+        let turn = target.yaw - pose.yaw;
+        let yaw = pose.yaw + turn.sin().atan2(turn.cos());
+        Spring { target: Pose { yaw, pitch: target.pitch }, velocity: [0.; 2], ticks: 0, carry: 0. }
+    }
+
+    /// Moves `pose` on by `seconds`; false once it rests at the target.
+    pub fn advance(&mut self, pose: &mut Pose, seconds: f32) -> bool {
+        let frequency = std::f32::consts::TAU / 0.5;
+        let decay = frequency * 0.78;
+        self.carry += seconds.max(0.);
+        while self.carry >= SPRING_TICK && self.ticks < 240 {
+            self.carry -= SPRING_TICK;
+            self.ticks += 1;
+            let error = [self.target.yaw - pose.yaw, self.target.pitch - pose.pitch];
+            for (v, e) in self.velocity.iter_mut().zip(error) {
+                *v += (e * frequency * frequency - 2. * decay * *v) * SPRING_TICK;
+            }
+            let speed = self.velocity[0].hypot(self.velocity[1]);
+            if speed > 9. {
+                self.velocity = self.velocity.map(|v| v * 9. / speed);
+            }
+            pose.yaw += self.velocity[0] * SPRING_TICK;
+            pose.pitch += self.velocity[1] * SPRING_TICK;
+        }
+        let error = (self.target.yaw - pose.yaw).hypot(self.target.pitch - pose.pitch);
+        let rest = self.ticks >= 240 || (error < 0.0005 && self.velocity[0].hypot(self.velocity[1]) < 0.005);
+        if rest {
+            *pose = self.target;
+        }
+        !rest
     }
 }
 
@@ -1047,8 +1095,15 @@ mod tests {
         assert!(x < 0.5 && (y - 0.5).abs() < 0.01, "{x} {y}");
         let mut pose = Pose::default();
         pose.orbit(400., 100.);
-        pose.settle();
-        assert_eq!(pose, Pose { yaw: YAW_LIMIT, pitch: 0. }, "a released phone stands up within the yaw limit");
+        let mut spring = Spring::toward(&pose, pose.settled());
+        assert!(spring.advance(&mut pose, 1. / 60.), "a released phone springs back over frames");
+        assert!(pose.yaw > YAW_LIMIT && pose.pitch < 0.6, "{pose:?}");
+        assert!(!spring.advance(&mut pose, 3.), "and comes to rest");
+        assert_eq!(pose, Pose { yaw: YAW_LIMIT, pitch: 0. }, "upright within the yaw limit");
+        let mut turned = Pose { yaw: 2. * std::f32::consts::TAU + 0.1, pitch: 0. };
+        let mut spring = Spring::toward(&turned, Pose::default());
+        while spring.advance(&mut turned, 0.1) {}
+        assert!((turned.yaw - 2. * std::f32::consts::TAU).abs() < 1e-3, "it turns back the short way: {turned:?}");
     }
 
     #[test]

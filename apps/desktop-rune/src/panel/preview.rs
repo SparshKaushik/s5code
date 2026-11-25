@@ -3166,7 +3166,7 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
     };
     let preset = d.preset.map_or("Responsive", |i| PRESETS[i].0);
     let locked = d.lock.is_some();
-    let mut bar = row().w_full().h(DEVICE_TOOLBAR_H - 1.).px(6.).gap(2.).center_y();
+    let mut bar = row().h_full().pl(6.).pr(2.).gap(2.).center_y();
     if width >= 560. {
         bar = bar.child(text("Dimensions").font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground).mr(2.));
     }
@@ -3206,10 +3206,16 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
         // As web, a rotated preset stays selected and a locked ratio turns with it.
         let preset = device(s, tab).preset;
         set_device(s, tab, h, w, preset);
-    }).build(t))
-    .child(el().grow(1.))
-    .child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
-    col().w_full().fill(t.c.background.alpha_mul(0.95)).child(bar).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
+    }).build(t));
+    // As web's `sticky right-0`: a narrow panel scrolls the controls sideways under a close
+    // button that stays put.
+    let close = row().h_full().pr(6.).center_y().child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
+    let strip = row()
+        .w_full()
+        .h(DEVICE_TOOLBAR_H - 1.)
+        .child(el().key(format!("browser-device-toolbar-{tab}")).grow(1.).min_w(0.).h_full().scroll_x().scroll_edge_fade(16.).child(bar))
+        .child(close);
+    col().w_full().fill(t.c.background.alpha_mul(0.95)).child(strip).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
 }
 
 /// Floats the tab over the chat and closes the panel, or puts it back.

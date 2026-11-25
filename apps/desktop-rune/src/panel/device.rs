@@ -112,6 +112,10 @@ struct Stream {
     /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
     flat: bool,
     pose: model::Pose,
+    /// The phone springing back to rest after a turn, and the frame it last moved at.
+    spring: Option<(model::Spring, Instant)>,
+    /// When a wheel turn that sent no end of its gesture counts as let go (web's 1.2 s).
+    wheel_until: Option<Instant>,
     /// A pointer on the 3D view: touching the screen at its last point, or turning the phone.
     grab: Option<Grab>,
     /// The phone the 3D view draws (the device's model, else the procedural phone) and what it was made for.
@@ -339,6 +343,8 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         stand_vertical: None,
         flat: false,
         pose: model::Pose::default(),
+        spring: None,
+        wheel_until: None,
         grab: None,
         phone: None,
     };
@@ -398,6 +404,8 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         stand_vertical: None,
         flat: false,
         pose: model::Pose::default(),
+        spring: None,
+        wheel_until: None,
         grab: None,
         phone: None,
     }
@@ -498,6 +506,8 @@ static TENT: rune::Icon = rune::Icon { name: "stance-tent", view: 22.0, body: "<
 const FOLD_PATH: &str = "/api/device-hub/vendor/serve-emu/api/fold";
 const FOLD_TIMEOUT: Duration = Duration::from_secs(12);
 const FOLD_RETRY: Duration = Duration::from_secs(3);
+/// Web `bindPhoneTrackpad`'s wait before a wheel turn without an end counts as let go.
+const WHEEL_IDLE: Duration = Duration::from_millis(1200);
 
 /// Web's `AndroidFoldState`: serve-emu's readout of an emulated foldable.
 #[derive(Clone, Debug, PartialEq)]
@@ -743,7 +753,7 @@ fn scene_3d(app: &App) -> Option<viewport::Scene> {
 
 /// Web `createPhoneInteraction` on the 3D view of `size` points: a press on the screen touches
 /// it, anywhere else turns the phone, which stands back up when let go.
-fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32)) {
+fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
     let Some(scene) = scene_3d(s) else { return };
     let camera = model::camera(&scene.model, &scene.world, size.0 / size.1);
     let (x, y) = (d.x / size.0, d.y / size.1);
@@ -757,7 +767,10 @@ fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32)) {
                 }
                 Some(Grab::Touch(f64::from(u), f64::from(v)))
             }
-            None => Some(Grab::Orbit(d.x, d.y)),
+            None => {
+                (stream.spring, stream.wheel_until) = (None, None);
+                Some(Grab::Orbit(d.x, d.y))
+            }
         },
         (Some(Grab::Touch(u, v)), _) => {
             let (u, v) = model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
@@ -774,7 +787,8 @@ fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32)) {
     };
     stream.grab = if ended {
         if matches!(grab, Some(Grab::Orbit(..))) {
-            stream.pose.settle();
+            let rest = stream.pose.settled();
+            spring_to(stream, rest, tx);
         }
         None
     } else {
@@ -782,10 +796,64 @@ fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32)) {
     };
 }
 
-/// Web's `resetView`: the phone upright and facing the camera, and the device back in portrait.
+fn spring_to(stream: &mut Stream, target: model::Pose, tx: &mut Tx) {
+    stream.wheel_until = None;
+    stream.spring = Some((model::Spring::toward(&stream.pose, target), Instant::now()));
+    tx.wake_after(Duration::ZERO);
+}
+
+/// Web `phoneWheelNavigation` on the 3D view of `size` points: a scroll turns the phone (a
+/// pinch, the Duo's, does nothing here), which springs back when the gesture ends.
+fn wheel_3d(s: &mut App, e: rune::WheelEvent, size: (f32, f32), tx: &mut Tx) -> bool {
+    let Some(stream) = s.ui.panel.device.stream.as_mut() else { return false };
+    // Turning during a touch would move the point it holds on the screen.
+    if stream.grab.is_some() || e.mods.ctrl || e.mods.cmd {
+        return true;
+    }
+    if e.momentum || matches!(e.phase, rune::GesturePhase::Ended) {
+        if stream.wheel_until.is_some() {
+            let rest = stream.pose.settled();
+            spring_to(stream, rest, tx);
+        }
+        return true;
+    }
+    if e.dx == 0. && e.dy == 0. {
+        return true;
+    }
+    stream.spring = None;
+    stream.pose.orbit(e.dx.clamp(-size.0 / 4., size.0 / 4.), e.dy.clamp(-size.1 / 4., size.1 / 4.));
+    stream.wheel_until = Some(Instant::now() + WHEEL_IDLE);
+    tx.wake_after(WHEEL_IDLE);
+    true
+}
+
+/// Steps the phone's spring and lets go of an idle wheel turn, asking for frames only while it moves.
+fn step_3d(stream: &mut Stream, tx: &mut Tx) -> bool {
+    let now = Instant::now();
+    match stream.wheel_until {
+        Some(until) if now >= until => {
+            stream.wheel_until = None;
+            stream.spring = Some((model::Spring::toward(&stream.pose, stream.pose.settled()), now));
+        }
+        Some(until) => tx.wake_after(until - now),
+        None => {}
+    }
+    let Some((spring, at)) = stream.spring.as_mut() else { return false };
+    let moving = spring.advance(&mut stream.pose, now.duration_since(*at).as_secs_f32());
+    *at = now;
+    if moving {
+        tx.wake_after(Duration::ZERO);
+    } else {
+        stream.spring = None;
+    }
+    true
+}
+
+/// Web's `resetView`: the phone springs upright and facing the camera, and the device goes back to portrait.
 fn restore_3d(app: &mut App) {
     let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
-    stream.pose = model::Pose::default();
+    stream.spring = Some((model::Spring::toward(&stream.pose, model::Pose::default()), Instant::now()));
+    stream.wheel_until = None;
     stream.grab = None;
     if let Some(input) = &stream.input
         && screen_state(stream).is_some_and(|s| s.orientation != "portrait")
@@ -969,6 +1037,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
         feeds += state.rev;
     }
+    changed |= step_3d(stream, tx);
     if feeds != stream.feeds_seen {
         stream.feeds_seen = feeds;
         changed = true;
@@ -1130,7 +1199,8 @@ fn screen(stream: &Stream, three: bool, stage: Option<(f32, f32)>, name: &str, t
             .effect(viewport::MARK)
             .key("device-3d")
             .focusable(true)
-            .on_drag(move |s: &mut App, d, _| grab_3d(s, d, (w, h)))
+            .on_drag(move |s: &mut App, d, tx| grab_3d(s, d, (w, h), tx))
+            .on_wheel(move |s: &mut App, e, tx| wheel_3d(s, e, (w, h), tx))
             .on_key(|s: &mut App, e, tx| {
                 if matches!(e.key, Key::Escape) && e.mods.shift {
                     tx.blur();
