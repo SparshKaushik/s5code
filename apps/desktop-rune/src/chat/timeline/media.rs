@@ -525,8 +525,15 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             None => entry.failed = true,
         }
     }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let assets = &app.ui.chat.timeline.assets;
+        for player in assets.media.entries.values().filter_map(|e| e.loaded.as_ref()).chain(assets.ready.values()).filter_map(|l| l.soft.as_ref()) {
+            player.sync();
+        }
+    }
     let state = &mut app.ui.chat.timeline.assets.media;
-    let errors = state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
+    let errors =state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
     let copied = state.copied.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
     for (title, description) in errors {
         crate::shell::palette::toast_error(app, &title, Some(&description));

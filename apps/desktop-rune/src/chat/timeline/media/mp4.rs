@@ -1,5 +1,5 @@
 //! Just enough ISO BMFF (MP4, and QuickTime's .mov) to play an H.264 track: its parameter sets,
-//! and where each sample sits and when it shows. Fragmented files (`moof`) aren't read.
+//! and where each sample sits and when it shows, from the sample table and any movie fragments.
 
 use crate::panel::device::h264::{self, Params};
 
@@ -46,8 +46,8 @@ fn u16_at(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(d.get(at..at.checked_add(2)?)?.try_into().ok()?))
 }
 
-/// The boxes laid end to end in `data`: each one's type and body.
-fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+/// The boxes laid end to end in `data`: each one's type, where it starts, and its body.
+fn boxes(data: &[u8]) -> Vec<([u8; 4], usize, &[u8])> {
     let mut out = Vec::new();
     let mut at = 0usize;
     while let (Some(size), Some(kind)) = (u32_at(data, at), data.get(at + 4..at + 8)) {
@@ -61,10 +61,14 @@ fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
         };
         let Some(end) = usize::try_from(size).ok().filter(|s| *s >= header).and_then(|s| at.checked_add(s)).filter(|e| *e <= data.len()) else { break };
         let Ok(kind) = <[u8; 4]>::try_from(kind) else { break };
-        out.push((kind, &data[at + header..end]));
+        out.push((kind, at, &data[at + header..end]));
         at = end;
     }
     out
+}
+
+fn children(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    boxes(data).into_iter().map(|(kind, _, body)| (kind, body)).collect()
 }
 
 fn child<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
@@ -89,18 +93,21 @@ fn rows(body: &[u8], width: usize) -> Option<(&[u8], usize)> {
 /// The first H.264 video track of an MP4 or QuickTime file.
 pub fn parse(file: &[u8]) -> Result<Track, String> {
     let moov = child(file, b"moov").ok_or(UNSUPPORTED)?;
-    if child(moov, b"mvex").is_some() {
-        return Err(UNSUPPORTED.into());
-    }
     children(moov)
         .into_iter()
         .filter(|(kind, _)| kind == b"trak")
-        .find_map(|(_, trak)| track(file, trak))
+        .find_map(|(_, trak)| track(file, moov, trak))
         .ok_or_else(|| UNSUPPORTED.to_owned())?
 }
 
+/// Whether the file has a sound track, which Rune's audio player then reads.
+pub fn has_sound(file: &[u8]) -> bool {
+    let handler = |trak: &[u8]| Some(child(child(trak, b"mdia")?, b"hdlr")?.get(8..12)? == b"soun");
+    child(file, b"moov").is_some_and(|moov| children(moov).into_iter().any(|(kind, trak)| kind == *b"trak" && handler(trak) == Some(true)))
+}
+
 /// `None` when the track isn't H.264 video; an error when it is but can't be read.
-fn track(file: &[u8], trak: &[u8]) -> Option<Result<Track, String>> {
+fn track(file: &[u8], moov: &[u8], trak: &[u8]) -> Option<Result<Track, String>> {
     let mdia = child(trak, b"mdia")?;
     if child(mdia, b"hdlr")?.get(8..12)? != b"vide" {
         return None;
@@ -112,7 +119,24 @@ fn track(file: &[u8], trak: &[u8]) -> Option<Result<Track, String>> {
     }
     // A VisualSampleEntry's fields take 78 bytes before its child boxes.
     let (params, length_size) = h264::avcc_record(child(entry.get(78..)?, b"avcC")?)?;
-    Some(samples(file, stbl).map(|samples| Track { params, length_size, timescale: timescale(mdia).unwrap_or(1000), samples }).ok_or_else(|| "The video's sample table is damaged.".to_owned()))
+    let samples = || {
+        let (mut samples, end) = table(stbl)?;
+        if let Some(mvex) = child(moov, b"mvex") {
+            fragments(file, mvex, track_id(trak)?, end, &mut samples)?;
+        }
+        if samples.iter().any(|s| s.offset.checked_add(s.size).is_none_or(|end| end > file.len())) {
+            return None;
+        }
+        let first = samples.iter().map(|s| s.pts).min().unwrap_or(0);
+        samples.iter_mut().for_each(|s| s.pts -= first);
+        Some(samples)
+    };
+    Some(samples().map(|samples| Track { params, length_size, timescale: timescale(mdia).unwrap_or(1000), samples }).ok_or_else(|| "The video's sample table is damaged.".to_owned()))
+}
+
+fn track_id(trak: &[u8]) -> Option<u32> {
+    let tkhd = child(trak, b"tkhd")?;
+    u32_at(tkhd, if tkhd.first()? == &1 { 20 } else { 12 })
 }
 
 fn timescale(mdia: &[u8]) -> Option<u32> {
@@ -121,8 +145,9 @@ fn timescale(mdia: &[u8]) -> Option<u32> {
     u32_at(mdhd, at).filter(|t| *t > 0)
 }
 
-/// Each sample's place in the file and its presentation time, from the sample table.
-fn samples(file: &[u8], stbl: &[u8]) -> Option<Vec<Sample>> {
+/// Each sample's place in the file and its presentation time, from the sample table, and the
+/// decode time after its last sample.
+fn table(stbl: &[u8]) -> Option<(Vec<Sample>, i64)> {
     let stsz = full(child(stbl, b"stsz")?)?;
     let (fixed, count) = (u32_at(stsz, 0)?, u32_at(stsz, 4)? as usize);
     if count > MAX_SAMPLES || (fixed == 0 && stsz.len() < 8 + count * 4) {
@@ -155,7 +180,7 @@ fn samples(file: &[u8], stbl: &[u8]) -> Option<Vec<Sample>> {
             }
         }
     }
-    if offsets.len() != count || offsets.iter().any(|(at, s)| at.checked_add(*s).is_none_or(|end| end > file.len())) {
+    if offsets.len() != count {
         return None;
     }
 
@@ -182,8 +207,68 @@ fn samples(file: &[u8], stbl: &[u8]) -> Option<Vec<Sample>> {
             at += k;
         }
     }
-    let first = (0..count).map(|i| dts[i] + shift[i]).min().unwrap_or(0);
-    Some(offsets.into_iter().enumerate().map(|(i, (offset, size))| Sample { offset, size, pts: dts[i] + shift[i] - first }).collect())
+    Some((offsets.into_iter().enumerate().map(|(i, (offset, size))| Sample { offset, size, pts: dts[i] + shift[i] }).collect(), t))
+}
+
+/// Appends track `id`'s samples from each movie fragment (`moof`), decoding on from `dts`.
+fn fragments(file: &[u8], mvex: &[u8], id: u32, mut dts: i64, out: &mut Vec<Sample>) -> Option<()> {
+    // trex: the track's defaults, after its ID and sample description index.
+    let trex = children(mvex).into_iter().filter(|(k, _)| k == b"trex").filter_map(|(_, b)| full(b)).find(|b| u32_at(b, 0) == Some(id));
+    let default = |at: usize| trex.and_then(|b| u32_at(b, at)).unwrap_or(0);
+    for (_, moof_at, moof) in boxes(file).into_iter().filter(|(k, _, _)| k == b"moof") {
+        for (_, traf) in children(moof).into_iter().filter(|(k, _)| k == b"traf") {
+            let tfhd = child(traf, b"tfhd")?;
+            let (flags, tfhd) = (u32_at(tfhd, 0)? & 0xff_ffff, full(tfhd)?);
+            if u32_at(tfhd, 0)? != id {
+                continue;
+            }
+            let mut at = 4;
+            let mut field = |set: bool, width: usize| {
+                let here = at;
+                at += if set { width } else { 0 };
+                set.then_some(here)
+            };
+            let base = match field(flags & 0x1 != 0, 8) {
+                Some(here) => usize::try_from(u64_at(tfhd, here)?).ok()?,
+                None => moof_at,
+            };
+            field(flags & 0x2 != 0, 4);
+            let duration = field(flags & 0x8 != 0, 4).map_or(Some(default(8)), |here| u32_at(tfhd, here))?;
+            let size = field(flags & 0x10 != 0, 4).map_or(Some(default(12)), |here| u32_at(tfhd, here))?;
+            if let Some(tfdt) = child(traf, b"tfdt") {
+                dts = if tfdt.first()? == &1 { i64::try_from(u64_at(tfdt, 4)?).ok()? } else { i64::from(u32_at(tfdt, 4)?) };
+            }
+            let mut pos = base;
+            for (_, trun) in children(traf).into_iter().filter(|(k, _)| k == b"trun") {
+                let (flags, trun) = (u32_at(trun, 0)? & 0xff_ffff, full(trun)?);
+                let count = u32_at(trun, 0)? as usize;
+                let mut at = 4;
+                if flags & 0x1 != 0 {
+                    pos = base.checked_add_signed(u32_at(trun, at)? as i32 as isize)?;
+                    at += 4;
+                }
+                if flags & 0x4 != 0 {
+                    at += 4;
+                }
+                let width = [0x100, 0x200, 0x400, 0x800].iter().filter(|f| flags & *f != 0).count() * 4;
+                if out.len() + count > MAX_SAMPLES || trun.len() < at + count.checked_mul(width)? {
+                    return None;
+                }
+                for _ in 0..count {
+                    let mut next = |set: u32| {
+                        let v = (flags & set != 0).then(|| u32_at(trun, at));
+                        at += if flags & set != 0 { 4 } else { 0 };
+                        v.flatten()
+                    };
+                    let (d, s, _, shift) = (next(0x100).unwrap_or(duration), next(0x200).unwrap_or(size), next(0x400), next(0x800).map_or(0, |c| c as i32 as i64));
+                    out.push(Sample { offset: pos, size: s as usize, pts: dts + shift });
+                    pos = pos.checked_add(s as usize)?;
+                    dts += i64::from(d);
+                }
+            }
+        }
+    }
+    Some(())
 }
 
 /// A file holding `units`, Annex B access units of one H.264 stream, at `fps` frames a second.
@@ -242,7 +327,7 @@ pub fn write(units: &[Vec<u8>], width: u16, height: u16, fps: u32) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn unit(nals: &[&[u8]]) -> Vec<u8> {
@@ -259,13 +344,35 @@ mod tests {
         let bodies: Vec<Vec<&[u8]>> = track.samples.iter().map(|s| h264::length_nals(&file[s.offset..s.offset + s.size], 4)).collect();
         assert_eq!(bodies, vec![vec![&[0x65, 1, 2, 3][..]], vec![&[0x41, 4, 5][..]], vec![&[0x41, 6][..]]], "FAILED: parameter sets live in avcC, not the samples");
         assert_eq!(track.samples.iter().map(|s| s.pts).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(!has_sound(&file));
+    }
+
+    pub(crate) fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/fixtures/video/{name}", env!("CARGO_MANIFEST_DIR"))).expect("fixture")
+    }
+
+    #[test]
+    fn a_fragmented_clip_reads_like_its_plain_copy() {
+        // ffmpeg's libx264, High profile with two B-frames and a keyframe every 6, and AAC sound;
+        // once plain, once with `-movflags frag_keyframe+empty_moov+default_base_moof`.
+        let read = |name: &str| {
+            let file = fixture(name);
+            let track = parse(&file).unwrap_or_else(|e| panic!("FAILED: {name} parses: {e}"));
+            let samples: Vec<(Vec<u8>, i64)> = track.samples.iter().map(|s| (file[s.offset..s.offset + s.size].to_vec(), s.pts)).collect();
+            (track.timescale, track.params, has_sound(&file), samples)
+        };
+        let (plain, fragmented) = (read("high-bframes.mp4"), read("high-bframes-fragmented.mp4"));
+        let pts: Vec<i64> = plain.3.iter().map(|(_, pts)| *pts).collect();
+        assert_eq!(pts, [0, 3, 1, 2, 5, 4, 6, 9, 7, 8, 11, 10].map(|n| n * 1024), "FAILED: B-frames show before the frame decoded ahead of them");
+        assert_eq!((plain.0, plain.2), (12288, true));
+        assert!(plain == fragmented, "FAILED: the fragments hold the same samples, at the same times");
     }
 
     #[test]
     fn what_cannot_play_says_so() {
         assert_eq!(parse(b"not a video").err().as_deref(), Some(UNSUPPORTED));
-        let fragmented = [&20u32.to_be_bytes()[..], b"moov", &12u32.to_be_bytes(), b"mvex", &[0; 4]].concat();
-        assert_eq!(parse(&fragmented).err().as_deref(), Some(UNSUPPORTED));
+        let trackless = [&20u32.to_be_bytes()[..], b"moov", &12u32.to_be_bytes(), b"mvex", &[0; 4]].concat();
+        assert_eq!(parse(&trackless).err().as_deref(), Some(UNSUPPORTED));
         let units = [unit(&[&[0x67, 0x42], &[0x68, 0xce], &[0x65, 1]])];
         let mut file = write(&units, 2, 2, 30);
         // The chunk now starts at the file's end, so its sample runs past it.
