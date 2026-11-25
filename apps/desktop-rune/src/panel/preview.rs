@@ -1987,6 +1987,136 @@ pub fn scene(app: &mut App, kind: &str) -> TabId {
     tab
 }
 
+/// A two-page PDF for the `browser-pdf-chrome` scene, its text in Helvetica.
+fn scene_pdf_bytes() -> Vec<u8> {
+    let page = |lines: &[&str]| {
+        let body: String = lines.iter().enumerate().map(|(i, l)| format!("BT /F1 {} Tf 72 {} Td ({l}) Tj ET\n", if i == 0 { 28 } else { 14 }, 700 - i * 34)).collect();
+        format!("<< /Length {} >>\nstream\n{body}endstream", body.len())
+    };
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 7 0 R >> >> >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>".to_owned(),
+        page(&["Quarterly report", "Revenue grew 18% to $4.2M.", "Rendered by pdf.js in the panel's Chrome.", "Page one of two."]),
+        page(&["Appendix", "Page two of two."]),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{object}\nendobj\n", i + 1).bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for offset in offsets {
+        out.extend(format!("{offset:010} 00000 n \n").bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).bytes());
+    out
+}
+
+/// The `browser-permissions-chrome` page: what a page finds it may use.
+const SCENE_PERMISSIONS: &str = r#"<!doctype html><title>Permissions</title><style>body{font:16px system-ui,sans-serif;margin:24px;background:#fff;color:#111}td{padding:6px 14px 6px 0}</style>
+<h2>What this page may use</h2><table id="t"></table><script>
+(async () => {
+  const t = document.getElementById("t");
+  const row = (k, v) => t.insertAdjacentHTML("beforeend", "<tr><td>" + k + "</td><td><b>" + v + "</b></td></tr>");
+  for (const name of ["geolocation", "notifications", "camera", "microphone", "clipboard-write"]) {
+    try { row(name, (await navigator.permissions.query({ name })).state); } catch (e) { row(name, "error"); }
+  }
+  row("Notification.requestPermission()", await Notification.requestPermission());
+  row("getCurrentPosition()", await new Promise((r) => navigator.geolocation.getCurrentPosition(() => r("a position"), (e) => r("error " + e.code + (e.code === 1 ? " (denied)" : e.code === 2 ? " (unavailable)" : "")), { timeout: 5000 })));
+  document.title = "Permissions ready";
+})();
+</script>"#;
+
+/// The scenes' page server: a PDF at an address without `.pdf`, a page behind a sign-in, a
+/// popup opener and its popup, and a permissions probe.
+fn scene_server() -> Option<u16> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    let port = listener.local_addr().ok()?.port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request.split(' ').nth(1).unwrap_or("/");
+            let (status, headers, body) = match path {
+                "/reports/q3" => ("200 OK", "Content-Type: application/pdf\r\n", scene_pdf_bytes()),
+                "/opener" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>Popup opener</title><button style=\"position:fixed;inset:0;font:24px system-ui\" onclick=\"window.open('/popped', 'p', 'width=500,height=400')\">Open a 500x400 popup</button>".to_vec()),
+                "/popped" => ("200 OK", "Content-Type: text/html\r\n", b"<!doctype html><title>The popup</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#dbeafe;font:28px system-ui\"><p>The popup painted</p>".to_vec()),
+                "/staging" => ("401 Unauthorized", "Content-Type: text/html\r\nWWW-Authenticate: Basic realm=\"Staging\"\r\n", b"<!doctype html><title>401 Unauthorized</title><body style=\"font:16px system-ui,sans-serif;margin:24px\"><h1>401 Unauthorized</h1><p>The staging server's own page, shown once the sign-in is cancelled.</p>".to_vec()),
+                _ => ("200 OK", "Content-Type: text/html\r\n", SCENE_PERMISSIONS.as_bytes().to_vec()),
+            };
+            let head = format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
+        }
+    });
+    Some(port)
+}
+
+/// The shown tab's status once `done` holds, or after a minute.
+fn scene_wait(app: &App, tab: TabId, done: impl Fn(&Status) -> bool) -> Status {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let status = app.ui.panel.browser.browser.shared.lock().unwrap().tabs.get(&tab).cloned().unwrap_or_default();
+        if done(&status) || std::time::Instant::now() > deadline {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Scenes with Chrome (`S5_CHROME`): a real tab loads `path` from `scene_server` and waits for
+/// `title`, since a headless run's clock does not wait on Chrome.
+pub fn scene_page(app: &mut App, path: &str, title: &str) -> Option<TabId> {
+    let port = scene_server()?;
+    super::html_frame::scene_waker(app);
+    let ui = &mut app.ui.panel.browser;
+    ui.area = (539., 731.);
+    ui.chrome_scale = Some(1.);
+    ui.browser.send(Cmd::Viewport { w: 539., h: 731., scale: 1. });
+    let tab = open_tab(app, browser::DEFAULT_PROFILE);
+    let ui = &mut app.ui.panel.browser;
+    ui.browser.send(Cmd::Show(Some(tab)));
+    ui.browser.send(Cmd::Navigate(tab, format!("http://127.0.0.1:{port}{path}")));
+    let status = scene_wait(app, tab, |s| s.title == title && s.painted && !s.loading);
+    // pdf.js draws after the load; its frames follow.
+    std::thread::sleep(Duration::from_secs(3));
+    eprintln!("scene: tab at {} titled {:?}, painted {}, failure {:?}", status.url, status.title, status.painted, status.failure.map(|f| f.description));
+    Some(tab)
+}
+
+/// The live check's popup: a click opens `window.open(url, name, "width=500,height=400")`, which
+/// the panel adopts as a tab that must paint without a tab switch.
+pub fn scene_popup(app: &mut App) -> Option<TabId> {
+    let opener = scene_page(app, "/opener", "Popup opener")?;
+    for kind in ["mousePressed", "mouseReleased"] {
+        app.ui.panel.browser.browser.send(Cmd::Mouse { kind, x: 200., y: 200., clicks: 1 });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let popup = loop {
+        poll(app, &mut Tx::default());
+        if let Some(tab) = app.ui.panel.browser.tabs.keys().copied().find(|t| *t != opener) {
+            break tab;
+        }
+        if std::time::Instant::now() > deadline {
+            eprintln!("scene: no popup opened");
+            return Some(opener);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    poll(app, &mut Tx::default());
+    let status = scene_wait(app, popup, |s| s.title == "The popup" && s.painted && !s.loading);
+    std::thread::sleep(Duration::from_secs(2));
+    poll(app, &mut Tx::default());
+    eprintln!("scene: popup tab at {} titled {:?}, painted {}", status.url, status.title, status.painted);
+    Some(popup)
+}
+
 /// The profile a tab shows pages in: a server tab's as its server reports it.
 fn tab_profile(app: &App, tab: TabId) -> String {
     let Some(t) = app.ui.panel.browser.tabs.get(&tab) else { return browser::DEFAULT_PROFILE.to_owned() };

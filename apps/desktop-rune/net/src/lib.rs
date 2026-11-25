@@ -647,6 +647,23 @@ pub fn api_post_read(base: &str, bearer: &str, path: &str, query: &str, limit: u
         .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
+/// A JSON POST on one of the server's `/api` routes, its response body at most `limit` bytes.
+pub fn api_post_json(base: &str, bearer: &str, path: &str, query: &str, body: &Value, timeout: std::time::Duration, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(timeout)
+        .build()
+        .post(url.as_str())
+        .set("Authorization", &format!("Bearer {bearer}"))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(api_error)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), limit), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
     if !relative_url.starts_with("/api/attachments/upload/") {
