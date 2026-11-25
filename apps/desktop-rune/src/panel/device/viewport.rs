@@ -83,7 +83,10 @@ fn light(dir: vec3f, color: vec3f, n: vec3f, v: vec3f, diffuse: vec3f, f0: vec3f
         let u = (o.local.x + s.x * 0.5) / s.x;
         let v = (o.local.y + s.y * 0.5) / s.y;
         var uv = vec2f(u, v);
-        if (s.z > 0.5) {
+        if (mat.params.w > 0.5) {
+            // A screen at its mesh's own UVs: the foldable's bent inner display and its cover.
+            uv = o.uv;
+        } else if (s.z > 0.5) {
             if (s.w > 0.0) { uv = vec2f(1.0 - v, u); } else { uv = vec2f(v, 1.0 - u); }
         }
         let c = textureSample(screen_tex, samp, vec2f(uv.x, 1.0 - uv.y));
@@ -317,7 +320,7 @@ impl Gpu {
                 let uniform = buffer(device, 32, wgpu::BufferUsages::UNIFORM);
                 let kind = if m.screen { 2.0 } else if m.unlit { 1.0 } else { 0.0 };
                 let view = m.texture.and_then(|t| textures.get(t));
-                queue.write_buffer(&uniform, 0, &floats(&[m.base[0], m.base[1], m.base[2], m.base[3], m.metallic, m.roughness, kind, if view.is_some() { 1.0 } else { 0.0 }]));
+                queue.write_buffer(&uniform, 0, &floats(&[m.base[0], m.base[1], m.base[2], m.base[3], m.metallic, m.roughness, kind, if view.is_some() || m.mapped { 1.0 } else { 0.0 }]));
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("device-3d material"),
                     layout: &self.material_layout,

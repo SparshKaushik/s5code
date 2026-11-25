@@ -28,11 +28,13 @@ pub struct Material {
     pub unlit: bool,
     /// Shows the device's screen.
     pub screen: bool,
+    /// A screen shown at its mesh's own UVs (u across, v up) rather than across `Model::screen`.
+    pub mapped: bool,
 }
 
 impl Material {
     fn lit(hex: u32, metallic: f32, roughness: f32) -> Material {
-        Material { base: linear(hex), metallic, roughness, texture: None, blend: false, unlit: false, screen: false }
+        Material { base: linear(hex), metallic, roughness, texture: None, blend: false, unlit: false, screen: false, mapped: false }
     }
 }
 
@@ -60,6 +62,8 @@ pub struct Model {
     pub images: Vec<Image>,
     /// The display's width and height, and the z of its face.
     pub screen: [f32; 3],
+    /// Displays that aren't one flat face at `screen` (a foldable's), for touches.
+    pub faces: Vec<Face>,
     pub min: [f32; 3],
     pub max: [f32; 3],
 }
@@ -75,6 +79,16 @@ impl Model {
         }
         (self.min, self.max) = (min, max);
     }
+}
+
+/// A flat display: `center ± right ± up` in the model's space, showing `across` of the screen's
+/// width from its left edge to its right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Face {
+    pub center: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub across: [f32; 2],
 }
 
 /// A three.js colour: sRGB hex, linear components.
@@ -342,6 +356,7 @@ pub fn parse_glb(bytes: &[u8]) -> Result<Model, String> {
                 blend: m["alphaMode"] == "BLEND",
                 unlit: false,
                 screen: false,
+                mapped: false,
             }
         })
         .collect();
@@ -429,7 +444,7 @@ pub fn parse_glb(bytes: &[u8]) -> Result<Model, String> {
     for mesh in meshes.iter_mut().filter(|m| m.screen) {
         mesh.material = screen;
     }
-    let mut model = Model { meshes, materials, images, screen: [width, height, max[2]], min: [0.; 3], max: [0.; 3] };
+    let mut model = Model { meshes, materials, images, screen: [width, height, max[2]], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
     model.bounds();
     Ok(model)
 }
@@ -637,7 +652,183 @@ pub fn phone(profile: &Profile, aspect: f32) -> Model {
     if let Some(f) = profile.flash {
         b.cap(flash, &Builder::circle(0.022), [camera[0] - f[0], camera[1] + f[1]], plate - 0.0325, false, false);
     }
-    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [screen_width, SCREEN_HEIGHT, 0.043], min: [0.; 3], max: [0.; 3] };
+    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [screen_width, SCREEN_HEIGHT, 0.043], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
+    model.bounds();
+    model
+}
+
+
+// `androidFoldScene.ts`.
+
+const FOLD_DEPTH: f32 = 0.075;
+const FOLD_INSET: f32 = 0.026;
+const CREASE: f32 = 0.004;
+const PIVOT_Z: f32 = FOLD_DEPTH / 2. + 0.005;
+/// `DEFAULT_FOLD_INNER_ASPECT`: the inner display's width over height when the frame can't say.
+const FOLD_INNER_ASPECT: f32 = 2076. / 2152.;
+
+/// `isFoldInnerAspect`: whether a frame of `width` over `height` is the unfolded inner display.
+pub fn fold_inner_aspect(width: u32, height: u32) -> f32 {
+    let aspect = width as f32 / height as f32;
+    if aspect.is_finite() && aspect > 0.75 && aspect < 1.5 { aspect } else { FOLD_INNER_ASPECT }
+}
+
+fn quad(out: &mut Vec<[f32; 2]>, a: [f32; 2], c: [f32; 2], b: [f32; 2]) {
+    for i in 1..=8 {
+        let t = i as f32 / 8.;
+        let u = 1. - t;
+        out.push([u * u * a[0] + 2. * u * t * c[0] + t * t * b[0], u * u * a[1] + 2. * u * t * c[1] + t * t * b[1]]);
+    }
+}
+
+/// `panelPath`: one half's outline, rounded on its outer side, counter-clockwise about its centre,
+/// and that centre.
+fn panel(half_width: f32, left: bool, inset: f32, radius: f32, hinge_inset: f32) -> (Vec<[f32; 2]>, [f32; 2]) {
+    let (l, r) = if left { (-half_width + inset, -CREASE / 2. - hinge_inset) } else { (CREASE / 2. + hinge_inset, half_width - inset) };
+    let (b, t) = (-SCREEN_HEIGHT / 2. + inset, SCREEN_HEIGHT / 2. - inset);
+    let mut out = Vec::new();
+    if left {
+        out.extend([[r, b], [r, t], [l + radius, t]]);
+        quad(&mut out, [l + radius, t], [l, t], [l, t - radius]);
+        out.push([l, b + radius]);
+        quad(&mut out, [l, b + radius], [l, b], [l + radius, b]);
+    } else {
+        out.extend([[l, b], [r - radius, b]]);
+        quad(&mut out, [r - radius, b], [r, b], [r, b + radius]);
+        out.push([r, t - radius]);
+        quad(&mut out, [r, t - radius], [r, t], [r - radius, t]);
+        out.push([l, t]);
+    }
+    let centre = [(l + r) / 2., 0.];
+    (out.into_iter().map(|p| [p[0] - centre[0], p[1]]).collect(), centre)
+}
+
+/// Turns `p` by `angle` about the y axis through `(0, 0, z)`, as three.js's `rotation.y` does.
+fn turn(p: [f32; 3], angle: f32, z: f32) -> [f32; 3] {
+    let (s, c) = angle.sin_cos();
+    [p[0] * c + (p[2] - z) * s, p[1], -p[0] * s + (p[2] - z) * c + z]
+}
+
+/// `createAndroidFoldScene` at a hinge `angle` (0 closed, 180 open) around an inner display of
+/// `inner_aspect`: two halves on a spine, the continuous inner screen bending with the left half
+/// from 90° open, the cover screen before that.
+pub fn fold(angle: f32, inner_aspect: f32) -> Model {
+    let materials = vec![
+        Material::lit(0xa3abb2, 0.9, 0.28),
+        Material::lit(0xc4cad0, 0.95, 0.16),
+        Material::lit(0x0b0d10, 0.1, 0.2),
+        Material::lit(0x2c3237, 0.35, 0.52),
+        Material::lit(0x1a1e22, 0.55, 0.3),
+        Material::lit(0x061022, 0.6, 0.1),
+        Material { unlit: true, ..Material::lit(0xf2ead6, 0., 1.) },
+        Material { unlit: true, screen: true, mapped: true, ..Material::lit(0xffffff, 0., 1.) },
+    ];
+    let (metal, polished, bezel, back_glass, island, lens, flash, screen) = (0, 1, 2, 3, 4, 5, 6, 7);
+    let angle = angle.clamp(0., 180.);
+    let hinge = std::f32::consts::PI * (1. - angle / 180.);
+    let inner = angle >= 90.;
+    let screen_height = SCREEN_HEIGHT - 2. * FOLD_INSET;
+    let half_width = inner_aspect * screen_height / 2. + FOLD_INSET;
+    let (d, h) = (FOLD_DEPTH, SCREEN_HEIGHT);
+    let mut b = Builder { meshes: Vec::new() };
+    let mut faces = Vec::new();
+
+    let half = |b: &mut Builder, left: bool, back: usize| {
+        let (outline, at) = panel(half_width, left, 0., 0.1, 0.);
+        b.slab(metal, &outline, at, -d / 2., d / 2.);
+        let (outline, at) = panel(half_width, left, 0.01, 0.095, 0.002);
+        b.cap(bezel, &outline, at, d / 2. + 0.001, true, false);
+        b.cap(back, &outline, at, -d / 2. - 0.001, false, false);
+    };
+    half(&mut b, true, bezel);
+    // The cover display, on the left half's back.
+    let (cover_w, cover_h) = (half_width - FOLD_INSET * 2. - 0.02, h - FOLD_INSET * 2. - 0.04);
+    let cover_at = [-half_width / 2., 0., -d / 2. - 0.003];
+    if !inner {
+        b.cap(screen, &rounded(cover_w, cover_h, 0.07), [cover_at[0], cover_at[1]], cover_at[2], false, true);
+        let m = b.meshes.last_mut().expect("just added");
+        m.uvs = m.positions.iter().map(|p| [(cover_w / 2. - (p[0] - cover_at[0])) / cover_w, (p[1] + cover_h / 2.) / cover_h]).collect();
+    }
+    for m in &mut b.meshes {
+        for p in &mut m.positions {
+            *p = turn(*p, hinge, PIVOT_Z);
+        }
+        for n in &mut m.normals {
+            *n = turn(*n, hinge, 0.);
+        }
+    }
+    let inner_half = (half_width - FOLD_INSET - CREASE / 2.) / 2.;
+    let inner_z = d / 2. + 0.003;
+    let up = [0., h / 2. - FOLD_INSET, 0.];
+    if inner {
+        faces.push(Face { center: turn([-CREASE / 2. - inner_half, 0., inner_z], hinge, PIVOT_Z), right: turn([inner_half, 0., 0.], hinge, 0.), up, across: [0., 0.5] });
+        faces.push(Face { center: [CREASE / 2. + inner_half, 0., inner_z], right: [inner_half, 0., 0.], up, across: [0.5, 1.] });
+    } else {
+        faces.push(Face { center: turn(cover_at, hinge, PIVOT_Z), right: turn([-cover_w / 2., 0., 0.], hinge, 0.), up: [0., cover_h / 2., 0.], across: [0., 1.] });
+    }
+
+    half(&mut b, false, back_glass);
+    // The rear camera faces -z, so its x runs mirrored.
+    let camera = [half_width - 0.07 - 0.23, h / 2. - 0.08 - 0.1];
+    let z0 = -d / 2. - 0.002;
+    b.slab(island, &rounded(0.46, 0.2, 0.07), camera, z0 - 0.026, z0);
+    for (x, radius) in [(-0.14, 0.05), (-0.01, 0.05), (0.105, 0.036)] {
+        let at = [camera[0] - x, camera[1]];
+        b.slab(metal, &Builder::circle(radius + 0.012), at, z0 - 0.036, z0 - 0.024);
+        b.cap(lens, &Builder::circle(radius), at, z0 - 0.0365, false, false);
+    }
+    b.cap(flash, &Builder::circle(0.018), [camera[0] - 0.185, camera[1] + 0.045], z0 - 0.0265, false, false);
+    for (y, length) in [(0.52, 0.16), (0.2, 0.3)] {
+        b.slab(metal, &rounded(0.02, length, 0.), [half_width + 0.008, y], -d * 0.225, d * 0.225);
+    }
+
+    // The spine: the back half of a cylinder about the hinge, turned half as far as the left half.
+    let radius = PIVOT_Z + d / 2. - 0.002;
+    let m = b.mesh(polished);
+    let (start, sweep) = (std::f32::consts::FRAC_PI_2 + 0.15, std::f32::consts::PI - 0.3);
+    for i in 0..=16 {
+        let a = start + sweep * i as f32 / 16.;
+        let normal = turn([a.sin(), 0., a.cos()], hinge / 2., 0.);
+        for y in [-(h - 0.012) / 2., (h - 0.012) / 2.] {
+            m.positions.push(turn([radius * a.sin(), y, radius * a.cos() + PIVOT_Z], hinge / 2., PIVOT_Z));
+            m.normals.push(normal);
+        }
+        if i > 0 {
+            let k = (i * 2) as u32;
+            m.indices.extend([k - 2, k, k + 1, k - 2, k + 1, k - 1]);
+        }
+    }
+
+    // The continuous inner screen, its left part bent with the left half.
+    if inner {
+        let width = 2. * (half_width - FOLD_INSET);
+        let front = d / 2. + 0.004;
+        let m = b.mesh(screen);
+        m.screen = true;
+        let (columns, rows) = (40, 48);
+        for j in 0..=rows {
+            let y = -screen_height / 2. + screen_height * j as f32 / rows as f32;
+            let r = 0.076;
+            let corner = (y.abs() - (screen_height / 2. - r)).max(0.);
+            let limit = width / 2. - r + (r * r - corner * corner).max(0.).sqrt();
+            for i in 0..=columns {
+                let x = (-width / 2. + width * i as f32 / columns as f32).clamp(-limit, limit);
+                let (p, n) = if x < 0. { (turn([x, y, front], hinge, PIVOT_Z), turn([0., 0., 1.], hinge, 0.)) } else { ([x, y, front], [0., 0., 1.]) };
+                m.positions.push(p);
+                m.normals.push(n);
+                m.uvs.push([x / width + 0.5, y / screen_height + 0.5]);
+            }
+        }
+        let stride = columns + 1;
+        for j in 0..rows {
+            for i in 0..columns {
+                let k = j * stride + i;
+                m.indices.extend([k, k + 1, k + stride + 1, k, k + stride + 1, k + stride]);
+            }
+        }
+    }
+
+    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [2. * (half_width - FOLD_INSET), screen_height, d / 2. + 0.004], faces, min: [0.; 3], max: [0.; 3] };
     model.bounds();
     model
 }
@@ -749,6 +940,9 @@ pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layou
     let back = |v: [f32; 3]| [0, 1, 2].map(|c| world[c * 4] * v[0] + world[c * 4 + 1] * v[1] + world[c * 4 + 2] * v[2]);
     let origin = back(eye);
     let dir = back([far[0] - eye[0], far[1] - eye[1], far[2] - eye[2]]);
+    if !model.faces.is_empty() {
+        return face_point(&model.faces, origin, dir, layout, captured);
+    }
     let [width, height, z] = model.screen;
     if dir[2].abs() < 1e-6 {
         return None;
@@ -770,6 +964,44 @@ pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layou
         r if r == PI => (1. - u, v),
         _ => (u, 1. - v),
     })
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The fold's `screenPoint`: the nearest display the ray meets, else for a captured touch the
+/// display whose plane it meets closest to its bounds.
+fn face_point(faces: &[Face], origin: [f32; 3], dir: [f32; 3], layout: &Layout, captured: bool) -> Option<(f32, f32)> {
+    let mut best: Option<(bool, f32, f32, f32, &Face)> = None;
+    for face in faces {
+        let (r, u) = (face.right, face.up);
+        let normal = [r[1] * u[2] - r[2] * u[1], r[2] * u[0] - r[0] * u[2], r[0] * u[1] - r[1] * u[0]];
+        let denom = dot(normal, dir);
+        if denom.abs() < 1e-9 {
+            continue;
+        }
+        let t = dot(normal, [face.center[0] - origin[0], face.center[1] - origin[1], face.center[2] - origin[2]]) / denom;
+        if t <= 0. {
+            continue;
+        }
+        let off = [origin[0] + dir[0] * t - face.center[0], origin[1] + dir[1] * t - face.center[1], origin[2] + dir[2] * t - face.center[2]];
+        let (s, v) = (dot(off, r) / dot(r, r), dot(off, u) / dot(u, u));
+        let inside = s.abs() <= 1. && v.abs() <= 1.;
+        // A hit ranks by distance; a miss by how far outside the display it lands.
+        let rank = if inside { t } else { s.abs().max(v.abs()) };
+        if best.is_none_or(|(hit, best_rank, ..)| (inside && !hit) || (inside == hit && rank < best_rank)) {
+            best = Some((inside, rank, s, v, face));
+        }
+    }
+    let (inside, _, s, v, face) = best?;
+    if !inside && !captured {
+        return None;
+    }
+    let (s, v) = (s.clamp(-1., 1.), v.clamp(-1., 1.));
+    let x = face.across[0] + (s + 1.) / 2. * (face.across[1] - face.across[0]);
+    let y = (1. - v) / 2.;
+    Some(if layout.rotation == std::f32::consts::PI { (1. - x, 1. - y) } else { (x, y) })
 }
 
 #[cfg(test)]
@@ -817,5 +1049,33 @@ mod tests {
         pose.orbit(400., 100.);
         pose.settle();
         assert_eq!(pose, Pose { yaw: YAW_LIMIT, pitch: 0. }, "a released phone stands up within the yaw limit");
+    }
+
+    #[test]
+    fn a_foldable_bends_its_inner_screen_and_closes_on_its_cover() {
+        let aspect = fold_inner_aspect(2076, 2152);
+        assert!((aspect - FOLD_INNER_ASPECT).abs() < 1e-6);
+        assert_eq!(fold_inner_aspect(1080, 2424), FOLD_INNER_ASPECT, "a folded frame isn't the inner display");
+        let inner = layout(None, 2076, 2152);
+        let world = Pose::default().matrix(0.);
+        let open = fold(180., aspect);
+        assert_eq!(open.faces.len(), 2, "open, the inner display's two halves take touches");
+        let cam = camera(&open, &world, 1.);
+        let (x, y) = screen_point(&open, &world, &cam, &inner, 0.5, 0.5, false).unwrap();
+        assert!((x - 0.5).abs() < 0.02 && (y - 0.5).abs() < 0.02, "{x} {y}");
+        let (x, y) = screen_point(&open, &world, &cam, &inner, 0.4, 0.4, false).unwrap();
+        assert!(x < 0.5 && y < 0.5, "the left half is the screen's left: {x} {y}");
+        assert!(screen_point(&open, &world, &cam, &inner, 0.6, 0.5, false).unwrap().0 > 0.5);
+        assert_eq!(screen_point(&open, &world, &cam, &inner, 0.01, 0.5, false), None, "the frame isn't the screen");
+        let half = fold(90., aspect);
+        assert!(half.max[2] > open.max[2] + 0.5, "half open, the left half stands toward the camera");
+        let closed = fold(0., aspect);
+        let screens: Vec<&Mesh> = closed.meshes.iter().filter(|m| m.screen).collect();
+        assert_eq!((screens.len(), closed.faces.len()), (1, 1), "closed, only the cover display shows");
+        assert!(screens[0].uvs.len() == screens[0].positions.len() && screens[0].uvs.iter().flatten().all(|c| (0. ..=1.).contains(c)));
+        let cam = camera(&closed, &world, 0.5);
+        let (x, y) = screen_point(&closed, &world, &cam, &inner, 0.5, 0.5, false).unwrap();
+        assert!((x - 0.5).abs() < 0.1 && (y - 0.5).abs() < 0.05, "{x} {y}");
+        assert!(screen_point(&closed, &world, &cam, &inner, 0.4, 0.5, false).unwrap().0 < x, "the cover reads left to right");
     }
 }

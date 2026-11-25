@@ -688,8 +688,13 @@ fn shows_3d(app: &App, stream: &Stream) -> bool {
     !stream.flat && stream.phone.is_some() && streaming(stream) && unavailable_3d(app, stream).is_none()
 }
 
+/// The hinge angle an Android foldable's 3D view shows, once serve-emu says it folds.
+fn fold_angle(stream: &Stream) -> Option<f32> {
+    stream.android.then(|| stream.fold.lock().unwrap_or_else(|e| e.into_inner()).angle).flatten().map(|a| a as f32)
+}
+
 /// Keeps the phone the 3D view draws in step with the device: its model once parsed (`now` in
-/// scenes), else web's procedural phone for its shape and display.
+/// scenes), else a foldable at its hinge angle, else web's procedural phone for its shape and display.
 fn sync_phone(app: &mut App) -> bool {
     let Some(stream) = app.ui.panel.device.stream.as_ref() else { return false };
     let name = device_name(app, stream).to_owned();
@@ -700,9 +705,14 @@ fn sync_phone(app: &mut App) -> bool {
             wake();
         }
     };
-    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match model::model_id(stream.android, &name).and_then(|id| model::model(id, now, wake)) {
-        Some(model) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
-        None => {
+    let (want, build): (String, Box<dyn FnOnce() -> Arc<model::Model>>) = match (model::model_id(stream.android, &name).and_then(|id| model::model(id, now, wake)), fold_angle(stream)) {
+        (Some(model), _) => (format!("model:{}", Arc::as_ptr(&model) as usize), Box::new(move || model)),
+        (None, Some(angle)) => {
+            let (w, h) = stream.pixels.size();
+            let aspect = model::fold_inner_aspect(w, h);
+            (format!("fold:{angle}:{aspect}"), Box::new(move || Arc::new(model::fold(angle, aspect))))
+        }
+        (None, None) => {
             let (w, h) = stream.pixels.size();
             let layout = model::layout(None, w, h);
             let profile = model::profile(stream.android, &name, layout.aspect);
@@ -726,7 +736,9 @@ fn scene_3d(app: &App) -> Option<viewport::Scene> {
     let (_, model) = stream.phone.as_ref()?;
     let (w, h) = stream.pixels.size();
     let layout = model::layout(screen_state(stream).as_ref().map(|s| s.orientation.as_str()), w, h);
-    Some(viewport::Scene { model: model.clone(), world: stream.pose.matrix(layout.rotation), layout, pixels: stream.pixels.clone() })
+    // A foldable turns with its hinge, not its orientation.
+    let turn = if model.faces.is_empty() { layout.rotation } else { 0. };
+    Some(viewport::Scene { model: model.clone(), world: stream.pose.matrix(turn), layout, pixels: stream.pixels.clone() })
 }
 
 /// Web `createPhoneInteraction` on the 3D view of `size` points: a press on the screen touches
@@ -1936,6 +1948,8 @@ pub fn fold_fixture(app: &mut App) {
     fold.angle = Some(90.);
     fold.error = Some("Fold command timed out.".into());
     fold.read_for = Some(stream.pixels.size());
+    drop(fold);
+    sync_phone(app);
 }
 
 /// An iPhone Duo held open in a laptop stand, for scenes.
