@@ -195,12 +195,12 @@ fn sleep_unless(stop: &AtomicBool, total: Duration) {
 }
 
 /// Polls the screen's accessibility elements every two seconds; a failed poll keeps the last.
-pub fn spawn_ax(base: String, bearer: String, path: String, query: String, android: bool, wake: impl Fn() + Send + 'static) -> Feed<Option<Vec<AxElement>>> {
+pub fn spawn_ax(base: String, auth: s5_net::Auth, path: String, query: String, android: bool, wake: impl Fn() + Send + 'static) -> Feed<Option<Vec<AxElement>>> {
     let feed = Feed { data: Arc::new(Mutex::new(None)), rev: Arc::default(), stop: Arc::default() };
     let (data, rev, stop) = (feed.data.clone(), feed.rev.clone(), feed.stop.clone());
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            let parsed = s5_net::api_get(&base, &bearer, &path, &query, 8 << 20)
+            let parsed = s5_net::api_get(&base, &auth, &path, &query, 8 << 20)
                 .ok()
                 .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
                 .and_then(|v| (if android { android_ax(&v) } else { ios_ax(&v) }).ok());
@@ -218,15 +218,15 @@ pub fn spawn_ax(base: String, bearer: String, path: String, query: String, andro
 }
 
 /// Streams serve-sim's event log while the section is open, reconnecting when it goes quiet.
-pub fn spawn_log(base: String, bearer: String, path: String, query: String, wake: impl Fn() + Send + 'static) -> Feed<Vec<LogEntry>> {
+pub fn spawn_log(base: String, auth: s5_net::Auth, path: String, query: String, wake: impl Fn() + Send + 'static) -> Feed<Vec<LogEntry>> {
     let feed = Feed { data: Arc::new(Mutex::new(vec![])), rev: Arc::default(), stop: Arc::default() };
     let (data, rev, stop) = (feed.data.clone(), feed.rev.clone(), feed.stop.clone());
     std::thread::spawn(move || {
         let url = format!("{}{path}?{query}", base.trim_end_matches('/'));
         let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout_read(Duration::from_secs(20)).build();
         while !stop.load(Ordering::Relaxed) {
-            let response = agent.get(&url).set("Authorization", &format!("Bearer {bearer}")).set("Accept", "text/event-stream").call();
-            let Ok(response) = response else {
+            let response = auth.apply(agent.get(&url).set("Accept", "text/event-stream")).ok().and_then(|request| request.call().ok());
+            let Some(response) = response else {
                 sleep_unless(&stop, Duration::from_secs(3));
                 continue;
             };

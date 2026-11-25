@@ -183,11 +183,11 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn open(base: String, bearer: String, host: &str, device: &str, wake: impl Fn() + Send + 'static) -> Input {
+    pub fn open(base: String, auth: s5_net::Auth, host: &str, device: &str, wake: impl Fn() + Send + 'static) -> Input {
         let (input, rx) = Input::channel(false);
         let query = format!("device={}&hostId={}", super::encode(device), super::encode(host));
         let shared = input.state.clone();
-        std::thread::spawn(move || run(&base, &bearer, &query, &rx, &shared, &wake));
+        std::thread::spawn(move || run(&base, &auth, &query, &rx, &shared, &wake));
         input
     }
 
@@ -423,9 +423,9 @@ fn press(usage: u8, shift: bool) -> Vec<Vec<u8>> {
 }
 
 /// Keeps the socket open until `Input` drops, reconnecting after a second when it is lost.
-fn run(base: &str, bearer: &str, query: &str, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) {
+fn run(base: &str, auth: &s5_net::Auth, query: &str, rx: &Receiver<Message>, state: &Mutex<State>, wake: &dyn Fn()) {
     loop {
-        if let Ok(mut socket) = s5_net::api_socket(base, bearer, PATH, query, Duration::from_millis(15))
+        if let Ok(mut socket) = s5_net::api_socket(base, auth, PATH, query, Duration::from_millis(15))
             && pump(&mut socket, rx, state, wake)
         {
             return;

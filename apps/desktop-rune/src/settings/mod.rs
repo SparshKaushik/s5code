@@ -1425,6 +1425,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "connections");
         connections::scene(s, "t3-connect");
     }),
+    ("settings-connections-relay-client-install", |s| {
+        scene(s, "connections");
+        crate::cloud::relay_client::scene(s, false);
+    }),
+    ("settings-connections-relay-client-installing", |s| {
+        scene(s, "connections");
+        crate::cloud::relay_client::scene(s, true);
+    }),
+    ("settings-connections-t3-connect-mobile", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-mobile");
+    }),
+    ("settings-connections-t3-connect-account", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-account");
+    }),
     ("settings-connections-t3-connect-signing-in", |s| {
         scene(s, "connections");
         connections::scene(s, "t3-connect-signing-in");

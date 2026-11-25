@@ -1,6 +1,6 @@
 //! Web `ScheduledTasksSettings`: every environment's tasks in scope, each row's switch and menu,
 //! webhook deliveries, and the editor (`tasks/editor.rs`).
-pub(super) mod draft;
+pub(crate) mod draft;
 mod editor;
 
 use super::connections::{dot, machine_icon, machine_kind};

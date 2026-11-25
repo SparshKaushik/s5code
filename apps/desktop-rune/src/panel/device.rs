@@ -327,16 +327,16 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
             wake();
         }
     };
-    let net = app.src.net_ref().map(|n| (n.base_url().to_owned(), n.bearer().to_owned()));
+    let net = app.src.net_ref().map(|n| (n.base_url().to_owned(), n.auth().clone()));
     match (transport, net) {
-        (Transport::Semu, Some((base, bearer))) => {
+        (Transport::Semu, Some((base, auth))) => {
             let (input, rx) = input::Input::channel(true);
             let query = format!("device={}&frame-meta=1&hostId={}", encode(&device), encode(&host));
-            video::spawn_semu(base, bearer, query, rx, input.state.clone(), stream.pixels.clone(), stream.shared.clone(), stream.stop.clone(), wake);
+            video::spawn_semu(base, auth, query, rx, input.state.clone(), stream.pixels.clone(), stream.shared.clone(), stream.stop.clone(), wake);
             stream.input = Some(input);
         }
-        (_, Some((base, bearer))) => {
-            stream.input = Some(input::Input::open(base, bearer, &host, &device, wake));
+        (_, Some((base, auth))) => {
+            stream.input = Some(input::Input::open(base, auth, &host, &device, wake));
             stream.ticket = app.src.net().map(|n| n.http_request("POST", "/api/auth/websocket-ticket/media", json!({})));
         }
         (_, None) => {}
@@ -416,7 +416,7 @@ fn act(app: &mut App, action: Value) {
 /// serve-sim's PNG screenshot, saved to Downloads as web's download.
 fn screenshot(app: &mut App, name: &str) {
     let Some(net) = app.src.net_ref() else { return };
-    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    let (base, auth) = (net.base_url().to_owned(), net.auth().clone());
     let wake = app.ui.panel.waker.clone();
     let Some(stream) = app.ui.panel.device.stream.as_ref() else { return };
     let Some((host, device)) = stream.key.split_once('\u{0}') else { return };
@@ -432,7 +432,7 @@ fn screenshot(app: &mut App, name: &str) {
     let shared = stream.shared.clone();
     let path = format!("/api/device-hub/vendor/{}/api/screenshot", if stream.transport == Transport::Semu { "serve-emu" } else { "serve-sim" });
     std::thread::spawn(move || {
-        let saved = s5_net::api_post_read(&base, &bearer, &path, &query, 64 << 20)
+        let saved = s5_net::api_post_read(&base, &auth, &path, &query, 64 << 20)
             .map_err(|e| format!("Screenshot capture failed ({e}). Try again."))
             .and_then(|png| if png.is_empty() { Err("The device returned an empty screenshot. Try again.".to_owned()) } else { Ok(png) })
             .and_then(|png| {
@@ -589,17 +589,17 @@ impl Fold {
 
 /// Web's `androidFoldReadAtom`: reads the posture for each screen size, every three seconds
 /// until it answers.
-fn read_fold(stream: &Stream, hub: (String, String, String, String, impl Fn() + Send + 'static)) {
+fn read_fold(stream: &Stream, hub: (String, s5_net::Auth, String, String, impl Fn() + Send + 'static)) {
     let size = stream.pixels.size();
     if !stream.fold.lock().unwrap_or_else(|e| e.into_inner()).wants_read(size) {
         return;
     }
-    let (base, bearer, host, device, wake) = hub;
+    let (base, auth, host, device, wake) = hub;
     let (shared, stop) = (stream.fold.clone(), stream.stop.clone());
     let query = format!("device={}&hostId={}", encode(&device), encode(&host));
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            let read = s5_net::api_get(&base, &bearer, FOLD_PATH, &query, 1 << 16).and_then(|body| parse_fold(&body));
+            let read = s5_net::api_get(&base, &auth, FOLD_PATH, &query, 1 << 16).and_then(|body| parse_fold(&body));
             match shared.lock().unwrap_or_else(|e| e.into_inner()).read(size, read) {
                 Some(true) => return wake(),
                 Some(false) => return,
@@ -614,14 +614,14 @@ fn change_fold(app: &mut App, posture: &'static str) {
     if !input_ready(app) {
         return;
     }
-    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
     let Some(shared) = app.ui.panel.device.stream.as_ref().map(|s| s.fold.clone()) else { return };
     if !shared.lock().unwrap_or_else(|e| e.into_inner()).begin(posture) {
         return;
     }
     let query = format!("device={}&hostId={}", encode(&device), encode(&host));
     std::thread::spawn(move || {
-        let result = s5_net::api_post_json(&base, &bearer, FOLD_PATH, &query, &json!({"posture": posture}), FOLD_TIMEOUT, 1 << 16)
+        let result = s5_net::api_post_json(&base, &auth, FOLD_PATH, &query, &json!({"posture": posture}), FOLD_TIMEOUT, 1 << 16)
             .map_err(|e| fold_error(&e))
             .and_then(|body| parse_fold(&body));
         shared.lock().unwrap_or_else(|e| e.into_inner()).finish(result);
@@ -629,12 +629,12 @@ fn change_fold(app: &mut App, posture: &'static str) {
     });
 }
 
-/// The hub connection a readout thread uses: base URL, bearer, the device's host and id, and the wake.
-fn hub(app: &App) -> Option<(String, String, String, String, impl Fn() + Send + 'static)> {
+/// The hub connection a readout thread uses: base URL, credentials, the device's host and id, and the wake.
+fn hub(app: &App) -> Option<(String, s5_net::Auth, String, String, impl Fn() + Send + 'static)> {
     let net = app.src.net_ref()?;
     let (host, device) = app.ui.panel.device.stream.as_ref()?.key.split_once('\u{0}')?;
     let wake = app.ui.panel.waker.clone();
-    Some((net.base_url().to_owned(), net.bearer().to_owned(), host.to_owned(), device.to_owned(), move || {
+    Some((net.base_url().to_owned(), net.auth().clone(), host.to_owned(), device.to_owned(), move || {
         if let Some(wake) = &wake {
             wake();
         }
@@ -656,10 +656,10 @@ fn toggle_ax(app: &mut App) {
         return;
     }
     let android = stream.android;
-    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
     let (path, query) = ax_endpoint(android, &host, &device);
     if let Some(stream) = app.ui.panel.device.stream.as_mut() {
-        stream.ax = Some(inspect::spawn_ax(base, bearer, path, query, android, wake));
+        stream.ax = Some(inspect::spawn_ax(base, auth, path, query, android, wake));
     }
 }
 
@@ -668,10 +668,10 @@ fn toggle_log(app: &mut App) {
     if stream.log.take().is_some() {
         return;
     }
-    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
     let query = format!("device={}&limit={}&hostId={}", encode(&device), inspect::LOG_LIMIT, encode(&host));
     if let Some(stream) = app.ui.panel.device.stream.as_mut() {
-        stream.log = Some(inspect::spawn_log(base, bearer, "/api/device-hub/vendor/serve-sim/api/event-log/events".into(), query, wake));
+        stream.log = Some(inspect::spawn_log(base, auth, "/api/device-hub/vendor/serve-sim/api/event-log/events".into(), query, wake));
     }
 }
 

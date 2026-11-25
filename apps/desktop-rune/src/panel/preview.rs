@@ -1623,11 +1623,11 @@ fn attach_stream(app: &mut App, tab: TabId, key: agent::Key, snapshot: &Value) -
     let Some(waker) = app.ui.panel.waker.clone() else { return false };
     let Some(env) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.remote.clone()) else { return false };
     let Some(net) = env_net(app, &env) else { return false };
-    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    let (base, auth) = (net.base_url().to_owned(), net.auth().clone());
     let ui = &mut app.ui.panel.browser;
     let area = ui.area;
     let Some(t) = ui.tabs.get_mut(&tab) else { return false };
-    let stream = super::stream::Stream::open(base, bearer, &key, t.pixels.clone(), waker);
+    let stream = super::stream::Stream::open(base, auth, &key, t.pixels.clone(), waker);
     if area.0 >= 1. {
         stream.resize(area.0, area.1);
     }

@@ -21,6 +21,8 @@ pub struct Ui {
     error: Option<String>,
     /// The account's tunnel cap after the relay refused a tunnel at it.
     tunnel_limit: Option<u64>,
+    /// What onboarding's Continue asked for, applying (`crate::cloud::onboarding`).
+    onboarding: Option<Slot<Result<(), Failure>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -166,27 +168,63 @@ fn toggle(s: &mut App, change: Change) {
         fail(s, Failure::new("This connection needs permission to view and manage T3 Connect settings."));
         return;
     }
-    let Some(net) = s.src.net() else { return };
-    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
-    let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or_default().to_owned();
-    let relay = crate::cloud::config().map(|c| c.relay);
-    let plan = plan(&state, change);
-    let slot: Slot<Result<(), Failure>> = Arc::default();
-    let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
-    std::thread::spawn(move || {
-        let result = run(&plan, &base, &bearer, &environment, relay.as_deref());
-        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-        if let Some(waker) = waker {
-            waker();
-        }
-    });
+    let Some(slot) = start(s, plan(&state, change)) else { return };
     s.ui.settings.connect.busy = Some((change, slot));
 }
 
-fn env_post(base: &str, bearer: &str, path: &str, body: Value, action: &str) -> Result<Value, Failure> {
+/// Runs `plan` in the background; a managed tunnel first needs the relay client (web
+/// `ensureRelayClientAvailable`), which may ask to install it.
+fn start(s: &mut App, plan: Plan) -> Option<Slot<Result<(), Failure>>> {
+    let net = s.src.net()?;
+    let (base, auth) = (net.base_url().to_owned(), net.auth().clone());
+    let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or_default().to_owned();
+    let relay = crate::cloud::config().map(|c| c.relay);
+    let slot: Slot<Result<(), Failure>> = Arc::default();
+    let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
+    let managed = matches!(plan, Plan::Link { managed: true, .. });
+    let link = move || {
+        std::thread::spawn(move || {
+            let result = run(&plan, &base, &auth, &environment, relay.as_deref());
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+            if let Some(waker) = waker {
+                waker();
+            }
+        });
+    };
+    if managed {
+        let (failed, key) = (slot.clone(), s.ui.env.active.clone());
+        crate::cloud::relay_client::ensure(s, &key, move |_, ready| match ready {
+            Ok(()) => link(),
+            Err(message) => *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(Failure::new(message))),
+        });
+    } else {
+        link();
+    }
+    Some(slot)
+}
+
+/// Onboarding's Continue (web `reconcileCloudState`): it only turns links on.
+fn onboarding_plan(state: &Value, managed: bool, publish: bool) -> Plan {
+    if state["linked"] != true || state["linkRevoked"] == true || managed_active(state) != managed {
+        return Plan::Link { managed, publish, hold: None };
+    }
+    Plan::Preferences { publish, hold: None }
+}
+
+/// What onboarding needs from the link state: whose account it is linked to and what it publishes.
+fn link_state(state: &Value) -> crate::cloud::onboarding::LinkState {
+    let linked = state["linked"] == true && state["linkRevoked"] != true;
+    crate::cloud::onboarding::LinkState {
+        linked_user: state["cloudUserId"].as_str().filter(|_| linked).map(str::to_owned),
+        managed_tunnel: state["managedTunnelActive"].as_bool().unwrap_or(state["linked"] == true),
+        publish_activity: state["publishAgentActivity"] == true,
+    }
+}
+
+fn env_post(base: &str, auth: &s5_net::Auth, path: &str, body: Value, action: &str) -> Result<Value, Failure> {
     let url = format!("{}{path}", base.trim_end_matches('/'));
-    let response = agent().post(&url).set("Authorization", &format!("Bearer {bearer}")).send_json(body);
-    read(response, action)
+    let request = auth.apply(agent().post(&url)).map_err(Failure::new)?;
+    read(request.send_json(body), action)
 }
 
 fn relay_post(relay: &str, token: &str, path: &str, body: Value) -> Result<Value, Failure> {
@@ -233,18 +271,18 @@ fn endpoint(base: &str, managed: bool) -> (Value, Value) {
     )
 }
 
-fn run(plan: &Plan, base: &str, bearer: &str, environment: &str, relay: Option<&str>) -> Result<(), Failure> {
+fn run(plan: &Plan, base: &str, auth: &s5_net::Auth, environment: &str, relay: Option<&str>) -> Result<(), Failure> {
     let preferences = |publish: bool, hold: Option<bool>| {
         let mut body = json!({"publishAgentActivity": publish});
         if let Some(hold) = hold {
             body["holdWebhooksWhileOffline"] = json!(hold);
         }
-        env_post(base, bearer, "/api/connect/preferences", body, "Could not update environment cloud preferences.").map(drop)
+        env_post(base, auth, "/api/connect/preferences", body, "Could not update environment cloud preferences.").map(drop)
     };
     match plan {
         Plan::Preferences { publish, hold } => preferences(*publish, *hold),
         Plan::Unlink => {
-            env_post(base, bearer, "/api/connect/unlink", json!({}), "Could not unlink the environment from cloud.")?;
+            env_post(base, auth, "/api/connect/unlink", json!({}), "Could not unlink the environment from cloud.")?;
             // Web revokes the relay's record too, and only logs when that fails.
             if let (Some(relay), Ok(token)) = (relay, crate::cloud::account_token()) {
                 let url = format!("{}/v1/client/environment-links/{environment}", relay.trim_end_matches('/'));
@@ -260,7 +298,7 @@ fn run(plan: &Plan, base: &str, bearer: &str, environment: &str, relay: Option<&
             let (endpoint, origin) = endpoint(base, *managed);
             let proof = env_post(
                 base,
-                bearer,
+                auth,
                 "/api/connect/link-proof",
                 json!({"challenge": challenge["challenge"], "relayIssuer": relay, "endpoint": endpoint, "origin": origin}),
                 "Could not obtain environment link proof.",
@@ -276,7 +314,7 @@ fn run(plan: &Plan, base: &str, bearer: &str, environment: &str, relay: Option<&
             }
             env_post(
                 base,
-                bearer,
+                auth,
                 "/api/connect/relay-config",
                 json!({
                     "relayUrl": relay,
@@ -306,7 +344,7 @@ fn fail(s: &mut App, failure: Failure) {
 
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
-    let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access");
+    let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
     if showing && s.ui.settings.connect.state.is_none() && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read") {
         refresh(s);
     }
@@ -319,6 +357,31 @@ pub fn poll(s: &mut App) -> bool {
             let message = e["message"].as_str().unwrap_or("The request failed.");
             format!("Could not read environment cloud link state: {message}")
         }));
+        let manage = super::permissions::can(s, "relay:read") && super::permissions::can(s, "relay:write");
+        let link = s.ui.settings.connect.state.as_ref().and_then(|r| r.as_ref().ok()).filter(|_| manage).map(link_state);
+        crate::cloud::onboarding::set_link_state(s, link);
+        changed = true;
+    }
+    if let Some((managed, publish)) = crate::cloud::onboarding::take_publish(s) {
+        let slot = match s.ui.settings.connect.state.clone() {
+            Some(Ok(state)) => start(s, onboarding_plan(&state, managed, publish)),
+            _ => None,
+        };
+        match slot {
+            Some(slot) => s.ui.settings.connect.onboarding = Some(slot),
+            None => crate::cloud::onboarding::published(s, Err("Could not read environment cloud link state.".into())),
+        }
+        changed = true;
+    }
+    let applied = s.ui.settings.connect.onboarding.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(result) = applied {
+        s.ui.settings.connect.onboarding = None;
+        if let Err(failure) = &result {
+            s.ui.settings.connect.tunnel_limit = failure.tunnel_limit;
+        }
+        crate::cloud::onboarding::published(s, result.map_err(|f| f.message));
+        refresh(s);
+        crate::cloud::refresh(s);
         changed = true;
     }
     let done = s.ui.settings.connect.busy.as_ref().and_then(|(change, slot)| Some((*change, slot.lock().unwrap_or_else(|e| e.into_inner()).take()?)));
@@ -471,5 +534,16 @@ mod tests {
         assert_eq!(refused.tunnel_limit, Some(2));
         assert_eq!(refused.message, "https://relay/v1/client/environment-links failed: Limit reached");
         assert_eq!(failure("Could not unlink the environment from cloud.", 500, &Value::Null).message, "Could not unlink the environment from cloud: HTTP 500");
+    }
+
+    #[test]
+    fn onboarding_links_only_what_differs_and_prefills_from_its_own_link() {
+        let tunnel = json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": false, "cloudUserId": "user_1"});
+        assert_eq!(onboarding_plan(&tunnel, true, true), Plan::Preferences { publish: true, hold: None });
+        assert_eq!(onboarding_plan(&tunnel, false, true), Plan::Link { managed: false, publish: true, hold: None });
+        assert_eq!(onboarding_plan(&json!({"linked": false}), true, false), Plan::Link { managed: true, publish: false, hold: None });
+        let link = link_state(&tunnel);
+        assert_eq!((link.linked_user.as_deref(), link.managed_tunnel, link.publish_activity), (Some("user_1"), true, false));
+        assert_eq!(link_state(&json!({"linked": true, "linkRevoked": true, "cloudUserId": "user_1"})).linked_user, None, "a revoked link is nobody's");
     }
 }

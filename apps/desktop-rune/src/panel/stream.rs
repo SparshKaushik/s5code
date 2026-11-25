@@ -58,7 +58,7 @@ pub struct Stream {
     inbox: Arc<Mutex<Vec<Event>>>,
     pressed: AtomicBool,
     base: String,
-    bearer: String,
+    auth: s5_net::Auth,
     query: String,
     waker: rune::Waker,
 }
@@ -66,7 +66,7 @@ pub struct Stream {
 /// The worker's side: where it connects and what it reports into.
 struct Ctx {
     base: String,
-    bearer: String,
+    auth: s5_net::Auth,
     query: String,
     pixels: Pixels,
     state: Arc<Mutex<State>>,
@@ -75,21 +75,21 @@ struct Ctx {
 }
 
 impl Stream {
-    pub fn open(base: String, bearer: String, key: &Key, pixels: Pixels, waker: rune::Waker) -> Stream {
+    pub fn open(base: String, auth: s5_net::Auth, key: &Key, pixels: Pixels, waker: rune::Waker) -> Stream {
         let (tx, rx) = channel();
         let state = Arc::new(Mutex::new(State::default()));
         let inbox = Arc::new(Mutex::new(vec![]));
         let query = url_query(key);
-        let ctx = Ctx { base: base.clone(), bearer: bearer.clone(), query: query.clone(), pixels, state: state.clone(), inbox: inbox.clone(), waker: waker.clone() };
+        let ctx = Ctx { base: base.clone(), auth: auth.clone(), query: query.clone(), pixels, state: state.clone(), inbox: inbox.clone(), waker: waker.clone() };
         std::thread::spawn(move || run(ctx, rx));
-        Stream { tx, state, inbox, pressed: AtomicBool::new(false), base, bearer, query, waker }
+        Stream { tx, state, inbox, pressed: AtomicBool::new(false), base, auth, query, waker }
     }
 
     /// A stream already in `state`, connected to nothing, for headless scenes.
     pub fn fixture(state: State) -> Stream {
         let (tx, _) = channel();
         let waker: rune::Waker = Arc::new(|| {});
-        Stream { tx, state: Arc::new(Mutex::new(state)), inbox: Arc::default(), pressed: AtomicBool::new(false), base: String::new(), bearer: String::new(), query: String::new(), waker }
+        Stream { tx, state: Arc::new(Mutex::new(state)), inbox: Arc::default(), pressed: AtomicBool::new(false), base: String::new(), auth: s5_net::Auth::Bearer(String::new()), query: String::new(), waker }
     }
 
     pub fn state(&self) -> State {
@@ -107,15 +107,15 @@ impl Stream {
 
     /// Saves one of the session's downloads again, as web's "Download" on a file it can't show.
     pub fn save(&self, id: &str, name: String) {
-        fetch_download((self.base.clone(), self.bearer.clone(), self.query.clone()), self.inbox.clone(), self.waker.clone(), id, name);
+        fetch_download((self.base.clone(), self.auth.clone(), self.query.clone()), self.inbox.clone(), self.waker.clone(), id, name);
     }
 
     /// Answers the page's file picker with these files; none cancels it.
     pub fn upload(&self, chooser: &str, files: Vec<std::path::PathBuf>) {
-        let (base, bearer, inbox, waker) = (self.base.clone(), self.bearer.clone(), self.inbox.clone(), self.waker.clone());
+        let (base, auth, inbox, waker) = (self.base.clone(), self.auth.clone(), self.inbox.clone(), self.waker.clone());
         let query = format!("{}&chooser={}", session_query(&self.query), encode(chooser));
         std::thread::spawn(move || {
-            let result = multipart(&files).and_then(|(boundary, body)| s5_net::api_post(&base, &bearer, "/api/preview-stream/upload", &query, &format!("multipart/form-data; boundary={boundary}"), &body));
+            let result = multipart(&files).and_then(|(boundary, body)| s5_net::api_post(&base, &auth, "/api/preview-stream/upload", &query, &format!("multipart/form-data; boundary={boundary}"), &body));
             if let Err(e) = result {
                 inbox.lock().unwrap().push(Event::Failed("Unable to upload the file".into(), e));
                 waker();
@@ -293,7 +293,7 @@ fn run(ctx: Ctx, rx: Receiver<String>) {
     let mut failures = 0u32;
     let mut resize: Option<String> = None;
     loop {
-        let end = match s5_net::api_socket(&ctx.base, &ctx.bearer, "/api/preview-stream/ws", &ctx.query, Duration::from_millis(15)) {
+        let end = match s5_net::api_socket(&ctx.base, &ctx.auth, "/api/preview-stream/ws", &ctx.query, Duration::from_millis(15)) {
             Ok(mut socket) => {
                 failures = 0;
                 update(&ctx.state, &ctx.waker, |s| {
@@ -352,13 +352,13 @@ fn update(state: &Mutex<State>, waker: &rune::Waker, f: impl FnOnce(&mut State))
 
 /// Saves a download the page started into the Downloads folder, as Electron saves a person's.
 fn download(ctx: &Ctx, id: &str, name: String) {
-    fetch_download((ctx.base.clone(), ctx.bearer.clone(), ctx.query.clone()), ctx.inbox.clone(), ctx.waker.clone(), id, name);
+    fetch_download((ctx.base.clone(), ctx.auth.clone(), ctx.query.clone()), ctx.inbox.clone(), ctx.waker.clone(), id, name);
 }
 
-fn fetch_download((base, bearer, session): (String, String, String), inbox: Arc<Mutex<Vec<Event>>>, waker: rune::Waker, id: &str, name: String) {
+fn fetch_download((base, auth, session): (String, s5_net::Auth, String), inbox: Arc<Mutex<Vec<Event>>>, waker: rune::Waker, id: &str, name: String) {
     let query = format!("{}&id={}", session_query(&session), encode(id));
     std::thread::spawn(move || {
-        let saved = s5_net::api_get(&base, &bearer, "/api/preview-stream/download", &query, 4 << 30).and_then(|bytes| {
+        let saved = s5_net::api_get(&base, &auth, "/api/preview-stream/download", &query, 4 << 30).and_then(|bytes| {
             let dir = super::browser::downloads_dir();
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let path = super::browser::unique_path(&dir, &name).ok_or("The Downloads folder has too many copies of this file.")?;

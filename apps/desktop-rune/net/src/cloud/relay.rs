@@ -15,6 +15,8 @@ use super::{Failure, agent, failure, read_json};
 
 pub const CLIENT_ID: &str = "t3-web";
 pub const CONNECT_SCOPE: &str = "environment:connect";
+/// What discovery asks for: status checks and the connect that usually follows.
+pub const STATUS_SCOPE: &str = "environment:status environment:connect";
 const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
 const ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
@@ -94,12 +96,16 @@ pub fn relay_token(response: &Value, scope: &str, now: u64) -> Result<Token, Str
 }
 
 /// An environment linked to the account (`RelayClientEnvironmentRecord`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Linked {
     pub id: String,
     pub label: String,
     pub http: String,
     pub ws: String,
+    /// `linkedAt`, ISO-8601.
+    pub linked_at: String,
+    /// The endpoint is a managed (`cloudflare_tunnel`) tunnel, not only activity publishing.
+    pub managed: bool,
 }
 
 pub fn linked(response: &Value) -> Result<Vec<Linked>, String> {
@@ -108,9 +114,80 @@ pub fn linked(response: &Value) -> Result<Vec<Linked>, String> {
         .iter()
         .filter_map(|row| {
             let field = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
-            Some(Linked { id: field(&row["environmentId"])?, label: field(&row["label"]).unwrap_or_default(), http: field(&row["endpoint"]["httpBaseUrl"])?, ws: field(&row["endpoint"]["wsBaseUrl"])? })
+            Some(Linked {
+                id: field(&row["environmentId"])?,
+                label: field(&row["label"]).unwrap_or_default(),
+                http: field(&row["endpoint"]["httpBaseUrl"])?,
+                ws: field(&row["endpoint"]["wsBaseUrl"])?,
+                linked_at: field(&row["linkedAt"]).unwrap_or_default(),
+                managed: row["endpoint"]["providerKind"] == "cloudflare_tunnel",
+            })
         })
         .collect())
+}
+
+/// A phone registered for the account's notifications (`RelayClientDeviceRecord`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub id: String,
+    pub label: String,
+    pub android: bool,
+    pub ios_major: Option<u64>,
+    pub app_version: Option<String>,
+    pub notifications: bool,
+    /// Approvals, input requests, completions, failures.
+    pub alerts: [bool; 4],
+    pub live_activities: bool,
+    /// `updatedAt`, ISO-8601.
+    pub updated_at: String,
+}
+
+pub fn devices(response: &Value) -> Result<Vec<Device>, String> {
+    let rows = response["devices"].as_array().ok_or("The relay returned no device list.")?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let field = |v: &Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+            let on = |v: &Value| v.as_bool().unwrap_or(false);
+            let n = &row["notifications"];
+            Some(Device {
+                id: field(&row["deviceId"])?,
+                label: field(&row["label"])?,
+                android: row["platform"] == "android",
+                ios_major: row["iosMajorVersion"].as_u64(),
+                app_version: field(&row["appVersion"]),
+                notifications: on(&n["enabled"]),
+                alerts: [on(&n["notifyOnApproval"]), on(&n["notifyOnInput"]), on(&n["notifyOnCompletion"]), on(&n["notifyOnFailure"])],
+                live_activities: on(&row["liveActivities"]["enabled"]),
+                updated_at: field(&row["updatedAt"]).unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
+impl Device {
+    /// `mobileClientPlatformLabel`.
+    pub fn platform(&self) -> String {
+        let platform = match (self.android, self.ios_major) {
+            (true, _) => "Android".to_owned(),
+            (false, None) => "iOS".to_owned(),
+            (false, Some(major)) => format!("iOS {major}"),
+        };
+        match &self.app_version {
+            Some(version) => format!("{platform} · T3 Code {version}"),
+            None => platform,
+        }
+    }
+
+    /// `mobileClientNotificationDetail`.
+    pub fn detail(&self) -> String {
+        if !self.notifications {
+            return "Push notifications are disabled on this device.".into();
+        }
+        let names = ["approvals", "input requests", "completions", "failures"];
+        let on: Vec<&str> = names.iter().zip(self.alerts).filter(|(_, on)| *on).map(|(name, _)| *name).collect();
+        if on.is_empty() { "Push notifications are enabled, but no alert types are selected.".into() } else { format!("Alerts enabled for {}.", on.join(", ")) }
+    }
 }
 
 /// What `connectEnvironment` returns: where the environment is and a credential to spend there.
@@ -127,9 +204,42 @@ pub fn bootstrap(response: &Value, expected: &str) -> Result<Bootstrap, String> 
     }
     let field = |v: &Value, what: &str| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned).ok_or(format!("The relay returned no {what}."));
     Ok(Bootstrap {
-        environment: Linked { id: id.to_owned(), label: String::new(), http: field(&response["endpoint"]["httpBaseUrl"], "endpoint")?, ws: field(&response["endpoint"]["wsBaseUrl"], "endpoint")? },
+        environment: Linked { id: id.to_owned(), http: field(&response["endpoint"]["httpBaseUrl"], "endpoint")?, ws: field(&response["endpoint"]["wsBaseUrl"], "endpoint")?, ..Linked::default() },
         credential: field(&response["credential"], "credential")?,
     })
+}
+
+/// A relay `RelayEnvironmentStatusResponse` for a listed environment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Status {
+    pub online: bool,
+    /// `relayOfflineReasonMessage`: why an offline environment will not come back by itself.
+    pub offline_reason: Option<String>,
+    pub error: Option<String>,
+    pub trace: Option<String>,
+}
+
+const TUNNEL_RELEASED: &str = "Offline for a while, so its T3 Connect tunnel was removed. Start T3 Code on that computer and update it to the latest version to reconnect.";
+
+/// `validateStatus`: refused unless it is about the environment and endpoint listed.
+pub fn status(response: &Value, listed: &Linked) -> Result<Status, String> {
+    if response["environmentId"] != listed.id.as_str() {
+        return Err("Relay returned status for a different environment.".into());
+    }
+    if response["endpoint"]["httpBaseUrl"] != listed.http.as_str() || response["endpoint"]["wsBaseUrl"] != listed.ws.as_str() {
+        return Err("Relay returned status for a different environment endpoint.".into());
+    }
+    if response["descriptor"].is_object() && response["descriptor"]["environmentId"] != listed.id.as_str() {
+        return Err("Relay returned a descriptor for a different environment.".into());
+    }
+    let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    let online = match response["status"].as_str() {
+        Some("online") => true,
+        Some("offline") => false,
+        _ => return Err("Relay returned an unknown environment status.".into()),
+    };
+    let offline_reason = (!online && response["offlineReason"] == "tunnel_released").then(|| TUNNEL_RELEASED.to_owned());
+    Ok(Status { online, offline_reason, error: text(&response["error"]), trace: text(&response["traceId"]) })
 }
 
 /// `rpcSocketUrl` plus the ticket, and the upgrade proof's target: the socket URL as the HTTP
@@ -198,6 +308,19 @@ impl Relay<'_> {
             .map_err(|e| failure(action, e))?;
         bootstrap(&read_json(action, response)?, environment).map_err(Failure::new)
     }
+
+    /// `getEnvironmentStatus`, with a token granted [`STATUS_SCOPE`].
+    pub fn status(&self, relay: &Token, environment: &Linked) -> Result<Status, Failure> {
+        let action = "check environment status";
+        let url = format!("{}/v1/environments/{}/status", self.origin, environment.id);
+        let response = agent()
+            .post(&url)
+            .set("Authorization", &format!("DPoP {}", relay.access))
+            .set("DPoP", &self.proof("POST", &url, Some(&relay.access))?)
+            .call()
+            .map_err(|e| failure(action, e))?;
+        status(&read_json(action, response)?, environment).map_err(Failure::new)
+    }
 }
 
 /// The account's linked environments, with the Clerk session as a bearer token.
@@ -205,6 +328,20 @@ pub fn environments(origin: &str, clerk_jwt: &str) -> Result<Vec<Linked>, Failur
     let action = "list T3 Connect environments";
     let response = agent().get(&format!("{origin}/v1/environments")).set("Authorization", &format!("Bearer {clerk_jwt}")).call().map_err(|e| failure(action, e))?;
     linked(&read_json(action, response)?).map_err(Failure::new)
+}
+
+/// The account's mobile clients (`listDevicesV2`), with the Clerk session as a bearer token.
+pub fn client_devices(origin: &str, clerk_jwt: &str) -> Result<Vec<Device>, Failure> {
+    let action = "list mobile clients";
+    let response = agent().get(&format!("{origin}/v2/client/devices")).set("Authorization", &format!("Bearer {clerk_jwt}")).call().map_err(|e| failure(action, e))?;
+    devices(&read_json(action, response)?).map_err(Failure::new)
+}
+
+/// `unlinkEnvironment`: revokes the environment's T3 Connect access and frees its host space.
+pub fn deregister(origin: &str, clerk_jwt: &str, environment: &str) -> Result<(), Failure> {
+    let action = "deregister the server";
+    agent().delete(&format!("{origin}/v1/client/environment-links/{environment}")).set("Authorization", &format!("Bearer {clerk_jwt}")).call().map_err(|e| failure(action, e))?;
+    Ok(())
 }
 
 /// The environment's own DPoP access token, for a bootstrap the relay handed out.
@@ -258,6 +395,29 @@ mod tests {
     }
 
     #[test]
+    fn mobile_clients_parse_and_read_like_web() {
+        let list = json!({"devices": [
+            {"deviceId": "d-1", "label": "Pixel", "platform": "android", "iosMajorVersion": null, "androidApiLevel": 35, "appVersion": "1.4.0",
+             "notifications": {"enabled": true, "notifyOnApproval": true, "notifyOnInput": false, "notifyOnCompletion": true, "notifyOnFailure": true},
+             "liveActivities": {"enabled": false}, "updatedAt": "2026-11-20T10:05:00.000Z"},
+            {"deviceId": "d-2", "label": "iPhone", "platform": "ios", "iosMajorVersion": 26, "appVersion": null,
+             "notifications": {"enabled": true, "notifyOnApproval": false, "notifyOnInput": false, "notifyOnCompletion": false, "notifyOnFailure": false},
+             "liveActivities": {"enabled": true}, "updatedAt": "2026-11-21T08:00:00.000Z"},
+            {"deviceId": "d-3", "label": "Old", "platform": "ios", "iosMajorVersion": null, "appVersion": "1.0",
+             "notifications": {"enabled": false, "notifyOnApproval": true, "notifyOnInput": true, "notifyOnCompletion": true, "notifyOnFailure": true},
+             "liveActivities": {"enabled": false}, "updatedAt": "2026-11-21T08:00:00.000Z"},
+            {"deviceId": " ", "label": "No id"}]});
+        let devices = devices(&list).unwrap();
+        assert_eq!(devices.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), ["d-1", "d-2", "d-3"]);
+        assert_eq!(devices.iter().map(Device::platform).collect::<Vec<_>>(), ["Android · T3 Code 1.4.0", "iOS 26", "iOS · T3 Code 1.0"]);
+        assert_eq!(devices[0].detail(), "Alerts enabled for approvals, completions, failures.");
+        assert_eq!(devices[1].detail(), "Push notifications are enabled, but no alert types are selected.");
+        assert_eq!(devices[2].detail(), "Push notifications are disabled on this device.");
+        assert!(devices[1].live_activities && !devices[0].live_activities);
+        assert!(super::devices(&json!({})).is_err());
+    }
+
+    #[test]
     fn relay_replies_parse_and_wrong_grants_are_refused() {
         let reply = json!({"access_token": "rat-1", "issued_token_type": ACCESS_TOKEN, "token_type": "DPoP", "expires_in": 600, "scope": "environment:connect"});
         let token = relay_token(&reply, CONNECT_SCOPE, 1_000).unwrap();
@@ -268,7 +428,22 @@ mod tests {
         let list = json!({"environments": [
             {"environmentId": "env-1", "label": "Studio Mac", "endpoint": {"httpBaseUrl": "https://env-1.tunnel.example.com/", "wsBaseUrl": "wss://env-1.tunnel.example.com/", "providerKind": "cloudflare"}, "linkedAt": "2026-11-01T00:00:00.000Z"},
             {"environmentId": "env-2", "label": "Broken"}]});
-        assert_eq!(linked(&list).unwrap(), vec![Linked { id: "env-1".into(), label: "Studio Mac".into(), http: "https://env-1.tunnel.example.com/".into(), ws: "wss://env-1.tunnel.example.com/".into() }]);
+        let studio = Linked { id: "env-1".into(), label: "Studio Mac".into(), http: "https://env-1.tunnel.example.com/".into(), ws: "wss://env-1.tunnel.example.com/".into(), linked_at: "2026-11-01T00:00:00.000Z".into(), managed: false };
+        assert_eq!(linked(&list).unwrap(), vec![studio.clone()]);
+        let tunnel = json!({"environments": [{"environmentId": "env-1", "label": "Studio Mac", "endpoint": {"httpBaseUrl": "https://env-1.tunnel.example.com/", "wsBaseUrl": "wss://env-1.tunnel.example.com/", "providerKind": "cloudflare_tunnel"}, "linkedAt": "2026-11-01T00:00:00.000Z"}]});
+        assert_eq!(linked(&tunnel).unwrap(), vec![Linked { managed: true, ..studio }], "only a cloudflare_tunnel endpoint is a managed tunnel");
+        let listed = &linked(&list).unwrap()[0];
+        let online = json!({"environmentId": "env-1", "endpoint": {"httpBaseUrl": "https://env-1.tunnel.example.com/", "wsBaseUrl": "wss://env-1.tunnel.example.com/", "providerKind": "cloudflare"}, "status": "online", "checkedAt": "2026-11-25T00:00:00.000Z"});
+        assert_eq!(status(&online, listed).unwrap(), Status { online: true, offline_reason: None, error: None, trace: None });
+        let released = json!({"environmentId": "env-1", "endpoint": online["endpoint"], "status": "offline", "checkedAt": "x", "offlineReason": "tunnel_released", "error": "Tunnel not found", "traceId": "0af7651916cd43dd8448eb211c80319c"});
+        let offline = status(&released, listed).unwrap();
+        assert!(!offline.online && offline.offline_reason.as_deref().is_some_and(|m| m.starts_with("Offline for a while")));
+        assert_eq!((offline.error.as_deref(), offline.trace.as_deref()), (Some("Tunnel not found"), Some("0af7651916cd43dd8448eb211c80319c")));
+        let moved = json!({"environmentId": "env-1", "endpoint": {"httpBaseUrl": "https://elsewhere.example.com/", "wsBaseUrl": "wss://elsewhere.example.com/"}, "status": "online", "checkedAt": "x"});
+        assert_eq!(status(&moved, listed).unwrap_err(), "Relay returned status for a different environment endpoint.");
+        assert!(status(&json!({"environmentId": "env-2", "endpoint": online["endpoint"], "status": "online"}), listed).is_err());
+        let granted = json!({"access_token": "rat-2", "token_type": "DPoP", "expires_in": 600, "scope": "environment:connect environment:status"});
+        assert!(relay_token(&granted, STATUS_SCOPE, 0).is_ok(), "the grant may list its scopes in any order");
         let connected = json!({"environmentId": "env-1", "endpoint": {"httpBaseUrl": "https://env-1.tunnel.example.com/", "wsBaseUrl": "wss://env-1.tunnel.example.com/", "providerKind": "cloudflare"}, "credential": "boot-1", "expiresAt": "2026-11-22T00:05:00.000Z"});
         assert_eq!(bootstrap(&connected, "env-1").unwrap().credential, "boot-1");
         assert_eq!(bootstrap(&connected, "env-9").unwrap_err(), "Connected environment env-1 does not match env-9.");
