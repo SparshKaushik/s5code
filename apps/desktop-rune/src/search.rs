@@ -89,6 +89,15 @@ pub(crate) fn scene_results(s: &mut App) {
     s.ui.search.results = Results { params: params(s).unwrap_or_default(), matches, ..Results::default() };
 }
 
+/// Scene: enough matches in each file to scroll, for the headings that stick.
+pub(crate) fn scene_long(s: &mut App) {
+    scene_results(s);
+    s.ui.search.results.matches = ["src/lib.rs", "src/search/index.rs", "web/search.ts"]
+        .iter()
+        .flat_map(|path| (1..=8).map(move |i| json!({"path": path, "lineNumber": i * 7, "lineContent": format!("    let needle_{i} = haystack.find(needle);"), "matchRanges": [{"start": 8, "end": 14}]})))
+        .collect();
+}
+
 /// Scene: the search failed, so the status line carries the error.
 pub(crate) fn scene_error(s: &mut App) {
     open(s);
@@ -268,23 +277,18 @@ fn option(label: &'static str, glyph: &'static str, on: bool, enabled: bool, fla
     if glyph == "ab" {
         glyph_el = rich(glyph, vec![Span::new(0, 2).underline(fg)]).font(theme::mono(theme::XS_MEDIUM)).color(fg);
     }
-    let mut b = row()
-        .role("switch")
-        .label(label)
-        .help(label)
-        .h(24.)
-        .min_w(28.)
-        .px(6.)
-        .center()
-        .radius(6.)
-        .child(glyph_el);
+    // Web's `segmented` Toggle: borderless; pressed raises it onto the input surface.
+    let mut b = row().role("switch").label(label).help(label).h(24.).px(10.).center().radius(6.).child(glyph_el);
     if on {
-        b = b.fill(t.c.background).border(1., t.c.contrast_border.alpha_mul(0.6));
+        b = if t.dark { b.fill(t.c.contrast_input.alpha_mul(0.72)) } else { b.fill(t.c.background).shadow(1., 2., rune::Color::BLACK.alpha_mul(0.1)) };
     }
     if !enabled {
         return b.disabled(true).opacity(0.64);
     }
-    b.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle(s, flag))
+    if !on {
+        b = b.hover(if t.dark { t.c.contrast_input.alpha_mul(0.32) } else { t.c.background.alpha_mul(0.55) });
+    }
+    b.cursor(Cursor::Pointer).on_press(move |s: &mut App| toggle(s, flag))
 }
 
 fn status_line(s: &App, t: &T) -> Option<El> {
@@ -432,8 +436,12 @@ fn results(s: &App, matches: &[Value], pending: bool, t: &T) -> El {
     let shown = &matches[..matches.len().min(ui.visible)];
     for (path, rows) in groups(shown) {
         let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+        // Web `sticky top-0 bg-popover/95 backdrop-blur-sm`.
         let mut heading = row()
             .w_full()
+            .sticky_top(0.)
+            .fill(t.c.background.alpha_mul(0.95))
+            .backdrop_blur(4.)
             .h(32.)
             .px(12.)
             .gap(8.)

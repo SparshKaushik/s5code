@@ -45,6 +45,9 @@ pub struct State {
     pub clone: Option<CloneFlow>,
     pending: Option<(u64, Pending)>,
     pub publish: bool,
+    /// The host picked for the new repository (`newProjectPublishKind`), by `PROVIDERS` index.
+    pub publish_kind: Option<usize>,
+    pub(super) host_open: bool,
     pub(super) published: Option<(u64, &'static str)>,
     /// The environment the flow adds the project to, picked when it started; every request and
     /// server setting it reads belongs to it, wherever focus moves meanwhile.
@@ -326,8 +329,9 @@ fn readiness(s: &App, provider: usize) -> (bool, String) {
 fn option(v: &Value) -> Option<String> {
     v["value"].as_str().or(v.as_str()).map(str::to_owned)
 }
-fn publish_target(s: &App) -> Option<(usize, Option<String>, bool)> {
-    let targets: Vec<(usize, Option<String>)> = (0..PROVIDERS.len())
+/// `getNewProjectPublishTargets`: the hosts a new project can publish to, with their owner.
+fn publish_targets(s: &App) -> Vec<(usize, Option<String>)> {
+    (0..PROVIDERS.len())
         .filter(|i| readiness(s, *i).0)
         .filter_map(|i| {
             let account = s.ui.shell.palette.add.discovery.as_ref().and_then(|d| {
@@ -339,8 +343,32 @@ fn publish_target(s: &App) -> Option<(usize, Option<String>, bool)> {
                 Owner::Never => None,
             }
         })
-        .collect();
-    targets.first().map(|(i, owner)| (*i, owner.clone(), targets.len() > 1))
+        .collect()
+}
+/// `getNewProjectPublishTarget`: the picked host while it can take one, else the first; and
+/// whether there is a choice.
+fn publish_target(s: &App) -> Option<(usize, Option<String>, bool)> {
+    let targets = publish_targets(s);
+    let kind = s.ui.shell.palette.add.publish_kind;
+    let (i, owner) = targets.iter().find(|(i, _)| Some(*i) == kind).or(targets.first())?;
+    Some((*i, owner.clone(), targets.len() > 1))
+}
+/// A new project whose repository can go to GitHub or GitLab, the host picker open.
+pub(crate) fn scene_host(s: &mut App) {
+    s.ui.shell.palette.open = true;
+    start_new(s);
+    let host = |kind: &str, account: &str| json!({"kind": kind, "status": "available", "auth": {"status": "authenticated", "account": account}});
+    let add = &mut s.ui.shell.palette.add;
+    add.discovery = Some(json!({"sourceControlProviders": [host("github", "octo"), host("gitlab", "octo")]}));
+    add.publish = true;
+    add.host_open = true;
+    s.ui.shell.palette.query = rune::TextEdit::new("demo-app");
+}
+/// The host picker's choice.
+pub(super) fn pick_host(s: &mut App, kind: &str) {
+    let add = &mut s.ui.shell.palette.add;
+    add.publish_kind = PROVIDERS.iter().position(|p| p.kind == kind);
+    add.host_open = false;
 }
 fn new_repository(owner: &Option<String>, workspace_root: &str) -> String {
     let folder = workspace_root.split(['/', '\\']).rfind(|s| !s.is_empty()).unwrap_or("");
@@ -557,7 +585,11 @@ fn new_project_items(s: &App) -> Vec<Item> {
         } else {
             new_repository(&owner, &clone_destination(&root, &folder_name(&name)))
         });
-        v.trailing = Trailing::Check(s.ui.shell.palette.add.publish);
+        v.trailing = if several {
+            Trailing::Host(publish_targets(s).into_iter().map(|t| t.0).collect(), i, s.ui.shell.palette.add.publish)
+        } else {
+            Trailing::Check(s.ui.shell.palette.add.publish)
+        };
         v.disabled = busy(s);
         rows.push(v);
     }
@@ -700,6 +732,7 @@ pub fn choose(s: &mut App, source: Source) {
         }
         Source::New => {
             s.ui.shell.palette.add.publish = false;
+            s.ui.shell.palette.add.publish_kind = None;
             push_page(s, "add-new", "");
             request_discovery(s);
         }
@@ -1026,7 +1059,7 @@ pub fn poll(s: &mut App) -> bool {
                 Some(error) => toast(s, &format!("Created {name} without a first commit"), Some(&format!("{error} The project is in {root}."))),
             }
             if let Some(i) = publish
-                && let Some((_, owner, _)) = publish_target(s)
+                && let Some((_, owner)) = publish_targets(s).into_iter().find(|t| t.0 == i)
                 && let Some(net) = self::net(s)
             {
                 let pending = net.request("sourceControl.publishRepository", json!({
@@ -1091,6 +1124,22 @@ pub fn brand(provider: usize, size: f32, muted: rune::Color) -> Option<rune::El>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_new_repository_goes_to_the_picked_host_with_its_owner() {
+        let mut s = App::new();
+        let host = |kind: &str, account: &str| json!({"kind": kind, "status": "available", "auth": {"status": "authenticated", "account": account}});
+        s.ui.shell.palette.add.discovery = Some(json!({"sourceControlProviders": [host("gitlab", "lab-me"), host("github", "octo")]}));
+        let (first, owner, several) = publish_target(&s).expect("a host");
+        assert_eq!((PROVIDERS[first].kind, owner.as_deref(), several), ("github", Some("octo"), true));
+        s.ui.shell.palette.add.host_open = true;
+        pick_host(&mut s, "gitlab");
+        assert!(!s.ui.shell.palette.add.host_open, "FAILED: picking closes the picker");
+        let (picked, owner, _) = publish_target(&s).expect("a host");
+        assert_eq!((PROVIDERS[picked].kind, owner.as_deref()), ("gitlab", Some("lab-me")), "FAILED: the picked host and its own account");
+        s.ui.shell.palette.add.discovery = Some(json!({"sourceControlProviders": [host("github", "octo")]}));
+        let (only, _, several) = publish_target(&s).expect("a host");
+        assert_eq!((PROVIDERS[only].kind, several), ("github", false), "FAILED: a host that can no longer publish falls back to the first");
+    }
     #[test]
     fn a_readded_project_opens_its_latest_thread_by_the_sort_order() {
         let mut s = App::new();
