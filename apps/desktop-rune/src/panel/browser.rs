@@ -173,6 +173,7 @@ pub struct Live {
     pub pixels: Pixels,
     /// Runs in each of its documents before the page's own scripts.
     pub script: Option<String>,
+    pub file_pdf: bool,
     messages: Arc<Mutex<Vec<String>>>,
 }
 
@@ -180,7 +181,7 @@ impl Live {
     pub fn new(url: String, width: u32, height: u32, dark: bool) -> Live {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Live { id, url, width, height, dark, pixels: Pixels::new(), script: None, messages: Arc::default() }
+        Live { id, url, width, height, dark, pixels: Pixels::new(), script: None, file_pdf: false, messages: Arc::default() }
     }
 
     /// Its Chrome let it go without `LiveClose` (a relaunch).
@@ -1481,6 +1482,26 @@ impl Worker {
                     }
                 }
                 // A link the page opens goes to a browser tab, as web's frame hands it to the panel.
+                "Fetch.requestPaused" => {
+                    let session = v["sessionId"].as_str().unwrap_or_default();
+                    let current = p["request"]["url"].as_str();
+                    let pdf = self.lives.get(&id).is_some_and(|frame| {
+                        frame.live.file_pdf && frame.target.as_deref() == p["frameId"].as_str()
+                            && current == Some(frame.live.url.as_str())
+                    });
+                    if pdf {
+                        let document = base64::engine::general_purpose::STANDARD.encode(file_pdf_viewer(current.unwrap_or_default(), None));
+                        let headers = json!([
+                            {"name": "Content-Type", "value": "text/html; charset=utf-8"},
+                            {"name": "Cache-Control", "value": "no-store"},
+                            {"name": "Referrer-Policy", "value": "no-referrer"},
+                            {"name": "Content-Security-Policy", "value": "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; worker-src blob:; base-uri 'none'; form-action 'none'"},
+                        ]);
+                        self.send(Some(session), "Fetch.fulfillRequest", json!({"requestId": p["requestId"], "responseCode": 200, "responseHeaders": headers, "body": document}), None);
+                    } else {
+                        self.send(Some(session), "Fetch.continueRequest", json!({"requestId": p["requestId"]}), None);
+                    }
+                }
                 "Page.windowOpen" => {
                     let url = p["url"].as_str().unwrap_or_default().to_owned();
                     if url.starts_with("http") {
@@ -1627,7 +1648,7 @@ impl Worker {
                 let Some(frame) = self.lives.get_mut(&id) else { return };
                 frame.session = Some(session.clone());
                 let queue = std::mem::take(&mut frame.queue);
-                let (url, dark, script) = (frame.live.url.clone(), frame.live.dark, frame.live.script.clone());
+                let (url, dark, script, file_pdf) = (frame.live.url.clone(), frame.live.dark, frame.live.script.clone(), frame.live.file_pdf);
                 for (method, params) in [
                     ("Page.enable", json!({})),
                     ("Runtime.enable", json!({})),
@@ -1638,6 +1659,9 @@ impl Worker {
                 }
                 if let Some(source) = script {
                     self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": source }), None);
+                }
+                if file_pdf {
+                    self.send(Some(&session), "Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Response"}]}), None);
                 }
                 self.live_view(id);
                 self.send(Some(&session), "Page.navigate", json!({ "url": url }), None);
@@ -2373,6 +2397,16 @@ fn pdf_viewer(url: &str) -> String {
     // `{` too, so a file name can't stand in for the placeholders after it.
     let escape = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('{', "&#123;");
     PDF_VIEWER.replace("{title}", &escape(&name)).replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
+}
+
+pub(super) fn file_pdf_viewer(url: &str, fixture: Option<&[u8]>) -> String {
+    let name = url.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or("PDF");
+    let name = s5_net::url::form_urlencoded::parse(format!("name={}", name.replace('+', "%2B")).as_bytes())
+        .next().map(|(_, name)| name.into_owned()).unwrap_or_else(|| "PDF".into());
+    let title = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('{', "&#123;");
+    let bytes = fixture.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)).unwrap_or_default();
+    include_str!("file_viewers/pdf.html").replace("{title}", &title).replace("{bytes}", &bytes)
+        .replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
 }
 
 // pdf.js 3.11.174 (Apache-2.0, `assets/pdfjs/LICENSE`), bundled as Electron bundles its viewer so

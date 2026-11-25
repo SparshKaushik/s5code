@@ -439,8 +439,10 @@ fn load_commits(app: &mut App) {
 /// Puts the loaded files into the view, dropping tests when they are hidden.
 fn apply(app: &mut App) {
     let default_collapsed = setting(app, "diffFilesCollapsed", true);
+    let hide_tests = crate::settings::client::hide_test_files(&app.client_settings);
     let ui = &mut app.ui.panel.diff;
-    let files: Vec<FileDiff> = ui.files.iter().filter(|f| !ui.hide_tests || !is_test_file(f.path())).cloned().collect();
+    ui.hide_tests = hide_tests;
+    let files: Vec<FileDiff> = ui.files.iter().filter(|f| !hide_tests || !is_test_file(f.path())).cloned().collect();
     let collapsed = collapsed_for(&mut ui.folds, &ui.state, ui.touched, &files, default_collapsed);
     ui.state.set_files(files, &collapsed);
     sync_extras(app);
@@ -561,6 +563,10 @@ fn visible(app: &App) -> bool {
 
 pub fn poll(app: &mut App) -> bool {
     let mut changed = file_menu::poll(app);
+    if app.ui.panel.diff.hide_tests != crate::settings::client::hide_test_files(&app.client_settings) {
+        apply(app);
+        changed = true;
+    }
     if let Some(id) = app.ui.panel.diff.commits_pending
         && let Some(reply) = take(app, id)
     {
@@ -1428,7 +1434,7 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
     if ui.files.iter().any(|f| is_test_file(f.path())) {
         let hide = ui.hide_tests;
         right = right.child(toggle(t, "panel-diff-tests", if hide { "Show test files" } else { "Hide test files" }, &icons::FLASK_CONICAL_OFF, hide, move |s: &mut App| {
-            s.ui.panel.diff.hide_tests = !hide;
+            crate::settings::client::set_hide_test_files(&mut s.client_settings, !hide);
             apply(s);
         }));
     }

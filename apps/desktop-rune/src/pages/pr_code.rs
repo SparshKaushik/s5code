@@ -34,7 +34,7 @@ const FLUSH_MS: i64 = 400;
 /// The web keeps this in localStorage (`t3code.pullRequestFileTreeOpen`).
 const TREE_KEY: &str = "pullRequestFileTreeOpen";
 /// The web keeps this in localStorage (`t3code.diffHideTestFiles`).
-const HIDE_TESTS_KEY: &str = "diffHideTestFiles";
+use crate::settings::client::HIDE_TEST_FILES as HIDE_TESTS_KEY;
 const DRAFT: &str = "draft";
 /// Prefixes a review thread's note id.
 const THREAD: &str = "thread:";
@@ -253,7 +253,7 @@ fn ignore_ws(s: &App) -> bool {
 }
 
 fn hide_tests(s: &App) -> bool {
-    setting(s, HIDE_TESTS_KEY, false)
+    crate::settings::client::hide_test_files(&s.client_settings)
 }
 
 /// The files shown: tests dropped while hidden, except one a reveal asked for, and whitespace-only
@@ -1591,8 +1591,7 @@ fn set_ignore_ws(s: &mut App, on: bool) {
 }
 
 fn set_hide_tests(s: &mut App, hide: bool) {
-    s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(hide));
-    s.client_settings.save();
+    crate::settings::client::set_hide_test_files(&mut s.client_settings, hide);
     show(s);
 }
 

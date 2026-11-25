@@ -8,6 +8,8 @@ pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
 mod file_preview;
+mod file_viewers;
+pub const FILE_VIEWER_SCENES: &[(&str, fn(&mut App))] = file_viewers::SCENES;
 mod files;
 mod history;
 pub(crate) mod html_frame;
@@ -1135,7 +1137,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
-        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
+        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2]), cx.layout_with("file-image-viewport", |r| [r[2], r[3]])),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
         Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Surface::Terminal) => col()

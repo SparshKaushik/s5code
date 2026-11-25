@@ -30,6 +30,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 qrcodegen = "1.8"
 # Open VSX theme packages: reading deflated VSIX entries only, on the flate2 already in the tree.
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 
 # Linux SnapShots over the session bus (Screenshot portal, GNOME extension), on the versions and
 # features Rune's `dbus` feature already brings in.

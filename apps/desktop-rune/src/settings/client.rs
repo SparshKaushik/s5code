@@ -25,7 +25,18 @@ impl Default for ClientSettings {
 
 /// Keys only Rune reads. Electron's settings struct drops unknown keys when it saves the
 /// shared file, so these live beside it.
-const RUNE_ONLY: [&str; 6] = ["appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced", "t3code:version-mismatch-dismissals:v1"];
+const RUNE_ONLY: [&str; 8] = ["appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced", "t3code:version-mismatch-dismissals:v1", HIDE_TEST_FILES, "renderBrowserFile"];
+pub(crate) const HIDE_TEST_FILES: &str = "diffHideTestFiles";
+
+pub(crate) fn hide_test_files(settings: &ClientSettings) -> bool {
+    settings.values.get(HIDE_TEST_FILES).and_then(Value::as_bool).unwrap_or(false)
+}
+
+pub(crate) fn set_hide_test_files(settings: &mut ClientSettings, hide: bool) {
+    settings.values.insert(HIDE_TEST_FILES.into(), Value::Bool(hide));
+    settings.save();
+}
+
 const RUNE_FILE: &str = "desktop-rune-client-settings.json";
 
 /// Electron's `decodeJsonResult` leniency: comments and trailing commas, outside strings.
@@ -208,7 +219,9 @@ mod tests {
         settings
             .values
             .insert("appearance".into(), serde_json::json!("dark"));
-        settings.save();
+        assert!(!hide_test_files(&settings));
+        set_hide_test_files(&mut settings, true);
+        assert!(hide_test_files(&settings));
         assert!(settings.error.is_none());
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["futureSetting"]["nested"], true);
@@ -216,6 +229,7 @@ mod tests {
         let own = path.with_file_name(RUNE_FILE);
         let saved: Value = serde_json::from_slice(&std::fs::read(&own).unwrap()).unwrap();
         assert_eq!(saved["appearance"], "dark");
+        assert_eq!(saved[HIDE_TEST_FILES], true);
         settings
             .values
             .insert("appearance".into(), serde_json::json!("light"));

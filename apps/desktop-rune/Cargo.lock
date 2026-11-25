@@ -3100,6 +3100,7 @@ version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "base64",
+ "flate2",
  "futures-util",
  "image",
  "openh264",

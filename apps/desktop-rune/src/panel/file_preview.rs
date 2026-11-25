@@ -62,6 +62,7 @@ impl Kind {
     pub fn rendered_mode(self) -> Option<&'static str> {
         match self {
             Kind::Markdown => Some("markdown"),
+            Kind::Html => Some("html"),
             Kind::Mermaid => Some("mermaid"),
             Kind::Table(_) => Some("table"),
             _ => None,
@@ -166,7 +167,35 @@ pub struct Notebook {
 pub struct Cell {
     pub kind: &'static str,
     pub source: String,
-    pub outputs: Vec<String>,
+    pub outputs: Vec<NotebookOutput>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum NotebookOutput {
+    Text(String),
+    Html(String),
+    Image(Vec<u8>),
+}
+
+fn output(value: &Value) -> Option<NotebookOutput> {
+    use base64::Engine;
+    let data = &value["data"];
+    for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+        let encoded = notebook_text(&data[mime]);
+        if encoded.len() > 4 * 1024 * 1024 || encoded.is_empty() { continue }
+        let compact: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(compact) {
+            return Some(NotebookOutput::Image(bytes));
+        }
+    }
+    let html = notebook_text(&data["text/html"]);
+    if !html.trim().is_empty() && html.len() <= 1024 * 1024 {
+        return Some(NotebookOutput::Html(html));
+    }
+    let text = [&value["text"], &data["text/plain"], &value["traceback"]].into_iter()
+        .find(|v| !v.is_null()).map(notebook_text).unwrap_or_default();
+    let clean = strip_ansi(&text);
+    (!clean.trim().is_empty()).then_some(NotebookOutput::Text(clean))
 }
 
 fn notebook_text(value: &Value) -> String {
@@ -177,7 +206,7 @@ fn notebook_text(value: &Value) -> String {
     }
 }
 
-/// `openNotebook`: version 4 notebooks with up to 500 cells, saved text outputs only.
+/// `openNotebook`: version 4 notebooks with up to 500 cells.
 pub fn notebook(source: &str) -> Result<Notebook, String> {
     let v: Value = serde_json::from_str(source).map_err(|_| "This notebook is not valid JSON.".to_owned())?;
     let cells = v["cells"].as_array().filter(|c| v["nbformat"] == 4 && c.len() <= 500).ok_or("Preview supports version 4 notebooks with up to 500 cells.")?;
@@ -196,14 +225,7 @@ pub fn notebook(source: &str) -> Result<Notebook, String> {
                     _ => "raw",
                 },
                 source: notebook_text(&cell["source"]),
-                outputs: outputs
-                    .iter()
-                    .map(|o| {
-                        let text = [&o["text"], &o["data"]["text/plain"], &o["traceback"]].into_iter().find(|v| !v.is_null()).map(notebook_text).unwrap_or_default();
-                        strip_ansi(&text)
-                    })
-                    .filter(|t| !t.trim().is_empty())
-                    .collect(),
+                outputs: outputs.iter().filter_map(output).collect(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -283,9 +305,16 @@ pub fn table(parsed: &Table, t: &T) -> El {
 }
 
 /// NotebookPreview: a count, the "never executed" notice, then each cell with its saved output.
-pub fn notebook_view(app: &App, path: &str, nb: &Notebook, t: &T) -> El {
+pub fn notebook_view(
+    app: &App,
+    path: &str,
+    nb: &Notebook,
+    visible: usize,
+    t: &T,
+    rich: impl Fn(usize, usize, &NotebookOutput) -> El,
+) -> El {
     let mut cells = col().w_full().max_w(896.).gap(20.).px(20.).py(24.);
-    for (i, cell) in nb.cells.iter().enumerate() {
+    for (i, cell) in nb.cells.iter().take(visible).enumerate() {
         let label = if cell.kind == "code" { nb.language.as_str() } else { cell.kind };
         let mut card = col()
             .w_full()
@@ -303,12 +332,23 @@ pub fn notebook_view(app: &App, path: &str, nb: &Notebook, t: &T) -> El {
             let spans = rune_kit::syntax::SyntaxTheme::neutral(t.dark).spans(&rune_kit::syntax::highlight(lang, &cell.source), 0);
             card = card.child(row().w_full().px(12.).py(8.).child(text(cell.source.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).spans(spans).wrap().selectable(true)));
         }
-        for output in &cell.outputs {
-            card = card
-                .child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.6)))
-                .child(row().w_full().px(12.).py(8.).child(text(output.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.muted_foreground).wrap_anywhere().selectable(true)));
+        for (index, output) in cell.outputs.iter().enumerate() {
+            let rendered = match output {
+                NotebookOutput::Text(output) => row().w_full().px(12.).py(8.).child(
+                    text(output.clone()).font(theme::MONO_XS).color(t.c.muted_foreground).wrap_anywhere().selectable(true),
+                ),
+                _ => rich(i, index, output),
+            };
+            card = card.child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.6))).child(rendered);
         }
         cells = cells.child(card);
+    }
+    if nb.cells.is_empty() {
+        cells = cells.child(text("This notebook is empty.").font(theme::TEXT_SM).color(t.c.muted_foreground));
+    }
+    if visible < nb.cells.len() {
+        cells = cells.child(kit::Button::new(format!("Show more cells ({} remaining)", nb.cells.len() - visible))
+            .variant("outline").size("sm").on_press(super::file_viewers::show_more_cells).build(t));
     }
     col()
         .grow(1.)
@@ -416,7 +456,9 @@ mod tests {
         assert_eq!(nb.language, "python3");
         assert_eq!(nb.cells.len(), 3);
         assert_eq!((nb.cells[0].kind, nb.cells[0].source.as_str()), ("markdown", "# Title\nBody"));
-        assert_eq!(nb.cells[1].outputs, vec!["1\n", "2", "ValueError: bad"]);
+        assert_eq!(nb.cells[1].outputs, ["1\n", "2", "ValueError: bad"].map(|text| NotebookOutput::Text(text.to_owned())));
+        assert_eq!(output(&serde_json::json!({"data": {"text/html": "<b>table</b>", "text/plain": "plain"}})), Some(NotebookOutput::Html("<b>table</b>".into())));
+        assert_eq!(output(&serde_json::json!({"data": {"image/png": "AQID", "text/html": "<b>table</b>"}})), Some(NotebookOutput::Image(vec![1, 2, 3])));
         assert_eq!(nb.cells[2].kind, "raw");
         assert_eq!(notebook(r#"{"nbformat": 3, "cells": []}"#).unwrap_err(), "Preview supports version 4 notebooks with up to 500 cells.");
         assert!(notebook("{").is_err());
