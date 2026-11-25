@@ -160,6 +160,20 @@ fn signed_in(s: &App) -> bool {
     s.ui.cloud.identity.is_some()
 }
 
+/// Whether this machine's managed tunnel is on, once its link state is read.
+pub fn tunnel_on(s: &App) -> bool {
+    s.ui.settings.connect.state.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(managed_active)
+}
+
+/// Web `usePrimaryCloudLinkState().data.holdWebhooksWhileOffline`, once this machine's link state
+/// is read.
+pub fn holds_webhooks(s: &App) -> Option<bool> {
+    if s.ui.env.active != crate::env::LOCAL {
+        return None;
+    }
+    s.ui.settings.connect.state.as_ref()?.as_ref().ok().map(|state| state["holdWebhooksWhileOffline"] == true)
+}
+
 /// Reads the link state while the rows show; signed out there is nothing to read.
 fn refresh(s: &mut App) {
     if s.ui.settings.connect.read.is_some() {
@@ -422,14 +436,16 @@ fn fail(s: &mut App, failure: Failure) {
 
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
-    let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
+    let access = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
+    // Scheduled tasks say how T3 Connect delivers webhooks (web `WebhookDeliveryMode`).
+    let showing = access || matches!(&s.route, crate::Route::Settings(p) if p == "scheduled-tasks");
     let ready = showing && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read");
     let due = s.ui.settings.connect.next_read.is_some_and(|at| Instant::now() >= at);
     if ready && (s.ui.settings.connect.state.is_none() || due) {
         s.ui.settings.connect.next_read = None;
         refresh(s);
     }
-    if ready && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
+    if ready && access && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
         read_usage(s);
     }
     let usage = s.ui.settings.connect.usage_read.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());

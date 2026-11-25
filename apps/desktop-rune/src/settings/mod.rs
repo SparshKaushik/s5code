@@ -68,6 +68,8 @@ pub struct Ui {
     pub theme_import: TextEdit,
     /// Shown inside the import dialog, which covers the page's error banner.
     pub theme_import_error: Option<String>,
+    /// The imported theme whose id a custom theme already has (web `conflicts`).
+    pub theme_conflict: Option<Value>,
     pub theme_search: themes::Search,
     pub theme_editor: Option<Value>,
     pub theme_name: TextEdit,
@@ -291,6 +293,9 @@ pub fn value(s: &App, key: &str) -> Value {
     if let Some(key) = key.strip_prefix("snooze::") {
         return snooze::value(s, key);
     }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        return value(s, "browserDefaultViewport")[axis].clone();
+    }
     if let Some(key) = key.strip_prefix("profile::") {
         return browser_profiles::value(s, key);
     }
@@ -345,6 +350,12 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if let Some(key) = key.strip_prefix("snooze::") {
         snooze::set(s, key, value);
+        return;
+    }
+    if let Some(axis) = key.strip_prefix("viewport::") {
+        if let Some(next) = browser_profiles::resize(&self::value(s, "browserDefaultViewport"), axis, &value) {
+            update(s, "browserDefaultViewport", next);
+        }
         return;
     }
     if let Some(key) = key.strip_prefix("profile::") {
@@ -641,8 +652,7 @@ pub fn poll(s: &mut App) -> bool {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
             let provider_upsert = s.ui.settings.providers_ui.upserts.remove(&id);
-            if let Some(name) = s.ui.settings.profiles.clearing.remove(&id) {
-                browser_profiles::cleared(s, &name, reply.is_ok());
+            if browser_profiles::answered(s, id, reply.is_ok()) {
                 changed = true;
                 continue;
             }
@@ -998,6 +1008,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let mut nav = col().w_full().px(8.0).pb(8.0).gap(16.0);
     let search = rune::text_input(&s.ui.settings.search, theme::SM_MEDIUM.lh(21.0))
         .key("settings-search")
+        .label("Search settings")
         .single_line()
         .placeholder("Search", t.sb.muted_foreground)
         .grow(1.0)
@@ -1496,6 +1507,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "appearance");
         s.ui.settings.theme_import_open = true;
     }),
+    ("settings-appearance-theme-import-conflict", |s| {
+        scene(s, "appearance");
+        s.ui.settings.theme_import_open = true;
+        themes::scene_conflict(s);
+    }),
     ("settings-appearance-thread-details", |s| {
         scene(s, "appearance");
         s.ui.settings.thread_details_open = true;
@@ -1574,6 +1590,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-browser-profiles", |s| browser_profiles_scene(s, false, None)),
     ("settings-browser-profiles-light", |s| browser_profiles_scene(s, true, None)),
+    ("settings-browser-profile-clear-failed", |s| {
+        browser_profiles_scene(s, false, None);
+        s.ui.settings.profiles.clearing.insert(1, "Work".into());
+        browser_profiles::answered(s, 1, false);
+    }),
+    ("settings-browser-viewport", |s| {
+        scene(s, "browser");
+        s.client_settings.values.insert("browserDefaultViewport".into(), json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"}));
+        s.ui.settings.scene_bottom = true;
+    }),
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
     ("settings-browser-add-profile-menu", |s| browser_profiles_scene(s, false, Some("add"))),

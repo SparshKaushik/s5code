@@ -274,11 +274,8 @@ pub(super) fn view(s: &App, t: &T) -> El {
     rows.extend(crate::desktop::exposure::rows(s, t));
     rows.extend(super::connect::rows(s, t));
     rows.push(permissions(s, t));
-    col()
-        .w_full()
-        .gap(32.0)
-        .child(col().key(super::title_key("This machine")).w_full().gap(10.0).child(header).child(c::card(rows, t)))
-        .child(clients(s, t))
+    let page = col().w_full().gap(32.0).child(col().key(super::title_key("This machine")).w_full().gap(10.0).child(header).child(c::card(rows, t)));
+    if super::permissions::can(s, "access:read") || super::permissions::can(s, "access:write") { page.child(clients(s, t)) } else { page }
 }
 
 /// Web's primary environment Version row: the version and address, the update's progress while
@@ -516,6 +513,17 @@ fn clients(s: &App, t: &T) -> El {
         if let Some(link) = links.iter().find(|link| newest.is_some() && link["id"].as_str() == newest) {
             card.push(link_row(s, t, link));
         }
+        return c::card(card, t);
+    }
+    if !super::permissions::can(s, "access:read") {
+        card.push(
+            text("This connection can create access links but cannot view authorized clients.")
+                .font(theme::TEXT_XS)
+                .color(t.c.muted_foreground)
+                .wrap()
+                .px(16.0)
+                .py(12.0),
+        );
         return c::card(card, t);
     }
     let mut rows: Vec<El> = links.iter().map(|link| link_row(s, t, link)).collect();

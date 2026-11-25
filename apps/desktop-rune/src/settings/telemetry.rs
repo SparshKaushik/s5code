@@ -206,6 +206,29 @@ fn discard(s: &mut App) {
 /// Web's OpenTelemetry export section, for the Diagnostics page to mount.
 #[allow(dead_code)]
 pub(crate) fn view(s: &App, t: &T) -> El {
+    // Web `SettingsScopeNotice`: exports belong to one environment.
+    if !s.ui.settings.environment_only && s.ui.env.saved.len() > 1 {
+        let environment = s.state().config.as_ref().and_then(|c| c["environment"]["label"].as_str()).unwrap_or("Environment").to_owned();
+        let notice = row()
+            .w_full()
+            .px(16.0)
+            .py(12.0)
+            .gap(12.0)
+            .center_y()
+            .child(text("Choose one environment to configure its telemetry exports.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.0).min_w(0.0))
+            .child(
+                crate::kit::Button::new(environment)
+                    .variant("outline")
+                    .size("xs")
+                    .icon(&crate::icons::SERVER)
+                    .on_press(|s: &mut App| {
+                        super::commit_edits(s, true);
+                        s.ui.settings.environment_only = true;
+                    })
+                    .build(t),
+            );
+        return c::section("OpenTelemetry export", vec![notice], t);
+    }
     let ui = &s.ui.settings.telemetry;
     let can_edit = super::permissions::allowed(s, "server.checkOtlpEndpoint");
     let checking = can_check(s);
