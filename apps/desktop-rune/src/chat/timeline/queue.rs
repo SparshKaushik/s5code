@@ -232,7 +232,8 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
                         .variant("ghost")
                         .size("xs")
                         .on_press(|app: &mut App| crate::chat::composer::cancel_queued_edit(app))
-                        .build(t),
+                        .build(t)
+                        .label("Cancel editing queued message"),
                 );
         } else {
             let (edit_thread, edit_run, edit_text) = (thread.clone(), run.clone(), q.text.to_owned());

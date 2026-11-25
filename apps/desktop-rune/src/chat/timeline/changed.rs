@@ -167,7 +167,10 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
                 .help(label),
         );
     }
-    let head = head.child(
+    // ChangedFilesTree's header sticks 8 points under the timeline's top while the card shows,
+    // on an opaque fill so rows scroll under it.
+    let fill = if t.dark { crate::theme::mix_srgb(t.c.input, t.c.background, 0.2) } else { t.c.secondary };
+    let head = head.fill(fill).corners([8.0, 8.0, 0.0, 0.0]).sticky_top(8.0).child(
         Button::new("Open diff").variant("ghost-muted").size("xs").icon(&icons::FILE_DIFF).on_press(open_diff.clone()).build(t).help("Open the full diff"),
     );
     let mut list = col().w_full().px(4.0).pb(4.0);

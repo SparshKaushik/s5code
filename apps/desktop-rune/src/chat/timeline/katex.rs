@@ -133,7 +133,7 @@ pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, t: 
             Inline::Math { tex, display } => {
                 source.push_str(&super::inline::placeholder(formulas.len()));
                 let copy = if *display { format!("$${tex}$$") } else { format!("${tex}$") };
-                formulas.push(still(app, tex, *display, font.size, ink).map(|(pixels, w, h)| super::inline::Picture { pixels, size: [w, h], copy, open: None }));
+                formulas.push(still(app, tex, *display, font.size, ink).map(|(pixels, w, h)| super::inline::Picture { pixels, size: [w, h], copy, open: None, baseline: None, framed: false }));
             }
         }
     }
