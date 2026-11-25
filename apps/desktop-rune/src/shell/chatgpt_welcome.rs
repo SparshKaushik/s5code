@@ -88,7 +88,7 @@ pub fn view(s: &App, t: &T, layers: &mut Vec<El>) {
         });
     kit::Dialog::new("chatgpt-welcome", "Your ChatGPT plan is connected")
         .open(true)
-        .title_icon(icon(&crate::chat::composer::provider_icons::OPENAI, 32.0).color(t.c.foreground))
+        .title_icon_above(icon(&crate::chat::composer::provider_icons::OPENAI, 32.0).color(t.c.foreground))
         .description("Eligible usage in T3 Code uses your ChatGPT plan. Manage your shared usage and any credit settings in ChatGPT.")
         .on_close(dismiss)
         .child(text(format!("{provider} on {environment}")).font(theme::TEXT_XS).color(muted))

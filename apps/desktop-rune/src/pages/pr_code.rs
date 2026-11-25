@@ -2011,7 +2011,7 @@ fn comment_editor(s: &App, t: &T, draft: &EditDraft) -> El {
         .build(&kit::theme(t))
         .label("Markdown editor mode");
     let body = if draft.preview {
-        let shown = if empty { text("Nothing to preview.").font(theme::TEXT_XS).color(t.c.muted_foreground) } else { super::pr_detail::markdown(t, &draft.edit.text) };
+        let shown = if empty { text("Nothing to preview.").font(theme::TEXT_XS).color(t.c.muted_foreground) } else { super::pr_media::view(s, t, &draft.edit.text) };
         col().w_full().px(12.0).py(8.0).radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).child(shown)
     } else {
         let input = super::pr_edit::area(t, "pr-code-edit-comment".into(), &draft.edit, 6.0, "Edit comment".into(), "");

@@ -31,6 +31,8 @@ pub struct Ui {
     pub remove: Option<(String, String)>,
     pub clear: Option<(String, String)>,
     pub import: Option<Import>,
+    /// Clear requests in flight, by reply id, with the profile's name for web's toasts.
+    pub clearing: std::collections::HashMap<u64, String>,
 }
 
 /// Web's `BrowserImportWizard`, minus the steps only Safari needs.
@@ -165,9 +167,23 @@ pub fn rename(s: &mut App, id: &str, next: Value) {
 }
 
 /// Clears the profile on its server and in this computer's Chrome, as Electron clears both.
-fn clear_data(s: &mut App, id: &str) {
-    request(s, "preview.clearProfile", json!({"profileId": id}));
+fn clear_data(s: &mut App, id: &str, name: &str) {
+    match super::request_id(s, "preview.clearProfile", json!({"profileId": id})) {
+        Some(reply) => {
+            s.ui.settings.profiles.clearing.insert(reply, name.to_owned());
+        }
+        None => crate::shell::palette::toast_error(s, &format!("Could not clear {name}'s data"), Some("You're not connected to a server yet.")),
+    }
     crate::panel::preview::clear_profile(s, id, false);
+}
+
+/// Web's toasts once a clear request answers.
+pub fn cleared(s: &mut App, name: &str, ok: bool) {
+    if ok {
+        crate::shell::palette::toast(s, &format!("Cleared {name}'s cookies and cache"), None);
+    } else {
+        crate::shell::palette::toast_error(s, &format!("Could not clear {name}'s data"), None);
+    }
 }
 
 fn remove(s: &mut App, id: &str) {
@@ -344,7 +360,8 @@ pub fn overlays(s: &App, t: &T, scale: f32, layers: &mut Vec<El>) {
             .build(t, layers);
     }
     if let Some((id, name)) = s.ui.settings.profiles.clear.clone() {
-        kit::Dialog::new("clear-profile", format!("Clear “{name}”’s cookies and cache?"))
+        let title = format!("Clear “{name}”’s cookies and cache?");
+        kit::Dialog::new("clear-profile", title)
             .open(true)
             .alert()
             .description("You are signed out of its sites. Server browser tabs open in this profile close now.")
@@ -352,7 +369,7 @@ pub fn overlays(s: &App, t: &T, scale: f32, layers: &mut Vec<El>) {
             .child(footer(
                 "Clear data",
                 Box::new(move |s: &mut App| {
-                    clear_data(s, &id);
+                    clear_data(s, &id, &name);
                     s.ui.settings.profiles.clear = None;
                 }),
                 |s| s.ui.settings.profiles.clear = None,

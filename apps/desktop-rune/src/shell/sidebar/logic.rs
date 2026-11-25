@@ -283,9 +283,22 @@ impl Thread {
         }
     }
 
-    /// `canSnooze`, without the queued-turn check (shell rows carry no queue).
-    pub fn can_snooze(&self) -> bool {
-        !(self.pending_approval || self.pending_input || self.pending_request || self.guests > 0)
+    /// `canSnooze`: nothing pending, and no turn about to start.
+    pub fn can_snooze(&self, now: i64) -> bool {
+        !(self.pending_approval || self.pending_input || self.pending_request || self.guests > 0 || self.queued_turn_start(now))
+    }
+
+    /// `hasQueuedTurnStart`: the runtime is starting a turn, or a message sent in the last two
+    /// minutes (either way, for clock skew) is newer than the latest run.
+    pub fn queued_turn_start(&self, now: i64) -> bool {
+        if self.runtime.as_ref().is_some_and(|r| matches!(r.status.as_str(), "preparing" | "queued" | "starting")) {
+            return true;
+        }
+        let Some(at) = self.latest_user_message_at else { return false };
+        if (now - at).abs() > 2 * 60 * 1000 {
+            return false;
+        }
+        self.run.as_ref().is_none_or(|r| [r.requested_at, r.started_at, r.completed_at].into_iter().flatten().all(|t| t < at))
     }
 
     /// `isThreadWorking`.

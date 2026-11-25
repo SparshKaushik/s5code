@@ -126,6 +126,7 @@ fn restore(s: &mut App, tx: &mut rune::Tx) {
         tx.instant();
     }
     let (appearance, light, dark) = theme_values(s);
+    let theme_reset = appearance != "system" || light != THEME_DEFAULT || dark != THEME_DEFAULT;
     if appearance != "system" {
         update(s, "appearance", json!("system"));
         s.appearance = Appearance::System;
@@ -134,6 +135,9 @@ fn restore(s: &mut App, tx: &mut rune::Tx) {
         if current != THEME_DEFAULT {
             update(s, key, json!(THEME_DEFAULT));
         }
+    }
+    if theme_reset && s.client_settings.error.is_some() {
+        crate::shell::palette::toast_error(s, "Couldn\u{2019}t restore theme settings", Some("Try again."));
     }
     let keys: Vec<&str> = ROWS.iter().flat_map(|(_, keys)| keys.iter().copied()).filter(|k| dirty(s, k)).collect();
     for key in keys {
