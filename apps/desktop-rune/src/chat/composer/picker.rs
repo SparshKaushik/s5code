@@ -714,6 +714,7 @@ pub(super) fn chatgpt_sharing_scene(s: &mut App) {
     });
     draft_mut(s).model = Some(("codex".into(), "gpt-5.5".into()));
     toggle(s);
+    crate::shell::chatgpt_welcome::acknowledge_all(s);
 }
 
 /// SpeedControl: Codex service tiers, or Standard and Fast for a fast-mode switch.

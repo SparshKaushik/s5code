@@ -746,6 +746,40 @@ pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, orig
     shown
 }
 
+/// A pull request's linked picture or video (PullRequestMarkdown). `host` is the cwd and fetch URL
+/// of media its host keeps behind a credential, read through the server. Chat's lightbox and
+/// actions menu aren't drawn on the pull request pages, so a picture opens its URL instead.
+pub fn linked(app: &App, url: &str, kind: Kind, host: Option<(&str, &str)>, t: &T) -> El {
+    let name = if kind == Kind::Video { "Pull request video" } else { "" };
+    let media = Media { kind, name: name.to_owned(), reference: url_reference(url), open_file: None };
+    let (key, access) = match host {
+        Some((cwd, fetch)) => (format!("media:{cwd}:{fetch}"), Access::Asset(json!({"_tag": "github-media", "cwd": cwd, "url": fetch}))),
+        None => (format!("media:{url}"), Access::Direct(url.to_owned())),
+    };
+    let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
+    if entry.is_none() {
+        want(app, &key, &media, access);
+    }
+    let loaded = entry.and_then(|e| e.loaded.as_ref());
+    let failed = entry.is_some_and(|e| e.failed) || loaded.is_some_and(Loaded::failed);
+    if kind == Kind::Video {
+        return col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)).help(url.to_owned());
+    }
+    let size = loaded.map(|l| l.pixels.size()).filter(|(w, h)| *w > 0 && *h > 0);
+    let shown = match (loaded, size) {
+        _ if failed => col().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).center().padding(8.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("alert").child(unavailable_label("Image unavailable", "", theme::TEXT_XS, t)),
+        (Some(loaded), Some((w, h))) => {
+            let ratio = w as f32 / h as f32;
+            el().w_full().max_w((w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio)).aspect_ratio(ratio).pixels_fit(&loaded.pixels, SurfaceFit::Fit)
+        }
+        _ => return el().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading image"),
+    };
+    let open = url.to_owned();
+    shown.focusable(true).role("link").cursor(rune::Cursor::Pointer).label("Open image").help(url.to_owned()).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+        let _ = tx.open_url(&open);
+    })
+}
+
 /// MediaActions' trigger: the source as a tooltip, and right-click for the actions.
 pub fn with_actions(content: El, key: &str, media: &Media, tooltip: bool) -> El {
     let help = match &media.reference {

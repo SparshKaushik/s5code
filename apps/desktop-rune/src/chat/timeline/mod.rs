@@ -26,7 +26,7 @@ mod math;
 mod katex;
 mod announcer;
 pub(crate) mod citation;
-pub(crate) mod media;
+pub mod media;
 mod work;
 mod lifecycle;
 pub mod now;

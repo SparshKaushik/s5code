@@ -3,9 +3,11 @@
 //! carries the files because the two servers never talk to each other.
 //!
 //! Also the composer's clone banner (useProjectCloneBanner): any project still cloning or
-//! copying files into place, with Cancel, Retry and Remove project, and why Send waits.
+//! copying files into place, with Cancel, Retry and Remove project, and why Send waits; and
+//! ProjectCloneToastCoordinator's toasts for clones on every environment.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
@@ -28,6 +30,10 @@ pub struct Ui {
     copy_failed: HashMap<String, (String, Vec<String>)>,
     /// Banner actions in flight: the reply, its failure toast title, and a removed project.
     actions: Vec<(u64, &'static str, Option<String>)>,
+    /// Clone toasts by environment and project: the toast, what it shows, and the clone's phase.
+    toasts: HashMap<(String, String), (u64, String, String)>,
+    /// `silenceProjectCloneToasts`: clones whose draft was open, so running and done stay quiet.
+    silenced: HashSet<(String, String)>,
 }
 
 struct Dialog {
@@ -344,7 +350,7 @@ fn submit(s: &mut App) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    poll_dialog(s) | poll_jobs(s)
+    poll_dialog(s) | poll_jobs(s) | poll_toasts(s)
 }
 
 fn poll_dialog(s: &mut App) -> bool {
@@ -524,6 +530,8 @@ fn composer_project(s: &App) -> Option<(String, String)> {
 /// Subscribes to the clone lists the banner and the jobs read, and drops the rest.
 fn sync_watch(s: &mut App) {
     let mut wanted: BTreeSet<String> = s.ui.add_to_machine.jobs.iter().map(|j| j.target.clone()).collect();
+    // Every environment's clones raise toasts, as ProjectCloneToastCoordinator subscribes to each.
+    wanted.extend(env::keys(s));
     wanted.extend(composer_project(s).map(|(_, key)| key));
     let watched = std::mem::take(&mut s.ui.add_to_machine.watched);
     for key in watched.difference(&wanted) {
@@ -652,6 +660,141 @@ fn remove_project(s: &mut App, key: &str, project: &str) {
     if let Some(net) = env::net_of(s, key) {
         let id = net.dispatch(json!({"type": "project.delete", "commandId": s5_net::uuid(), "projectId": project}));
         s.ui.add_to_machine.actions.push((id, "Failed to remove project", Some(project.to_owned())));
+    }
+}
+
+// ProjectCloneToastCoordinator.
+
+/// What a clone's toast shows: kind, title, description, timeout, and its two actions.
+#[derive(Debug, PartialEq)]
+struct CloneToast {
+    kind: crate::shell::toast::Kind,
+    title: String,
+    description: String,
+    timeout: Option<i64>,
+    action: &'static str,
+    secondary: Option<&'static str>,
+    hide_copy: bool,
+}
+
+fn clone_toast(clone: &Value) -> CloneToast {
+    use crate::shell::toast::Kind;
+    let name = display_name(clone);
+    let destination = data::s(clone, "destinationPath").to_owned();
+    match data::s(clone, "phase") {
+        "running" => CloneToast { kind: Kind::Loading, title: format!("Cloning {name}"), description: progress_summary(clone), timeout: None, action: "Cancel", secondary: None, hide_copy: true },
+        "done" => CloneToast { kind: Kind::Success, title: format!("Cloned {name}"), description: destination, timeout: Some(8_000), action: "Open project", secondary: None, hide_copy: true },
+        "cancelled" => CloneToast { kind: Kind::Info, title: format!("Cancelled cloning {name}"), description: destination, timeout: None, action: "Retry", secondary: Some("Remove project"), hide_copy: true },
+        _ => CloneToast {
+            kind: Kind::Error,
+            title: format!("Failed to clone {name}"),
+            description: clone["error"].as_str().unwrap_or("The clone failed.").to_owned(),
+            timeout: None,
+            action: "Retry",
+            secondary: Some("Remove project"),
+            hide_copy: false,
+        },
+    }
+}
+
+/// `renderKey`: a toast changes only when what it shows does.
+fn render_key(clone: &Value) -> String {
+    let field = |k: &str| clone[k].as_str().map(str::to_owned).unwrap_or_else(|| clone[k].as_i64().map(|n| n.to_string()).unwrap_or_default());
+    format!("{}:{}:{}:{}:{}:{}", field("phase"), field("stage"), field("percent"), field("detail"), clone["stalled"] == true, field("error"))
+}
+
+#[derive(Debug, PartialEq)]
+enum CloneStep {
+    /// Its draft is open: silence it and close its toast.
+    Silence,
+    Close,
+    Keep,
+    Show,
+}
+
+fn clone_step(phase: &str, viewing: bool, silenced: bool, unchanged: bool) -> CloneStep {
+    if viewing {
+        CloneStep::Silence
+    } else if unchanged {
+        CloneStep::Keep
+    } else if silenced && matches!(phase, "running" | "done") {
+        CloneStep::Close
+    } else {
+        CloneStep::Show
+    }
+}
+
+fn poll_toasts(s: &mut App) -> bool {
+    use crate::shell::toast;
+    let viewing = match &s.route {
+        Route::Home { project_id: Some(p) } => Some((env::owner(s, p), p.clone())),
+        _ => None,
+    };
+    let keys = env::keys(s);
+    let (mut read, mut seen, mut changed) = (HashSet::new(), HashSet::new(), false);
+    for key in &keys {
+        let Some(clones) = env::net_of(s, key).and_then(|n| n.resource(CLONES, json!({}))).cloned() else { continue };
+        read.insert(key.clone());
+        for clone in clones.as_array().into_iter().flatten() {
+            let id = (key.clone(), data::s(clone, "projectId").to_owned());
+            seen.insert(id.clone());
+            let rendered = render_key(clone);
+            let phase = data::s(clone, "phase").to_owned();
+            let ui = &mut s.ui.add_to_machine;
+            let tracked = ui.toasts.get(&id).map(|t| t.0);
+            match clone_step(&phase, viewing.as_ref() == Some(&id), ui.silenced.contains(&id), ui.toasts.get(&id).is_some_and(|t| t.1 == rendered)) {
+                CloneStep::Keep => {}
+                step @ (CloneStep::Silence | CloneStep::Close) => {
+                    if step == CloneStep::Silence {
+                        ui.silenced.insert(id.clone());
+                    }
+                    if let Some((toast_id, ..)) = ui.toasts.remove(&id) {
+                        toast::close(s, toast_id);
+                        changed = true;
+                    }
+                }
+                CloneStep::Show => {
+                    let spec = clone_toast(clone);
+                    let toast_id = tracked.unwrap_or_else(|| toast::next_id(s));
+                    let mut shown = toast::Toast::new(spec.title.as_str(), Some(spec.description.as_str()), spec.kind);
+                    shown.hide_copy = spec.hide_copy;
+                    shown.actions = std::iter::once(spec.action).chain(spec.secondary).enumerate().map(|(i, label)| (label.to_owned(), i == 0, clone_toast_action(label, &id, toast_id))).collect();
+                    match tracked {
+                        Some(toast_id) => toast::update(s, toast_id, shown, spec.timeout),
+                        None => {
+                            toast::add(s, shown, spec.timeout);
+                        }
+                    }
+                    s.ui.add_to_machine.toasts.insert(id, (toast_id, rendered, phase));
+                    changed = true;
+                }
+            }
+        }
+    }
+    // A clone that left its list closes its toast, unless it finished: "Cloned" stays its 8 s.
+    let gone: Vec<(String, String)> = s.ui.add_to_machine.toasts.keys().filter(|id| !seen.contains(*id) && (read.contains(&id.0) || !keys.contains(&id.0))).cloned().collect();
+    for id in gone {
+        if let Some((toast_id, _, phase)) = s.ui.add_to_machine.toasts.remove(&id) {
+            if phase != "done" {
+                toast::close(s, toast_id);
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn clone_toast_action(label: &str, id: &(String, String), toast_id: u64) -> Rc<dyn Fn(&mut App, &mut rune::Tx)> {
+    let (key, project) = id.clone();
+    match label {
+        "Cancel" => Rc::new(move |s: &mut App, _: &mut rune::Tx| clone_action(s, &key, "projectClone.cancel", &project, "Failed to cancel clone")),
+        "Retry" => Rc::new(move |s: &mut App, _: &mut rune::Tx| clone_action(s, &key, "projectClone.retry", &project, "Failed to retry clone")),
+        "Remove project" => Rc::new(move |s: &mut App, _: &mut rune::Tx| remove_project(s, &key, &project)),
+        _ => Rc::new(move |s: &mut App, _: &mut rune::Tx| {
+            crate::shell::toast::close(s, toast_id);
+            s.ui.add_to_machine.toasts.remove(&(key.clone(), project.clone()));
+            crate::shell::sidebar::go(s, Route::Home { project_id: Some(project.clone()) });
+        }),
     }
 }
 
@@ -962,6 +1105,36 @@ pub const SCENES: &[(&str, fn(&mut App))] =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clone_toasts_follow_the_coordinator() {
+        use crate::shell::toast::Kind;
+        let clone = |phase: &str| json!({"projectId": "p", "phase": phase, "stage": "receiving", "percent": 42, "destinationPath": "/src/app", "repository": {"nameWithOwner": "acme/app"}});
+        let running = clone_toast(&clone("running"));
+        assert_eq!((running.kind, running.title.as_str(), running.timeout, running.action, running.secondary), (Kind::Loading, "Cloning acme/app", None, "Cancel", None));
+        assert_eq!(running.description, "Receiving objects · 42%");
+        let done = clone_toast(&clone("done"));
+        assert_eq!((done.kind, done.title.as_str(), done.description.as_str(), done.timeout, done.action), (Kind::Success, "Cloned acme/app", "/src/app", Some(8_000), "Open project"));
+        let cancelled = clone_toast(&clone("cancelled"));
+        assert_eq!((cancelled.kind, cancelled.title.as_str(), cancelled.action, cancelled.secondary, cancelled.hide_copy), (Kind::Info, "Cancelled cloning acme/app", "Retry", Some("Remove project"), true));
+        let failed = clone_toast(&clone("failed"));
+        assert_eq!((failed.kind, failed.description.as_str(), failed.hide_copy), (Kind::Error, "The clone failed.", false), "FAILED: a failure copies its error");
+        assert_ne!(render_key(&clone("running")), render_key(&json!({"phase": "running", "stage": "receiving", "percent": 43})), "FAILED: progress re-renders");
+
+        use CloneStep::*;
+        for (phase, viewing, silenced, unchanged, want) in [
+            ("running", true, false, false, Silence),
+            ("failed", true, true, false, Silence),
+            ("running", false, false, true, Keep),
+            ("running", false, true, false, Close),
+            ("done", false, true, false, Close),
+            ("failed", false, true, false, Show),
+            ("cancelled", false, true, false, Show),
+            ("running", false, false, false, Show),
+        ] {
+            assert_eq!(clone_step(phase, viewing, silenced, unchanged), want, "FAILED: {phase} viewing={viewing} silenced={silenced}");
+        }
+    }
 
     #[test]
     fn picks_env_files_under_the_read_cap_by_default() {
