@@ -9,7 +9,7 @@
 use rune::{El, col, row, text};
 
 use super::{muted, shared};
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, kit};
 
 #[derive(Clone, Copy, Debug, PartialEq)]

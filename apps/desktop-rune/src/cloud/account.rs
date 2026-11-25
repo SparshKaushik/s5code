@@ -6,7 +6,7 @@ use s5_net::cloud::Failure;
 use s5_net::cloud::relay::{self, Device, Linked};
 
 use super::{Event, config, muted, session_token, spawn};
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
 
 #[derive(Default)]

@@ -4,7 +4,7 @@
 use rune::{El, col, icon, row, text};
 use serde_json::{Value, json};
 
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
 
 const STEPS: [(&str, &str); 7] = [
