@@ -19,7 +19,7 @@ mod custom_models;
 pub(super) mod policy;
 mod codex;
 mod setup;
-mod updates;
+pub(crate) mod updates;
 mod usage;
 pub use usage::IDLE_KEY;
 

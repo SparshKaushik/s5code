@@ -317,6 +317,7 @@ fn offline() -> (Net, mpsc::Sender<Incoming>, mpsc::Receiver<Command>) {
         incoming_tx: incoming.clone(),
         wake: Arc::new(|| {}),
         kept_only: HashSet::new(),
+        awaiting: HashMap::new(),
     };
     (net, incoming, commands)
 }
@@ -334,6 +335,20 @@ fn replies_from_any_environment_reach_the_client_on_screen() {
     assert_eq!(shown.take_chunks(asked), vec![json!(1)]);
     assert_eq!(shown.take_reply(asked), Some(Ok(json!("contents"))));
     assert_eq!(remote.take_reply(asked), None);
+}
+
+#[test]
+fn a_request_awaits_until_its_reply_arrives() {
+    let (mut net, incoming, _commands) = offline();
+    let asked = net.request("git.pull", json!({}));
+    let awaiting: Vec<_> = net.awaiting().map(|(id, method, _)| (id, method.to_owned())).collect();
+    assert_eq!(awaiting, [(asked, "git.pull".to_owned())]);
+    incoming.send(Incoming::Chunk(asked, vec![json!(1)])).unwrap();
+    net.drain();
+    assert_eq!(net.awaiting().count(), 1, "FAILED: progress is not the reply");
+    incoming.send(Incoming::Reply(asked, Ok(json!(null)))).unwrap();
+    net.drain();
+    assert_eq!(net.awaiting().count(), 0);
 }
 
 #[test]
