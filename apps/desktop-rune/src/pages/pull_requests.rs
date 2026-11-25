@@ -2797,7 +2797,7 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
     }
     let mut actions = row().gap(8.0);
     let (title, description) = if !query.is_empty() {
-        actions = actions.child(Button("Clear search", Some(&i::SEARCH)).sm().on_press(|s: &mut App| {
+        actions = actions.child(Button("Clear search", None).sm().on_press(|s: &mut App| {
             let u = ui(s);
             u.query.clear();
             u.sent_query.clear();
