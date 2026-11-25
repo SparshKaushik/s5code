@@ -354,7 +354,6 @@ fn dismiss(s: &mut App) {
 }
 
 /// `UpdateEverythingResult`, saved as web's `SavedResult`.
-#[derive(Debug, PartialEq)]
 #[derive(Debug, Default, PartialEq)]
 struct Outcome {
     saved_at: i64,
