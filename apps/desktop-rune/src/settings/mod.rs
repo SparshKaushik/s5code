@@ -1598,7 +1598,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-browser-viewport", |s| {
         scene(s, "browser");
         s.client_settings.values.insert("browserDefaultViewport".into(), json!({"_tag": "preset", "width": 390, "height": 844, "presetId": "iphone-12-pro"}));
-        s.ui.settings.scene_bottom = true;
+        open_setting(s, "browser", "Default browser viewport");
     }),
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
