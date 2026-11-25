@@ -227,6 +227,13 @@ fn session_token(config: &Config) -> Result<String, Failure> {
     token
 }
 
+/// The signed-in account's session JWT, for the relay's client endpoints (linking this machine).
+/// Blocks on Clerk: call it off the UI thread.
+pub fn account_token() -> Result<String, Failure> {
+    let config = config().ok_or_else(|| Failure::new("This build has no T3 Connect configuration."))?;
+    session_token(&config)
+}
+
 /// The relay token, exchanged again when it lapses or `stale` says the relay refused it.
 fn relay_token(config: &Config, key: &Key, stale: bool) -> Result<Token, Failure> {
     let cached = shared().relay.clone().filter(|t| !stale && t.fresh(relay::now()));

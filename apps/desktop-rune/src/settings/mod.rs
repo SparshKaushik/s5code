@@ -23,6 +23,7 @@ mod devices;
 mod devices_editor;
 mod diff_scheme;
 pub mod fonts;
+mod connect;
 mod font_picker;
 mod keybindings;
 pub(crate) use keybindings::unshift;
@@ -131,6 +132,7 @@ pub struct Ui {
     pub providers_ui: providers::Ui,
     pub source_control: source_control::Ui,
     pub connections: connections::Ui,
+    pub connect: connect::Ui,
     pub snapshots: snapshots::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
@@ -554,6 +556,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
         }
+        if page.as_deref() == Some("access") {
+            connect::reset(s);
+        }
         if page.is_some() {
             permissions::load(s);
         }
@@ -629,7 +634,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && (diagnostics::tick(s) | resource_telemetry::tick(s));
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s) | snapshots::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s) | snapshots::poll(s) | connect::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -1600,6 +1605,12 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         providers::scene_copy_from(s);
     }),
     ("settings-appearance-font-picker", appearance_font_picker),
+    ("settings-access-t3-connect", |s| {
+        scene(s, "access");
+        connect::scene(s, json!({"linked": true, "managedTunnelActive": true, "publishAgentActivity": true, "holdWebhooksWhileOffline": false,
+            "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
+    }),
+    ("settings-access-t3-connect-signed-out", |s| scene(s, "access")),
 ];
 
 /// Typography's Monospace font menu open over a fixed font list.
