@@ -928,6 +928,8 @@ fn remote_servers(s: &mut App) {
     for (id, label) in [("env-box", "Hetzner box"), ("env-mini", "Mac mini")] {
         s.ui.env.saved.push(env::Saved { id: id.into(), label: label.into(), base: format!("https://{id}.example.com"), bearer: String::new() });
         let mut state = crate::data::fixture_state();
+        // The local fixture's threads would list once per machine.
+        state.threads.clear();
         if let Some(config) = state.config.as_mut() {
             config["environment"]["serverVersion"] = json!("0.1.5");
             config["environment"]["capabilities"]["serverSelfUpdate"] = json!("boot-service");
@@ -963,6 +965,7 @@ pub fn scene(s: &mut App, which: &str) {
         }
         "capsule" => {
             app_update(s);
+            remote_servers(s);
             let restarting = server_update::State::at(ServerStatus::Running { stage: Stage::Resuming, from: "0.1.5".into(), target: "0.1.7".into() });
             s.ui.shell.sidebar.everything.run = Some(Run {
                 local: local_version(s),
@@ -977,6 +980,7 @@ pub fn scene(s: &mut App, which: &str) {
         }
         "retry" => {
             app_update(s);
+            remote_servers(s);
             s.ui.shell.sidebar.everything.run = Some(Run {
                 local: None,
                 phase: Phase::Settled,

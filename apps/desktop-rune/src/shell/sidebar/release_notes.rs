@@ -404,7 +404,8 @@ pub fn view(s: &App, t: &T, on_hover: fn(&mut App, bool), layers: &mut Vec<El>) 
         list = list.child(col().mt(12.0).child(link(format!("{n} older {} on GitHub", if n == 1 { "release" } else { "releases" }), updates::releases_page(), t)));
     }
     let k = kit::theme(t);
-    let body = col().max_w(384.0).padding(8.0).role("dialog").label("Update release notes").child(head).child(kit::scroll_area("sb-release-notes", list.max_h(448.0).scroll(ScrollSpec { stick_bottom: false }), t));
+    // A fixed width (web's 24rem cap, which notes reach) so wrapped lines measure as they draw.
+    let body = col().w(384.0).padding(8.0).role("dialog").label("Update release notes").child(head).child(kit::scroll_area("sb-release-notes", list.max_h(448.0).scroll(ScrollSpec { stick_bottom: false }), t));
     let surface = kit::menu::glass(body, &k, false)
         .hover_delays(std::time::Duration::ZERO, std::time::Duration::from_millis(150))
         .on_hover_change(move |s: &mut App, on, _: &mut Tx| on_hover(s, on));
