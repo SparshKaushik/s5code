@@ -2,13 +2,18 @@
 //! holding webhooks while offline. State and preferences are the environment's `/api/connect/*`
 //! routes; linking runs web's `linkPrimaryEnvironmentToCloud` against the relay with the signed-in
 //! account (`crate::cloud`).
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, kit};
-use rune::{El, col, row, text};
+use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 type Slot<O> = Arc<Mutex<Option<O>>>;
+
+/// Web re-reads the link state every 30 s while the row is mounted, as the server rechecks the
+/// tunnel's reachability.
+const REFRESH: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct Ui {
@@ -23,6 +28,23 @@ pub struct Ui {
     tunnel_limit: Option<u64>,
     /// What onboarding's Continue asked for, applying (`crate::cloud::onboarding`).
     onboarding: Option<Slot<Result<(), Failure>>>,
+    /// Tunnels in use when the relay refused, so only a freed tunnel clears the alert.
+    used_at_refusal: Option<u64>,
+    /// Web `useManagedTunnelUsage`, and its request in flight.
+    usage: Option<Usage>,
+    usage_read: Option<Slot<Option<Usage>>>,
+    /// When the next link-state read is due; a sleeping thread wakes the app then.
+    next_read: Option<Instant>,
+    /// Web `openAuthPrompt`: the sign-in dialog.
+    prompt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Usage {
+    pub used: u64,
+    pub limit: u64,
+    /// `ManagedTunnelUpgrade`: `link`, `pro` or `premier`.
+    pub upgrade: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,7 +174,7 @@ fn refresh(s: &mut App) {
 pub fn reset(s: &mut App) {
     let ui = &mut s.ui.settings.connect;
     if ui.busy.is_none() {
-        (ui.state, ui.error, ui.tunnel_limit) = (None, None, None);
+        (ui.state, ui.error, ui.tunnel_limit, ui.used_at_refusal, ui.usage, ui.next_read) = (None, None, None, None, None, None);
     }
 }
 
@@ -163,7 +185,7 @@ fn toggle(s: &mut App, change: Change) {
     }
     let Some(Ok(state)) = ui.state.clone() else { return };
     ui.error = None;
-    ui.tunnel_limit = None;
+    (ui.tunnel_limit, ui.used_at_refusal) = (None, None);
     if !super::permissions::can(s, "relay:read") || !super::permissions::can(s, "relay:write") {
         fail(s, Failure::new("This connection needs permission to view and manage T3 Connect settings."));
         return;
@@ -219,6 +241,61 @@ fn link_state(state: &Value) -> crate::cloud::onboarding::LinkState {
         managed_tunnel: state["managedTunnelActive"].as_bool().unwrap_or(state["linked"] == true),
         publish_activity: state["publishAgentActivity"] == true,
     }
+}
+
+/// Web `managedTunnelCap`: a manual override is exact, else the T3 Chat plan raises the default.
+fn cap(t3chat: &Value) -> (u64, Option<&'static str>) {
+    if let Some(limit) = t3chat["maxTunnelsOverride"].as_u64() {
+        return (limit, None);
+    }
+    if t3chat["available"] != true {
+        return (3, None);
+    }
+    match t3chat["link"]["plan"].as_str() {
+        Some("premier") => (100, None),
+        Some("pro") => (10, Some("premier")),
+        Some("free") => (3, Some("pro")),
+        _ => (3, Some("link")),
+    }
+}
+
+fn tunnels_in_use(environments: &Value) -> u64 {
+    environments["environments"].as_array().into_iter().flatten().filter(|e| e["endpoint"]["providerKind"] == "cloudflare_tunnel").count() as u64
+}
+
+/// Web `refreshManagedTunnelUsage`: the account's environments and its T3 Chat plan.
+fn read_usage(s: &mut App) {
+    let Some(relay) = crate::cloud::config().map(|c| c.relay) else { return };
+    let slot: Slot<Option<Usage>> = Arc::default();
+    let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
+    std::thread::spawn(move || {
+        let get = |token: &str, path: &str| -> Option<Value> {
+            let url = format!("{}{path}", relay.trim_end_matches('/'));
+            agent().get(&url).set("Authorization", &format!("Bearer {token}")).call().ok()?.into_json().ok()
+        };
+        let usage = crate::cloud::account_token().ok().and_then(|token| {
+            let used = tunnels_in_use(&get(&token, "/v1/environments")?);
+            let (limit, upgrade) = cap(&get(&token, "/v1/client/t3chat-link")?);
+            Some(Usage { used, limit, upgrade })
+        });
+        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
+        if let Some(waker) = waker {
+            waker();
+        }
+    });
+    s.ui.settings.connect.usage_read = Some(slot);
+}
+
+/// Wakes the app when the next link-state read is due.
+fn schedule_read(s: &mut App) {
+    s.ui.settings.connect.next_read = Some(Instant::now() + REFRESH);
+    let waker = s.ui.panel.waker.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(REFRESH);
+        if let Some(waker) = waker {
+            waker();
+        }
+    });
 }
 
 fn env_post(base: &str, auth: &s5_net::Auth, path: &str, body: Value, action: &str) -> Result<Value, Failure> {
@@ -336,6 +413,7 @@ fn fail(s: &mut App, failure: Failure) {
     let ui = &mut s.ui.settings.connect;
     if failure.tunnel_limit.is_some() {
         ui.tunnel_limit = failure.tunnel_limit;
+        ui.used_at_refusal = ui.usage.map(|u| u.used);
         return;
     }
     ui.error = Some(failure.message.clone());
@@ -345,8 +423,28 @@ fn fail(s: &mut App, failure: Failure) {
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access") || s.ui.cloud.onboarding.is_some();
-    if showing && s.ui.settings.connect.state.is_none() && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read") {
+    let ready = showing && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read");
+    let due = s.ui.settings.connect.next_read.is_some_and(|at| Instant::now() >= at);
+    if ready && (s.ui.settings.connect.state.is_none() || due) {
+        s.ui.settings.connect.next_read = None;
         refresh(s);
+    }
+    if ready && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
+        read_usage(s);
+    }
+    let usage = s.ui.settings.connect.usage_read.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(usage) = usage {
+        let ui = &mut s.ui.settings.connect;
+        ui.usage_read = None;
+        ui.usage = usage;
+        if ui.tunnel_limit.is_some() && ui.used_at_refusal.is_none() {
+            ui.used_at_refusal = usage.map(|u| u.used);
+        }
+        changed = true;
+    }
+    if s.ui.settings.connect.prompt && signed_in(s) {
+        s.ui.settings.connect.prompt = false;
+        changed = true;
     }
     if let Some(id) = s.ui.settings.connect.read
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
@@ -360,6 +458,9 @@ pub fn poll(s: &mut App) -> bool {
         let manage = super::permissions::can(s, "relay:read") && super::permissions::can(s, "relay:write");
         let link = s.ui.settings.connect.state.as_ref().and_then(|r| r.as_ref().ok()).filter(|_| manage).map(link_state);
         crate::cloud::onboarding::set_link_state(s, link);
+        if showing {
+            schedule_read(s);
+        }
         changed = true;
     }
     if let Some((managed, publish)) = crate::cloud::onboarding::take_publish(s) {
@@ -395,9 +496,13 @@ pub fn poll(s: &mut App) -> bool {
             }
             Err(failure) => fail(s, failure),
         }
-        // A failed change may have partly applied: read the state again either way.
+        // A failed change may have partly applied: read the state again either way. Any link
+        // attempt can change the account's tunnel count.
         refresh(s);
         crate::cloud::refresh(s);
+        if s.ui.settings.connect.usage_read.is_none() {
+            read_usage(s);
+        }
         changed = true;
     }
     changed
@@ -441,7 +546,7 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
         kit::Button::new("Sign in")
             .variant("outline")
             .size("sm")
-            .on_press(|s: &mut App| s.navigate(crate::Route::Settings("connections".into())))
+            .on_press(|s: &mut App| s.ui.settings.connect.prompt = true)
             .build(t)
     };
     let managed = state.is_some_and(managed_active);
@@ -450,13 +555,14 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
     if let Some((status, error)) = status {
         tunnel_copy = tunnel_copy.child(text(status).font(theme::TEXT_XS).color(if error { t.c.destructive } else { t.c.muted_foreground }).wrap());
     }
-    if let Some(limit) = ui.tunnel_limit {
-        tunnel_copy = tunnel_copy.child(
-            text(format!("Your plan includes {limit} tunnel{}. Remove one or upgrade to link this environment.", if limit == 1 { "" } else { "s" }))
-                .font(theme::TEXT_XS)
-                .color(t.c.destructive)
-                .wrap(),
-        );
+    if signed_in {
+        let alert = limit_alert_shown(ui);
+        if let Some(usage) = ui.usage {
+            tunnel_copy = tunnel_copy.child(meter(usage, alert, t));
+        }
+        if alert {
+            tunnel_copy = tunnel_copy.child(limit_alert(ui.usage.and_then(|u| u.upgrade), t));
+        }
     }
     let mut out = vec![setting_row(
         "T3 Connect",
@@ -487,10 +593,114 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
     out
 }
 
+
+/// Web `T3ConnectTunnelUsage`: the refusal's alert stays until a tunnel frees or the cap rises.
+fn limit_alert_shown(ui: &Ui) -> bool {
+    let Some(limit) = ui.tunnel_limit else { return false };
+    let freed = matches!((ui.used_at_refusal, ui.usage), (Some(at), Some(usage)) if usage.used < at);
+    let raised = ui.usage.is_some_and(|u| u.limit > limit);
+    !freed && !raised
+}
+
+/// Web `TunnelUsageMeter`: "2 of 3 tunnels in use" with one slot per tunnel up to ten.
+fn meter(usage: Usage, alert: bool, t: &T) -> El {
+    let full = usage.used >= usage.limit;
+    let fill = if full { t.c.warning } else { t.c.foreground.alpha_mul(0.72) };
+    let bar = if usage.limit <= 10 {
+        (0..usage.limit).fold(row().w_full().h(6.0).gap(4.0), |bar, i| bar.child(el().h(6.0).grow(1.0).radius(3.0).fill(if i < usage.used { fill } else { t.c.muted })))
+    } else {
+        let share = (usage.used as f32 / usage.limit as f32).min(1.0);
+        row().w_full().h(6.0).radius(3.0).fill(t.c.muted).child(el().h(6.0).grow(share).radius(3.0).fill(fill)).child(el().h(6.0).grow(1.0 - share))
+    };
+    let mut line = row().w_full().gap(12.0).center_y().child(
+        text(format!("{} of {} tunnels in use", usage.used, usage.limit)).font(theme::TEXT_XS).color(if full { t.c.warning_foreground } else { t.c.foreground }).grow(1.0),
+    );
+    // At the cap the alert carries the same action.
+    if usage.upgrade.is_some_and(|u| u != "link") && !alert {
+        line = line.child(
+            text("Get more tunnels")
+                .font(theme::weight(theme::TEXT_XS, 500.0))
+                .color(t.c.foreground)
+                .role("link")
+                .cursor(rune::Cursor::Pointer)
+                .on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)),
+        );
+    }
+    col().max_w(384.0).w_full().gap(6.0).pt(6.0).child(line).child(bar.role("progressbar").label("T3 Connect tunnels in use").range_value(usage.used as f64, 0.0, usage.limit as f64))
+}
+
+const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
+
+/// Web `TunnelLimitAlert`. Rune has no account page, so linking T3 Chat or managing tunnels
+/// offers no button; an upgrade opens the T3 Chat subscription.
+fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
+    let description = match upgrade {
+        Some("link") => "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
+        Some(_) => "Switch to Tailscale or get more tunnels by upgrading your T3 Chat sub (sorry!)",
+        None => "Switch to Tailscale or deregister an environment you no longer use (sorry!)",
+    };
+    let mut alert = row()
+        .w_full()
+        .gap(12.0)
+        .padding(12.0)
+        .radius(8.0)
+        .border(1.0, t.c.warning.alpha_mul(0.32))
+        .fill(t.c.warning_surface)
+        .role("alert")
+        .child(rune::icon(&crate::icons::TRIANGLE_ALERT, 16.0).color(t.c.warning_foreground))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text("You\u{2019}re out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground))
+                .child(text(description).font(theme::TEXT_XS).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
+        );
+    if matches!(upgrade, Some("pro" | "premier")) {
+        alert = alert.child(kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)).build(t));
+    }
+    alert.mt(6.0)
+}
+
+/// Clerk's sign-in prompt (web `openAuthPrompt`), from the settings overlay pass.
+pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
+    let ui = &s.ui.settings.connect;
+    if ui.prompt && !signed_in(s) {
+        let cloud = &s.ui.cloud;
+        let mut body = col().w_full().gap(12.0);
+        body = match &cloud.signing_in {
+            Some(pending) => body.child(
+                row()
+                    .w_full()
+                    .gap(12.0)
+                    .center_y()
+                    .child(text(if pending.finishing { "Signing in\u{2026}" } else { "Finish signing in in your browser" }).font(theme::TEXT_SM).color(t.c.muted_foreground).grow(1.0))
+                    .child(kit::Button::new("Cancel").variant("ghost").size("sm").disabled(pending.finishing).on_press(crate::cloud::cancel_sign_in).build(t)),
+            ),
+            None => body.child(crate::cloud::provider_buttons(s, t, false)),
+        };
+        if let Some(error) = &cloud.error {
+            body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+        }
+        kit::Dialog::new("t3-connect-sign-in", "Sign in to T3 Connect")
+            .open(true)
+            .description("Make this environment available to your other devices through T3 Connect.")
+            .on_close(|s: &mut App| s.ui.settings.connect.prompt = false)
+            .child(body)
+            .build(t, layers);
+    }
+}
+
 /// Scenes: signed in with this environment linked over a healthy tunnel.
 pub fn scene(s: &mut App, state: Value) {
     crate::cloud::scene_signed_in(s);
     s.ui.settings.connect.state = Some(Ok(state));
+    s.ui.settings.connect.usage = Some(Usage { used: 2, limit: 3, upgrade: Some("link") });
+}
+
+/// Scenes: signed out, with the sign-in prompt open.
+pub fn scene_prompt(s: &mut App) {
+    s.ui.settings.connect.prompt = true;
 }
 
 #[cfg(test)]
@@ -527,6 +737,26 @@ mod tests {
         assert_eq!(reachability(&healthy), Some(("Tunnel connected · 4 connections · QUIC".to_owned(), false)));
         assert!(description(true, Some(&json!({"linked": true, "managedTunnelActive": false}))).starts_with("T3 Connect is out of sync"));
     }
+
+    #[test]
+    fn tunnel_usage_and_cap_follow_the_relay_and_t3_chat_plan() {
+        let envs = json!({"environments": [{"endpoint": {"providerKind": "cloudflare_tunnel"}}, {"endpoint": {"providerKind": "manual"}}, {"endpoint": {"providerKind": "cloudflare_tunnel"}}]});
+        assert_eq!(tunnels_in_use(&envs), 2);
+        assert_eq!(cap(&json!({"available": false, "link": null})), (3, None));
+        assert_eq!(cap(&json!({"available": true, "link": null})), (3, Some("link")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "free"}})), (3, Some("pro")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "pro"}})), (10, Some("premier")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "premier"}})), (100, None));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "pro"}, "maxTunnelsOverride": 7})), (7, None));
+        // The refusal's alert stays until a tunnel frees or the cap rises.
+        let mut ui = Ui { tunnel_limit: Some(3), used_at_refusal: Some(3), usage: Some(Usage { used: 3, limit: 3, upgrade: None }), ..Ui::default() };
+        assert!(limit_alert_shown(&ui));
+        ui.usage = Some(Usage { used: 2, limit: 3, upgrade: None });
+        assert!(!limit_alert_shown(&ui));
+        ui.usage = Some(Usage { used: 3, limit: 10, upgrade: None });
+        assert!(!limit_alert_shown(&ui));
+    }
+
 
     #[test]
     fn relay_refusals_carry_the_tunnel_cap() {
