@@ -643,7 +643,7 @@ fn environment_picker(s: &App, menu: Menu) -> Menu {
 
 /// The checkout's folder: the picked environment's copy, else the pull request's workspace, else
 /// its project's.
-pub(super) fn checkout_root(s: &App, d: &Value) -> Option<String> {
+fn checkout_root(s: &App, d: &Value) -> Option<String> {
     let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
     let picked = acting(s).map(|a| a.root);
     [picked.as_deref(), d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
