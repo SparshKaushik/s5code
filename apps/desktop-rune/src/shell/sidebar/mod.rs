@@ -5,6 +5,7 @@
 mod brand;
 mod chrome;
 mod drafts;
+pub mod everything;
 pub mod favicon;
 pub(crate) mod folders;
 pub mod logic;
@@ -152,6 +153,7 @@ pub struct Ui {
     content_req: Option<(Vec<u64>, String)>,
     favicons: favicon::Favicons,
     provider_updates: updates::State,
+    everything: everything::Ui,
 }
 
 impl Ui {
@@ -1698,6 +1700,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         overlays.extend(menu::view(s, cx, &model, th, m, t));
     }
     row::hover_card(s, &model, t, overlays);
+    everything::overlays(s, t, overlays);
     if let Some(d) = ui.drag.as_ref().filter(|d| d.context) {
         drag_ghost(s, &model, cx, t, d, overlays);
     }

@@ -91,6 +91,8 @@ pub struct Net {
     wake: Arc<dyn Fn() + Send + Sync>,
     /// Threads followed only through [`Net::keep_thread`]; any [`Net::watch_thread`] adopts one.
     kept_only: HashSet<String>,
+    /// Requests awaiting their reply: method and when it was sent (unix ms).
+    awaiting: HashMap<u64, (String, i64)>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -111,6 +113,9 @@ impl Default for State {
 }
 
 /// Process-wide, so a reply can be handed between environments' clients without colliding.
+/// Web's `MAX_TRACKED_RPC_ACK_REQUESTS`.
+const MAX_AWAITING: usize = 256;
+
 fn next_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -157,6 +162,7 @@ impl Net {
             incoming_tx,
             wake,
             kept_only: HashSet::new(),
+            awaiting: HashMap::new(),
         }
     }
     /// A client with no worker, for tests: each request is answered at once that the worker stopped.
@@ -177,6 +183,7 @@ impl Net {
             incoming_tx,
             wake: Arc::new(|| {}),
             kept_only: HashSet::new(),
+            awaiting: HashMap::new(),
         }
     }
     /// A connection over an in-memory transport that drops what it is sent and never answers,
@@ -199,6 +206,7 @@ impl Net {
             incoming_tx,
             wake: Arc::new(|| {}),
             kept_only: HashSet::new(),
+            awaiting: HashMap::new(),
         }
     }
     /// [`Net::in_memory`] that keeps the requests it is sent, so a client test can check what
@@ -209,6 +217,12 @@ impl Net {
         let mut net = Net::in_memory(base_url);
         net.tx = tx;
         (net, Sent(commands))
+    }
+    /// Delivers `item` on the `method` subscription as the server would.
+    #[cfg(feature = "test-support")]
+    pub fn put_resource_item(&mut self, method: &str, payload: Value, item: Value) {
+        let _ = self.incoming_tx.send(Incoming::Item(Route::Resource(method.into(), payload.to_string()), item));
+        self.drain();
     }
     /// Folds decoded messages without waiting for network I/O.
     pub fn drain(&mut self) -> bool {
@@ -254,6 +268,7 @@ impl Net {
                     changed = true;
                 }
                 Incoming::Reply(id, reply) => {
+                    self.awaiting.remove(&id);
                     self.replies.insert(id, reply);
                 }
                 Incoming::Chunk(id, values) => {
@@ -451,8 +466,21 @@ impl Net {
         {
             self.replies
                 .insert(id, Err(json!({"message":"network worker stopped"})));
+        } else {
+            if self.awaiting.len() >= MAX_AWAITING
+                && let Some(oldest) = self.awaiting.iter().min_by_key(|(id, _)| **id).map(|(id, _)| *id)
+            {
+                self.awaiting.remove(&oldest);
+            }
+            let sent = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+            self.awaiting.insert(id, (tag.to_owned(), sent));
         }
         id
+    }
+    /// Requests still waiting on their reply, for web's slow-request warning: id, method and
+    /// when each was sent (unix ms).
+    pub fn awaiting(&self) -> impl Iterator<Item = (u64, &str, i64)> {
+        self.awaiting.iter().map(|(id, (method, sent))| (*id, method.as_str(), *sent))
     }
     /// An id no server will answer, for a reply this client is handed instead (see [`Net::put_reply`]).
     pub fn reserve_id(&self) -> u64 {
@@ -533,15 +561,23 @@ pub fn api_socket(
     url.set_path(path);
     url.set_query(Some(query).filter(|q| !q.is_empty()));
     url.set_fragment(None);
-    // The server checks an upgrade's proof against the request as HTTP.
-    url.set_scheme(http).map_err(|_| "invalid server URL")?;
-    let (headers, _) = auth.headers("GET", url.as_str(), None)?;
-    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
-    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
-    for (name, value) in headers {
-        req.headers_mut().insert(name, value.parse().map_err(|_| "invalid authorization header")?);
-    }
-    let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+    // As `auth::send`: a refused DPoP token is renewed and the upgrade tried once more.
+    let mut rejected: Option<String> = None;
+    let mut socket = loop {
+        // The server checks an upgrade's proof against the request as HTTP.
+        url.set_scheme(http).map_err(|_| "invalid server URL")?;
+        let (headers, token) = auth.headers("GET", url.as_str(), rejected.as_deref())?;
+        url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
+        let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
+        for (name, value) in headers {
+            req.headers_mut().insert(name, value.parse().map_err(|_| "invalid authorization header")?);
+        }
+        match tungstenite::connect(req) {
+            Ok((socket, _)) => break socket,
+            Err(tungstenite::Error::Http(response)) if response.status() == 401 && token.is_some() && rejected.is_none() => rejected = token,
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     let tcp = match socket.get_mut() {
         MaybeTlsStream::Plain(tcp) => tcp,
         MaybeTlsStream::Rustls(tls) => &mut tls.sock,
