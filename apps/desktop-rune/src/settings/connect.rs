@@ -860,6 +860,36 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_usage_and_cap_follow_the_relay_and_t3_chat_plan() {
+        let envs = json!({"environments": [{"endpoint": {"providerKind": "cloudflare_tunnel"}}, {"endpoint": {"providerKind": "manual"}}, {"endpoint": {"providerKind": "cloudflare_tunnel"}}]});
+        assert_eq!(tunnels_in_use(&envs), 2);
+        assert_eq!(cap(&json!({"available": false, "link": null})), (3, None));
+        assert_eq!(cap(&json!({"available": true, "link": null})), (3, Some("link")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "free"}})), (3, Some("pro")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "pro"}})), (10, Some("premier")));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "premier"}})), (100, None));
+        assert_eq!(cap(&json!({"available": true, "link": {"plan": "pro"}, "maxTunnelsOverride": 7})), (7, None));
+        // The refusal's alert stays until a tunnel frees or the cap rises.
+        let mut ui = Ui { tunnel_limit: Some(3), used_at_refusal: Some(3), usage: Some(Usage { used: 3, limit: 3, upgrade: None }), ..Ui::default() };
+        assert!(limit_alert_shown(&ui));
+        ui.usage = Some(Usage { used: 2, limit: 3, upgrade: None });
+        assert!(!limit_alert_shown(&ui));
+        ui.usage = Some(Usage { used: 3, limit: 10, upgrade: None });
+        assert!(!limit_alert_shown(&ui));
+    }
+
+    #[test]
+    fn the_relay_client_is_checked_then_installed_like_web() {
+        assert_eq!(client_status(&json!({"status": "available", "executablePath": "/x", "source": "managed", "version": "1"})), Ok(None));
+        assert_eq!(client_status(&json!({"status": "missing", "version": "2026.11.0"})), Ok(Some("2026.11.0".into())));
+        assert_eq!(client_status(&json!({"status": "unsupported", "platform": "linux", "arch": "riscv64", "version": "1"})), Err("T3 Code cannot install the relay client automatically on linux-riscv64.".into()));
+        assert_eq!(installed(None), Err("The relay client install completed without a final status.".into()));
+        assert_eq!(installed(Some(&json!({"type": "progress", "stage": "activating"}))), Err("The relay client install completed without a final status.".into()));
+        assert_eq!(installed(Some(&json!({"type": "complete", "status": {"status": "available"}}))), Ok(()));
+        assert_eq!(installed(Some(&json!({"type": "complete", "status": {"status": "missing", "version": "1"}}))), Err("The relay client is still unavailable after installation.".into()));
+    }
+
+    #[test]
     fn relay_refusals_carry_the_tunnel_cap() {
         let refused = failure("https://relay/v1/client/environment-links failed", 403, &json!({"relayError": {"_tag": "RelayEnvironmentLinkLimitExceededError", "maxTunnels": 2, "message": "Limit reached"}}));
         assert_eq!(refused.tunnel_limit, Some(2));
