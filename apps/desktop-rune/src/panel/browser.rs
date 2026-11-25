@@ -1538,7 +1538,10 @@ impl Worker {
                 }
             }
             "Runtime.bindingCalled" if p["name"] == "__s5Page" => {
-                if let Some(event) = page_message(tab, p["payload"].as_str().unwrap_or_default()) {
+                let payload = p["payload"].as_str().unwrap_or_default();
+                if let Some(title) = page_title(payload) {
+                    self.update(tab, |s| s.title = title);
+                } else if let Some(event) = page_message(tab, payload) {
                     self.event(event);
                 }
             }
@@ -2484,6 +2487,12 @@ fn page_message(tab: TabId, payload: &str) -> Option<Event> {
     }
 }
 
+/// A title the page set after loading, which the headless shell never reports itself.
+fn page_title(payload: &str) -> Option<String> {
+    let m: Value = serde_json::from_str(payload).ok()?;
+    (m["kind"] == "title").then(|| m["title"].as_str().map(|t| t.trim().chars().take(512).collect()))?
+}
+
 /// Electron's clipboard and external-protocol hooks, which the headless shell lacks: copies
 /// reach the system clipboard, reads ask first, and links to other applications are confirmed.
 const PAGE_JS: &str = r#"(() => {
@@ -2516,6 +2525,12 @@ const PAGE_JS: &str = r#"(() => {
   for (const type of ["copy", "cut"]) {
     addEventListener(type, () => { set = null; }, true);
     addEventListener(type, (e) => { const text = e.defaultPrevented ? set : String(getSelection() || ""); if (text) send({ kind: "copy", text }); });
+  }
+  // Electron's page-title-updated: the headless shell sends no title change, so the page does.
+  if (window === top) {
+    let title = null;
+    const report = () => { if (document.title !== title) { title = document.title; send({ kind: "title", title }); } };
+    new MutationObserver(report).observe(document, { subtree: true, childList: true, characterData: true });
   }
   // Electron's window-open handler returns no window for a scheme it denies or keeps in place.
   const open = window.open;
@@ -2888,6 +2903,10 @@ mod tests {
     fn the_page_script_reports_copies_reads_and_links_to_other_apps() {
         assert!(matches!(page_message(1, r#"{"kind":"copy","text":"npm i"}"#), Some(Event::Clipboard(t)) if t == "npm i"));
         assert!(page_message(1, r#"{"kind":"copy","text":""}"#).is_none());
+        // A title set after load reaches the tab; it is no event of its own.
+        assert_eq!(page_title(r#"{"kind":"title","title":"  Inbox (3) "}"#).as_deref(), Some("Inbox (3)"));
+        assert_eq!(page_title(r#"{"kind":"copy","text":"x"}"#), None);
+        assert!(page_message(1, r#"{"kind":"title","title":"Inbox"}"#).is_none());
         assert!(matches!(page_message(2, r#"{"kind":"read","id":7,"origin":"http://localhost:5173"}"#), Some(Event::ClipboardRead { tab: 2, id: 7, origin }) if origin == "http://localhost:5173"));
         assert!(page_message(2, r#"{"kind":"read","id":7,"origin":"null"}"#).is_none(), "an opaque origin is refused, as Electron does");
         assert!(matches!(page_message(3, r#"{"kind":"external","url":"mailto:dev@example.com"}"#), Some(Event::External { tab: 3, url }) if url == "mailto:dev@example.com"));
