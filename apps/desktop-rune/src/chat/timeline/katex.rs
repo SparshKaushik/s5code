@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
 use rune::tok::TextStyle;
-use rune::{Color, El, el, row, text};
+use rune::{Color, El, el};
 
 use super::math::Inline;
 use crate::App;
@@ -91,16 +91,16 @@ pub struct State {
     stills: HashMap<(String, bool), (Shot, f32, f32)>,
 }
 
-/// The picture of `tex` in `ink` at text size `size`, or `None` until it has been typeset
-/// (asking for it) or when it can't be.
-pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<El> {
+/// The picture of `tex` in `ink` at text size `size` and its size in points, or `None` until it
+/// has been typeset (asking for it) or when it can't be.
+fn still(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<(rune::Pixels, f32, f32)> {
     let state = &app.ui.chat.timeline.katex;
     if let Some((shot, w, h)) = state.stills.get(&(tex.to_owned(), display)) {
-        return Some(el().w(*w).h(*h).pixels(&shot.pixels).label(tex.to_owned()));
+        return Some((shot.pixels.clone(), *w, *h));
     }
     let key = Key { tex: tex.to_owned(), display, size: (size * 10.).round() as u32, ink: ink.hex() };
     match state.entries.get(&key) {
-        Some(Entry::Ready(shot, w, h)) => Some(el().w(*w).h(*h).pixels(&shot.pixels).label(tex.to_owned())),
+        Some(Entry::Ready(shot, w, h)) => Some((shot.pixels.clone(), *w, *h)),
         Some(_) => None,
         None => {
             if let Ok(mut wanted) = state.wanted.try_borrow_mut()
@@ -116,133 +116,31 @@ pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color
     }
 }
 
-/// An inline-math paragraph laid out a word at a time, its formulas as pictures, once all of
-/// them are typeset: Rune's text can't hold a picture. A link is one unbroken piece. `None`
-/// keeps it TeX source, as do images, HTML and a formula inside a link.
-pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, link_ink: Color) -> Option<El> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+/// [`still`] as an element.
+pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<El> {
+    let (pixels, w, h) = still(app, tex, display, size, ink)?;
+    Some(el().w(w).h(h).pixels(&pixels).label(tex.to_owned()))
+}
+
+/// An inline-math paragraph as one text, its formulas laid out in its lines once all of them
+/// are typeset. `None` keeps it TeX source.
+pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, t: &crate::theme::T) -> Option<El> {
     let mut source = String::new();
     let mut formulas = Vec::new();
     for part in parts {
         match part {
             Inline::Text(text) => source.push_str(text),
             Inline::Math { tex, display } => {
-                source.push_str(&format!("\u{e000}{}\u{e001}", formulas.len()));
-                formulas.push(picture(app, tex, *display, font.size, ink));
+                source.push_str(&super::inline::placeholder(formulas.len()));
+                let copy = if *display { format!("$${tex}$$") } else { format!("${tex}$") };
+                formulas.push(still(app, tex, *display, font.size, ink).map(|(pixels, w, h)| super::inline::Picture { pixels, size: [w, h], copy, open: None }));
             }
         }
     }
-    if formulas.iter().any(Option::is_none) || source.lines().any(|l| block_syntax(l.trim_start())) {
+    if formulas.iter().any(Option::is_none) {
         return None;
     }
-    let mut words: Vec<El> = Vec::new();
-    let mut word = row().center_y();
-    let mut empty = true;
-    let (mut strong, mut emphasis) = (0, 0);
-    // The open link's URL and the text read so far.
-    let mut link: Option<(String, String)> = None;
-    let finish = |word: &mut El, empty: &mut bool, words: &mut Vec<El>| {
-        if !*empty {
-            words.push(std::mem::replace(word, row().center_y()));
-            *empty = true;
-        }
-    };
-    for event in Parser::new(&source) {
-        let (piece, mono) = match event {
-            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => continue,
-            Event::Start(Tag::Strong) => {
-                strong += 1;
-                continue;
-            }
-            Event::End(TagEnd::Strong) => {
-                strong -= 1;
-                continue;
-            }
-            Event::Start(Tag::Emphasis) => {
-                emphasis += 1;
-                continue;
-            }
-            Event::End(TagEnd::Emphasis) => {
-                emphasis -= 1;
-                continue;
-            }
-            Event::Start(Tag::Link { dest_url, .. }) if link.is_none() => {
-                link = Some((dest_url.into_string(), String::new()));
-                continue;
-            }
-            Event::End(TagEnd::Link) => {
-                let (url, label) = link.take()?;
-                let style = if strong > 0 { theme::weight(font, 600.) } else { font };
-                let help = super::md_links::help(&url);
-                let mut target = rune::Link::new(0..label.len(), url);
-                if let Some(help) = help {
-                    target = target.help(help);
-                }
-                word = word.child(text(label).font(style).color(link_ink).single_line().link(target).on_link(super::md_links::open));
-                empty = false;
-                continue;
-            }
-            Event::Text(t) | Event::Code(t) if link.is_some() => {
-                let (_, label) = link.as_mut()?;
-                if t.contains('\u{e000}') {
-                    return None;
-                }
-                label.push_str(&t);
-                continue;
-            }
-            Event::SoftBreak | Event::HardBreak if link.is_some() => {
-                link.as_mut()?.1.push(' ');
-                continue;
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                finish(&mut word, &mut empty, &mut words);
-                continue;
-            }
-            Event::Text(t) => (t.into_string(), false),
-            Event::Code(t) => (t.into_string(), true),
-            _ => return None,
-        };
-        let style = match (mono, strong > 0) {
-            (true, _) => TextStyle { size: font.size * 0.85, ..theme::mono(font) },
-            (false, true) => theme::weight(font, 600.),
-            (false, false) => font,
-        };
-        let style = if emphasis > 0 && !mono { style.italic() } else { style };
-        for (n, chunk) in piece.split(' ').enumerate() {
-            if n > 0 {
-                finish(&mut word, &mut empty, &mut words);
-            }
-            let mut rest = chunk;
-            while !rest.is_empty() {
-                let (before, formula, after) = match rest.find('\u{e000}') {
-                    Some(at) => {
-                        let close = rest[at..].find('\u{e001}').map_or(rest.len(), |c| at + c);
-                        let index: usize = rest[at + '\u{e000}'.len_utf8()..close].parse().ok()?;
-                        (&rest[..at], Some(index), rest.get(close + '\u{e001}'.len_utf8()..).unwrap_or_default())
-                    }
-                    None => (rest, None, ""),
-                };
-                if !before.is_empty() {
-                    word = word.child(text(before.to_owned()).font(style).color(ink).single_line());
-                    empty = false;
-                }
-                if let Some(index) = formula {
-                    word = word.child(formulas.get_mut(index)?.take()?);
-                    empty = false;
-                }
-                rest = after;
-            }
-        }
-    }
-    finish(&mut word, &mut empty, &mut words);
-    Some(row().w_full().flex_wrap().gap(4.0).center_y().min_h(font.line_px()).children(words))
-}
-
-/// Lines a word-at-a-time layout would draw wrong: headings, quotes, lists, tables and fences.
-fn block_syntax(line: &str) -> bool {
-    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    line.starts_with(['#', '>', '|', '<', '-', '*', '+', '`', '~', '='])
-        || (digits > 0 && (line[digits..].starts_with(". ") || line[digits..].starts_with(") ")))
+    super::inline::paragraph(&source, formulas, &|_, _| None, font, ink, t)
 }
 
 /// What a Markdown view holding math reads of the typesetting state.
@@ -384,15 +282,20 @@ mod tests {
     }
 
     #[test]
-    fn a_paragraph_with_a_link_flows_but_a_formula_inside_one_stays_source() {
+    fn a_paragraph_flows_around_its_formulas_even_inside_a_link() {
         let mut app = App::new();
         app.ui.chat.timeline.katex.stills.insert(("x".into(), false), (Shot::new(String::new(), 0, true), 8., 14.));
         let ink = Color { r: 1., g: 1., b: 1., a: 1. };
+        let t = theme::theme(true);
         let math = || Inline::Math { tex: "x".into(), display: false };
         let around = |before: &str, after: &str| vec![Inline::Text(before.into()), math(), Inline::Text(after.into())];
-        let flows = |parts: &[Inline]| flow(&app, parts, theme::TEXT_SM, ink, ink).is_some();
+        let flows = |parts: &[Inline]| flow(&app, parts, theme::TEXT_SM, ink, &t).is_some();
         assert!(flows(&around("See [the **docs**](https://example.com) for ", ".")));
-        assert!(!flows(&[Inline::Text("[see ".into()), math(), Inline::Text("](https://example.com)".into())]));
+        assert!(flows(&[Inline::Text("[see ".into()), math(), Inline::Text("](https://example.com)".into())]));
+        // An image needs its own picture; a list needs rune_kit's layout.
         assert!(!flows(&around("![chart](a.png) and ", "")));
+        assert!(!flows(&around("- item ", "")));
+        // An untypeset formula keeps the paragraph TeX source.
+        assert!(!flows(&[Inline::Text("a ".into()), Inline::Math { tex: "y".into(), display: false }]));
     }
 }

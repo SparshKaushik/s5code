@@ -2761,7 +2761,7 @@ mod tests {
     }
 }
 
-fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
+pub(crate) fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
     let key = row()
         .role("note")
         .center()
@@ -2776,7 +2776,7 @@ fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
     }
 }
 
-fn footer_label(label: &str, t: &T) -> El {
+pub(crate) fn footer_label(label: &str, t: &T) -> El {
     text(label)
         .font(theme::SM_MEDIUM)
         .color(t.c.contrast_muted_foreground)
