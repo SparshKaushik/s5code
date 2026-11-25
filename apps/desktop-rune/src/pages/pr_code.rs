@@ -85,6 +85,7 @@ pub struct Ui {
     page_failed: bool,
     /// Hide whitespace changes, seeded from `diffIgnoreWhitespace`.
     ignore_ws: Option<bool>,
+    hide_tests_applied: bool,
     /// Each file's counts before whitespace is hidden (sourceFileStats).
     counts: HashMap<String, (usize, usize)>,
     orphans_open: bool,
@@ -811,7 +812,7 @@ pub(super) fn poll(s: &mut App) -> bool {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return false };
     let commit = scoped_commit(&s.ui.pages.detail);
     let scope = json!([entry[TAG], review_key(&entry), commit]).to_string();
-    let (mode, wrap) = (layout(s), wrap_on(s));
+    let (mode, wrap, hide) = (layout(s), wrap_on(s), hide_tests(s));
     let mut changed = false;
     let c = &mut s.ui.pages.code;
     if c.scope != scope {
@@ -849,6 +850,9 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.paging = None;
         c.page_failed = false;
         c.viewed.refresh = true;
+        show(s);
+        changed = true;
+    } else if c.hide_tests_applied != hide {
         show(s);
         changed = true;
     }
@@ -995,6 +999,7 @@ fn show(s: &mut App) {
     let counts: HashMap<String, (usize, usize)> = source.iter().map(|f| (f.path().to_owned(), file_counts(f))).collect();
     let c = &mut s.ui.pages.code;
     c.counts = counts;
+    c.hide_tests_applied = hide;
     let collapsed: Vec<String> = files.iter().map(FileDiff::path).filter(|p| is_collapsed(p, default, &c.toggled)).map(str::to_owned).collect();
     c.diff.set_files(files, &collapsed);
     sync_notes(s);
@@ -2886,6 +2891,16 @@ mod tests {
         assert!(no_changes(&s, &[]));
         s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
         assert!(no_changes(&s, &files), "every file is a hidden test");
+        let entry = json!({"projectId": "p", "host": "github.com", "repository": "o/r", "number": 7});
+        let mut loaded = showing(&entry);
+        loaded.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(false));
+        loaded.ui.pages.detail.files = Some(files.clone());
+        show(&mut loaded);
+        assert_eq!(loaded.ui.pages.code.diff.files().len(), 2);
+        loaded.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(true));
+        poll(&mut loaded);
+        assert!(loaded.ui.pages.code.diff.files().is_empty(), "an open PR diff follows the shared setting");
+
         s.ui.pages.code.revealed = Some("src/b.spec.ts".into());
         assert!(!no_changes(&s, &files), "a revealed test stays shown");
         s.ui.pages.code.revealed = None;
