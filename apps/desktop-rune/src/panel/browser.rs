@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -340,9 +340,30 @@ pub struct Shared {
 /// The Default profile, which every tab uses unless it opens in another.
 pub const DEFAULT_PROFILE: &str = "default";
 pub const INCOGNITO_PROFILE: &str = "incognito";
+const SESSION_SEPARATOR: char = '\u{1f}';
 
-/// The panel's Chrome: one process per browser profile in use, as Electron keeps one session per
-/// profile. Only the Default profile's starts with the panel; another starts with its first tab.
+/// The Chrome session for a profile on an environment, as Electron's preview partitions: each
+/// environment keeps its own cookies and cache. This machine's sessions keep the bare profile, so
+/// their logins stay.
+pub fn session(environment: &str, profile: &str) -> String {
+    if environment == crate::env::LOCAL { profile.to_owned() } else { format!("{profile}{SESSION_SEPARATOR}{environment}") }
+}
+
+/// A session's profile, and its environment when that isn't this machine.
+fn split_session(session: &str) -> (&str, Option<&str>) {
+    match session.split_once(SESSION_SEPARATOR) {
+        Some((profile, environment)) => (profile, Some(environment)),
+        None => (session, None),
+    }
+}
+
+fn file_safe(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// The panel's Chrome: one process per session (an environment's browser profile) in use, as
+/// Electron keeps one partition per environment and profile. Only this machine's Default starts
+/// with the panel; another starts with its first tab. Workers are keyed by `session`.
 #[derive(Default)]
 pub struct Browser {
     workers: HashMap<String, Sender<Cmd>>,
@@ -428,20 +449,23 @@ impl Browser {
         }
     }
 
-    /// Clears a profile's cookies and cache, as Electron clears its session: through its Chrome
-    /// when it runs, else by deleting its folder. A removed profile's tabs stay open, as web's
-    /// "Removed profile", and its folder goes with the last of them.
+    /// Clears a profile's cookies and cache on every environment, as Electron clears its
+    /// partitions: through each Chrome that runs, else by deleting its folder. A removed profile's
+    /// tabs stay open, as web's "Removed profile", and each folder goes with its last tab.
     pub fn clear(&mut self, profile: &str, removed: bool) {
-        match self.workers.get(profile) {
-            Some(tx) => {
-                for cmd in [Cmd::ClearCookies, Cmd::ClearCache] {
-                    let _ = tx.send(cmd);
-                }
-                if removed && !self.doomed.iter().any(|p| p == profile) {
-                    self.doomed.push(profile.to_owned());
-                }
+        let running: Vec<String> = self.workers.keys().filter(|k| split_session(k).0 == profile).cloned().collect();
+        for session in &running {
+            for cmd in [Cmd::ClearCookies, Cmd::ClearCache] {
+                let _ = self.workers[session].send(cmd);
             }
-            None => self.quit(profile, true),
+            if removed && !self.doomed.contains(session) {
+                self.doomed.push(session.clone());
+            }
+        }
+        let held: Vec<PathBuf> = running.iter().map(|s| profile_dir(s)).collect();
+        let idle: Vec<PathBuf> = session_dirs(profile).into_iter().filter(|d| !held.contains(d)).collect();
+        if !idle.is_empty() {
+            std::thread::spawn(move || idle.into_iter().for_each(|d| drop(std::fs::remove_dir_all(d))));
         }
     }
 
@@ -506,9 +530,9 @@ impl Browser {
                 }
                 if closed {
                     self.profiles.remove(&tab.unwrap_or_default());
-                    // Only the Default profile's Chrome outlives its tabs.
+                    // Only this machine's Default Chrome outlives its tabs.
                     if profile != DEFAULT_PROFILE && !self.profiles.values().any(|p| *p == profile) {
-                        let wipe = profile == INCOGNITO_PROFILE || self.doomed.iter().any(|p| *p == profile);
+                        let wipe = split_session(&profile).0 == INCOGNITO_PROFILE || self.doomed.iter().any(|p| *p == profile);
                         self.doomed.retain(|p| *p != profile);
                         self.quit(&profile, wipe);
                     }
@@ -522,15 +546,33 @@ impl Browser {
     }
 }
 
-/// Where a profile keeps its Chrome data: Default's own folder, one per named profile, and a
-/// throwaway one for Incognito, emptied whenever its Chrome starts.
-pub fn profile_dir(profile: &str) -> PathBuf {
-    let root = crate::host::t3_home().join("userdata").join("browser");
+/// Where a session keeps its Chrome data: Default's own folder, one per named profile, and a
+/// throwaway one for Incognito, emptied whenever its Chrome starts. Another environment's
+/// sessions live in a folder of their own.
+pub fn profile_dir(session: &str) -> PathBuf {
+    profile_dir_in(&crate::host::t3_home().join("userdata").join("browser"), session)
+}
+
+fn profile_dir_in(root: &Path, session: &str) -> PathBuf {
+    let (profile, environment) = split_session(session);
+    let base = environment.map_or_else(|| root.to_owned(), |e| root.join(format!("env-{}", file_safe(e))));
     match profile {
-        DEFAULT_PROFILE => root.join("rune-default"),
-        INCOGNITO_PROFILE => std::env::temp_dir().join(format!("s5-rune-incognito-{}", std::process::id())),
-        other => root.join(format!("rune-profile-{}", other.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>())),
+        DEFAULT_PROFILE => base.join("rune-default"),
+        INCOGNITO_PROFILE => std::env::temp_dir().join(format!("s5-rune-incognito-{}{}", std::process::id(), environment.map(|e| format!("-{}", file_safe(e))).unwrap_or_default())),
+        other => base.join(format!("rune-profile-{}", file_safe(other))),
     }
+}
+
+/// A profile's folders on every environment that has one.
+fn session_dirs(profile: &str) -> Vec<PathBuf> {
+    session_dirs_in(&crate::host::t3_home().join("userdata").join("browser"), profile)
+}
+
+fn session_dirs_in(root: &Path, profile: &str) -> Vec<PathBuf> {
+    let local = profile_dir_in(root, profile);
+    let name = local.file_name().map(ToOwned::to_owned).unwrap_or_default();
+    let environments = std::fs::read_dir(root).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("env-"));
+    std::iter::once(local).chain(environments.map(|e| e.path().join(&name))).collect()
 }
 
 fn chrome_path() -> String {
@@ -563,6 +605,13 @@ pub fn shutdown() {
         let _ = child.wait();
     }
     let _ = std::fs::remove_dir_all(profile_dir(INCOGNITO_PROFILE));
+    // Other environments' Incognito folders.
+    let prefix = format!("s5-rune-incognito-{}-", std::process::id());
+    for entry in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Stops one profile's Chrome.
@@ -579,10 +628,10 @@ fn shutdown_profile(profile: &str) {
 /// profile; a folder another instance holds falls back to a throwaway one.
 fn launch(profile: &str, scale: f32) -> Result<(Child, String, PathBuf), String> {
     let dir = profile_dir(profile);
-    if profile == INCOGNITO_PROFILE {
+    if split_session(profile).0 == INCOGNITO_PROFILE {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    let spare = std::env::temp_dir().join(format!("s5-rune-chrome-{}-{profile}", std::process::id()));
+    let spare = std::env::temp_dir().join(format!("s5-rune-chrome-{}-{}", std::process::id(), file_safe(profile)));
     match launch_in(&dir, scale) {
         Ok((child, ws)) => Ok((child, ws, dir)),
         Err(_) => launch_in(&spare, scale).map(|(child, ws)| (child, ws, spare)),
@@ -2954,6 +3003,45 @@ mod tests {
         b.send(Cmd::Close(1));
         assert!(matches!(drain(&default_rx)[..], [Cmd::Close(1)]));
         assert_eq!(b.workers.keys().collect::<Vec<_>>(), [DEFAULT_PROFILE]);
+    }
+
+    #[test]
+    fn each_environment_keeps_its_own_sessions_and_clearing_a_profile_reaches_them_all() {
+        let remote = session("env-2", DEFAULT_PROFILE);
+        assert_eq!(session(crate::env::LOCAL, "work"), "work", "this machine keeps its folders, so logins stay");
+        assert_ne!(remote, DEFAULT_PROFILE);
+        let root = std::env::temp_dir().join(format!("s5-rune-sessions-test-{}", std::process::id()));
+        assert_eq!(profile_dir_in(&root, DEFAULT_PROFILE), root.join("rune-default"));
+        assert_eq!(profile_dir_in(&root, &remote), root.join("env-env-2").join("rune-default"));
+        assert_eq!(profile_dir_in(&root, &session("box/1", "work")), root.join("env-box_1").join("rune-profile-work"));
+        assert_ne!(profile_dir_in(&root, &session("env-2", INCOGNITO_PROFILE)), profile_dir_in(&root, INCOGNITO_PROFILE));
+        std::fs::create_dir_all(root.join("env-env-2")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        let mut dirs = session_dirs_in(&root, "work");
+        dirs.sort();
+        assert_eq!(dirs, [root.join("env-env-2").join("rune-profile-work"), root.join("rune-profile-work")]);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let mut b = Browser::default();
+        let (local_tx, local_rx) = channel();
+        let (remote_tx, remote_rx) = channel();
+        let (remote_work_tx, remote_work_rx) = channel();
+        // A name no real profile has: clearing deletes idle folders of it under the T3 home.
+        let work = format!("test-work-{}", std::process::id());
+        b.workers.insert(DEFAULT_PROFILE.into(), local_tx);
+        b.workers.insert(remote.clone(), remote_tx);
+        b.workers.insert(session("env-2", &work), remote_work_tx);
+        let drain = |rx: &Receiver<Cmd>| rx.try_iter().collect::<Vec<_>>();
+        b.open(1, Pixels::new(), DEFAULT_PROFILE);
+        b.open(2, Pixels::new(), &remote);
+        assert!(matches!(drain(&local_rx)[..], [Cmd::Open(1, _)]));
+        assert!(matches!(drain(&remote_rx)[..], [Cmd::Open(2, _)]), "the same profile on another environment is another Chrome");
+        b.clear(&work, false);
+        assert!(matches!(drain(&remote_work_rx)[..], [Cmd::ClearCookies, Cmd::ClearCache]));
+        assert!(drain(&remote_rx).is_empty() && drain(&local_rx).is_empty());
+        // Another environment's Default goes with its last tab; this machine's stays.
+        b.send(Cmd::Close(2));
+        assert!(matches!(drain(&remote_rx)[..], [Cmd::Close(2), Cmd::Quit { wipe: false }]));
     }
 
     #[test]
