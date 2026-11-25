@@ -116,7 +116,9 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     // `canOperateThreads` over the threads each item acts on.
     let operate = |of: &[&Thread]| super::can_operate(s, of);
     let mut out = Vec::new();
-    let pinned_rows: Vec<&Thread> = threads.iter().copied().filter(|t| t.pinned).collect();
+    // Pin and title regeneration count only rows whose server config is in.
+    let loaded: Vec<&Thread> = threads.iter().copied().filter(|t| super::config_of(s, t).is_some()).collect();
+    let pinned_rows: Vec<&Thread> = loaded.iter().copied().filter(|t| t.pinned).collect();
     let pinned: Vec<String> = pinned_rows.iter().map(|t| t.id.clone()).collect();
     if !pinned.is_empty() {
         out.push(leaf(item(format!("Unpin ({})", pinned.len()), move |s, _| {
@@ -137,7 +139,8 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
             super::settle_many(s, &ids);
         })
     }));
-    if threads.iter().all(|t| t.can_snooze() && !t.snoozed(model.now)) {
+    // `canSnoozeSelection`: every row's config is in and each can snooze, snoozed or not.
+    if threads.iter().all(|t| super::config_of(s, t).is_some() && t.can_snooze(model.now)) {
         out.push(MenuEntry::item(
             MenuItem::new(format!("Snooze ({count})"))
                 .submenu(bulk_entries(s, model, Some(Sub::Snooze)), open == Some(Sub::Snooze))
@@ -147,21 +150,24 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     }
     let shells = &s.state().threads;
     let regenerating = |id: &str| shells.iter().any(|t| t["id"] == id && !t["titleRegeneration"].is_null());
-    let fresh: Vec<String> = ids.iter().filter(|id| !regenerating(id.as_str())).cloned().collect();
+    let fresh: Vec<String> = loaded.iter().map(|t| t.id.clone()).filter(|id| !regenerating(id.as_str())).collect();
     let fresh_rows: Vec<&Thread> = threads.iter().copied().filter(|t| fresh.contains(&t.id)).collect();
-    out.push(leaf(if fresh.is_empty() {
-        todo(format!("Regenerating… ({count})"))
+    if loaded.is_empty() {
+    } else if fresh.is_empty() {
+        out.push(leaf(todo(format!("Regenerating… ({})", loaded.len()))));
     } else if !operate(&fresh_rows) {
-        todo(format!("Regenerate titles ({})", fresh.len()))
+        out.push(leaf(todo(format!("Regenerate titles ({})", fresh.len()))));
     } else {
-        item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
+        out.push(leaf(item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
             close(s);
-            for id in &fresh {
-                super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
-            }
+            super::batched(s, "Failed to regenerate thread titles", |s| {
+                for id in &fresh {
+                    super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
+                }
+            });
             s.ui.shell.sidebar.selected.clear();
-        })
-    }));
+        })));
+    }
     let unread = ids.clone();
     out.push(leaf(item(format!("Mark unread ({count})"), move |s, _| {
         close(s);
@@ -175,6 +181,7 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
             close(s);
             super::request_delete_many(s, ids.clone());
         })
+        .variant("destructive")
         .disabled(!operate(&threads)),
     ));
     out
@@ -269,7 +276,6 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             close(s);
             crate::chat::timeline::find::open(s);
         })));
-        out.push(MenuEntry::Separator);
     }
     if let Some(branch) = th.branch.clone() {
         let (project, worktree) = (th.project_id.clone(), th.worktree.clone());
@@ -291,7 +297,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     if !loaded {
     } else if th.snoozed(model.now) {
         out.push(leaf(op(item("Wake thread", with(super::unsnooze)))));
-    } else if th.can_snooze() {
+    } else if th.can_snooze(model.now) {
         out.push(sub_item("Snooze", Sub::Snooze));
     } else {
         out.push(leaf(todo("Snooze")));
@@ -315,9 +321,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     if super::share::can_share_with_guest(s) {
         out.push(leaf(item("Share with guest", with(super::share::open_guest))));
     }
-    // An archived group is not a filter choice.
+    // An archived group is not a filter choice, and the chat header's menu offers none.
     let (groups, by_project) = super::folders::group_of(s);
-    if let Some(group) = by_project.get(&th.project_id).map(|n| &groups[*n]).filter(|g| !g.archived) {
+    if let Some(group) = by_project.get(&th.project_id).map(|n| &groups[*n]).filter(|g| !g.archived && !header) {
         let members = group.members.clone();
         let scoped = members.iter().all(|m| s.ui.shell.sidebar.project_scope.contains(m));
         let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", group.label) };
@@ -350,7 +356,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     out.push(MenuEntry::Separator);
     let archive = if th.running() { todo("Archive thread") } else { op(item("Archive thread", with(super::request_archive))) };
     out.push(leaf(archive));
-    out.push(leaf(op(item("Delete", with(super::request_delete)))));
+    out.push(leaf(op(item("Delete", with(super::request_delete)).variant("destructive"))));
     out
 }
 
@@ -427,6 +433,25 @@ mod tests {
             assert!(!shown.iter().any(|l| l == gated), "FAILED: {gated} waits for the server config: {shown:?}");
         }
         state(&mut s).config = config;
+
+        // A turn about to start can't snooze (`hasQueuedTurnStart`): a message newer than the run.
+        th.snoozed_until = None;
+        th.run = None;
+        th.latest_user_message_at = Some(model.now);
+        let shown = entries(&s, &model, &th, None);
+        assert!(shown.iter().any(|e| matches!(e, MenuEntry::Item(i) if i.label_text() == "Snooze" && i.is_disabled())), "FAILED: a queued turn disables Snooze: {:?}", labels(&shown));
+        th.latest_user_message_at = Some(model.now - 3 * 60 * 1000);
+        assert!(th.can_snooze(model.now), "FAILED: an old message outside the grace window doesn't hold it");
+
+        // The chat header's menu (useThreadActionMenu): Find first, no separator after it, no filter.
+        let mut header = Menu::new(th.id.clone(), 0.0, 0.0);
+        header.header = true;
+        s.ui.shell.sidebar.menu = Some(header);
+        let shown = entries(&s, &model, &th, None);
+        assert!(matches!(&shown[0], MenuEntry::Item(i) if i.label_text() == "Find in thread"));
+        assert!(!matches!(shown[1], MenuEntry::Separator), "FAILED: web has no separator after Find");
+        assert!(!labels(&shown).iter().any(|l| l.starts_with("Filter by") || l == "Show all projects"), "FAILED: the header menu has no project filter");
+        s.ui.shell.sidebar.menu = None;
 
         // A session without `orchestration:operate` keeps the menu but disables what changes threads.
         crate::chat::details::set_session(&mut s, Some(Ok(json!({"authenticated": true, "permissions": ["orchestration:read"]}))));

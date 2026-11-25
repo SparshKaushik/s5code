@@ -6,7 +6,9 @@ use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
 use serde_json::{Value, json};
 
-use super::{b64url, b64url_decode};
+use super::b64url;
+#[cfg(test)]
+use super::b64url_decode;
 
 pub struct Key {
     pair: EcdsaKeyPair,

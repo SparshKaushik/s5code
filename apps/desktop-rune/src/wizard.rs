@@ -508,6 +508,13 @@ pub fn poll(s: &mut App) -> bool {
             changed = true;
         }
     }
+    // `selectNewComputers`: an account computer is ticked, and so added, once its status is known.
+    for linked in crate::cloud::new_computers(s) {
+        if s.ui.wizard.seen.insert(linked.id.clone()) {
+            choose(s, &linked, true);
+            changed = true;
+        }
+    }
     // `onPaired`: the new computer is ticked, and the form folds away.
     if s.ui.wizard.paired_here && !crate::env::pairing(s) {
         s.ui.wizard.paired_here = false;
@@ -957,6 +964,25 @@ fn continue_button(t: &T, label: &str, disabled: bool, f: impl Fn(&mut App) + 's
     kit::Button::new(label).icon(&icons::ARROW_RIGHT).disabled(disabled).on_press(f).build(t)
 }
 
+/// The T3 Connect card's computers share the Connect step's selection.
+pub(crate) fn chosen(s: &App, id: &str) -> bool {
+    s.ui.wizard.chosen.contains(id)
+}
+
+/// Web `onCheckedChange` for an account computer: ticking one not saved yet adds it through
+/// T3 Connect so it is connecting by Continue; unticking leaves it saved but out of setup.
+pub(crate) fn choose(s: &mut App, linked: &s5_net::cloud::relay::Linked, on: bool) {
+    if !on {
+        s.ui.wizard.chosen.remove(&linked.id);
+        return;
+    }
+    s.ui.wizard.seen.insert(linked.id.clone());
+    s.ui.wizard.chosen.insert(linked.id.clone());
+    if !s.ui.env.saved.iter().any(|e| e.id == linked.id) {
+        crate::cloud::add(s, linked);
+    }
+}
+
 fn toggle_computer(s: &mut App, env: &str) {
     if !s.ui.wizard.chosen.remove(env) {
         s.ui.wizard.chosen.insert(env.to_owned());
@@ -965,12 +991,18 @@ fn toggle_computer(s: &mut App, env: &str) {
 
 fn connect(s: &App, t: &T) -> El {
     let mut body = col().w_full().gap(8.).child(heading("Connect your computers", Some("Choose one or more computers. We’ll set up agents and projects on each."), t)).child(rune::el().h(12.));
-    for env in crate::env::keys(s) {
+    // The web's `fieldset` with its screen-reader legend. `directEnvironments`: computers reached
+    // through T3 Connect are listed in its card.
+    let mut computers = col().w_full().gap(8.).role("group").label("Computers to set up");
+    let relay_card = crate::cloud::config().is_some();
+    let keys: Vec<_> = crate::env::keys(s).into_iter().filter(|env| !(relay_card && crate::env::reached_by_relay(s, env))).collect();
+    let listed = !keys.is_empty();
+    for env in keys {
         let checked = s.ui.wizard.chosen.contains(&env);
         let label = crate::env::label(s, &env);
         let state = if s.ui.env.off.contains(&env) { "Off" } else { crate::env::short_status(s, &env) };
         let toggle = env.clone();
-        body = body.child(
+        computers = computers.child(
             card(t)
                 .cursor(rune::Cursor::Pointer)
                 .child(kit::Checkbox::new(checked).hide_label().label(label.clone()).build(&kit::theme(t)))
@@ -987,6 +1019,9 @@ fn connect(s: &App, t: &T) -> El {
                 .child(text(state).font(theme::TEXT_XS).color(t.c.muted_foreground).help(crate::env::status(s, &env)))
                 .on_press(move |s: &mut App| toggle_computer(s, &toggle)),
         );
+    }
+    if listed {
+        body = body.child(computers);
     }
     let open = s.ui.wizard.pairing_open;
     let mut pairing = col().w_full().radius(8.).border(1., t.c.border).fill(t.c.background).child(
@@ -1460,6 +1495,19 @@ pub(crate) fn scene_computers(s: &mut App) {
     s.ui.wizard.open = true;
 }
 
+/// Headless scene: the T3 Connect card with one account computer added and ticked, and one
+/// unticked while its relay is offline.
+pub(crate) fn scene_t3_connect(s: &mut App) {
+    crate::cloud::scene_signed_in(s);
+    s.ui.env.saved.push(crate::env::Saved { id: "env-box".into(), label: "Hetzner box".into(), base: "https://box.tunnel.example.com".into(), bearer: crate::env::T3_CONNECT.into() });
+    let mut state = crate::data::empty_state();
+    state.conn = s5_net::Conn::Open;
+    state.shell_ready = true;
+    crate::env::park(s, "env-box", crate::data::Source::Fixture(state));
+    s.ui.wizard.seen.extend(["env-box".to_owned(), "env-studio".to_owned()]);
+    s.ui.wizard.chosen.insert("env-box".into());
+}
+
 /// Headless scene: the Projects step on a computer whose connection may read but not operate.
 pub(crate) fn scene_import_denied(s: &mut App) {
     crate::scene_clock(s);
@@ -1707,5 +1755,30 @@ mod tests {
         poll(&mut s);
         assert!(s.ui.wizard.chosen.contains("box"), "the computer just paired is ticked");
         assert!(!s.ui.wizard.pairing_open && s.ui.wizard.link.text.is_empty());
+    }
+
+    #[test]
+    fn account_computers_are_ticked_and_added_once_and_unticking_sticks() {
+        // SAFETY: tests that save environments all point here; keeps them off the real config dir.
+        unsafe { std::env::set_var("S5_ENVIRONMENTS", std::env::temp_dir().join(format!("s5-env-{}.json", std::process::id()))) };
+        let mut s = App::new();
+        s.ui.wizard.open = true;
+        s.ui.wizard.decided = true;
+        crate::cloud::scene_signed_in(&mut s);
+        s.ui.cloud.availability.insert("env-studio".into(), crate::cloud::Availability::Checking);
+        poll(&mut s);
+        let saved = |s: &App, id: &str| s.ui.env.saved.iter().find(|e| e.id == id).map(|e| e.bearer.clone());
+        assert!(chosen(&s, "env-box") && saved(&s, "env-box").as_deref() == Some(crate::env::T3_CONNECT), "a computer with a status is ticked and connects through T3 Connect");
+        assert!(!chosen(&s, "env-studio") && saved(&s, "env-studio").is_none(), "one still being checked waits");
+
+        let studio = crate::cloud::linked(&s, "env-studio").unwrap();
+        choose(&mut s, &studio, true);
+        assert_eq!(saved(&s, "env-studio").as_deref(), Some(crate::env::T3_CONNECT), "ticking adds it, so it is connecting by Continue");
+        choose(&mut s, &studio, false);
+        s.ui.cloud.availability.insert("env-studio".into(), crate::cloud::Availability::Online);
+        poll(&mut s);
+        assert!(!chosen(&s, "env-studio") && saved(&s, "env-studio").is_some(), "unticking leaves it saved but out of setup, and it stays unticked");
+        let (_, _, skipped) = setup_of(&s);
+        assert!(skipped.iter().all(|id| id != "env-studio"));
     }
 }

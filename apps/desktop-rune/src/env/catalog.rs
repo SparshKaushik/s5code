@@ -4,7 +4,7 @@
 //! `secret-tool`) and joins a catalog that already exists. It never makes a key, since a blob
 //! Electron can't decrypt would cost it every saved connection.
 //!
-//! Bearer connections sync both ways. SSH, relay and learned entries are kept as they are.
+//! Bearer and T3 Connect connections sync both ways. SSH and learned entries are kept as they are.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -80,6 +80,15 @@ fn bearers(inner: &Value) -> Vec<Saved> {
         .collect()
 }
 
+/// T3 Connect routes (`RelayConnectionTarget`): an environment and its label. Where it is comes
+/// from the account's listing, since the catalog keeps no endpoint for it.
+fn relays(inner: &Value) -> Vec<(String, String)> {
+    list(inner, "targets")
+        .filter(|t| t["_tag"] == "RelayConnectionTarget")
+        .filter_map(|t| Some((t["environmentId"].as_str().filter(|id| !id.is_empty())?.to_owned(), t["label"].as_str().unwrap_or_default().to_owned())))
+        .collect()
+}
+
 /// `normalizeAdvertisedEndpoint`: the origin with a `/` path, and its WebSocket twin.
 fn endpoints(base: &str) -> Option<(String, String)> {
     let url = s5_net::url::Url::parse(base).ok()?;
@@ -103,8 +112,25 @@ fn rows<'a>(inner: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
 
 /// Mirrors Rune's bearer list into the catalog: each saved one upserted, each one removed
 /// since the last save dropped.
-fn merge(inner: &mut Value, old: &[Saved], new: &[Saved]) {
+fn merge(inner: &mut Value, old: &[Saved], new: &[Saved], relay: &[String]) {
     let removed: Vec<&str> = old.iter().filter(|o| !new.iter().any(|n| n.id == o.id)).map(|o| o.id.as_str()).collect();
+    // A relay route goes with its environment, or alone when Rune dropped just that route.
+    // Electron's relay routes for environments Rune has not adopted stay.
+    rows(inner, "targets").retain(|t| {
+        let id = t["environmentId"].as_str().unwrap_or_default();
+        t["_tag"] != "RelayConnectionTarget" || !(removed.contains(&id) || (new.iter().any(|n| n.id == id) && !relay.iter().any(|r| r == id)))
+    });
+    for e in new.iter().filter(|e| relay.contains(&e.id)) {
+        let targets = rows(inner, "targets");
+        match targets.iter_mut().find(|t| t["_tag"] == "RelayConnectionTarget" && t["environmentId"] == e.id.as_str()) {
+            Some(t) => t["label"] = json!(e.label),
+            // After the environment's other routes: T3 Connect is the fallback.
+            None => {
+                let at = targets.iter().rposition(|t| t["environmentId"] == e.id.as_str()).map_or(targets.len(), |i| i + 1);
+                targets.insert(at, json!({"_tag": "RelayConnectionTarget", "environmentId": e.id, "label": e.label}));
+            }
+        }
+    }
     let gone: Vec<String> = list(inner, "targets")
         .filter(|t| t["_tag"] == "BearerConnectionTarget" && t["environmentId"].as_str().is_some_and(|id| removed.contains(&id)))
         .filter_map(|t| t["connectionId"].as_str().map(str::to_owned))
@@ -141,21 +167,21 @@ fn merge(inner: &mut Value, old: &[Saved], new: &[Saved]) {
     }
 }
 
-/// The catalog's bearer connections, remembering the key for saves. Blocking: the keychain may
-/// ask the person first.
-pub fn read() -> Vec<Saved> {
-    let Ok(text) = std::fs::read_to_string(path()) else { return Vec::new() };
-    let Some((inner, key)) = open(&text, candidates()) else { return Vec::new() };
+/// The catalog's bearer connections and T3 Connect routes, remembering the key for saves.
+/// Blocking: the keychain may ask the person first.
+pub fn read() -> (Vec<Saved>, Vec<(String, String)>) {
+    let Ok(text) = std::fs::read_to_string(path()) else { return Default::default() };
+    let Some((inner, key)) = open(&text, candidates()) else { return Default::default() };
     *KEY.lock().unwrap() = Some(key);
-    bearers(&inner)
+    (bearers(&inner), relays(&inner))
 }
 
 /// After Rune saves its list: the catalog follows, read fresh since Electron may have written.
-pub fn export(old: &[Saved], new: &[Saved]) {
+pub fn export(old: &[Saved], new: &[Saved], relay: &[String]) {
     let Some(key) = *KEY.lock().unwrap() else { return };
     let path = path();
     let Some((mut inner, _)) = std::fs::read_to_string(&path).ok().and_then(|text| open(&text, [key])) else { return };
-    merge(&mut inner, old, new);
+    merge(&mut inner, old, new, relay);
     let temporary = path.with_file_name(format!("connection-catalog.json.{}.{}.tmp", std::process::id(), s5_net::uuid().replace('-', "")));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -212,7 +238,7 @@ mod tests {
         let renamed = Saved { label: "Renamed".into(), bearer: "tok-new".into(), ..bearers(&inner)[0].clone() };
         let added = saved("env-new", "http://10.0.0.5:3773", "tok-x");
         let tunnel = saved("env-ssh2", "http://127.0.0.1:40001", "tok-t");
-        merge(&mut inner, &[], &[renamed, added.clone(), tunnel]);
+        merge(&mut inner, &[], &[renamed, added.clone(), tunnel], &[]);
         let read = bearers(&inner);
         assert_eq!(read.len(), 2, "a loopback SSH tunnel stays out: {read:?}");
         assert_eq!((read[0].label.as_str(), read[0].bearer.as_str()), ("Renamed", "tok-new"));
@@ -220,10 +246,29 @@ mod tests {
         let profile = list(&inner, "profiles").find(|p| p["environmentId"] == "env-new").unwrap();
         assert_eq!((profile["connectionId"].as_str(), profile["httpBaseUrl"].as_str(), profile["wsBaseUrl"].as_str()), (Some("bearer:env-new:http://10.0.0.5:3773"), Some("http://10.0.0.5:3773/"), Some("ws://10.0.0.5:3773/")));
 
-        merge(&mut inner, &[added.clone()], &[]);
+        merge(&mut inner, &[added.clone()], &[], &[]);
         assert!(bearers(&inner).iter().all(|e| e.id != "env-new"), "removed in Rune, removed here");
         assert!(list(&inner, "credentials").all(|c| c["connectionId"] != "bearer:env-new:http://10.0.0.5:3773"));
         assert_eq!(list(&inner, "targets").filter(|t| t["_tag"] != "BearerConnectionTarget").count(), 2, "SSH and relay entries stay");
         assert_eq!(inner["disabledEnvironmentIds"], json!(["env-relay"]));
+    }
+
+    #[test]
+    fn t3_connect_routes_read_and_write_as_relay_targets() {
+        let mut inner = catalog();
+        assert_eq!(relays(&inner), [("env-relay".to_owned(), "Relay".to_owned())]);
+
+        let relay_only = saved("env-cloud", "https://env-cloud.tunnel.example", crate::env::T3_CONNECT);
+        let both = bearers(&inner)[0].clone();
+        merge(&mut inner, &[], &[both.clone(), relay_only.clone()], &["env-abc".into(), "env-cloud".into()]);
+        let tags: Vec<(String, String)> = list(&inner, "targets").map(|t| (t["_tag"].as_str().unwrap().to_owned(), t["environmentId"].as_str().unwrap().to_owned())).collect();
+        let at = |tag: &str, id: &str| tags.iter().position(|t| t.0 == tag && t.1 == id);
+        assert!(at("RelayConnectionTarget", "env-abc") == at("BearerConnectionTarget", "env-abc").map(|i| i + 1), "a fallback relay route follows its environment's bearer route: {tags:?}");
+        assert!(at("RelayConnectionTarget", "env-cloud").is_some() && at("BearerConnectionTarget", "env-cloud").is_none(), "a relay environment has no bearer to export");
+        assert!(list(&inner, "credentials").all(|c| !c["connectionId"].as_str().unwrap().contains("env-cloud")));
+        assert_eq!(relays(&inner).len(), 3, "Electron's own relay route stays");
+
+        merge(&mut inner, &[both.clone(), relay_only.clone()], &[both], &[]);
+        assert_eq!(relays(&inner), [("env-relay".to_owned(), "Relay".to_owned())], "removing the environment or just its relay route removes the target");
     }
 }

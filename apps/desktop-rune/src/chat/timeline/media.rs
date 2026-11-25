@@ -32,6 +32,7 @@ pub const MARKDOWN_DECODE: u32 = 960;
 pub enum Kind {
     Image,
     Video,
+    Audio,
 }
 
 impl Kind {
@@ -39,6 +40,7 @@ impl Kind {
         match self {
             Kind::Image => "image",
             Kind::Video => "video",
+            Kind::Audio => "audio",
         }
     }
 }
@@ -116,9 +118,22 @@ impl Loaded {
                 }
                 loaded.player = Some(player);
             }
+            Some(Kind::Audio) => {
+                let player = Player::audio(loaded.url.clone());
+                if let Some(wake) = waker {
+                    player.set_waker(wake);
+                }
+                // Its length shows before it plays, as web's preload="metadata".
+                player.preload();
+                loaded.player = Some(player);
+            }
             None => {}
         }
         loaded
+    }
+
+    pub fn player(&self) -> Option<&Player> {
+        self.player.as_ref()
     }
 
     /// The picture could not be read, or the video cannot play here.
@@ -220,7 +235,7 @@ fn get(url: &str) -> Result<ureq::Response, String> {
 }
 
 /// `downloadMedia`, to a path the save dialog picked; a video streams to disk.
-fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
     if url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
         return std::fs::write(path, fetch(url)?).map_err(|e| e.to_string());
     }
@@ -265,7 +280,10 @@ pub fn attachment_kind(mime: &str, name: &str) -> Option<Kind> {
         return Some(Kind::Image);
     }
     let generic = mime.is_empty() || mime == "application/octet-stream";
-    (mime.starts_with("video/") || (generic && kind(name) == Some("video"))).then_some(Kind::Video)
+    if mime.starts_with("video/") || (generic && kind(name) == Some("video")) {
+        return Some(Kind::Video);
+    }
+    (mime.starts_with("audio/") || (generic && kind(name) == Some("audio"))).then_some(Kind::Audio)
 }
 
 fn windows_absolute(path: &str) -> bool {
@@ -654,6 +672,8 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
                 };
                 col().w_full().max_w(MAX_SIDE).child(video(&key, &media.name, loaded, failed, original, t))
             }
+            // `resolve` leaves audio with the Markdown text.
+            Kind::Audio => continue,
         };
         out = out.child(with_actions(shown, &key, &media, true));
     }
@@ -798,7 +818,8 @@ pub fn linked(app: &App, url: &str, name: &str, kind: Kind, host: Option<&Host>,
     let loaded = entry.and_then(|e| e.loaded.as_ref());
     let failed = entry.is_some_and(|e| e.failed);
     let shown = match kind {
-        Kind::Video => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
+        // Pull requests only link pictures and videos; the player also plays sound.
+        Kind::Video | Kind::Audio => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
         Kind::Image => picture(&key, &media, loaded, failed, false, gallery, t),
     };
     with_actions(shown, &key, &media, true)
@@ -1027,6 +1048,8 @@ mod tests {
         assert_eq!(attachment_kind("video/quicktime", "a.mov"), Some(Kind::Video));
         assert_eq!(attachment_kind("", "a.webm"), Some(Kind::Video));
         assert_eq!(attachment_kind("application/pdf", "a.mp4"), None);
+        assert_eq!(attachment_kind("audio/mpeg", "memo.mp3"), Some(Kind::Audio));
+        assert_eq!(attachment_kind("", "memo.m4a"), Some(Kind::Audio));
         assert_eq!(attachment_kind("image/png", "a.png"), Some(Kind::Image));
     }
 

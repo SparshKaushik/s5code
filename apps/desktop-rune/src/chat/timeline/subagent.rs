@@ -220,7 +220,7 @@ fn open(app: &mut App, key: Option<&str>, thread: &str) {
     crate::shell::sidebar::open_thread(app, thread);
 }
 
-fn terminal(status: &str) -> bool {
+pub(crate) fn terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
 
@@ -330,9 +330,9 @@ pub fn poll(app: &mut App) -> bool {
 }
 
 /// A workflow agent as a member row reads it (workflowMembersToRuntime).
-struct Member<'a> {
-    agent: &'a Value,
-    status: &'a str,
+pub(crate) struct Member<'a> {
+    pub(crate) agent: &'a Value,
+    pub(crate) status: &'a str,
 }
 
 impl<'a> Member<'a> {
@@ -345,22 +345,22 @@ impl<'a> Member<'a> {
         };
         Member { agent, status }
     }
-    fn index(&self) -> u64 {
+    pub(crate) fn index(&self) -> u64 {
         self.agent["index"].as_u64().unwrap_or(0)
     }
-    fn phase(&self) -> Option<u64> {
+    pub(crate) fn phase(&self) -> Option<u64> {
         self.agent["phaseIndex"].as_u64()
     }
 }
 
-struct Phase<'a> {
-    title: String,
-    members: Vec<Member<'a>>,
+pub(crate) struct Phase<'a> {
+    pub(crate) title: String,
+    pub(crate) members: Vec<Member<'a>>,
 }
 
 /// deriveWorkflowGroups for one coordinator: phases by index, titled by the declared plan over
 /// what members report, then the members outside any phase.
-fn group<'a>(workflow: &'a Value, coordinator: &'a str) -> (Vec<Phase<'a>>, Vec<Member<'a>>) {
+pub(crate) fn group<'a>(workflow: &'a Value, coordinator: &'a str) -> (Vec<Phase<'a>>, Vec<Member<'a>>) {
     let mut members: Vec<Member> = rows::array(workflow, "agents").iter().map(|a| Member::new(a, coordinator)).collect();
     members.sort_by_key(Member::index);
     let mut titles: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();

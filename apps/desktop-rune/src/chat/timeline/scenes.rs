@@ -264,6 +264,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("details-items-empty", crate::chat::details::items::scene_empty),
     ("details-servers", crate::chat::details::servers::scene),
     ("details-automations", crate::chat::details::automations::scene),
+    ("details-lineage", crate::chat::details::lineage::scene),
     ("dialog-native-child-work", crate::chat::details::child_work::scene),
     ("composer-banner-feedback", composer_banner_feedback),
     ("composer-banner-fallback", composer_banner_fallback),
@@ -291,6 +292,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-markdown-alerts", markdown_alerts),
     ("timeline-codex-directives", codex_directives),
     ("timeline-file-card", file_card),
+    ("timeline-audio", audio),
+    ("timeline-snapshot", snapshot),
+    ("timeline-snapshot-lightbox", snapshot_lightbox),
     ("timeline-lightbox-nav", lightbox_nav),
     ("timeline-optimistic-send", optimistic_send),
     ("chat-drop-overlay", drop_overlay),
@@ -324,22 +328,20 @@ fn context_strip(app: &mut App) {
 fn math(app: &mut App) {
     showcase(app);
     app.client_settings.values.insert("mathRenderingEnabled".into(), serde_json::json!(true));
-    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size. It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
+    let text = "The loss is $L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2$, and \\(n\\) is the batch size ([derivation](https://example.com/mse)). It costs $5 and $10 a run.\n\n$$\n\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)\n$$\n\n```math\ne^{i\\pi} + 1 = 0\n```";
     push_visible(app, vec![serde_json::json!({"id": "scene-math", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
 }
 
-/// The same formulas once KaTeX typeset them: striped stand-ins of their size, since the render
-/// host has no Chrome; the inline paragraph lays out a word at a time.
+/// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph lays
+/// out a word at a time.
 fn math_typeset(app: &mut App) {
     math(app);
-    for (tex, display, size) in [
-        ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false, (118.0, 26.0)),
-        ("n", false, (10.0, 18.0)),
-        ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true, (210.0, 40.0)),
-        ("e^{i\\pi} + 1 = 0", true, (96.0, 22.0)),
-    ] {
-        super::katex::scene_seed(app, tex, display, size);
-    }
+    super::katex::scene_typeset(app, &[
+        ("L = \\frac{1}{n}\\sum_i (y_i - \\hat y_i)^2", false),
+        ("n", false),
+        ("\\nabla L = -\\frac{2}{n} X^T (y - \\hat y)", true),
+        ("e^{i\\pi} + 1 = 0", true),
+    ]);
 }
 
 /// The lightbox's middle picture zoomed 2x and panned right and down.
@@ -377,6 +379,40 @@ fn file_card(app: &mut App) {
             {"type": "file", "id": "scene-file-unsigned", "name": "trace.json", "mimeType": "application/json", "sizeBytes": 2048}]})]);
     let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
+}
+/// Sent audio: one clip signed (on Linux it can't play, so it reads Unavailable) and one still
+/// signing, under a file card.
+fn audio(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    push_visible(app, vec![json!({"id": "scene-audio", "type": "user_message", "status": "completed", "inputIntent": "turn_start",
+        "text": "Transcribe these voice notes.", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
+            {"type": "file", "id": "scene-audio-signed", "name": "standup-notes.m4a", "mimeType": "audio/mp4", "sizeBytes": 812_000},
+            {"type": "file", "id": "scene-audio-signing", "name": "follow-up.mp3", "mimeType": "audio/mpeg", "sizeBytes": 240_000}]})]);
+    let signed = super::media::Loaded::new("https://example.com/standup-notes.m4a".into(), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
+    app.ui.chat.timeline.assets.ready.insert("scene-audio-signed".into(), signed);
+}
+/// A sent snapshot (SnapShotAttachmentDetails), its accessibility popover open.
+fn snapshot(app: &mut App) {
+    use serde_json::json;
+    showcase(app);
+    let source = crate::chat::snapshot::scene_source();
+    push_visible(app, vec![json!({"id": "scene-snapshot-message", "type": "user_message", "status": "completed", "inputIntent": "turn_start",
+        "text": "Why does the download link look disabled?", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
+            {"type": "image", "id": "scene-snapshot", "name": "Safari snapshot.png", "mimeType": "image/png", "sizeBytes": 182_000, "source": source}]})]);
+    let mut loaded = super::media::Loaded::new("https://example.com/snapshot.png".into(), "Safari snapshot.png".into(), None, 0, None);
+    let picture = crate::chat::snapshot::scene_picture();
+    loaded.pixels.set(picture.width(), picture.height(), picture.into_raw());
+    loaded.kind = Some(super::media::Kind::Image);
+    app.ui.chat.timeline.assets.ready.insert("scene-snapshot".into(), loaded);
+    app.ui.chat.snapshot.open = Some(("snapshot-contents-scene-snapshot".into(), source));
+}
+/// The snapshot in the lightbox, showing its accessibility JSON in the picture's place.
+fn snapshot_lightbox(app: &mut App) {
+    snapshot(app);
+    app.ui.chat.snapshot.open = None;
+    app.ui.chat.timeline.assets.open = Some("scene-snapshot".into());
+    app.ui.chat.snapshot.lightbox = Some("scene-snapshot".into());
 }
 /// The lightbox on the second of three pictures in one paragraph: Previous, Next and "(2/3)".
 fn lightbox_nav(app: &mut App) {

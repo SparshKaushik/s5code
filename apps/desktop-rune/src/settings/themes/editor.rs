@@ -235,9 +235,78 @@ fn set_advanced(s: &mut App, on: bool) {
 }
 
 fn lock_reason(s: &App, dark: bool) -> Option<String> {
-    let modes = editing_modes(s)?;
+    let Some(modes) = editing_modes(s) else {
+        // A new theme named like an existing one adds the palette that theme lacks.
+        let target = name_target(s)?;
+        let label = target["label"].as_str().unwrap_or("");
+        return super::modes(&target).contains(&mode(dark)).then(|| format!("\u{201c}{label}\u{201d} already has a {} palette.", mode(dark)));
+    };
     let label = s.ui.settings.theme_editor.as_ref().and_then(|t| t["label"].as_str()).unwrap_or("");
     (!modes.contains(&mode(dark))).then(|| format!("\u{201c}{label}\u{201d} has no {} palette. Create a theme with the same name to add one.", mode(dark)))
+}
+
+/// Web `themeIdFromName` for names with ASCII letters or digits.
+fn id_from_name(name: &str) -> String {
+    let dashed: String = name.trim().to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let parts: Vec<&str> = dashed.split('-').filter(|p| !p.is_empty()).collect();
+    parts.join("-").chars().take(48).collect::<String>().trim_end_matches('-').to_owned()
+}
+
+/// Web `mergeTarget`: another custom theme with this name, or with the id the name would get.
+fn merge_target<'a>(library: &'a [Value], editing_id: &Value, name: &str) -> Option<&'a Value> {
+    let normalized = name.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let id = id_from_name(&normalized);
+    library.iter().find(|t| t["id"] != *editing_id && ((!id.is_empty() && t["id"] == id.as_str()) || t["label"].as_str().is_some_and(|l| l.trim().to_lowercase() == normalized)))
+}
+
+fn name_target(s: &App) -> Option<Value> {
+    let template = s.ui.settings.theme_editor.as_ref()?;
+    merge_target(&custom_themes(s), &template["id"], &s.ui.settings.theme_name.text).cloned()
+}
+
+/// Web's merge branches of `handleSubmit`: the target theme with the edited palettes added as
+/// variants, and the appearance web reports as added, or why the name can't take them.
+fn merged(target: &Value, edited: Option<&[&str]>, active: &'static str, advanced: bool, colors: impl Fn(&str) -> Value) -> Result<(Value, &'static str), String> {
+    let label = target["label"].as_str().unwrap_or("");
+    let taken = super::modes(target);
+    let added: Vec<&str> = match edited {
+        Some(edited) => {
+            if let Some(collision) = edited.iter().copied().find(|m| taken.contains(m)) {
+                return Err(format!("\u{201c}{label}\u{201d} already has a {collision} palette. Pick another name."));
+            }
+            edited.to_vec()
+        }
+        None if taken.contains(&active) => return Err(format!("\u{201c}{label}\u{201d} already has light and dark palettes. Pick another name.")),
+        None => vec![active],
+    };
+    let mut variants = target["variants"].as_object().cloned().unwrap_or_default();
+    for m in &added {
+        variants.insert((*m).to_owned(), colors(*m));
+    }
+    let mut theme = json!({"id": target["id"], "label": target["label"], "appearance": target["appearance"], "colors": target["colors"], "variants": variants});
+    if target["managed"] == true && !advanced {
+        theme["managed"] = json!(true);
+    }
+    if target["collection"].is_object() {
+        theme["collection"] = target["collection"].clone();
+    }
+    Ok((theme, if added.first() == Some(&"dark") { "dark" } else { "light" }))
+}
+
+/// Web switches a new theme off an appearance its name's theme already has.
+fn follow_name(s: &mut App) {
+    if editing_modes(s).is_some() {
+        return;
+    }
+    let taken = name_target(s).map(|t| super::modes(&t)).unwrap_or_default();
+    let dark = s.ui.settings.theme_edit_dark;
+    if taken.len() == 1 && taken[0] == mode(dark) {
+        s.ui.settings.theme_edit_dark = !dark;
+        sync_fields(s, None);
+    }
 }
 
 fn set_appearance(s: &mut App, dark: bool) {
@@ -247,14 +316,17 @@ fn set_appearance(s: &mut App, dark: bool) {
     }
 }
 
+/// `colorsForSave`: guided mode regenerates the palettes it changed.
+fn save_colors(session: &Value, m: &str) -> Value {
+    let current = &session["colors"][m];
+    if session["advanced"] != true && session["dirty"][m] == true { managed(m == "dark", current) } else { current.clone() }
+}
+
 /// `handleSubmit` without the merge-by-name path: an edit keeps the theme's appearances and
 /// collection, a new theme takes the appearance being edited.
 fn saved_theme(template: &Value, session: &Value, name: &str, dark: bool, editing: bool) -> Value {
     let advanced = session["advanced"] == true;
-    let colors = |m: &str| {
-        let current = &session["colors"][m];
-        if !advanced && session["dirty"][m] == true { managed(m == "dark", current) } else { current.clone() }
-    };
+    let colors = |m: &str| save_colors(session, m);
     let mut theme = if editing {
         let base = if template["appearance"] == "dark" { "dark" } else { "light" };
         let mut theme = json!({"id": template["id"], "label": name, "appearance": base, "colors": colors(base)});
@@ -285,6 +357,15 @@ fn save(s: &mut App) {
     let dark = s.ui.settings.theme_edit_dark;
     let mut library = custom_themes(s);
     let editing = library.iter().any(|t| t["id"] == template["id"]);
+    if let Some(target) = merge_target(&library, &template["id"], &name).cloned() {
+        let edited = library.iter().find(|t| t["id"] == template["id"]).map(modes);
+        let session = session(s).clone();
+        match merged(&target, edited.as_deref(), mode(dark), session["advanced"] == true, |m| save_colors(&session, m)) {
+            Err(error) => session_mut(s)["error"] = json!(error),
+            Ok((theme, appearance)) => save_merge(s, library, &template["id"], theme, appearance),
+        }
+        return;
+    }
     let theme = saved_theme(&template, session(s), &name, dark, editing);
     let id = theme["id"].clone();
     match library.iter_mut().find(|t| t["id"] == id) {
@@ -300,6 +381,30 @@ fn save(s: &mut App) {
         crate::settings::update(s, if dark { "themeDark" } else { "themeLight" }, id);
         crate::shell::palette::toast(s, &format!("{name} created"), Some("It\u{2019}s now active."));
     }
+    close(s);
+}
+
+/// Saves a merge, retires the edited theme it absorbed, and makes the result active like web's
+/// `setTheme`.
+fn save_merge(s: &mut App, mut library: Vec<Value>, retired: &Value, theme: Value, appearance: &str) {
+    let id = theme["id"].clone();
+    let label = theme["label"].as_str().unwrap_or("").to_owned();
+    library.retain(|t| t["id"] != *retired);
+    if let Some(existing) = library.iter_mut().find(|t| t["id"] == id) {
+        *existing = theme;
+    }
+    crate::settings::update(s, "customThemes", json!(library));
+    for key in ["themeLight", "themeDark"] {
+        if s.client_settings.values.get(key) == Some(retired) {
+            crate::settings::update(s, key, id.clone());
+        }
+    }
+    crate::settings::update(s, if appearance == "dark" { "themeDark" } else { "themeLight" }, id);
+    if s.client_settings.error.is_some() {
+        crate::shell::palette::toast_error(s, "Could not save your theme", Some("Browser storage is unavailable, so the change was not kept."));
+        return;
+    }
+    crate::shell::palette::toast(s, &format!("{label} updated"), Some(&format!("Its {appearance} palette was added.")));
     close(s);
 }
 
@@ -569,7 +674,10 @@ fn body(s: &App, t: &T, editing: Option<&[&'static str]>) -> El {
             .placeholder(if editing.is_some() { "Theme name" } else { "e.g. Aurora" })
             .size("sm")
             .on_edit(|s: &mut App| &mut s.ui.settings.theme_name)
-            .on_change(|s: &mut App, _| session_mut(s)["error"] = Value::Null)
+            .on_change(|s: &mut App, _| {
+                session_mut(s)["error"] = Value::Null;
+                follow_name(s);
+            })
             .build(t)
             .single_line(),
     );
@@ -738,6 +846,25 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_same_named_theme_gains_the_new_palette() {
+        let night = json!({"id": "night", "label": "Night", "appearance": "dark", "colors": {"background": "#000"}, "managed": true});
+        let library = vec![night.clone(), json!({"id": "dawn", "label": "Dawn", "appearance": "light", "colors": {}})];
+        assert_eq!(id_from_name("  Night Owl!! "), "night-owl");
+        assert_eq!(merge_target(&library, &json!("new"), " night ").map(|t| &t["id"]), Some(&json!("night")));
+        assert_eq!(merge_target(&library, &json!("night"), "Night"), None, "a theme never merges into itself");
+        let colors = |m: &str| json!({"background": if m == "light" { "#fff" } else { "#111" }});
+        let (theme, added) = merged(&night, None, "light", false, colors).unwrap();
+        assert_eq!(added, "light");
+        assert_eq!(theme["variants"]["light"], json!({"background": "#fff"}));
+        assert_eq!((&theme["appearance"], &theme["colors"], &theme["managed"]), (&json!("dark"), &json!({"background": "#000"}), &json!(true)));
+        assert_eq!(merged(&night, None, "dark", false, colors).unwrap_err(), "\u{201c}Night\u{201d} already has light and dark palettes. Pick another name.");
+        // Renaming an edited dark theme onto it collides with its dark palette.
+        assert_eq!(merged(&night, Some(&["dark"]), "dark", true, colors).unwrap_err(), "\u{201c}Night\u{201d} already has a dark palette. Pick another name.");
+        let (theme, _) = merged(&night, Some(&["light"]), "light", true, colors).unwrap();
+        assert!(theme.get("managed").is_none(), "an advanced edit leaves the theme unmanaged");
+    }
 
     #[test]
     fn the_color_filter_reads_role_labels_like_web() {
