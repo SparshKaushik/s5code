@@ -2159,6 +2159,7 @@ mod tests {
     #[test]
     fn test_filter_applies_to_both_loaded_diffs_and_survives_workspace_reset() {
         let mut app = App::new();
+        app.client_settings.error = Some("Fixture settings are read-only".into());
         test_filter_fixture(&mut app, false);
         app.ui.pages.detail.files = Some(app.ui.panel.diff.files.clone());
         crate::pages::pr_code::refresh_test_filter(&mut app);
