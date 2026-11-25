@@ -499,6 +499,10 @@ pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
 }
 /// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
 /// be read.
+/// A toast web raises as `success` whose title varies, so `kind_of` can't know it.
+pub(crate) fn toast_success(s: &mut App, title: &str, description: Option<&str>) {
+    raise(s, title, description, Kind::Success, Vec::new(), None);
+}
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Error, Vec::new(), None);
 }

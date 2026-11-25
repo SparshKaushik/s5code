@@ -495,7 +495,7 @@ fn close_batch(s: &mut App, entries: Vec<Value>) {
         }
     }
     let Some(id) = sent.first().map(|a| a.id) else {
-        return crate::shell::palette::toast(s, "Actions need a connected environment.", None);
+        return crate::shell::palette::toast_error(s, "Actions need a connected environment.", None);
     };
     let u = ui(s);
     u.batches.push(Batch { id, size: sent.len(), closed: 0, failures: Vec::new() });
@@ -524,7 +524,11 @@ fn settle(s: &mut App, batch: u64, a: &Acting, reply: Result<Value, Value>) {
     }
     let b = u.batches.remove(n);
     let (title, description) = batch_summary(b.size, b.closed, &b.failures);
-    crate::shell::palette::toast(s, &title, description.as_deref());
+    if b.failures.is_empty() {
+        crate::shell::palette::toast_success(s, &title, description.as_deref());
+    } else {
+        crate::shell::palette::toast_error(s, &title, description.as_deref());
+    }
 }
 
 /// The batch toast: how many closed, and the first three failures.
@@ -621,7 +625,7 @@ fn succeeded(s: &mut App, a: &Acting) {
         "close" => format!("{} closed", capitalized(term(&a.entry))),
         _ => format!("{} reopened", capitalized(term(&a.entry))),
     };
-    crate::shell::palette::toast(s, &title, None);
+    crate::shell::palette::toast_success(s, &title, None);
     let list = &mut s.ui.pages.pull_requests;
     // Hosts may accept a merge before it lands; the next read says whether it merged.
     if a.action == "merge" {
@@ -633,7 +637,7 @@ fn succeeded(s: &mut App, a: &Acting) {
 
 fn failed(s: &mut App, a: &Acting, raw: &str) {
     let (title, hint) = failure_text(a.action, term(&a.entry));
-    crate::shell::palette::toast(s, &title, Some(&readable(raw, hint)));
+    crate::shell::palette::toast_error(s, &title, Some(&readable(raw, hint)));
 }
 
 /// actionFailureLabels and actionFailureHints.
@@ -837,7 +841,7 @@ pub(crate) fn checks_body(t: &T, checks: &[Value], all: bool, toggle: fn(&mut Ap
         if let Some(url) = c["url"].as_str().map(str::to_string) {
             line = line.child(text("Details").font(theme::TEXT_XS).color(t.c.primary).cursor(Cursor::Pointer).role("link").on_press_tx(move |s: &mut App, tx: &mut Tx| {
                 if tx.open_url(&url).is_err() {
-                    crate::shell::palette::toast(s, "Unable to open check details", None);
+                    crate::shell::palette::toast_error(s, "Unable to open check details", None);
                 }
             }));
         }

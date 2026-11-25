@@ -740,7 +740,7 @@ fn poll_checkout(s: &mut App) -> bool {
         None => super::pr_actions::checkout_toast(mode, term, on_head),
     };
     if on_head {
-        crate::shell::palette::toast(s, &title, Some(&description));
+        crate::shell::palette::toast_success(s, &title, Some(&description));
     } else {
         crate::shell::palette::toast_warning(s, &title, Some(&description), Vec::new(), false);
     }
