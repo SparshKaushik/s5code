@@ -4,11 +4,17 @@
 //! account (`crate::cloud`).
 use crate::theme::{self, T};
 use crate::{App, kit};
-use rune::{El, col, row, text};
+use crate::theme::AlphaMul;
+use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 type Slot<O> = Arc<Mutex<Option<O>>>;
+
+/// Web re-reads the link state every 30 s while the row is mounted, as the server rechecks the
+/// tunnel's reachability.
+const REFRESH: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct Ui {
@@ -21,6 +27,34 @@ pub struct Ui {
     error: Option<String>,
     /// The account's tunnel cap after the relay refused a tunnel at it.
     tunnel_limit: Option<u64>,
+    /// Tunnels in use when the relay refused, so only a freed tunnel clears the alert.
+    used_at_refusal: Option<u64>,
+    /// Web `useManagedTunnelUsage`, and its request in flight.
+    usage: Option<Usage>,
+    usage_read: Option<Slot<Option<Usage>>>,
+    /// When the next link-state read is due; a sleeping thread wakes the app then.
+    next_read: Option<Instant>,
+    /// Web `ensureRelayClientAvailable` for the change waiting on it.
+    pub install: Option<(Change, Install)>,
+    /// Web `openAuthPrompt`: the sign-in dialog.
+    prompt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Usage {
+    pub used: u64,
+    pub limit: u64,
+    /// `ManagedTunnelUpgrade`: `link`, `pro` or `premier`.
+    pub upgrade: Option<&'static str>,
+}
+
+/// Where the relay client check stands; `Confirming` and `Installing` are web's
+/// `RelayClientInstallDialog` states.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Install {
+    Checking(u64),
+    Confirming { version: String },
+    Installing { id: u64, version: String, stage: String, last: Option<Value> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,28 +183,41 @@ fn refresh(s: &mut App) {
 /// Each visit reads the link state again, as web's mount revalidates it.
 pub fn reset(s: &mut App) {
     let ui = &mut s.ui.settings.connect;
-    if ui.busy.is_none() {
-        (ui.state, ui.error, ui.tunnel_limit) = (None, None, None);
+    if ui.busy.is_none() && ui.install.is_none() {
+        (ui.state, ui.error, ui.tunnel_limit, ui.used_at_refusal, ui.usage, ui.next_read) = (None, None, None, None, None, None);
     }
 }
 
 fn toggle(s: &mut App, change: Change) {
     let ui = &mut s.ui.settings.connect;
-    if ui.busy.is_some() {
+    if ui.busy.is_some() || ui.install.is_some() {
         return;
     }
     let Some(Ok(state)) = ui.state.clone() else { return };
     ui.error = None;
-    ui.tunnel_limit = None;
+    (ui.tunnel_limit, ui.used_at_refusal) = (None, None);
     if !super::permissions::can(s, "relay:read") || !super::permissions::can(s, "relay:write") {
         fail(s, Failure::new("This connection needs permission to view and manage T3 Connect settings."));
         return;
     }
+    let plan = plan(&state, change);
+    // A managed tunnel needs the relay client on this machine first.
+    if matches!(plan, Plan::Link { managed: true, .. }) {
+        if let Some(net) = s.src.net() {
+            let id = net.request("cloud.getRelayClientStatus", json!({}));
+            s.ui.settings.connect.install = Some((change, Install::Checking(id)));
+        }
+        return;
+    }
+    start(s, change, plan);
+}
+
+/// Runs the plan off the UI thread; `poll` reports how it went.
+fn start(s: &mut App, change: Change, plan: Plan) {
     let Some(net) = s.src.net() else { return };
     let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
     let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or_default().to_owned();
     let relay = crate::cloud::config().map(|c| c.relay);
-    let plan = plan(&state, change);
     let slot: Slot<Result<(), Failure>> = Arc::default();
     let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
     std::thread::spawn(move || {
@@ -181,6 +228,148 @@ fn toggle(s: &mut App, change: Change) {
         }
     });
     s.ui.settings.connect.busy = Some((change, slot));
+}
+
+fn unsupported(status: &Value) -> String {
+    format!("T3 Code cannot install the relay client automatically on {}-{}.", status["platform"].as_str().unwrap_or(""), status["arch"].as_str().unwrap_or(""))
+}
+
+/// `ensureRelayClientAvailable`'s first answer: link now (`None`), offer this version, or why not.
+fn client_status(status: &Value) -> Result<Option<String>, String> {
+    match status["status"].as_str() {
+        Some("available") => Ok(None),
+        Some("missing") => Ok(Some(status["version"].as_str().unwrap_or("").to_owned())),
+        Some("unsupported") => Err(unsupported(status)),
+        _ => Err("Could not check relay client availability.".into()),
+    }
+}
+
+/// The install stream's last event, as web reads `Stream.runLast`.
+fn installed(last: Option<&Value>) -> Result<(), String> {
+    let Some(event) = last.filter(|e| e["type"] == "complete") else {
+        return Err("The relay client install completed without a final status.".into());
+    };
+    match event["status"]["status"].as_str() {
+        Some("available") => Ok(()),
+        Some("unsupported") => Err(unsupported(&event["status"])),
+        _ => Err("The relay client is still unavailable after installation.".into()),
+    }
+}
+
+/// The install dialog's answer (web `respondToRelayClientInstallConfirmation`); a host dialog
+/// such as misc's calls this too.
+pub fn respond_install(s: &mut App, confirmed: bool) {
+    let Some((change, Install::Confirming { version })) = s.ui.settings.connect.install.clone() else { return };
+    if !confirmed {
+        s.ui.settings.connect.install = None;
+        fail(s, Failure::new("Relay client installation was cancelled."));
+        return;
+    }
+    let Some(net) = s.src.net() else { return };
+    let id = net.request("cloud.installRelayClient", json!({}));
+    s.ui.settings.connect.install = Some((change, Install::Installing { id, version, stage: "checking".into(), last: None }));
+}
+
+fn poll_install(s: &mut App) -> bool {
+    let Some((change, install)) = s.ui.settings.connect.install.clone() else { return false };
+    let Some(net) = s.src.net() else { return false };
+    let outcome = match install {
+        Install::Checking(id) => match net.take_reply(id) {
+            None => return false,
+            Some(Err(_)) => Err("Could not check relay client availability.".to_owned()),
+            Some(Ok(status)) => match client_status(&status) {
+                Ok(Some(version)) => {
+                    s.ui.settings.connect.install = Some((change, Install::Confirming { version }));
+                    return true;
+                }
+                Ok(None) => Ok(()),
+                Err(message) => Err(message),
+            },
+        },
+        Install::Confirming { .. } => return false,
+        Install::Installing { id, version, mut stage, mut last } => {
+            let events = net.take_chunks(id);
+            let reply = net.take_reply(id);
+            for event in events {
+                if event["type"] == "progress"
+                    && let Some(next) = event["stage"].as_str()
+                {
+                    stage = next.to_owned();
+                }
+                last = Some(event);
+            }
+            match reply {
+                None => {
+                    s.ui.settings.connect.install = Some((change, Install::Installing { id, version, stage, last }));
+                    return true;
+                }
+                Some(Err(_)) => Err("Could not install the relay client.".to_owned()),
+                Some(Ok(_)) => installed(last.as_ref()),
+            }
+        }
+    };
+    s.ui.settings.connect.install = None;
+    let state = s.ui.settings.connect.state.clone().and_then(Result::ok).unwrap_or_default();
+    match outcome {
+        Ok(()) => start(s, change, plan(&state, change)),
+        Err(message) => fail(s, Failure::new(message)),
+    }
+    true
+}
+
+/// Web `managedTunnelCap`: a manual override is exact, else the T3 Chat plan raises the default.
+fn cap(t3chat: &Value) -> (u64, Option<&'static str>) {
+    if let Some(limit) = t3chat["maxTunnelsOverride"].as_u64() {
+        return (limit, None);
+    }
+    if t3chat["available"] != true {
+        return (3, None);
+    }
+    match t3chat["link"]["plan"].as_str() {
+        Some("premier") => (100, None),
+        Some("pro") => (10, Some("premier")),
+        Some("free") => (3, Some("pro")),
+        _ => (3, Some("link")),
+    }
+}
+
+fn tunnels_in_use(environments: &Value) -> u64 {
+    environments["environments"].as_array().into_iter().flatten().filter(|e| e["endpoint"]["providerKind"] == "cloudflare_tunnel").count() as u64
+}
+
+/// Web `refreshManagedTunnelUsage`: the account's environments and its T3 Chat plan.
+fn read_usage(s: &mut App) {
+    let Some(relay) = crate::cloud::config().map(|c| c.relay) else { return };
+    let slot: Slot<Option<Usage>> = Arc::default();
+    let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
+    std::thread::spawn(move || {
+        let get = |token: &str, path: &str| -> Option<Value> {
+            let url = format!("{}{path}", relay.trim_end_matches('/'));
+            agent().get(&url).set("Authorization", &format!("Bearer {token}")).call().ok()?.into_json().ok()
+        };
+        let usage = crate::cloud::account_token().ok().and_then(|token| {
+            let used = tunnels_in_use(&get(&token, "/v1/environments")?);
+            let (limit, upgrade) = cap(&get(&token, "/v1/client/t3chat-link")?);
+            Some(Usage { used, limit, upgrade })
+        });
+        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
+        if let Some(waker) = waker {
+            waker();
+        }
+    });
+    s.ui.settings.connect.usage_read = Some(slot);
+}
+
+/// Wakes the app when the next link-state read is due.
+fn schedule_read(s: &mut App) {
+    s.ui.settings.connect.next_read = Some(Instant::now() + REFRESH);
+    let waker = s.ui.panel.waker.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(REFRESH);
+        if let Some(waker) = waker {
+            waker();
+        }
+    });
 }
 
 fn env_post(base: &str, bearer: &str, path: &str, body: Value, action: &str) -> Result<Value, Failure> {
@@ -298,6 +487,7 @@ fn fail(s: &mut App, failure: Failure) {
     let ui = &mut s.ui.settings.connect;
     if failure.tunnel_limit.is_some() {
         ui.tunnel_limit = failure.tunnel_limit;
+        ui.used_at_refusal = ui.usage.map(|u| u.used);
         return;
     }
     ui.error = Some(failure.message.clone());
@@ -307,9 +497,30 @@ fn fail(s: &mut App, failure: Failure) {
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     let showing = matches!(&s.route, crate::Route::Settings(p) if p == "access");
-    if showing && s.ui.settings.connect.state.is_none() && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read") {
+    let ready = showing && crate::cloud::config().is_some() && signed_in(s) && super::permissions::can(s, "relay:read");
+    let due = s.ui.settings.connect.next_read.is_some_and(|at| Instant::now() >= at);
+    if ready && (s.ui.settings.connect.state.is_none() || due) {
+        s.ui.settings.connect.next_read = None;
         refresh(s);
     }
+    if ready && s.ui.settings.connect.usage.is_none() && s.ui.settings.connect.usage_read.is_none() {
+        read_usage(s);
+    }
+    let usage = s.ui.settings.connect.usage_read.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take());
+    if let Some(usage) = usage {
+        let ui = &mut s.ui.settings.connect;
+        ui.usage_read = None;
+        ui.usage = usage;
+        if ui.tunnel_limit.is_some() && ui.used_at_refusal.is_none() {
+            ui.used_at_refusal = usage.map(|u| u.used);
+        }
+        changed = true;
+    }
+    if s.ui.settings.connect.prompt && signed_in(s) {
+        s.ui.settings.connect.prompt = false;
+        changed = true;
+    }
+    changed |= poll_install(s);
     if let Some(id) = s.ui.settings.connect.read
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
     {
@@ -319,6 +530,9 @@ pub fn poll(s: &mut App) -> bool {
             let message = e["message"].as_str().unwrap_or("The request failed.");
             format!("Could not read environment cloud link state: {message}")
         }));
+        if showing {
+            schedule_read(s);
+        }
         changed = true;
     }
     let done = s.ui.settings.connect.busy.as_ref().and_then(|(change, slot)| Some((*change, slot.lock().unwrap_or_else(|e| e.into_inner()).take()?)));
@@ -332,9 +546,13 @@ pub fn poll(s: &mut App) -> bool {
             }
             Err(failure) => fail(s, failure),
         }
-        // A failed change may have partly applied: read the state again either way.
+        // A failed change may have partly applied: read the state again either way. Any link
+        // attempt can change the account's tunnel count.
         refresh(s);
         crate::cloud::refresh(s);
+        if s.ui.settings.connect.usage_read.is_none() {
+            read_usage(s);
+        }
         changed = true;
     }
     changed
@@ -364,8 +582,8 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
     let ui = &s.ui.settings.connect;
     let signed_in = signed_in(s);
     let state = ui.state.as_ref().and_then(|r| r.as_ref().ok());
-    let busy = ui.busy.as_ref().map(|(change, _)| *change);
-    let disabled = !write || !signed_in || state.is_none() || busy.is_some();
+    let busy = ui.busy.is_some() || ui.install.is_some();
+    let disabled = !write || !signed_in || state.is_none() || busy;
     let reason = (!write).then_some("Your session does not have permission to manage T3 Connect access.");
     let switch = |on: bool, label: &str, change: fn(bool) -> Change| {
         let mut control = kit::Switch::new(on).label(label).hide_label().disabled(disabled).on_toggle(move |s: &mut App| toggle(s, change(!on))).build(&kit::theme(t));
@@ -378,7 +596,7 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
         kit::Button::new("Sign in")
             .variant("outline")
             .size("sm")
-            .on_press(|s: &mut App| s.navigate(crate::Route::Settings("connections".into())))
+            .on_press(|s: &mut App| s.ui.settings.connect.prompt = true)
             .build(t)
     };
     let managed = state.is_some_and(managed_active);
@@ -387,13 +605,14 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
     if let Some((status, error)) = status {
         tunnel_copy = tunnel_copy.child(text(status).font(theme::TEXT_XS).color(if error { t.c.destructive } else { t.c.muted_foreground }).wrap());
     }
-    if let Some(limit) = ui.tunnel_limit {
-        tunnel_copy = tunnel_copy.child(
-            text(format!("Your plan includes {limit} tunnel{}. Remove one or upgrade to link this environment.", if limit == 1 { "" } else { "s" }))
-                .font(theme::TEXT_XS)
-                .color(t.c.destructive)
-                .wrap(),
-        );
+    if signed_in {
+        let alert = limit_alert_shown(ui);
+        if let Some(usage) = ui.usage {
+            tunnel_copy = tunnel_copy.child(meter(usage, alert, t));
+        }
+        if alert {
+            tunnel_copy = tunnel_copy.child(limit_alert(ui.usage.and_then(|u| u.upgrade), t));
+        }
     }
     let mut out = vec![setting_row(
         "T3 Connect",
@@ -424,10 +643,185 @@ pub fn rows(s: &App, t: &T) -> Vec<El> {
     out
 }
 
+/// Web `T3ConnectTunnelUsage`: the refusal's alert stays until a tunnel frees or the cap rises.
+fn limit_alert_shown(ui: &Ui) -> bool {
+    let Some(limit) = ui.tunnel_limit else { return false };
+    let freed = matches!((ui.used_at_refusal, ui.usage), (Some(at), Some(usage)) if usage.used < at);
+    let raised = ui.usage.is_some_and(|u| u.limit > limit);
+    !freed && !raised
+}
+
+/// Web `TunnelUsageMeter`: "2 of 3 tunnels in use" with one slot per tunnel up to ten.
+fn meter(usage: Usage, alert: bool, t: &T) -> El {
+    let full = usage.used >= usage.limit;
+    let fill = if full { t.c.warning } else { t.c.foreground.alpha_mul(0.72) };
+    let bar = if usage.limit <= 10 {
+        (0..usage.limit).fold(row().w_full().h(6.0).gap(4.0), |bar, i| bar.child(el().h(6.0).grow(1.0).radius(3.0).fill(if i < usage.used { fill } else { t.c.muted })))
+    } else {
+        let share = (usage.used as f32 / usage.limit as f32).min(1.0);
+        row().w_full().h(6.0).radius(3.0).fill(t.c.muted).child(el().h(6.0).grow(share).radius(3.0).fill(fill)).child(el().h(6.0).grow(1.0 - share))
+    };
+    let mut line = row().w_full().gap(12.0).center_y().child(
+        text(format!("{} of {} tunnels in use", usage.used, usage.limit)).font(theme::TEXT_XS).color(if full { t.c.warning_foreground } else { t.c.foreground }).grow(1.0),
+    );
+    // At the cap the alert carries the same action.
+    if usage.upgrade.is_some_and(|u| u != "link") && !alert {
+        line = line.child(
+            text("Get more tunnels")
+                .font(theme::weight(theme::TEXT_XS, 500.0))
+                .color(t.c.foreground)
+                .role("link")
+                .cursor(rune::Cursor::Pointer)
+                .on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)),
+        );
+    }
+    col().max_w(384.0).w_full().gap(6.0).pt(6.0).child(line).child(bar.role("progressbar").label("T3 Connect tunnels in use").range_value(usage.used as f64, 0.0, usage.limit as f64))
+}
+
+const T3CHAT_SUBSCRIPTION_URL: &str = "https://t3.chat/settings/subscription";
+
+/// Web `TunnelLimitAlert`. Rune has no account page, so linking T3 Chat or managing tunnels
+/// offers no button; an upgrade opens the T3 Chat subscription.
+fn limit_alert(upgrade: Option<&str>, t: &T) -> El {
+    let description = match upgrade {
+        Some("link") => "Switch to Tailscale or get more tunnels by linking your T3 Chat sub (sorry!)",
+        Some(_) => "Switch to Tailscale or get more tunnels by upgrading your T3 Chat sub (sorry!)",
+        None => "Switch to Tailscale or deregister an environment you no longer use (sorry!)",
+    };
+    let mut alert = row()
+        .w_full()
+        .gap(12.0)
+        .padding(12.0)
+        .radius(8.0)
+        .border(1.0, t.c.warning.alpha_mul(0.32))
+        .fill(t.c.warning_surface)
+        .role("alert")
+        .child(rune::icon(&crate::icons::TRIANGLE_ALERT, 16.0).color(t.c.warning_foreground))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text("You\u{2019}re out of tunnels (they cost us money).").font(theme::SM_MEDIUM).color(t.c.warning_foreground))
+                .child(text(description).font(theme::TEXT_XS).color(t.c.warning_foreground.alpha_mul(0.8)).wrap()),
+        );
+    if matches!(upgrade, Some("pro" | "premier")) {
+        alert = alert.child(kit::Button::new("Upgrade on T3 Chat").size("sm").on_press(|s: &mut App| super::auth::open_url(s, T3CHAT_SUBSCRIPTION_URL)).build(t));
+    }
+    alert.mt(6.0)
+}
+
+const INSTALL_STEPS: [(&str, &str); 7] = [
+    ("checking", "Checking current installation"),
+    ("waiting_for_lock", "Waiting for installer"),
+    ("downloading", "Downloading relay client"),
+    ("verifying", "Verifying download"),
+    ("installing", "Installing relay client"),
+    ("validating", "Validating executable"),
+    ("activating", "Activating installation"),
+];
+
+/// Web's `RelayClientInstallDialog` and Clerk's sign-in prompt, from the settings overlay pass.
+pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
+    let ui = &s.ui.settings.connect;
+    match ui.install.as_ref().map(|(_, install)| install) {
+        Some(Install::Confirming { version }) => {
+            let panel = col()
+                .w_full()
+                .gap(4.0)
+                .padding(12.0)
+                .radius(12.0)
+                .border(1.0, t.c.border.alpha_mul(0.7))
+                .fill(t.c.muted.alpha_mul(0.35))
+                .child(text("Managed relay client").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(format!("T3 Code will download and install version {version} locally.")).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap());
+            let footer = row()
+                .w_full()
+                .gap(8.0)
+                .justify_end()
+                .child(kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| respond_install(s, false)).build(t))
+                .child(kit::Button::new("Download and install").on_press(|s: &mut App| respond_install(s, true)).build(t));
+            kit::Dialog::new("relay-client-install", "Install relay client?")
+                .open(true)
+                .description("T3 Code needs the relay client to make this environment available through T3 Connect.")
+                .on_close(|s: &mut App| respond_install(s, false))
+                .child(col().w_full().gap(16.0).child(panel).child(footer))
+                .build(t, layers);
+        }
+        Some(Install::Installing { stage, .. }) => {
+            let index = INSTALL_STEPS.iter().position(|(id, _)| id == stage).unwrap_or(0);
+            let share = (index + 1) as f32 / INSTALL_STEPS.len() as f32;
+            let body = col()
+                .w_full()
+                .gap(10.0)
+                .child(
+                    row()
+                        .w_full()
+                        .gap(12.0)
+                        .child(text(INSTALL_STEPS[index].1).font(theme::SM_MEDIUM).color(t.c.foreground).grow(1.0))
+                        .child(text(format!("{} of {}", index + 1, INSTALL_STEPS.len())).font(theme::TEXT_SM).color(t.c.muted_foreground)),
+                )
+                .child(
+                    row()
+                        .w_full()
+                        .h(8.0)
+                        .radius(4.0)
+                        .fill(t.c.muted)
+                        .role("progressbar")
+                        .label("Relay client installation progress")
+                        .child(el().h(8.0).grow(share).radius(4.0).fill(t.c.primary))
+                        .child(el().h(8.0).grow(1.0 - share)),
+                )
+                .child(text("Keep T3 Code open while the relay client is installed.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
+            kit::Dialog::new("relay-client-install", "Installing relay client")
+                .open(true)
+                .description("T3 Code is preparing this environment for secure access through T3 Connect.")
+                .child(body)
+                .build(t, layers);
+        }
+        _ => {}
+    }
+    if ui.prompt && !signed_in(s) {
+        let cloud = &s.ui.cloud;
+        let mut body = col().w_full().gap(12.0);
+        body = match &cloud.signing_in {
+            Some(pending) => body.child(
+                row()
+                    .w_full()
+                    .gap(12.0)
+                    .center_y()
+                    .child(text(if pending.finishing { "Signing in\u{2026}" } else { "Finish signing in in your browser" }).font(theme::TEXT_SM).color(t.c.muted_foreground).grow(1.0))
+                    .child(kit::Button::new("Cancel").variant("ghost").size("sm").disabled(pending.finishing).on_press(crate::cloud::cancel_sign_in).build(t)),
+            ),
+            None => body.child(crate::cloud::provider_buttons(s, t, false)),
+        };
+        if let Some(error) = &cloud.error {
+            body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+        }
+        kit::Dialog::new("t3-connect-sign-in", "Sign in to T3 Connect")
+            .open(true)
+            .description("Make this environment available to your other devices through T3 Connect.")
+            .on_close(|s: &mut App| s.ui.settings.connect.prompt = false)
+            .child(body)
+            .build(t, layers);
+    }
+}
+
 /// Scenes: signed in with this environment linked over a healthy tunnel.
 pub fn scene(s: &mut App, state: Value) {
     crate::cloud::scene_signed_in(s);
     s.ui.settings.connect.state = Some(Ok(state));
+    s.ui.settings.connect.usage = Some(Usage { used: 2, limit: 3, upgrade: Some("link") });
+}
+
+/// Scenes: signed out, with the sign-in prompt open.
+pub fn scene_prompt(s: &mut App) {
+    s.ui.settings.connect.prompt = true;
+}
+
+/// Scenes: the relay client install dialog asking first.
+pub fn scene_install(s: &mut App) {
+    s.ui.settings.connect.install = Some((Change::Tunnel(true), Install::Confirming { version: "2026.11.0".into() }));
 }
 
 #[cfg(test)]

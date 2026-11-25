@@ -105,6 +105,8 @@ pub struct Ui {
     pub open_select: Option<String>,
     /// The installed-font menus' search and open state, by setting key.
     pub font_pickers: HashMap<String, crate::kit::ComboboxState>,
+    /// Scenes only: a snapshot is one frame, before a reveal can scroll, so the page opens at its end.
+    pub scene_bottom: bool,
     pub search: TextEdit,
     /// The highlighted search result (web's `activeResultIndex`).
     pub search_active: usize,
@@ -639,6 +641,11 @@ pub fn poll(s: &mut App) -> bool {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
             let provider_upsert = s.ui.settings.providers_ui.upserts.remove(&id);
+            if let Some(name) = s.ui.settings.profiles.clearing.remove(&id) {
+                browser_profiles::cleared(s, &name, reply.is_ok());
+                changed = true;
+                continue;
+            }
             let toast = reply.as_ref().err().and(failure_toast(&method, provider_upsert));
             match reply {
                 Ok(result) => {
@@ -1171,7 +1178,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .w_full()
         .items_center()
         .scroll(rune::ScrollSpec {
-            stick_bottom: false,
+            stick_bottom: s.ui.settings.scene_bottom,
         })
         .child(page);
     // A marker keyed by the target, since `on_layout` reports only a new or moved element: a
@@ -1240,6 +1247,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     keybindings::overlays(s, t, &mut overlays);
     permissions::overlays(s, t, &mut overlays);
     snapshots::overlays(s, t, &mut overlays);
+    connect::overlays(s, t, &mut overlays);
     font_picker::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
@@ -1612,6 +1620,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             "reachability": {"status": "reachable", "checkedAt": "2026-11-25T10:00:00.000Z", "readyConnections": 4, "protocol": "quic"}}));
     }),
     ("settings-access-t3-connect-signed-out", |s| scene(s, "access")),
+    ("settings-access-t3-connect-sign-in", |s| {
+        scene(s, "access");
+        connect::scene_prompt(s);
+    }),
+    ("settings-access-t3-connect-install", |s| {
+        scene(s, "access");
+        s.ui.settings.loaded_page = Some("access".into());
+        connect::scene(s, json!({"linked": true, "managedTunnelActive": false, "publishAgentActivity": true}));
+        connect::scene_install(s);
+    }),
 ];
 
 /// Typography's Monospace font menu open over a fixed font list.
@@ -1622,9 +1640,7 @@ fn appearance_font_picker(s: &mut App) {
             .into_iter()
             .map(|name| font_picker::Family { name: name.into(), mono: !matches!(name, "Geist" | "Inter" | "Noto Sans") }),
     ));
-    s.ui.settings.reveal = Some("Monospace font".into());
-    // The first poll would treat the page as newly opened and drop the reveal.
-    s.ui.settings.loaded_page = Some("appearance".into());
+    s.ui.settings.scene_bottom = true;
     let picker = s.ui.settings.font_pickers.entry("fontFamilyCode".into()).or_default();
     picker.open = true;
     picker.search.focused = true;

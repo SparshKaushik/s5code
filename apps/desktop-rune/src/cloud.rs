@@ -498,7 +498,7 @@ fn muted(copy: impl Into<String>, t: &T) -> El {
     text(copy).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()
 }
 
-fn provider_buttons(s: &App, t: &T, busy: bool) -> El {
+pub(crate) fn provider_buttons(s: &App, t: &T, busy: bool) -> El {
     let mut buttons = row().gap(8.0).flex_wrap();
     for (strategy, name) in providers(s) {
         buttons = buttons.child(kit::Button::new(format!("Continue with {name}")).variant("outline").size("sm").disabled(busy).on_press(move |s: &mut App| sign_in(s, &strategy)).build(t));
