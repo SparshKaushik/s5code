@@ -176,16 +176,26 @@ fn format_bytes(value: f64) -> String {
 /// "{EXT} · {size}".
 fn file_label(attachment: &Value) -> (String, String) {
     let name = s(attachment, "name");
+    let pasted = s(&attachment["source"], "_tag") == "pasted-text";
+    let label = if pasted { "Pasted text" } else { name }.to_owned();
+    if sending(attachment) {
+        return (label, "Sending\u{2026}".to_owned());
+    }
     let size = format_bytes(attachment["sizeBytes"].as_f64().unwrap_or(0.0));
-    if s(&attachment["source"], "_tag") == "pasted-text" {
-        return ("Pasted text".to_owned(), size);
+    if pasted {
+        return (label, size);
     }
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext)
         .filter(|ext| (1..=8).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()))
         .map_or_else(|| "File".to_owned(), str::to_uppercase);
-    (name.to_owned(), format!("{ext} · {size}"))
+    (label, format!("{ext} · {size}"))
+}
+
+/// Still uploading with its message: it can't be opened or saved yet.
+fn sending(attachment: &Value) -> bool {
+    attachment["downloadable"] == false
 }
 
 pub fn view(app: &App, attachment: &Value, t: &T) -> El {
@@ -313,6 +323,7 @@ fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El 
 /// once its URL is signed.
 fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
     let (label, size) = file_label(attachment);
+    let url = url.filter(|_| !sending(attachment));
     let identity = row()
         .grow(1.0)
         .min_w(0.0)
@@ -327,15 +338,15 @@ fn file_card(attachment: &Value, url: Option<String>, t: &T) -> El {
                 .child(text(label.clone()).font(theme::SM_MEDIUM).color(t.c.message_foreground).truncate())
                 .child(text(size).font(theme::TEXT_XS).color(t.c.muted_foreground)),
         );
-    let download_label = format!("Download {label}");
+    let download_label = if sending(attachment) { "Sending attachment".to_owned() } else { format!("Download {label}") };
     let download = row()
         .size(24.0, 24.0)
         .center()
         .radius(6.0)
         .role("button")
         .label(download_label.clone())
-        .help(download_label)
         .child(icon(&icons::DOWNLOAD, 12.0).color(t.c.muted_foreground));
+    let download = if sending(attachment) { download } else { download.help(download_label) };
     let (identity, download) = match url {
         Some(url) => {
             let (id, name) = (s(attachment, "id").to_owned(), s(attachment, "name").to_owned());
@@ -807,5 +818,7 @@ mod tests {
         assert_eq!(file_label(&file("Makefile")).1, "File · 2.00 KB");
         let pasted = json!({"name": "pasted-1.txt", "sizeBytes": 300, "source": {"_tag": "pasted-text"}});
         assert_eq!(file_label(&pasted), ("Pasted text".to_owned(), "300 B".to_owned()));
+        let sending = json!({"name": "notes.md", "sizeBytes": 2048, "downloadable": false});
+        assert_eq!(file_label(&sending), ("notes.md".to_owned(), "Sending\u{2026}".to_owned()));
     }
 }

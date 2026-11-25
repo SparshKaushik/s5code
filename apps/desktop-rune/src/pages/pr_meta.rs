@@ -270,7 +270,7 @@ fn finish(s: &mut App, write: Write, reply: Result<Value, Value>) {
         }
         Ok(_) => {
             if let Some((title, description)) = success(&write, super::pr_row::provider_name(field(&entry, "provider"))) {
-                crate::shell::palette::toast(s, &title, description.as_deref());
+                crate::shell::palette::toast_success(s, &title, description.as_deref());
             }
             match write {
                 Write::Label { .. } => load_candidates(s, "labels"),

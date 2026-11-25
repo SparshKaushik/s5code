@@ -1149,12 +1149,14 @@ fn tour(s: &App, t: &T, entry: &Value, guide: &Value, banner: Option<El>) -> El 
         None => main.child(text("This change has no files to tour.").font(theme::TEXT_SM).color(t.c.muted_foreground)),
         Some(stop) => main.child(stop_view(s, t, stops, stop, position, seen, wide)),
     };
-    let mut out = row().w_full().px(16.0).py(16.0).gap(24.0).items_start();
+    let mut out = row().key(TOUR).w_full().px(16.0).py(16.0).gap(24.0).items_start();
     if wide {
-        out = out.child(col().w(256.0).child(rail(t, stops, position, seen, true)));
+        out = out.child(col().w(256.0).sticky_top(16.0).child(rail(t, stops, position, seen, true)));
     }
     out.child(main)
 }
+
+const TOUR: &str = "pr-guide-tour";
 
 /// GuideRail.
 fn rail(t: &T, stops: &[Value], position: usize, seen: &HashSet<usize>, count: bool) -> El {
@@ -1265,7 +1267,9 @@ fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, see
     for (n, excerpt) in excerpts.iter().enumerate() {
         out = out.child(excerpt_view(s, t, n, excerpt, by_excerpt.get(n).map(Vec::as_slice).unwrap_or(&[])));
     }
-    if !notes.is_empty() {
+    // The @min-[90rem]/guide breakpoint: the notes stand beside the stop rather than in it.
+    let aside = !notes.is_empty() && rune::memo::layout_with(TOUR, |r| r[2] >= 1440.0).unwrap_or(false);
+    if !notes.is_empty() && !aside {
         out = out.child(notes_view(t, &notes));
     }
     let excerpt_paths: HashSet<&str> = excerpts.iter().map(|e| field(e, "path")).collect();
@@ -1281,7 +1285,11 @@ fn stop_view(s: &App, t: &T, stops: &[Value], stop: &Value, position: usize, see
     } else if can_finish(s) {
         footer = footer.child(kit::Button::new("Finish review").icon(&i::MESSAGE_SQUARE).build(t).on_press_tx(finish));
     }
-    out.child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(footer)
+    let out = out.child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6))).child(footer);
+    if !aside {
+        return out;
+    }
+    row().w_full().gap(32.0).items_start().child(out.grow(1.0).shrink().min_w(0.0)).child(col().w(320.0).sticky_top(16.0).child(notes_view(t, &notes)))
 }
 
 /// GuideExcerpt: the excerpt's lines from the change, its notes' markers, pending line comments

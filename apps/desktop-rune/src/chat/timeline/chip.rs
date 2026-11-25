@@ -186,7 +186,10 @@ pub fn card(t: &T, record: &Value, screenshot: Option<El>) -> El {
             }
         }
         "preview-annotation" => {
-            body = body.children(screenshot).child(page_head(t, record));
+            let shot = screenshot.unwrap_or_else(|| {
+                text("Screenshot unavailable").font(theme::TEXT_XS).color(t.c.secondary_label).w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4))
+            });
+            body = body.child(shot).child(page_head(t, record));
             if !s(record, "comment").is_empty() {
                 body = body.child(line(s(record, "comment").to_owned()));
             }

@@ -392,7 +392,8 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                     .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
                     .collect()
             };
-            select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key))
+            let control = select(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title), &options, select_width(key));
+            if key == "browserDefaultViewport" { super::browser_profiles::viewport_control(s, t, control) } else { control }
         }
         Some("slider") => slider(s, t, key, spec["ariaLabel"].as_str().unwrap_or(title)),
         Some("model") => super::models::control(s, t, key),
@@ -456,7 +457,8 @@ fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
         .gap(8.0)
         .center_y()
         .child(family)
-        .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)));
+        // Web names the code size after its setting, whichever row shows it.
+        .child(select(s, t, size, &if size == "fontSizeCode" { "Code font size".to_owned() } else { format!("{title} size") }, &options, select_width(size)));
     let hint = matches!(key, "fontFamilySans" | "fontFamilyCode" | "fontFamilyComposer").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
     match hint {
         Some(hint) => col().gap(4.0).items_end().child(control).child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground)),

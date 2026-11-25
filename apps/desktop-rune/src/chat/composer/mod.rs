@@ -983,7 +983,7 @@ fn resume(s: &mut App) {
 }
 
 /// The send in flight for the open draft: its files uploading, or its thread launching.
-fn send_busy(s: &App) -> bool {
+pub(crate) fn send_busy(s: &App) -> bool {
     let key = active_key(s);
     let c = &s.ui.chat.composer;
     c.uploads.iter().any(|u| u.outgoing.key == key) || c.sends.iter().any(|(r, o)| o.key == key && c.launches.iter().any(|(l, _)| l == r))

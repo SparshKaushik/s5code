@@ -470,6 +470,9 @@ pub fn control(s: &App, t: &T, key: &str) -> El {
 fn trigger(s: &App, t: &T, key: &str) -> El {
     let entries = candidates(s, key);
     let none = |copy: &str| text(copy.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground);
+    if key == "textGenerationModelSelection" && s.state().config.is_none() {
+        return none("Connect an environment to choose its text generation model.");
+    }
     if key == "textGenerationModelSelection" && !entries.iter().any(|p| selectable(p)) {
         return none("No text generation providers available.");
     }

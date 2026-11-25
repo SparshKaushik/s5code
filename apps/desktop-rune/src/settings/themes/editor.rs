@@ -718,7 +718,7 @@ fn body(s: &App, t: &T, editing: Option<&[&'static str]>) -> El {
     if let Some(error) = state["error"].as_str() {
         out = out.child(text(error.to_owned()).role("status").font(theme::TEXT_SM).color(t.c.destructive).wrap());
     }
-    out.child(row().w_full().gap(12.0).center_y().child(text("Appearance").font(theme::SM_MEDIUM).color(t.c.foreground).grow(1.0)).child(appearance.build(&k)))
+    out.child(row().w_full().gap(12.0).center_y().child(text("Appearance").font(theme::SM_MEDIUM).color(t.c.foreground).grow(1.0)).child(appearance.build(&k).label("Theme appearance")))
         .child(row().w_full().gap(12.0).items_start().child(heading).child(controls))
         .child(fields(s, t, advanced))
 }
