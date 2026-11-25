@@ -153,12 +153,17 @@ pub(super) fn condense_reporter(s: &App, tab: usize) -> impl Fn(rune::ScrollPos)
     }
 }
 
+/// The scroller each tab's header follows: the Code tab's diff view, else the shared area.
+pub(super) fn scroller(tab: usize) -> String {
+    if tab == 2 { super::pr_code::SCROLLER.to_string() } else { format!("pr-detail-scroll-{tab}") }
+}
+
 /// Restores the condensed tab's scroll offset before the next paint.
 pub fn anchor_header(s: &mut App, tx: &mut Tx) -> bool {
     let u = &s.ui.pages.detail;
     let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return false };
     if tab == u.tab && u.condense.on(tab) {
-        tx.scroll_to_y(if tab == 2 { "pr-code-view/scroll".to_string() } else { format!("pr-detail-scroll-{tab}") }, y);
+        tx.scroll_to_y(scroller(tab), y);
     }
     true
 }
@@ -276,6 +281,8 @@ pub fn poll(s: &mut App) -> bool {
                     s.ui.pages.code.fresh = true;
                     s.ui.pages.code.next = d["nextCursor"].as_str().map(str::to_owned);
                     s.ui.pages.code.first_mark = Some(super::pr_code::page_mark(&d));
+                    s.ui.pages.code.omitted.clear();
+                    super::pr_code::absorb_omitted(&mut s.ui.pages.code, &d);
                     s.ui.pages.code.raw = super::pr_code::unparsed(d["patch"].as_str().unwrap_or(""), u.files.as_deref().unwrap_or(&[]));
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),
@@ -636,7 +643,7 @@ fn environment_picker(s: &App, menu: Menu) -> Menu {
 
 /// The checkout's folder: the picked environment's copy, else the pull request's workspace, else
 /// its project's.
-fn checkout_root(s: &App, d: &Value) -> Option<String> {
+pub(super) fn checkout_root(s: &App, d: &Value) -> Option<String> {
     let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
     let picked = acting(s).map(|a| a.root);
     [picked.as_deref(), d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
@@ -1199,7 +1206,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         super::pr_guide::TAB if super::pr_guide::available(s) => super::pr_guide::view(s, t),
         _ => summary(s, t, d, overlays),
     };
-    let key = format!("pr-detail-scroll-{}", u.tab);
+    let key = scroller(u.tab);
     super::pr_edit::reaction_picker(s, t, overlays);
     let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(condense_reporter(s, u.tab)).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
     confirm_catcher(s, overlays);
@@ -1857,32 +1864,6 @@ fn checks_popover(s: &App, t: &T, checks: &[Value], stale: bool, (glyph, ink, la
     popover.build(&kit::theme(t), overlays)
 }
 
-fn check_glyph(t: &T, status: Option<&str>) -> (&'static rune::Icon, Color) {
-    match status {
-        Some("success") => (&i::CIRCLE_CHECK, success(t)),
-        Some("failure") | Some("cancelled") => (&i::CIRCLE_X, t.c.destructive),
-        Some("pending") => (&i::CIRCLE_DOT, amber(t)),
-        Some("action-required") => (&i::CIRCLE_ALERT, amber(t)),
-        Some("skipped") => (&i::CIRCLE_SLASH, t.c.muted_foreground.alpha_mul(0.7)),
-        Some(_) => (&i::CIRCLE_DASHED, t.c.muted_foreground),
-        None => (&i::CIRCLE_DOT, t.c.muted_foreground),
-    }
-}
-
-/// pullRequestCheckStatusLabel.
-fn check_label(c: &Value) -> &'static str {
-    match field(c, "status") {
-        "pending" => "Running",
-        "action-required" if super::pr_row::workflow_approval(c) => "Awaiting approval",
-        "action-required" => "Awaiting action",
-        "success" => "Passed",
-        "failure" => "Failed",
-        "cancelled" => "Cancelled",
-        "skipped" => "Skipped",
-        _ => "Neutral",
-    }
-}
-
 // ---- summary ----------------------------------------------------------------------------
 
 fn meta_row(t: &T, glyph: &'static rune::Icon, label: &str, value: El) -> El {
@@ -1959,7 +1940,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
     let mut out = col().w_full().pb(48.0).child(meta).child(rule(t));
     let body = field(d, "body").trim().to_string();
     out = out.child(section(t, "description", "Description".into(), !u.description_closed, |s| ui(s).description_closed = !ui(s).description_closed, None, || {
-        super::pr_edit::description(s, t, d, markdown(t, if body.is_empty() { "_No description provided._" } else { &body }))
+        super::pr_edit::description(s, t, d, super::pr_media::view(s, t, if body.is_empty() { "_No description provided._" } else { &body }))
     }));
     let checks = d["checks"].as_array().cloned().unwrap_or_default();
     let stale = checks_rollup(s, d).1;
@@ -1976,8 +1957,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         }
         let mut list = col().w_full();
         for c in &checks {
-            let status = field(c, "status");
-            let (glyph, ink) = check_glyph(t, Some(status));
+            let (glyph, ink, label) = super::pr_row::check_status(t, c);
             let mut r = row()
                 .w_full()
                 .px(8.0)
@@ -1988,7 +1968,7 @@ fn summary(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
                 .child(icon(glyph, 14.0).color(ink))
                 .child(text(field(c, "name").to_string()).font(theme::TEXT_XS).color(t.c.foreground).truncate().shrink().min_w(0.0))
                 .child(spacer())
-                .child(text(check_label(c)).font(theme::TEXT_XS).color(t.c.muted_foreground));
+                .child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground));
             if let Some(url) = c["url"].as_str().map(str::to_string) {
                 r = r.key(format!("pr-check-{}", field(c, "name"))).hover(t.c.accent.alpha_mul(0.6)).cursor(Cursor::Pointer).on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&url);
@@ -2153,7 +2133,7 @@ fn collapsed(s: &App, t: &T, item: &conv::Item) -> El {
         }
         return card.children(conv::more_replies(t, item).map(|m| m.mt(8.0)));
     }
-    let shown = body.map(|b| super::pr_code::clipped_comment(s, t, field(c, "id"), markdown(t, &b)));
+    let shown = body.map(|b| super::pr_code::clipped_comment(s, t, field(c, "id"), super::pr_media::view(s, t, &b)));
     if let Some(body) = super::pr_edit::comment_body(s, t, c, shown) {
         card = card.child(col().w_full().mt(8.0).child(body));
     }
@@ -2320,7 +2300,7 @@ fn reply_thread(s: &App, t: &T, replies: &[Cow<Value>], surface: Surface<'_>) ->
     let mut thread = col().w_full().gap(12.0);
     for r in replies {
         let r = &**r;
-        let shown = markdown(t, field(r, "body").trim());
+        let shown = super::pr_media::view(s, t, field(r, "body").trim());
         let shown = if matches!(surface, Surface::Summary(_)) { super::pr_code::clipped_comment(s, t, field(r, "id"), shown) } else { shown };
         thread = thread.child(col().w_full().gap(6.0).child(head_line(s, t, r, surface, None, None)).children(super::pr_edit::comment_body(s, t, r, Some(shown))));
     }
@@ -2344,7 +2324,7 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Cow<Value>], surface: Surf
         .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(s, t, c, surface, path, fix)))
         .children(at.map(|at| at.px(12.0).pt(8.0)));
     let summary = matches!(surface, Surface::Summary(_));
-    let rendered = conv::visible_body(field(c, "body")).map(|b| markdown(t, &b)).map(|b| if summary { super::pr_code::clipped_comment(s, t, field(c, "id"), b) } else { b });
+    let rendered = conv::visible_body(field(c, "body")).map(|b| super::pr_media::view(s, t, &b)).map(|b| if summary { super::pr_code::clipped_comment(s, t, field(c, "id"), b) } else { b });
     if let Some(body) = super::pr_edit::comment_body(s, t, c, rendered) {
         card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(body));
     }
@@ -2654,9 +2634,9 @@ mod tests {
 
     #[test]
     fn a_workflow_run_waiting_on_approval_says_so() {
-        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://github.com/o/r/actions/runs/12/job/3"})), "Awaiting approval");
-        assert_eq!(check_label(&json!({"status": "action-required", "url": "https://ci.example/build/12"})), "Awaiting action");
-        assert_eq!(check_label(&json!({"status": "action-required", "url": null})), "Awaiting action");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": "https://github.com/o/r/actions/runs/12/job/3"})), "Awaiting approval");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": "https://ci.example/build/12"})), "Awaiting action");
+        assert_eq!(super::super::pr_row::check_label(&json!({"status": "action-required", "url": null})), "Awaiting action");
     }
 
     #[test]
@@ -3070,6 +3050,18 @@ mod tests {
         assert!(c.on(2) && !c.on(0), "each tab keeps its own");
         c.set(2, false);
         assert!(!c.on(2));
+
+        // The Code tab follows the diff view's own scroller, not the shared area.
+        assert_eq!(scroller(2), "pr-code-view/scroll");
+        assert_eq!(scroller(0), "pr-detail-scroll-0");
+        let mut s = App::new();
+        s.ui.pages.detail.tab = 2;
+        s.ui.pages.detail.condense.set(2, true);
+        *s.ui.pages.detail.condense.anchor.lock().unwrap() = Some((2, 40.0));
+        let mut tx = Tx::default();
+        assert!(anchor_header(&mut s, &mut tx), "the Code tab's condensing restores its offset");
+        assert!(s.ui.pages.detail.condense.anchor.lock().unwrap().is_none(), "once");
+        assert!(!anchor_header(&mut s, &mut tx));
     }
 
     #[test]
