@@ -1081,7 +1081,7 @@ mod tests {
         assert_eq!(profile(true, "Pixel Tablet", 0.6).id, "android-tablet");
         assert_eq!(profile(false, "iPad Air", 0.7).id, "ios-tablet");
         let portrait = layout(Some("portrait"), 1179, 2556);
-        let world = world(super::super::motion::IDENTITY, portrait.rotation);
+        let world = super::world(super::super::motion::IDENTITY, portrait.rotation);
         let cam = camera(&model, &world, 0.6);
         let centre = screen_point(&model, &world, &cam, &portrait, 0.5, 0.5, false).unwrap();
         assert!((centre.0 - 0.5).abs() < 0.01 && (centre.1 - 0.5).abs() < 0.01, "{centre:?}");
@@ -1091,7 +1091,7 @@ mod tests {
         assert!(screen_point(&model, &world, &cam, &portrait, 0.01, 0.5, true).is_some(), "a captured touch keeps going");
         // Landscape left: the screen's top runs along the phone's left side.
         let left = layout(Some("landscape_left"), 2556, 1179);
-        let world = world(super::super::motion::IDENTITY, left.rotation);
+        let world = super::world(super::super::motion::IDENTITY, left.rotation);
         let cam = camera(&model, &world, 1.6);
         let (x, y) = screen_point(&model, &world, &cam, &left, 0.4, 0.5, false).unwrap();
         assert!(x < 0.5 && (y - 0.5).abs() < 0.01, "{x} {y}");
@@ -1103,7 +1103,7 @@ mod tests {
         assert!((aspect - FOLD_INNER_ASPECT).abs() < 1e-6);
         assert_eq!(fold_inner_aspect(1080, 2424), FOLD_INNER_ASPECT, "a folded frame isn't the inner display");
         let inner = layout(None, 2076, 2152);
-        let world = world(super::super::motion::IDENTITY, 0.);
+        let world = super::world(super::super::motion::IDENTITY, 0.);
         let open = fold(180., aspect);
         assert_eq!(open.faces.len(), 2, "open, the inner display's two halves take touches");
         let cam = camera(&open, &world, 1.);
