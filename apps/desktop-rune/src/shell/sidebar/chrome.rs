@@ -519,8 +519,10 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
         menu.child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN).label("Usage").on_press(|s: &mut App| super::go(s, Route::Usage)))
     };
     let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(undo_notice(s, t));
-    if let Some(pill) = crate::desktop::updates::pill(s, t, model.updates > 0) {
-        bar = bar.child(pill);
+    if let Some(control) = super::everything::control(s, t) {
+        bar = bar.child(control);
+    } else if let Some(pill) = crate::desktop::updates::pill(s, t, model.updates > 0) {
+        bar = bar.child(super::everything::notes_trigger(pill));
     } else if model.updates > 0 {
         bar = bar.child(
             el().key("sb-update")
@@ -545,7 +547,7 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
 /// `SidebarThreadUndoNotice`: fills the footer's free space, right-aligned, while an action can
 /// be undone.
 fn undo_notice(s: &App, t: &T) -> El {
-    let Some((action, count)) = s.ui.shell.sidebar.undos.notice(crate::data::now_ms()) else { return spacer() };
+    let Some((action, count)) = s.ui.shell.sidebar.undos.notice(crate::data::now_ms()) else { return if super::everything::running(s) { el() } else { spacer() } };
     let action = format!("{action:?}");
     let summary = if count == 1 { action } else { format!("{action} {count}") };
     let shortcut = crate::shell::palette::shortcut_label(s, "thread.undo");

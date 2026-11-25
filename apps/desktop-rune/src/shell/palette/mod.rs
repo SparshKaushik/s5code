@@ -109,6 +109,9 @@ enum Trailing {
     /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
     /// It writes every member of the project's group together.
     Pin(Vec<String>, bool),
+    /// "Create private repository" with several hosts: the host picker (`PROVIDERS` indexes and
+    /// the picked one), then the checkbox.
+    Host(Vec<usize>, usize, bool),
 }
 struct SearchTerm {
     value: String,
@@ -1912,6 +1915,10 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if find_key(s, e) {
         return true;
     }
+    if e.key == Key::Escape && s.ui.shell.palette.add.host_open {
+        s.ui.shell.palette.add.host_open = false;
+        return true;
+    }
     match &e.key {
         // Web closes from any submenu; only the file search returns to the commands.
         Key::Escape => {
@@ -2193,7 +2200,7 @@ fn footer(s: &App, rows: &[Item], t: &T) -> El {
     }
     bar
 }
-fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
+fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T, layers: &mut Vec<El>) -> El {
     let ui = &s.ui.shell.palette;
     let muted = t.c.contrast_muted_foreground;
     let title = match &v.highlight {
@@ -2293,6 +2300,27 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Picked => entry = entry.child(icon(&icons::CHECK, 14.).color(t.c.contrast_icon_muted)),
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
+        Trailing::Host(targets, picked, on) => {
+            let providers = &add_project::PROVIDERS;
+            let kinds: Vec<&str> = targets.iter().map(|i| providers[*i].kind).collect();
+            let mut select = kit::Select::new("palette-publish-host", &kinds)
+                .label("Host for the new repository")
+                .size("xs")
+                .variant("ghost")
+                .width(0.)
+                .align_end()
+                .current(Some(providers[*picked].kind))
+                .open(ui.add.host_open && !v.disabled)
+                .disabled(v.disabled)
+                .on_toggle(|s: &mut App| s.ui.shell.palette.add.host_open ^= true)
+                .on_close(|s: &mut App| s.ui.shell.palette.add.host_open = false)
+                .on_choose(|s: &mut App, kind: &str, _: &mut Tx| add_project::pick_host(s, kind));
+            for i in targets {
+                select = select.option_name(providers[*i].kind, providers[*i].name);
+            }
+            let k = kit::theme(t);
+            entry = entry.child(row().gap(8.).center_y().child(select.build(&k, layers)).child(kit::Checkbox::new(*on).hide_label().build(&k)));
+        }
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
         Trailing::Theme(current, theme, modes) => {
             let mut end = row().gap(8.0).center_y();
@@ -2383,6 +2411,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     if let Some(submit) = submit {
         head = head.child(submit);
     }
+    let mut layers = vec![];
     let mut list = col().w_full().padding(8.);
     let mut group = "";
     for (i, v) in rows.iter().enumerate() {
@@ -2400,7 +2429,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
                 );
             }
         }
-        list = list.child(row_view(s, i, v, raw, t));
+        list = list.child(row_view(s, i, v, raw, t, &mut layers));
     }
     let browse_error = add_project::browsing(s).then(|| add_project::browse_error(s)).flatten();
     if let Some(error) = browse_error {
@@ -2435,7 +2464,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
         .child(list)
         .child(footer(s, &rows, t))
         .modal(true, |s: &mut App| s.ui.shell.palette.open = false);
-    vec![
+    let mut out = vec![
         kit::motion::scrim(t).key("palette-backdrop"),
         col()
             .key("palette-layer")
@@ -2446,7 +2475,9 @@ fn palette(s: &App, t: &T) -> Vec<El> {
             .items_center()
             .transition(rune::Transition::none())
             .child(kit::motion::popup(panel)),
-    ]
+    ];
+    out.extend(layers);
+    out
 }
 
 #[cfg(test)]
