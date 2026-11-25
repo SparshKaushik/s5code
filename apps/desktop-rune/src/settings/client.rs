@@ -25,7 +25,7 @@ impl Default for ClientSettings {
 
 /// Keys only Rune reads. Electron's settings struct drops unknown keys when it saves the
 /// shared file, so these live beside it.
-const RUNE_ONLY: [&str; 5] = ["appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced"];
+const RUNE_ONLY: [&str; 6] = ["appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced", "t3code:version-mismatch-dismissals:v1"];
 const RUNE_FILE: &str = "desktop-rune-client-settings.json";
 
 /// Electron's `decodeJsonResult` leniency: comments and trailing commas, outside strings.

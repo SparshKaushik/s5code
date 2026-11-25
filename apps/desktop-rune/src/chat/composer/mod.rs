@@ -15,6 +15,7 @@ mod picker;
 pub mod provider_icons;
 mod search;
 mod stash;
+pub(crate) mod system_banners;
 pub(crate) mod usage_limits;
 
 use std::collections::{HashMap, HashSet};
@@ -2102,6 +2103,7 @@ pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut layers = if side_owner(s).is_some() { Vec::new() } else { overlay_layers(s, cx, t) };
     layers.extend(chips::citation_popover(s, t));
     usage_limits::overlay(s, t, &mut layers);
+    system_banners::overlays(s, t, &mut layers);
     layers
 }
 
@@ -2977,6 +2979,10 @@ fn cold_claude_scene(s: &mut App) {
 
 /// Scenes for the composer, topbar, home and details card.
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("composer-auto-update-available", system_banners::scene_available),
+    ("composer-auto-update-running", system_banners::scene_running),
+    ("composer-auto-update-failed", system_banners::scene_failed),
+    ("composer-auto-update-machines", system_banners::scene_machines),
     ("home-empty", on_home),
     ("home-typed", |s| {
         on_home(s);

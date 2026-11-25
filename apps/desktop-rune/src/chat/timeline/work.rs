@@ -578,8 +578,8 @@ pub fn attempt_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
 }
 
 /// WorkingTimelineRow: the turn in flight's header; compacting, behind a minimize glyph.
-pub fn working_view(label: String, compacting: bool, t: &T) -> El {
-    let mut line = row().h(24.0).px(4.0).gap(6.0).center_y();
+pub fn working_view(label: String, compacting: bool, background: Option<El>, t: &T) -> El {
+    let mut line = row().w_full().h(24.0).px(4.0).gap(8.0).center_y();
     if compacting {
         line = line.child(icon(&icons::MINIMIZE_2, 12.0).color(t.c.muted_foreground));
     }
@@ -587,7 +587,10 @@ pub fn working_view(label: String, compacting: bool, t: &T) -> El {
         .w_full()
         .pt(4.0)
         .pb(8.0)
-        .child(line.child(text(label).font(theme::TEXT_SM.lh(22.75)).color(t.c.muted_foreground)))
+        .child(
+            line.child(text(label).font(theme::TEXT_SM.lh(22.75)).color(t.c.muted_foreground))
+                .children(background.map(|chip| row().grow(1.0).justify_end().child(chip))),
+        )
         .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6)))
 }
 

@@ -509,7 +509,13 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
     if updating || super::machines::row_failure(s, &saved.id).is_some() {
         let (line, color) = match super::machines::row_failure(s, &saved.id).filter(|_| !updating) {
             Some(message) => (message.to_owned(), t.c.destructive),
-            None => ("Downloading…".to_owned(), t.c.foreground),
+            None => {
+                let stage = match crate::chat::server_update::status_on(s, &saved.id) {
+                    crate::chat::server_update::Status::Running { stage, .. } => stage.label(),
+                    _ => "Downloading…",
+                };
+                (stage.to_owned(), t.c.foreground)
+            }
         };
         identity = identity.child(
             row().mt(4.0).gap(8.0).center_y().child(el().w(6.0).h(6.0).radius(3.0).fill(color)).child(text(line.clone()).font(theme::XS_MEDIUM).color(color).truncate().help(line).shrink().min_w(0.0)),

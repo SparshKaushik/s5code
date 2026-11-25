@@ -77,7 +77,7 @@ fn organization(policy: &Value) -> &str {
 }
 
 /// Contracts `managedUpdatesDenial`.
-fn updates_denial(policy: Option<&Value>) -> Option<String> {
+pub(crate) fn updates_denial(policy: Option<&Value>) -> Option<String> {
     let policy = policy?;
     (policy["limits"]["updates"]["mode"] == "off").then(|| format!("{} manages T3 Code updates.", organization(policy)))
 }

@@ -212,6 +212,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-usage-limit-banner", usage_limit_banner),
     ("timeline-child-approval", child_approval),
     ("timeline-worktree-setup", worktree_setup),
+    ("timeline-background-setup", background_setup),
+    ("timeline-background-setup-open", background_setup_open),
+    ("timeline-background-setup-details", background_setup_details),
     ("timeline-worktree-handed-off", worktree_handed_off),
     ("timeline-worktree-retry", worktree_retry),
     ("timeline-tool-group", tool_group),
@@ -691,6 +694,40 @@ fn worktree_setup(app: &mut App) {
     app.ui.chat.timeline.worktree.details.insert(id.clone());
     app.ui.chat.timeline.worktree.held.insert(id, snapshot);
 }
+fn background_setup(app: &mut App) {
+    worktree_setup(app);
+    live_turn(app, false);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let Some(snapshot) = app.ui.chat.timeline.worktree.held.get_mut(&id) {
+        snapshot["stages"][4] = serde_json::json!({
+            "id": "agent", "status": "done",
+            "startedAt": "2026-03-10T12:00:09Z", "endedAt": "2026-03-10T12:00:10Z"
+        });
+    }
+    app.now_ms = crate::data::iso_ms("2026-03-10T12:00:42Z").unwrap_or(app.now_ms);
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(view) = state.thread_views.get_mut(&id)
+    {
+        for run in view.projection["runs"].as_array_mut().into_iter().flatten() {
+            if run["id"] == "scene-live" {
+                run["startedAt"] = serde_json::json!("2026-03-10T12:00:10Z");
+            }
+        }
+    }
+}
+
+fn background_setup_open(app: &mut App) {
+    background_setup(app);
+    if let Route::Thread(id) = &app.route {
+        app.ui.chat.timeline.worktree.background_open = Some(id.clone());
+    }
+}
+
+fn background_setup_details(app: &mut App) {
+    background_setup_open(app);
+    app.ui.chat.timeline.worktree.background_details = true;
+}
+
 /// The agent started from a worktree whose setup script failed: the card is one summary row.
 fn worktree_handed_off(app: &mut App) {
     showcase(app);
@@ -829,6 +866,12 @@ fn server_update_running(app: &mut App) {
 fn server_update_failed(app: &mut App) {
     use crate::chat::server_update::{Stage, Status, show};
     showcase(app);
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(config) = state.config.as_mut()
+    {
+        config["environment"]["serverVersion"] = serde_json::json!("0.1.6");
+        config["environment"]["capabilities"]["serverSelfUpdate"] = serde_json::json!("respawn");
+    }
     let message = "Server update failed: The new server did not start.".to_owned();
     show(app, Status::Failed { stage: Stage::Downloading, from: "0.0.20".into(), target: "0.0.21".into(), message });
 }

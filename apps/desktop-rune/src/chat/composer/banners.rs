@@ -33,6 +33,7 @@ pub struct Item {
     pub environment: bool,
     pub icon: &'static rune::Icon,
     pub title: String,
+    pub title_control: Option<El>,
     pub description: Option<String>,
     pub actions: Vec<El>,
     pub dismiss: Option<El>,
@@ -41,7 +42,7 @@ pub struct Item {
 
 impl Item {
     pub fn new(id: impl Into<String>, variant: Variant, icon: &'static rune::Icon, title: impl Into<String>) -> Item {
-        Item { id: id.into(), variant, environment: false, icon, title: title.into(), description: None, actions: Vec::new(), dismiss: None, children: None }
+        Item { id: id.into(), variant, environment: false, icon, title: title.into(), title_control: None, description: None, actions: Vec::new(), dismiss: None, children: None }
     }
 }
 
@@ -54,6 +55,7 @@ pub(crate) enum FeedbackStatus {
 
 #[derive(Default)]
 pub struct State {
+    pub(crate) system: super::system_banners::State,
     /// Thread id -> its `/feedback` submissions, oldest first.
     pub(crate) feedback: HashMap<String, Vec<(String, FeedbackStatus)>>,
     /// `provider.uploadFeedback` in flight: the request, its thread and submission.
@@ -322,6 +324,7 @@ fn items(app: &App, t: &T) -> Vec<Item> {
     items.extend(fallback_item(app, t));
     items.extend(crate::chat::timeline::banners::recovery_item(app, t));
     items.extend(crate::chat::timeline::banners::system_items(app, t));
+    items.extend(super::system_banners::auto_item(app, t));
     items.extend(ceiling_item(app, t));
     items
 }
@@ -357,11 +360,12 @@ fn card(t: &T, item: Item, first: bool) -> El {
         .min_w(0.0)
         .gap(4.0)
         .center_y()
-        .child(text(title.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).single_line().truncate().shrink().min_w(0.0).help_when_truncated(title));
+        .child(item.title_control.unwrap_or_else(|| text(title.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).single_line().truncate().shrink().min_w(0.0).help_when_truncated(title)));
     if let Some(description) = item.description {
         words = words.child(text(description.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().grow(1.0).shrink().min_w(0.0).help_when_truncated(description));
     }
-    let mut head = row().w_full().min_h(28.0).gap(4.0).center_y().child(el().size(24.0, 24.0).center().child(icon(item.icon, 12.0).color(t.c.muted_foreground))).child(words);
+    let icon_color = if item.environment && std::ptr::eq(item.icon, &icons::CIRCLE_ALERT) { t.c.error } else { t.c.muted_foreground };
+    let mut head = row().w_full().min_h(28.0).gap(4.0).center_y().child(el().size(24.0, 24.0).center().child(icon(item.icon, 12.0).color(icon_color))).child(words);
     if !item.actions.is_empty() || item.dismiss.is_some() {
         head = head.child(row().gap(4.0).center_y().children(item.actions).children(item.dismiss));
     }

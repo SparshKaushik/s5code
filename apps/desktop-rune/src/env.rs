@@ -575,12 +575,33 @@ pub(crate) fn persist(s: &App) -> Option<String> {
 
 /// Web `setEnabled` on a saved environment: off disconnects it and keeps it saved; on reconnects.
 pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
+    let title = if enabled { "Could not switch backend on" } else { "Could not switch backend off" };
+    set_enabled_with_error(s, id, enabled, title);
+}
+
+pub(crate) fn set_enabled_for_composer(s: &mut App, id: &str, enabled: bool) {
+    let title = if enabled { "Could not reconnect environment" } else { "Could not disconnect server" };
+    set_enabled_with_error(s, id, enabled, title);
+}
+
+fn set_enabled_with_error(s: &mut App, id: &str, enabled: bool, title: &str) {
     let Some(env) = s.ui.env.saved.iter().find(|e| e.id == id).cloned() else { return };
     if enabled == !s.ui.env.off.iter().any(|k| k == id) {
         return;
     }
+    let previous = s.ui.env.off.clone();
     if enabled {
         s.ui.env.off.retain(|k| k != id);
+    } else {
+        s.ui.env.off.push(id.to_owned());
+    }
+    s.ui.env.error = persist(s);
+    if s.ui.env.error.is_some() {
+        s.ui.env.off = previous;
+        saving_failed(s, title);
+        return;
+    }
+    if enabled {
         let src = connect(s, &env);
         s.ui.env.parked.push((env.id.clone(), src));
         ssh::resume(s, id);
@@ -591,10 +612,7 @@ pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
         }
         s.ui.env.parked.retain(|(k, _)| k != id);
         ssh::suspend(s, id);
-        s.ui.env.off.push(id.to_owned());
     }
-    s.ui.env.error = persist(s);
-    saving_failed(s, if enabled { "Could not switch backend on" } else { "Could not switch backend off" });
 }
 
 /// `ORCHESTRATION_PROTOCOL_VERSION`, which the transport asks for.

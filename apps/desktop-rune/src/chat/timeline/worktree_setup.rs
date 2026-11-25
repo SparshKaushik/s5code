@@ -26,6 +26,8 @@ pub struct State {
     /// The thread whose stream is open.
     watched: Option<String>,
     pub(super) details: HashSet<String>,
+    pub(super) background_open: Option<String>,
+    pub(super) background_details: bool,
     /// Thread id -> `worktreeSetup.cancel` in flight.
     cancelling: HashMap<String, u64>,
     /// Run id -> `prepared-run.retry` in flight.
@@ -75,7 +77,11 @@ fn visible(snapshot: &Value, turn_started: bool, follow_up_sent: bool) -> bool {
 /// setupHandedOff: the agent has started from the worktree, so the card is history and a finished
 /// one folds to a single summary row.
 fn handed_off(snapshot: &Value, turn_started: bool) -> bool {
-    turn_started && array(snapshot, "stages").iter().any(|st| s(st, "id") == "agent" && s(st, "status") == "done")
+    turn_started && agent_started(snapshot)
+}
+
+fn agent_started(snapshot: &Value) -> bool {
+    array(snapshot, "stages").iter().any(|st| s(st, "id") == "agent" && s(st, "status") == "done")
 }
 
 /// CollapsedSummaryRow's status: failed when the setup or its script did.
@@ -221,7 +227,6 @@ fn settled(projection: &Value, run: &str, shell: Option<&Value>) -> bool {
 /// queues behind the setup instead (`sendQueuesBehindSetup`).
 pub fn blocks_send(app: &App, thread: &str) -> bool {
     let queues = app.state().threads.iter().find(|r| s(r, "id") == thread).is_some_and(|r| matches!(s(r, "activityRunStatus"), "preparing" | "starting"));
-    let agent_started = |snapshot: &Value| array(snapshot, "stages").iter().any(|st| s(st, "id") == "agent" && s(st, "status") == "done");
     !queues && app.ui.chat.timeline.worktree.held.get(thread).is_some_and(|snapshot| s(snapshot, "phase") == "running" && !agent_started(snapshot))
 }
 
@@ -311,16 +316,42 @@ fn stage_color(status: &str, t: &T) -> rune::Color {
     }
 }
 
+fn turn_started(app: &App, thread: &str) -> bool {
+    if let Some(view) = app.state().thread_views.get(thread) {
+        let runs = array(&view.projection, "runs");
+        let latest = |eligible: fn(&Value) -> bool| {
+            runs.iter().filter(|run| eligible(run)).max_by_key(|run| run["ordinal"].as_u64())
+        };
+        if let Some(run) = latest(|r| matches!(s(r, "status"), "preparing" | "starting" | "running" | "waiting"))
+            .or_else(|| latest(|r| s(r, "status") != "queued" || r["queueHeld"] != true))
+        {
+            return run["startedAt"].is_string();
+        }
+    }
+    app.state().threads.iter().any(|r| s(r, "id") == thread && r["latestRunStartedAt"].is_string())
+}
+
+fn background_running(snapshot: &Value, turn_started: bool) -> bool {
+    s(snapshot, "phase") == "running" && handed_off(snapshot, turn_started)
+}
+
+pub(super) fn background<'a>(app: &'a App, thread: &str) -> Option<&'a Value> {
+    let snapshot = app.ui.chat.timeline.worktree.held.get(thread)?;
+    background_running(snapshot, turn_started(app, thread)).then_some(snapshot)
+}
+
 pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     let snapshot = app.ui.chat.timeline.worktree.held.get(thread)?;
-    let shell = app.state().threads.iter().find(|r| s(r, "id") == thread);
-    let turn_started = shell.is_some_and(|r| !s(r, "latestRunStartedAt").is_empty());
+    let turn_started = turn_started(app, thread);
     let follow_up = app.state().thread_views.get(thread).is_some_and(|v| array(&v.projection, "turnItems").iter().filter(|i| s(i, "type") == "user_message").count() > 1);
-    if !visible(snapshot, turn_started, follow_up) {
+    if !visible(snapshot, turn_started, follow_up) || background_running(snapshot, turn_started) {
         return None;
     }
+    Some(card(app, thread, snapshot, t, handed_off(snapshot, turn_started), false))
+}
+
+pub(super) fn card(app: &App, thread: &str, snapshot: &Value, t: &T, embedded: bool, in_popover: bool) -> El {
     let running = s(snapshot, "phase") == "running";
-    let embedded = handed_off(snapshot, turn_started);
     let now = app.now_ms;
     let mut card = col().w_full().label("Worktree setup");
     if !embedded && !running && s(snapshot, "phase") != "done" {
@@ -396,7 +427,8 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
     if s(snapshot, "phase") == "failed" && !s(snapshot, "error").is_empty() {
         card = card.child(text(s(snapshot, "error").to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().ml(32.0).mt(4.0));
     }
-    let open = app.ui.chat.timeline.worktree.details.contains(thread);
+    let ui = &app.ui.chat.timeline.worktree;
+    let open = if in_popover { ui.background_details } else { ui.details.contains(thread) };
     let details_thread = thread.to_owned();
     let mut actions = row().ml(19.0).mt(2.0).gap(2.0).center_y().flex_wrap().child(
         Button::new("Details")
@@ -404,21 +436,30 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
             .size("xs")
             .icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT })
             .on_press(move |app: &mut App| {
-                let details = &mut app.ui.chat.timeline.worktree.details;
-                if !details.remove(&details_thread) {
-                    details.insert(details_thread.clone());
+                let ui = &mut app.ui.chat.timeline.worktree;
+                if in_popover {
+                    ui.background_details ^= true;
+                } else if !ui.details.remove(&details_thread) {
+                    ui.details.insert(details_thread.clone());
                 }
             })
-            .build(t),
+            .build(t)
+            .expanded(open),
     );
     if let Some(id) = setup_terminal(snapshot) {
+        let terminal_thread = thread.to_owned();
         let id = id.to_owned();
         actions = actions.child(
             Button::new("Open terminal")
                 .variant("ghost-muted")
                 .size("xs")
                 .icon(&icons::TERMINAL)
-                .on_press(move |app: &mut App| crate::panel::drawer::show(app, &id))
+                .on_press(move |app: &mut App| {
+                    if in_popover {
+                        super::background_setup::close(app);
+                    }
+                    crate::panel::drawer::show_for(app, &terminal_thread, &id);
+                })
                 .build(t),
         );
     }
@@ -464,7 +505,7 @@ pub fn view(app: &App, thread: &str, t: &T) -> Option<El> {
         }
         card = card.child(list);
     }
-    Some(card)
+    card
 }
 
 #[cfg(test)]
@@ -494,6 +535,16 @@ mod tests {
         assert!(handed_off(&ok, true));
         assert!(!handed_off(&ok, false), "FAILED: the turn has not started yet");
         assert!(!handed_off(&with("running", "running", "pending"), true), "FAILED: the agent has not started from the worktree");
+        for (phase, agent, started, expected) in [
+            ("running", "done", true, true),
+            ("running", "done", false, false),
+            ("running", "pending", true, false),
+            ("done", "done", true, false),
+            ("failed", "done", true, false),
+            ("cancelled", "done", true, false),
+        ] {
+            assert_eq!(background_running(&with(phase, "running", agent), started), expected);
+        }
         assert_eq!(summary_status(&ok), "done");
         assert_eq!(summary_status(&with("done", "failed", "done")), "failed");
         assert_eq!(summary_status(&with("cancelled", "skipped", "pending")), "failed");
