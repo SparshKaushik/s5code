@@ -394,7 +394,7 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
 /// Hands the server its browser and telemetry fds; the returned call, once the server has
 /// started, connects this side of them.
 #[cfg(unix)]
-fn pass_channels(command: &mut Command) -> std::io::Result<impl FnOnce()> {
+fn pass_channels(command: &mut Command) -> std::io::Result<impl FnOnce() + use<>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     let (events, server_events) = std::os::unix::net::UnixStream::pair()?;
@@ -435,7 +435,7 @@ fn pass_channels(command: &mut Command) -> std::io::Result<impl FnOnce()> {
 /// Windows passes no extra handles yet, so agents don't drive the panel's tabs there and the
 /// server gets no host telemetry.
 #[cfg(not(unix))]
-fn pass_channels(_: &mut Command) -> std::io::Result<impl FnOnce()> {
+fn pass_channels(_: &mut Command) -> std::io::Result<impl FnOnce() + use<>> {
     Ok(|| {})
 }
 
