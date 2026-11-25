@@ -1014,6 +1014,9 @@ fn connect(s: &App, t: &T) -> El {
     }
     let (ready, _, skipped) = setup_of(s);
     let labels: Vec<String> = skipped.iter().map(|env| crate::env::label(s, env)).collect();
+    if let Some(cloud) = crate::cloud::wizard_option(s, t) {
+        body = body.child(rune::el().h(8.)).child(cloud);
+    }
     body = body.child(rune::el().h(8.)).child(pairing);
     if let Some(note) = skipped_note(&labels) {
         body = body.child(text(note).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().mt(8.));
@@ -1144,7 +1147,7 @@ fn pairing_form(s: &App, t: &T) -> El {
 }
 
 /// Web `CommandBlock`: the command after a muted `$`, with a copy button.
-fn command_block(command: &'static str, t: &T) -> El {
+pub(crate) fn command_block(command: &'static str, t: &T) -> El {
     row()
         .w_full()
         .px(12.)
@@ -1226,7 +1229,28 @@ fn agent_section(s: &App, env: &str, t: &T) -> El {
     if let Some(setup) = s.ui.wizard.terminal.as_ref().filter(|setup| setup.env == env) {
         list = list.child(setup_terminal(s, setup, t));
     }
+    if providers_on(s, env).iter().any(|p| data::s(p, "driver") == "codex" && provider_state(Some(p)) == "ready") {
+        let env = env.to_owned();
+        list = list.child(
+            row().mt(4.).child(
+                kit::Button::new("Connect another ChatGPT account")
+                    .variant("ghost-muted")
+                    .size("xs")
+                    .on_press(move |s: &mut App| another_chatgpt_account(s, &env))
+                    .build(t),
+            ),
+        );
+    }
     list
+}
+
+/// Web `AddManagedCodexAccountDialog`: Settings' "Add ChatGPT account" dialog, on the computer
+/// whose agents these are (the dialog works on the active environment).
+fn another_chatgpt_account(s: &mut App, env: &str) {
+    if s.ui.env.active != env {
+        crate::env::switch(s, env);
+    }
+    crate::settings::add_provider::open_chatgpt(s);
 }
 
 fn agents(s: &App, t: &T) -> El {
@@ -1389,6 +1413,10 @@ pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
         .child(content)
         .open(true)
         .build(t, layer);
+    // Settings mounts the same dialog when it is the screen.
+    if !matches!(s.route, crate::Route::Settings(_)) {
+        crate::settings::add_provider::chatgpt_dialog(s, t, layer);
+    }
 }
 
 /// Headless scene: Add a computer open with its pairing help.
@@ -1411,6 +1439,16 @@ pub(crate) fn scene_setup_terminal(s: &mut App) {
     ui.step = Step::Agents;
     ui.open = true;
     ui.terminal = Some(Setup { env, driver: "claudeAgent", instance: "claudeAgent".into(), id, cwd: "/home/me".into(), command, back: None });
+}
+
+/// Headless scene: the Agents step with "Connect another ChatGPT account" pressed.
+pub(crate) fn scene_chatgpt(s: &mut App) {
+    let env = s.ui.env.active.clone();
+    let ui = &mut s.ui.wizard;
+    ui.setup = vec![env.clone()];
+    ui.step = Step::Agents;
+    ui.open = true;
+    another_chatgpt_account(s, &env);
 }
 
 /// Headless scene: every listed computer ticked, so those not connected are named as skipped.

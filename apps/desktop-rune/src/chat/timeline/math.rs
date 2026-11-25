@@ -1,14 +1,55 @@
-//! Render math (ChatMarkdown's `remark-math`, micromark-extension-llm-math as patched). Rune
-//! can't typeset, so each formula reads as MarkdownMath's fallback, its TeX source `\(tex\)` or
-//! `\[⏎tex⏎\]`, escaped so Markdown keeps it literal.
+//! Render math (ChatMarkdown's `remark-math`, micromark-extension-llm-math as patched): where
+//! the formulas are. `katex` typesets them; until it has, or without Chrome, each reads as
+//! MarkdownMath's fallback, its TeX source `\(tex\)` or `\[⏎tex⏎\]`, escaped so Markdown keeps
+//! it literal.
 use std::borrow::Cow;
+
+/// A paragraph of prose as math sees it.
+#[derive(Debug, PartialEq)]
+pub enum Block {
+    /// Markdown with no formulas.
+    Text(String),
+    /// A display formula on lines of its own.
+    Display(String),
+    /// Markdown holding inline formulas.
+    Inline(Vec<Inline>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Inline {
+    Text(String),
+    Math { tex: String, display: bool },
+}
 
 /// Prose Markdown with every formula made literal TeX source; display blocks become paragraphs.
 pub fn literal(source: &str) -> Cow<'_, str> {
     if !may_contain(source) {
         return Cow::Borrowed(source);
     }
-    Cow::Owned(source.split("\n\n").map(paragraph).collect::<Vec<_>>().join("\n\n"))
+    Cow::Owned(blocks(source).iter().map(Block::literal).collect::<Vec<_>>().join("\n\n"))
+}
+
+/// `source`'s paragraphs, display formulas split out as paragraphs of their own.
+pub fn blocks(source: &str) -> Vec<Block> {
+    source.split("\n\n").flat_map(paragraph).collect()
+}
+
+impl Block {
+    /// The block as Markdown, its formulas literal TeX source.
+    pub fn literal(&self) -> String {
+        match self {
+            Block::Text(text) => text.clone(),
+            Block::Display(tex) => display(tex),
+            Block::Inline(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    Inline::Text(text) => text.clone(),
+                    Inline::Math { tex, display: true } => escape(&format!("\\[{tex}\\]")),
+                    Inline::Math { tex, display: false } => escape(&format!("\\({tex}\\)")),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A closed ```` ```math ```` fence: one display formula.
@@ -17,7 +58,7 @@ pub fn display(tex: &str) -> String {
 }
 
 /// `mayContainMath`: messages without these skip math parsing.
-fn may_contain(text: &str) -> bool {
+pub fn may_contain(text: &str) -> bool {
     text.contains('$') || text.contains("\\(") || text.contains("\\[")
 }
 
@@ -46,13 +87,13 @@ fn escape(text: &str) -> String {
     out
 }
 
-fn paragraph(text: &str) -> String {
+fn paragraph(text: &str) -> Vec<Block> {
     let indented = text.trim_start_matches('\n').starts_with("    ") || text.trim_start_matches('\n').starts_with('\t');
     if !may_contain(text) || indented {
-        return text.to_owned();
+        return vec![Block::Text(text.to_owned())];
     }
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut out: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     let (mut from, mut i) = (0, 0);
     while i < lines.len() {
         match flow(&lines[i..]) {
@@ -60,7 +101,7 @@ fn paragraph(text: &str) -> String {
                 if from < i {
                     out.push(inline(&lines[from..i].join("\n")));
                 }
-                out.push(display(&tex));
+                out.push(Block::Display(tex.trim().to_owned()));
                 i += used;
                 from = i;
             }
@@ -70,7 +111,7 @@ fn paragraph(text: &str) -> String {
     if from < lines.len() {
         out.push(inline(&lines[from..].join("\n")));
     }
-    out.join("\n\n")
+    out
 }
 
 /// A display block opening at `lines[0]` (`$$` or `\[` fences, math-flow / math-tex-flow): its TeX
@@ -137,11 +178,11 @@ fn close(line: &str, open: usize) -> Close {
     Close::None
 }
 
-/// Inline formulas (math-text, math-tex-text) made literal, skipping code spans, escapes, link
+/// Inline formulas (math-text, math-tex-text) split out, skipping code spans, escapes, link
 /// destinations and autolinks as Markdown does.
-fn inline(text: &str) -> String {
+fn inline(text: &str) -> Block {
     let b = text.as_bytes();
-    let mut out = String::with_capacity(text.len() + 16);
+    let mut out = Vec::new();
     let (mut copied, mut i) = (0, 0);
     while i < b.len() {
         let found = match b[i] {
@@ -167,9 +208,10 @@ fn inline(text: &str) -> String {
         };
         match found {
             Some((tex, display, end)) => {
-                out.push_str(&text[copied..i]);
-                let tex = text[tex].trim();
-                out.push_str(&escape(&if display { format!("\\[{tex}\\]") } else { format!("\\({tex}\\)") }));
+                if copied < i {
+                    out.push(Inline::Text(text[copied..i].to_owned()));
+                }
+                out.push(Inline::Math { tex: text[tex].trim().to_owned(), display });
                 copied = end;
                 i = end;
             }
@@ -180,8 +222,13 @@ fn inline(text: &str) -> String {
             None => i += 1,
         }
     }
-    out.push_str(&text[copied..]);
-    out
+    if out.is_empty() {
+        return Block::Text(text.to_owned());
+    }
+    if copied < text.len() {
+        out.push(Inline::Text(text[copied..].to_owned()));
+    }
+    Block::Inline(out)
 }
 
 type Found = Option<(std::ops::Range<usize>, bool, usize)>;
@@ -328,6 +375,16 @@ mod tests {
         assert_eq!(shown("$$a$$ is first.\nSome prose.\n$$\nb\n$$"), "\\[a\\] is first. Some prose.\n\n\\[\nb\n\\]");
         assert_eq!(shown("Where $x = 1,$ with $$ b,$$."), "Where \\(x = 1,\\) with \\[b,\\].");
         assert_eq!(display("x_1 * y_2\n"), "\\\\\\[\\\nx\\_1 \\* y\\_2\\\n\\\\\\]");
+    }
+
+    #[test]
+    fn blocks_split_display_formulas_out_and_keep_inline_ones_in_place() {
+        let math = |tex: &str, display| Inline::Math { tex: tex.to_owned(), display };
+        assert_eq!(
+            blocks("Where $x$ holds.\n$$\na\n$$\n\nNo math here."),
+            [Block::Inline(vec![Inline::Text("Where ".into()), math("x", false), Inline::Text(" holds.".into())]), Block::Display("a".into()), Block::Text("No math here.".into())]
+        );
+        assert_eq!(blocks("It costs $5."), [Block::Text("It costs $5.".into())]);
     }
 
     #[test]

@@ -615,9 +615,7 @@ fn pr_badge(t: &T, thread: &str, pr: &logic::PrBadge) -> El {
         .child(icon(glyph, 12.0).color(tone))
         .child(text(pr.text.clone()).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))
         .on_press_tx(move |s: &mut App, tx: &mut Tx| match (&url, list) {
-            (Some(url), false) => {
-                let _ = tx.open_url(url);
-            }
+            (Some(url), false) => crate::panel::pull_requests::open_link(s, tx, url),
             _ => {
                 super::open_thread(s, &id);
                 crate::shell::palette::actions::show_pull_requests(s);

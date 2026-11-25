@@ -4,7 +4,7 @@ pub(crate) use access::grants as session_grants;
 pub(crate) use connections::env_machine_icon;
 mod accent;
 mod acp_icons;
-mod add_provider;
+pub(crate) mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
@@ -15,7 +15,7 @@ pub mod client;
 pub(crate) mod connection_diagnosis;
 mod checkout_grouping;
 pub(crate) mod connections;
-mod controls;
+pub(crate) mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;
 pub(crate) mod thread_details;
@@ -608,7 +608,7 @@ pub fn poll(s: &mut App) -> bool {
         s.navigate(Route::Settings("general".into()));
     }
     let diagnostics = matches!(&s.route, Route::Settings(p) if p == "diagnostics") && (diagnostics::tick(s) | resource_telemetry::tick(s));
-    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s);
+    let mut changed = diagnostics | commit_edits(s, false) | licenses::poll(s) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s) | telemetry::poll(s) | providers::poll(s) | about::poll(s) | tasks::poll(s) | themes::poll(s) | snapshots::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -1384,6 +1384,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "connections");
         connections::scene(s, "outdated");
     }),
+    ("settings-connections-t3-connect", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect");
+    }),
+    ("settings-connections-t3-connect-signing-in", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-signing-in");
+    }),
+    ("settings-connections-t3-connect-route", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-route");
+    }),
+    ("settings-connections-trace", |s| {
+        scene(s, "connections");
+        connections::scene(s, "trace");
+    }),
     ("settings-connections-machines", |s| {
         scene(s, "connections");
         connections::scene(s, "machines");
@@ -1542,7 +1558,43 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-providers-secrets-light", |s| providers_secrets(s, true, "codex_work")),
     ("settings-providers-password", |s| providers_secrets(s, false, "opencode")),
     ("settings-providers-password-light", |s| providers_secrets(s, true, "opencode")),
+    ("settings-theme-editor", |s| theme_editor_scene(s, "open")),
+    ("settings-theme-editor-inspecting", |s| theme_editor_scene(s, "inspecting")),
+    ("settings-theme-editor-resized", |s| theme_editor_scene(s, "resized")),
+    ("settings-providers-codex-managed", providers_codex_managed),
+    ("settings-providers-custom-model-options", providers_custom_model_options),
 ];
+
+fn theme_editor_scene(s: &mut App, state: &str) {
+    scene(s, "appearance");
+    themes::editor_scene(s, state);
+}
+
+/// A managed Codex instance signed in with ChatGPT: the account row and Manage usage.
+fn providers_codex_managed(s: &mut App) {
+    providers_scene(s, false, "codex");
+    stage_settings(s, json!({"providerInstances": {"codex": {"driver": "codex", "enabled": true, "config": {"enabled": true, "setupMode": "managed"}}}}));
+    if let crate::data::Source::Fixture(st) = &mut s.src
+        && let Some(providers) = st.config.as_mut().and_then(|c| c["providers"].as_array_mut())
+        && let Some(codex) = providers.iter_mut().find(|p| p["instanceId"] == "codex")
+    {
+        codex["auth"] = json!({"status": "authenticated", "email": "you@example.com"});
+        codex["setup"] = json!({"canAuthenticate": true, "canInstall": true});
+    }
+}
+
+/// A custom model with options: each option's preset menu, the second one open.
+fn providers_custom_model_options(s: &mut App) {
+    providers_scene(s, false, "claudeAgent");
+    let entry = json!({"slug": "claude-sonnet-5-preview", "name": "Sonnet 5 preview", "capabilities": {"optionDescriptors": [
+        {"id": "thinking", "label": "Thinking", "type": "boolean", "currentValue": true},
+        {"id": "effort", "label": "Effort", "type": "select", "options": [{"id": "low", "label": "Low"}, {"id": "high", "label": "High", "isDefault": true}]}
+    ]}});
+    stage_settings(s, json!({"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "config": {"customModels": [entry]}}}}));
+    let ui = &mut s.ui.settings.providers_ui;
+    ui.scene_bottom = true;
+    providers::scene_custom_model(s, "claude-sonnet-5-preview", 1);
+}
 
 /// The providers page with model preferences and a second Codex instance staged.
 fn providers_scene(s: &mut App, light: bool, selected: &str) {

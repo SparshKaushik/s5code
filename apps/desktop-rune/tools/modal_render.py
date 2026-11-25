@@ -36,6 +36,10 @@ image = (
         "fonts-liberation",
         "fonts-noto-color-emoji",
     )
+    # Chrome for the `*-chrome` scenes' real pages (S5_CHROME below); the .deb brings its libraries.
+    .run_commands("apt-get update && apt-get install -y curl ca-certificates"
+                  " && curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+                  " && apt-get install -y /tmp/chrome.deb && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*")
 )
 
 app = modal.App("s5code-rune-render", image=image)
@@ -52,13 +56,17 @@ def render(bundle: bytes, jobs: list, files: dict) -> dict:
         os.environ,
         VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/lvp_icd.json",
         S5_FIXTURES="/work/fixtures",
+        S5_CHROME="/usr/bin/google-chrome-stable",
     )
     out, logs = {}, []
     for name, scene, theme, extra in jobs:
         stem = name + ("-light" if theme == "light" else "")
         cmd = ["/work/target/release/s5code-rune", "--snap", f"/tmp/{stem}.png", "--tree", f"/tmp/{stem}.tree.json",
                "--scene", scene, "--size", "1440x900", "--scale", "1", "--theme", theme, *extra]
-        r = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd="/work")
+        # Scenes share one container; per-scene client state keeps one scene's settings out of the next.
+        os.makedirs(f"/tmp/state-{stem}", exist_ok=True)
+        job_env = dict(env, S5_CLIENT_SETTINGS=f"/tmp/state-{stem}/client-settings.json")
+        r = subprocess.run(cmd, env=job_env, capture_output=True, text=True, cwd="/work")
         noise = [l for l in (r.stdout + r.stderr).splitlines() if not l.startswith("rune: ")]
         logs.append(f"[{stem}] exit {r.returncode}" + ("".join("\n  " + l for l in noise[-20:]) if noise else ""))
         for ext in ("png", "tree.json"):

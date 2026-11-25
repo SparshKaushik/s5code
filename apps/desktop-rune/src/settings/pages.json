@@ -59,6 +59,7 @@
       "rows": [
         {
           "key": "confirmThreadUnpin",
+          "ariaLabel": "Confirm thread unpinning",
           "title": "Unpin confirmation",
           "description": "Ask before unpinning a thread from the pinned section.",
           "kind": "switch",
@@ -66,6 +67,7 @@
         },
         {
           "key": "confirmThreadArchive",
+          "ariaLabel": "Confirm thread archiving",
           "title": "Archive confirmation",
           "description": "Require a second click on the inline archive action before a thread is archived.",
           "kind": "switch",
@@ -73,6 +75,7 @@
         },
         {
           "key": "confirmThreadDelete",
+          "ariaLabel": "Confirm thread deletion",
           "title": "Delete confirmation",
           "description": "Ask before deleting a thread and its chat history.",
           "kind": "switch",
@@ -80,6 +83,7 @@
         },
         {
           "key": "confirmQuit",
+          "ariaLabel": "Quit shortcut behavior",
           "title": "Quit shortcut",
           "description": "Hold mode also quits on two quick presses.",
           "kind": "select",
@@ -96,6 +100,7 @@
       "rows": [
         {
           "key": "timestampFormat",
+          "ariaLabel": "Timestamp format",
           "title": "Time format",
           "description": "System default follows your browser or OS clock preference.",
           "kind": "select",
@@ -176,6 +181,7 @@
         },
         {
           "key": "diffIgnoreWhitespace",
+          "ariaLabel": "Hide whitespace changes by default",
           "title": "Hide whitespace changes",
           "description": "Set whether the diff panel ignores whitespace-only edits by default.",
           "kind": "switch",
@@ -283,6 +289,7 @@
       "rows": [
         {
           "key": "panelAnimationDurationMs",
+          "ariaLabel": "Panel animation duration",
           "title": "Panel animations",
           "description": "Set how fast panels open and close.",
           "kind": "slider",
@@ -303,6 +310,7 @@
         },
         {
           "key": "persistComposerContextStrip",
+          "ariaLabel": "Keep composer context visible in active threads",
           "title": "Composer context",
           "description": "Keep branch and worktree controls below the composer after a thread starts.",
           "kind": "switch",
@@ -369,6 +377,7 @@
         },
         {
           "key": "wordWrap",
+          "ariaLabel": "Wrap code, diffs, and file previews by default",
           "title": "Word wrap",
           "description": "Wrap long lines in code blocks, diffs, and file previews by default.",
           "kind": "switch",
@@ -635,6 +644,7 @@
         },
         {
           "key": "newWorktreesStartFromOrigin",
+          "ariaLabel": "Start new worktrees from remote by default",
           "title": "Start from remote",
           "description": "Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.",
           "kind": "switch",
@@ -704,6 +714,7 @@
       "rows": [
         {
           "key": "enableProviderUpdateChecks",
+          "ariaLabel": "Check provider versions",
           "title": "Provider update checks",
           "description": "Check installed provider CLIs for newer available versions and fetch model catalog updates. When off, new models may not appear.",
           "kind": "switch",

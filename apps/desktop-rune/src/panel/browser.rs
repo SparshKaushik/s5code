@@ -107,12 +107,15 @@ pub struct Shot {
     pub width: u32,
     pub dark: bool,
     pub pixels: Pixels,
+    /// Trim the right and bottom margins of the page's top-left colour, the reported height
+    /// then being the trimmed one; a shot with nothing on it fails.
+    pub crop: bool,
     done: Arc<Mutex<Option<Option<f32>>>>,
 }
 
 impl Shot {
     pub fn new(url: String, width: u32, dark: bool) -> Shot {
-        Shot { url, width, dark, pixels: Pixels::new(), done: Arc::default() }
+        Shot { url, width, dark, pixels: Pixels::new(), crop: false, done: Arc::default() }
     }
 
     /// The captured height once finished, or `Some(None)` when it failed or its Chrome went
@@ -1660,11 +1663,15 @@ impl Worker {
                 let started = session.and_then(|session| {
                     let snap = self.snaps.get_mut(&id)?;
                     snap.session = Some(session.clone());
-                    Some((session, snap.shot.url.clone(), snap.shot.width.max(1), snap.shot.dark))
+                    Some((session, snap.shot.url.clone(), snap.shot.width.max(1), snap.shot.dark, snap.shot.crop))
                 });
-                let Some((session, url, width, dark)) = started else { return self.snap_finish(id, None) };
+                let Some((session, url, width, dark, crop)) = started else { return self.snap_finish(id, None) };
                 let session = session.as_str();
                 self.send(Some(session), "Page.enable", json!({}), None);
+                // A cropped shot keeps the page's transparency, to sit on any surface.
+                if crop {
+                    self.send(Some(session), "Emulation.setDefaultBackgroundColorOverride", json!({ "color": { "r": 0, "g": 0, "b": 0, "a": 0 } }), None);
+                }
                 self.send(Some(session), "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": 80, "deviceScaleFactor": self.scale, "mobile": false }), None);
                 let scheme = if dark { "dark" } else { "light" };
                 self.send(Some(session), "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }, { "name": "prefers-reduced-motion", "value": "reduce" }] }), None);
@@ -1688,8 +1695,12 @@ impl Worker {
                 self.send(Some(&session), "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::SnapShot(id, height)));
             }
             Reply::SnapShot(id, height) => {
-                let shown = self.snaps.get(&id).is_some_and(|n| show(&n.shot.pixels, r["data"].as_str()));
-                self.snap_finish(id, shown.then_some(height));
+                let shown = match self.snaps.get(&id) {
+                    Some(n) if n.shot.crop => show_cropped(&n.shot, r["data"].as_str()),
+                    Some(n) => show(&n.shot.pixels, r["data"].as_str()).then_some(height),
+                    None => None,
+                };
+                self.snap_finish(id, shown);
             }
             Reply::Created(tab) => {
                 let Some(target) = r["targetId"].as_str().map(str::to_owned) else { return };
@@ -2684,6 +2695,32 @@ fn show(pixels: &Pixels, data: Option<&str>) -> bool {
     true
 }
 
+/// A cropped shot's picture and its CSS height: the right and bottom margins of the top-left
+/// colour go, keeping a 2px border.
+fn show_cropped(shot: &Shot, data: Option<&str>) -> Option<f32> {
+    let bytes = data.and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())?;
+    let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let ((w, h), scale) = (crop_bounds(&rgba)?, rgba.width() as f32 / shot.width.max(1) as f32);
+    let pad = (2. * scale).round() as u32;
+    let (w, h) = ((w + pad).min(rgba.width()), (h + pad).min(rgba.height()));
+    let cropped = image::imageops::crop_imm(&rgba, 0, 0, w, h).to_image();
+    shot.pixels.set(w, h, cropped.into_raw());
+    Some(h as f32 / scale)
+}
+
+/// The extent of whatever differs from the top-left pixel, or `None` when nothing does.
+fn crop_bounds(rgba: &image::RgbaImage) -> Option<(u32, u32)> {
+    let background = *rgba.get_pixel(0, 0);
+    let (mut right, mut bottom) = (0, 0);
+    for (x, y, pixel) in rgba.enumerate_pixels() {
+        if pixel.0.iter().zip(background.0).any(|(a, b)| a.abs_diff(b) > 8) {
+            right = right.max(x + 1);
+            bottom = bottom.max(y + 1);
+        }
+    }
+    (right > 0).then_some((right, bottom))
+}
+
 /// A navigation that turned into a download, was stopped, or met a cancelled leave-page prompt
 /// leaves the page as it was, unless a newer navigation already took over.
 fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
@@ -2699,6 +2736,15 @@ fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cropped_shot_keeps_what_differs_from_its_corner() {
+        let mut page = image::RgbaImage::new(10, 6);
+        page.put_pixel(3, 2, image::Rgba([20, 20, 20, 200]));
+        page.put_pixel(1, 1, image::Rgba([4, 4, 4, 4]));
+        assert_eq!(crop_bounds(&page), Some((4, 3)), "faint antialiasing noise is background");
+        assert_eq!(crop_bounds(&image::RgbaImage::new(4, 4)), None, "an empty shot fails");
+    }
 
     #[test]
     fn window_opens_resolve_like_electrons_handler() {

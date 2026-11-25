@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use rune::{El, col, el, row, text};
+use rune::{El, Tx, col, el, row, text};
 use serde_json::{Map, Value, json};
 
 use super::browser::{Cmd, LIVE_LOAD, Live};
@@ -486,6 +486,11 @@ impl Host {
         out
     }
 
+    /// When an unanswered `ui/resource-teardown` stops waiting.
+    pub fn teardown_due(&self) -> Option<Instant> {
+        self.teardown.as_ref().map(|(_, at)| *at + TEARDOWN_TIMEOUT)
+    }
+
     pub fn tick(&mut self, now: Instant) -> Vec<Effect> {
         if self.teardown.as_ref().is_some_and(|(_, at)| now.duration_since(*at) >= TEARDOWN_TIMEOUT) {
             self.teardown = None;
@@ -581,6 +586,8 @@ struct Frame {
     revision: String,
     width: f32,
     visible: bool,
+    /// Its row left the timeline's virtual list, which unmounts it without a last layout.
+    unlisted: bool,
     height: f32,
     dark: bool,
     styles: Value,
@@ -719,14 +726,45 @@ fn update_context(s: &mut App, id: &str) {
     run(s, id, live, effects);
 }
 
+/// The timeline's rows in view (`on_visible_rows`), with the row each app is in: an app whose
+/// row left lets its page go, and one whose row came back may load again on its next layout.
+pub fn in_view(s: &mut App, apps: &[(usize, String)], rows: std::ops::Range<usize>) -> bool {
+    let mut changed = false;
+    for (row, id) in apps {
+        let Some(frame) = frame_mut(s, id) else { continue };
+        let unlisted = !rows.contains(row);
+        if frame.unlisted == unlisted {
+            continue;
+        }
+        frame.unlisted = unlisted;
+        changed = true;
+        if unlisted && frame.visible {
+            frame.visible = false;
+            release(s, id);
+        }
+    }
+    changed
+}
+
+/// Whether the thread waits on the user (an approval or a question): its apps stay inline so the
+/// request shows, as web's step-aside.
+fn awaiting_user(projection: &Value) -> bool {
+    projection["runtimeRequests"].as_array().is_some_and(|requests| requests.iter().any(|r| s(r, "status") == "pending"))
+}
+
+fn thread_awaiting(app: &App, thread: &str) -> bool {
+    app.state().thread_views.get(thread).is_some_and(|view| awaiting_user(&view.projection))
+}
+
 fn layout(s: &mut App, seed: &Seed, styles: &Value, dark: bool, [_, y, w, h]: [f32; 4]) -> bool {
     // Half a window of slack either side, so a short scroll back finds the app still running.
-    let visible = s.ui.desktop.window_size().is_none_or(|[_, height]| y + h > -height / 2. && y < height * 1.5);
+    let near = s.ui.desktop.window_size().is_none_or(|[_, height]| y + h > -height / 2. && y < height * 1.5);
     let apps = &mut s.ui.panel.mcp_apps;
     if !apps.frames.iter().any(|f| f.id == seed.id) {
         apps.frames.push(Frame::new(seed));
     }
     let Some(frame) = frame_mut(s, &seed.id) else { return false };
+    let visible = near && !frame.unlisted;
     let resized = (frame.width - w.round()).abs() >= 1.;
     let themed = frame.dark != dark || frame.styles != *styles;
     let shown = frame.visible != visible;
@@ -841,7 +879,7 @@ enum Heard {
     Gone,
 }
 
-pub fn poll(s: &mut App) -> bool {
+pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let apps = &s.ui.panel.mcp_apps;
     if apps.frames.is_empty() && apps.tearing.is_empty() {
         return false;
@@ -866,6 +904,15 @@ pub fn poll(s: &mut App) -> bool {
     for live in done {
         cmd(s, Cmd::LiveClose(live));
     }
+    // A silent app is let go on time, not at the next wake that happens by.
+    if let Some(due) = s.ui.panel.mcp_apps.tearing.iter().filter_map(|(_, host)| host.teardown_due()).min() {
+        tx.wake_after(due.saturating_duration_since(now));
+    }
+    let stepping: Vec<String> = s.ui.panel.mcp_apps.frames.iter().filter(|f| f.fullscreen && thread_awaiting(s, &f.conversation)).map(|f| f.id.clone()).collect();
+    for id in &stepping {
+        exit_fullscreen(s, id);
+    }
+    changed |= !stepping.is_empty();
     // Apps of a thread no longer on screen go.
     let route = match s.frame_route() {
         Route::Thread(thread) => Some(thread.clone()),
@@ -1022,7 +1069,7 @@ fn ask(s: &mut App, id: &str, live: u64, message: String, request: Value, on_con
 fn run(s: &mut App, id: &str, live: u64, effects: Vec<Effect>) {
     for effect in effects {
         let Some(frame) = live_frame(s, id, live) else { return };
-        let server = frame.app.server.clone();
+        let (server, conversation) = (frame.app.server.clone(), frame.conversation.clone());
         match effect {
             Effect::Post(message) => {
                 cmd(s, Cmd::LiveEval(live, format!("window.__s5Deliver && window.__s5Deliver({message})")));
@@ -1044,7 +1091,7 @@ fn run(s: &mut App, id: &str, live: u64, effects: Vec<Effect>) {
                 settle(s, id, live, &request, Ok(json!({})));
             }
             Effect::SendMessage { id: request, text } => {
-                let (frame_id, thread) = (id.to_owned(), frame.conversation.clone());
+                let (frame_id, thread) = (id.to_owned(), conversation.clone());
                 let (reply_to, body) = (request.clone(), text.clone());
                 let send = move |s: &mut App| {
                     let command = json!({
@@ -1065,12 +1112,13 @@ fn run(s: &mut App, id: &str, live: u64, effects: Vec<Effect>) {
             }
             Effect::UpdateModelContext { id: request, context } => {
                 let mut params = target(frame, context);
-                params["conversationThreadId"] = json!(frame.conversation);
+                params["conversationThreadId"] = json!(conversation);
                 rpc(s, id, live, "mcpApps.updateModelContext", params, Call::Context(request));
             }
             Effect::DisplayMode { id: request, mode } => {
                 let others = s.ui.panel.mcp_apps.frames.iter().any(|f| f.fullscreen && f.id != id);
-                let allowed = mode == "fullscreen" && !others && crate::shell::confirm::current(s).is_none() && live_frame(s, id, live).is_some_and(|f| f.recently_activated());
+                let waiting = thread_awaiting(s, &conversation);
+                let allowed = mode == "fullscreen" && !others && !waiting && crate::shell::confirm::current(s).is_none() && live_frame(s, id, live).is_some_and(|f| f.recently_activated());
                 if mode == "fullscreen" && allowed {
                     if let Some(frame) = live_frame(s, id, live) {
                         frame.fullscreen = true;
@@ -1345,6 +1393,85 @@ pub fn scene_seed(app: &mut App, item: &Value, height: f32) {
     app.ui.panel.mcp_apps.frames.push(frame);
 }
 
+/// A minimal MCP app for the live scene: it initializes with the host, themes itself from the
+/// host context, shows the call's input and result, and reports its height.
+const SCENE_APP: &str = r#"<!doctype html><html><head><meta charset="utf-8"><style>
+html { color-scheme: dark; } body { margin: 0; font: 14px/1.45 var(--font-sans, system-ui, sans-serif); color: var(--color-text-primary, #eee); background: var(--color-background-secondary, #111); }
+.card { padding: 20px 24px; } h1 { font-size: 18px; margin: 0 0 4px; } .muted { color: var(--color-text-secondary, #999); font-size: 12px; }
+.days { display: flex; gap: 12px; align-items: flex-end; height: 120px; margin-top: 16px; } .day { flex: 1; text-align: center; font-size: 12px; }
+.bar { background: #60a5fa; border-radius: 6px 6px 0 0; margin-bottom: 4px; }
+</style></head><body><div class="card" id="card"><h1 id="title">Waiting for the host…</h1><div class="muted" id="host"></div><div class="days" id="days"></div></div>
+<script>
+let next = 1; const waiting = {};
+const send = (m) => window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, m), "*");
+const request = (method, params) => new Promise((done) => { const id = next++; waiting[id] = done; send({ id, method, params }); });
+const theme = (context) => { for (const [k, v] of Object.entries(context?.styles?.variables ?? {})) document.documentElement.style.setProperty(k, v); };
+addEventListener("message", (event) => {
+  const m = event.data;
+  if (event.source !== window.parent || !m || m.jsonrpc !== "2.0") return;
+  if (m.id !== undefined && waiting[m.id]) { waiting[m.id](m.result ?? m.error); delete waiting[m.id]; return; }
+  if (m.method === "ui/notifications/tool-input") document.getElementById("title").textContent = "Forecast for " + m.params.arguments.city;
+  if (m.method === "ui/notifications/host-context-changed") theme(m.params);
+  if (m.method === "ui/notifications/tool-result") {
+    const days = m.params.structuredContent?.days ?? [];
+    document.getElementById("days").innerHTML = days.map((d) => `<div class="day"><div class="bar" style="height:${d.high * 8}px"></div>${d.day} ${d.high}°</div>`).join("");
+    send({ method: "ui/notifications/size-changed", params: { height: document.getElementById("card").offsetHeight } });
+  }
+});
+request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "forecast", version: "1.0.0" }, appCapabilities: { availableDisplayModes: ["inline"] } }).then((r) => {
+  theme(r.hostContext);
+  document.getElementById("host").textContent = `${r.hostInfo.name} · protocol ${r.protocolVersion} · ${r.hostContext.displayMode} · ${r.hostContext.theme} · ${r.hostContext.containerDimensions.width}px`;
+  send({ method: "ui/notifications/initialized", params: {} });
+});
+</script></body></html>"#;
+
+/// Scenes with Chrome (`S5_CHROME`): the row's app run for real through the bridge and host,
+/// pumping the frame's own poll here since a headless run's clock does not wait on Chrome. It
+/// ends once the app sized itself after the call's result, then keeps the last painted frame.
+pub fn scene_live(app: &mut App, id: &str) {
+    super::html_frame::scene_waker(app);
+    let conversation = match app.frame_route() {
+        Route::Thread(thread) => thread.clone(),
+        _ => String::new(),
+    };
+    let styles = Value::Object(style_variables(&super::html_frame::theme_variables(&crate::theme::theme(true))));
+    let Some(frame) = frame_mut(app, id) else { return };
+    let call = ToolCall {
+        arguments: json!({"city": "Oslo"}),
+        result: Some(json!({"content": [{"type": "text", "text": "Five days"}], "structuredContent": {"days": [
+            {"day": "Mon", "high": 4}, {"day": "Tue", "high": 6}, {"day": "Wed", "high": 3}, {"day": "Thu", "high": 8}, {"day": "Fri", "high": 11}]}, "_meta": null})),
+    };
+    // From the default height, so the app's own size report is what changes it.
+    *frame = Frame { live: None, still: false, width: 728., height: DEFAULT_HEIGHT, visible: true, dark: true, styles, conversation, tool_call: Some(call), ..std::mem::take(frame) };
+    start(app, id, super::html_frame::data_url(SCENE_APP));
+    let mut tx = Tx::default();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut sized = None;
+    while Instant::now() < deadline {
+        poll(app, &mut tx);
+        let Some(frame) = frame_mut(app, id) else { return };
+        if frame.live.is_none() {
+            return eprintln!("scene: the app's page went away (failed {}, navigated {})", frame.failed, frame.navigated);
+        }
+        // Sized after its result: let Chrome paint at the new height, then stop.
+        if sized.is_none() && (frame.height - DEFAULT_HEIGHT).abs() >= 1. {
+            eprintln!("scene: the app sized itself to {} px after its result", frame.height);
+            sized = Some(Instant::now());
+        }
+        if sized.is_some_and(|at| at.elapsed() > Duration::from_millis(1500)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if sized.is_none() {
+        eprintln!("scene: the app never reported its size");
+    }
+    if let Some(frame) = frame_mut(app, id) {
+        frame.still = true;
+    }
+    super::browser::shutdown();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1560,11 +1687,39 @@ mod tests {
         assert_eq!(host.tick(start + Duration::from_millis(1999)), vec![]);
         assert_eq!(host.receive(r#"{"jsonrpc":"2.0","id":"t3-host-0","result":{}}"#, &Value::Null), vec![Effect::TornDown]);
         assert_eq!(host.receive(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#, &Value::Null), vec![]);
-        // An app that never answers is let go after two seconds.
+        // An app that never answers is let go after two seconds, which the frame wakes for.
         let mut silent = Host::new(&app());
         replay(&mut silent, &[INITIALIZE, INITIALIZED], &context("inline"));
+        assert_eq!(silent.teardown_due(), None);
         silent.teardown(start);
+        assert_eq!(silent.teardown_due(), Some(start + TEARDOWN_TIMEOUT));
         assert_eq!(silent.tick(start + TEARDOWN_TIMEOUT), vec![Effect::TornDown]);
+        assert_eq!(silent.teardown_due(), None);
+    }
+
+    #[test]
+    fn a_pending_request_keeps_apps_inline() {
+        assert!(awaiting_user(&json!({"runtimeRequests": [{"kind": "approval", "status": "resolved"}, {"kind": "user_input", "status": "pending"}]})));
+        assert!(!awaiting_user(&json!({"runtimeRequests": [{"kind": "approval", "status": "resolved"}]})));
+        assert!(!awaiting_user(&json!({})));
+    }
+
+    #[test]
+    fn rows_leaving_the_list_let_their_apps_go_and_come_back() {
+        let mut s = App::new();
+        let seed = Seed { id: "a".into(), app: app(), thread: "t".into(), item: "a".into(), conversation: "t".into(), revision: "r".into() };
+        s.ui.panel.mcp_apps.frames.push(Frame { visible: true, ..Frame::new(&seed) });
+        let apps = [(3, "a".to_owned()), (9, "missing".to_owned())];
+        // In view: nothing changes.
+        assert!(!in_view(&mut s, &apps, 0..5));
+        // Scrolled out of the list: unlisted and no longer on screen.
+        assert!(in_view(&mut s, &apps, 5..12));
+        let frame = &s.ui.panel.mcp_apps.frames[0];
+        assert!(frame.unlisted && !frame.visible);
+        assert!(!in_view(&mut s, &apps, 6..12), "reported once");
+        // Back in view: listed again, for its next layout to load.
+        assert!(in_view(&mut s, &apps, 2..8));
+        assert!(!s.ui.panel.mcp_apps.frames[0].unlisted);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 mod add_to_machine;
 mod chat;
+mod cloud;
 mod data;
 mod desktop;
 mod env;
@@ -65,6 +66,7 @@ impl Route {
 #[derive(Default)]
 pub struct Ui {
     pub add_to_machine: add_to_machine::Ui,
+    pub cloud: cloud::Ui,
     pub shell: shell::Ui,
     pub chat: chat::Ui,
     pub panel: panel::Ui,
@@ -134,6 +136,7 @@ impl App {
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
     env::start(s);
+    cloud::start(s);
     prompt_link::start(s);
     s.host = host::start(move || waker());
 }
@@ -199,6 +202,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
     changed |= links::poll(s);
+    changed |= cloud::poll(s);
     changed |= add_to_machine::poll(s);
     changed |= settings::codex_callback::poll(s);
     changed |= wizard::poll(s);

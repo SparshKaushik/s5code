@@ -45,9 +45,12 @@ image = (
     .run_commands("curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs")
     # Real turns with OpenCode's free `opencode/*-free` models; see OPENCODE_API_KEY below.
     .run_commands("npm install -g opencode-ai@latest && opencode --version")
+    # Chrome for the browser panel and inline frames (S5_CHROME below); the .deb brings its libraries.
+    .run_commands("curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+                  " && apt-get update && apt-get install -y /tmp/chrome.deb && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*")
 )
 
-ENV = "export DISPLAY=:99 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HOME=/root"
+ENV = "export DISPLAY=:99 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HOME=/root S5_CHROME=/usr/bin/google-chrome-stable"
 
 SETTINGS = {
     "providerInstances": {

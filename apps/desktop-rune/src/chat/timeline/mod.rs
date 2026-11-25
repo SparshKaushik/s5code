@@ -23,6 +23,8 @@ mod inspector;
 mod history;
 pub(crate) mod md_links;
 mod math;
+mod katex;
+mod announcer;
 pub(crate) mod citation;
 mod media;
 mod work;
@@ -39,12 +41,15 @@ use rune::{Cx, El, GrowthSpec, ScrollSpec, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+pub use announcer::view as announcer;
 pub use minimap::view as minimap;
 pub use scenes::SCENES;
 
 #[derive(Default)]
 pub struct Ui {
     assets: attachments::Assets,
+    katex: katex::State,
+    announcer: announcer::State,
     follow: Follow,
     /// A side chat pane's own follow state, so its scrolling leaves the chat's alone.
     side_follow: Follow,
@@ -462,6 +467,16 @@ fn notice_view(app: &App, item: &Value, t: &T) -> El {
         .children(worktree_setup::retry_button(app, item, t).map(|b| row().ml(28.0).pb(4.0).child(b)))
 }
 
+/// The turn items a row draws.
+fn row_items<'a>(row: &Row<'a>) -> Vec<&'a Value> {
+    match row {
+        Row::Work { items, .. } | Row::Tools { items, .. } | Row::Attempt { items, .. } | Row::Subagents { items, .. } => items.clone(),
+        Row::Item(item) | Row::User(item) | Row::Assistant(item) => vec![*item],
+        Row::Request { item, .. } => item.iter().copied().collect(),
+        _ => vec![],
+    }
+}
+
 fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
@@ -800,7 +815,7 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
     let mut changed = attachments::poll(app, tx) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
         | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | subagent::poll(app) | worktree_setup::poll(app)
         | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app)
-        | pending::poll(app, tx) | crate::chat::guest::poll(app);
+        | pending::poll(app, tx) | crate::chat::guest::poll(app) | katex::poll(app) | announcer::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -988,11 +1003,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         stack = stack.child(col().key("timeline-row-parent").w_full().child(parent));
         lead += 1;
     }
-    // The minimap lights the prompts in view and finds the turn being read.
+    // The minimap lights the prompts in view and finds the turn being read; MCP apps whose rows
+    // leave the virtual list let their pages go.
     if routed {
         let thread = thread_id.to_owned();
+        let apps: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(index, r)| row_items(r).into_iter().filter(|item| crate::panel::mcp_app::reference(item).is_some()).map(move |item| (index + lead, s(item, "id").to_owned())))
+            .collect();
         stack = stack.on_visible_rows(move |app: &mut App, r: std::ops::Range<usize>| {
-            minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead))
+            let apps_changed = crate::panel::mcp_app::in_view(app, &apps, r.clone());
+            minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead)) | apps_changed
         });
     }
     for (index, r) in rows.into_iter().enumerate() {
