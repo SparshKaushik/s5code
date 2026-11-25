@@ -236,11 +236,9 @@ fn server_row(s: &App, linked: &Linked, t: &T) -> El {
                 .role("group")
                 .label(format!("Confirm deregistration of {label}"))
                 .child(text("Deregister server").font(theme::weight(theme::TEXT_SM, theme::SEMIBOLD)).color(t.c.foreground))
-                .child(row().mt(4.0).child(muted(format!("“{label}” will be removed from this account."), t)))
-                .child(row().mt(16.0).max_w(576.0).child(muted(
-                    "T3 Connect access will be revoked, any managed tunnel will be removed, and a host space will become available. Local connections on your devices are not changed.",
-                    t,
-                )))
+                .child(muted(format!("“{label}” will be removed from this account."), t).mt(4.0))
+                // A text child of the column wraps to its width; inside a row it measured unbounded.
+                .child(muted("T3 Connect access will be revoked, any managed tunnel will be removed, and a host space will become available. Local connections on your devices are not changed.", t).mt(16.0))
                 .child(
                     row()
                         .mt(16.0)
