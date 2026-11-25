@@ -11,7 +11,7 @@ use super::Outgoing;
 /// Image types the server stores (PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES), by extension.
 const IMAGE_TYPES: [(&str, &str); 5] =
     [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
-const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+pub(super) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// PROVIDER_SEND_TURN_MAX_FILE_BYTES.
 pub const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 255;
@@ -58,7 +58,7 @@ fn extension(name: &str) -> Option<String> {
     Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
 }
 
-fn image_type(name: &str) -> Option<&'static str> {
+pub(super) fn image_type(name: &str) -> Option<&'static str> {
     let ext = extension(name)?;
     IMAGE_TYPES.iter().find(|(e, _)| *e == ext).map(|(_, m)| *m)
 }
@@ -272,6 +272,13 @@ impl Thumbs {
     }
 
     /// Decodes `path` before returning, for scenes that draw one frame.
+    /// A prepared picture takes its original's thumbnail, so its tile stays as it is.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        if let Some(thumb) = self.ready.remove(from) {
+            self.ready.insert(to.to_owned(), thumb);
+        }
+    }
+
     pub fn load_now(&mut self, path: &str) {
         self.ready.insert(path.to_owned(), load_thumb(path, None, true));
     }

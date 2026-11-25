@@ -199,6 +199,13 @@ fn request(url: &str) -> Result<ureq::Response, String> {
     })
 }
 
+/// The file at `url`, streamed to `path`.
+pub(crate) fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
+    let response = request(url)?;
+    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    std::io::copy(&mut response.into_reader(), &mut file).map(drop).map_err(|e| e.to_string())
+}
+
 /// `fetchMediaBlob`: the response at an http(s) URL, or web's reason it can't be read.
 fn get(url: &str) -> Result<ureq::Response, String> {
     let response = request(url)?;
