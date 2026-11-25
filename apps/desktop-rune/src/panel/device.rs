@@ -1265,7 +1265,7 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
     ];
     pill = pill.child(rail_menu(app, Menu::More, kit::Button::new("More device actions").icon(&icons::ELLIPSIS), more, t, overlays));
     if let Some(stream) = stream {
-        let (phone, live, reason) = (shows_3d(app, stream), streaming(stream), unavailable_3d(app, stream));
+        let (phone, live, reason) = (shows_3d(app, stream), streaming, unavailable_3d(app, stream));
         let three = kit::Button::new("3D view")
             .icon(&icons::BOX)
             .variant(if phone { "secondary" } else { "ghost" })
