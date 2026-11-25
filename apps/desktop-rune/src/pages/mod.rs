@@ -77,7 +77,7 @@ pub fn on_modifier(s: &mut App, e: &KeyEvent) -> bool {
 }
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
+    crate::chat::timeline::attachments::on_key(s, e) || usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
 }
 
 /// A bundled recording next to the shell fixtures (`fixtures/pull-requests.json`, `usage.json`).
@@ -137,6 +137,13 @@ fn open_detail(s: &mut App, tab: usize, then: impl Fn(&mut pr_detail::Ui)) {
     s.ui.pages.detail.tab = tab;
     pr_detail::poll(s);
     then(&mut s.ui.pages.detail);
+}
+
+/// A description holding an upload, pictures on a line of their own and one inline.
+fn media_scene(s: &mut App, open: bool) {
+    let body = "Adds the demo.\n\nhttps://github.com/user-attachments/assets/0f1e2d3c-demo\n\n![Before](https://github.com/user-attachments/assets/1a2b-before) ![After](https://example.com/after.png)\n\nInline ![badge](https://example.com/badge.svg) stays in the text.\n\nThanks!";
+    open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["body"] = json!(body); });
+    pr_media::scene(s, open);
 }
 
 /// The checkout menu with the repository on a second machine too: the environment picker.
@@ -673,7 +680,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-code-condensed", |s| open_detail(s, 2, |u| u.condense.set(2, true))),
     ("pull-requests-detail-closed", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["state"] = json!("closed"); d["autoMergeEnabled"] = json!(false); })),
     ("pull-requests-detail-draft", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["isDraft"] = json!(true); d["autoMergeEnabled"] = json!(false); })),
-    ("pull-requests-detail-media", |s| open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["body"] = json!("Adds the demo.\n\nhttps://github.com/user-attachments/assets/0f1e2d3c-demo\n\n[screenshot](https://example.com/shot.png)\n\nThanks!"); })),
+    ("pull-requests-detail-media", |s| media_scene(s, false)),
+    ("pull-requests-detail-media-lightbox", |s| media_scene(s, true)),
     ("pull-requests-detail-app-access", |s| open_detail(s, 0, |u| u.app_access.2 = Some("not-covered".into()))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
