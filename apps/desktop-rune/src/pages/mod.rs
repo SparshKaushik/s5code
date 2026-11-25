@@ -376,6 +376,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
     ("pull-requests-detail-guide-empty", |s| pr_guide::scene(s, "empty")),
     ("pull-requests-detail-guide-ready", |s| pr_guide::scene(s, "ready")),
+    ("pull-requests-detail-guide-wide", |s| {
+        pr_guide::scene(s, "ready");
+        s.ui.pages.pull_requests.maximized = true;
+    }),
     ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
     ("pull-requests-detail-guide-finish", |s| pr_guide::scene(s, "finish")),
     ("pull-requests-detail-guide-excerpt-comment", |s| pr_guide::scene(s, "comment")),
