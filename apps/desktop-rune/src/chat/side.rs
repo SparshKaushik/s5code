@@ -326,7 +326,7 @@ fn delete(s: &mut App, side: &str) {
 
 /// resolveLatestMergeBackRun: the newest run that finished its reply (still `waiting` while its
 /// checkpoint is captured), unless a newer one is under way.
-fn merge_back_run(projection: &Value) -> Option<&str> {
+pub(crate) fn merge_back_run(projection: &Value) -> Option<&str> {
     let runs = projection["runs"].as_array()?;
     let ordinal = |r: &Value| r["ordinal"].as_i64().unwrap_or(0);
     let latest = runs.iter().filter(|r| matches!(data::s(r, "status"), "waiting" | "completed")).max_by_key(|r| ordinal(r))?;
@@ -434,7 +434,7 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
 }
 
 /// The thread a side chat forked from: a run fork's thread, else its lineage parent.
-fn parent_of(t: &Value) -> &str {
+pub(crate) fn parent_of(t: &Value) -> &str {
     if t["forkedFrom"]["type"] == "run" { data::s(&t["forkedFrom"], "threadId") } else { data::s(&t["lineage"], "parentThreadId") }
 }
 
@@ -464,7 +464,7 @@ fn row_status(t: &Value) -> &str {
 }
 
 /// threadRelationshipStatusLabel.
-fn status_label(status: &str) -> &'static str {
+pub(crate) fn status_label(status: &str) -> &'static str {
     match status {
         "preparing" | "starting" => "Starting",
         "running" | "in_progress" => "Running",
@@ -484,7 +484,7 @@ fn status_label(status: &str) -> &'static str {
 }
 
 /// ThreadRelationshipIcon's status dot.
-fn status_dot(t: &T, status: &str) -> Color {
+pub(crate) fn status_dot(t: &T, status: &str) -> Color {
     match status {
         "running" | "in_progress" | "pending" | "waiting" => t.c.info,
         "failed" | "error" => t.c.destructive,

@@ -1432,6 +1432,12 @@ fn browser_scene(app: &mut App, kind: &str) {
     let tab = preview::scene(app, kind);
     activate(app, Surface::Browser(tab));
 }
+fn browser_page_scene(app: &mut App, path: &str, title: &str) {
+    scene(app, None);
+    if let Some(tab) = preview::scene_page(app, path, title) {
+        activate(app, Surface::Browser(tab));
+    }
+}
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-picker", |s| scene(s, None)),
     ("browser-annotation", |s| browser_scene(s, "annotation")),
@@ -1444,6 +1450,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-external-prompt", |s| browser_scene(s, "external-prompt")),
     ("browser-file-not-shown", |s| browser_scene(s, "file-not-shown")),
     ("browser-server-unreachable", |s| browser_scene(s, "server-unreachable")),
+    ("browser-pdf-chrome", |s| browser_page_scene(s, "/reports/q3", "q3")),
+    ("browser-auth-chrome", |s| browser_page_scene(s, "/staging", "401 Unauthorized")),
+    ("browser-permissions-chrome", |s| browser_page_scene(s, "/permissions", "Permissions ready")),
+    ("browser-popup-chrome", |s| {
+        scene(s, None);
+        if let Some(tab) = preview::scene_popup(s) {
+            activate(s, Surface::Browser(tab));
+        }
+    }),
     ("panel-launcher-profiles", |s| {
         scene(s, None);
         s.client_settings.values.insert("browserProfiles".into(), json!([{ "id": "work", "name": "Work", "kind": "persistent" }]));

@@ -727,17 +727,31 @@ pub(crate) fn workflow_approval(c: &Value) -> bool {
         })
 }
 
-/// CHECK_STATUS_PRESENTATION and pullRequestCheckStatusLabel.
-fn check_status(t: &T, c: &Value) -> (&'static rune::Icon, Color, &'static str) {
+/// CHECK_STATUS_PRESENTATION, with pullRequestCheckStatusLabel's label.
+pub(super) fn check_status(t: &T, c: &Value) -> (&'static rune::Icon, Color, &'static str) {
     let faint = t.c.muted_foreground.alpha_mul(0.7);
+    let (glyph, ink): (&'static rune::Icon, Color) = match field(c, "status") {
+        "pending" => (&i::LOADER_CIRCLE, tw::AMBER_500),
+        "action-required" => (&i::CIRCLE_DOT, amber(t)),
+        "success" => (&i::CIRCLE_CHECK, success(t)),
+        "failure" | "cancelled" => (&i::CIRCLE_X, t.c.destructive),
+        "skipped" => (&i::CIRCLE_SLASH, faint),
+        _ => (&i::CIRCLE_DASHED, faint),
+    };
+    (glyph, ink, check_label(c))
+}
+
+/// pullRequestCheckStatusLabel: a workflow run waiting on approval says so.
+pub(super) fn check_label(c: &Value) -> &'static str {
     match field(c, "status") {
-        "pending" => (&i::LOADER_CIRCLE, tw::AMBER_500, "Running"),
-        "action-required" => (&i::CIRCLE_DOT, amber(t), if workflow_approval(c) { "Awaiting approval" } else { "Awaiting action" }),
-        "success" => (&i::CIRCLE_CHECK, success(t), "Passed"),
-        "failure" => (&i::CIRCLE_X, t.c.destructive, "Failed"),
-        "cancelled" => (&i::CIRCLE_X, t.c.destructive, "Cancelled"),
-        "skipped" => (&i::CIRCLE_SLASH, faint, "Skipped"),
-        _ => (&i::CIRCLE_DASHED, faint, "Neutral"),
+        "pending" => "Running",
+        "action-required" if workflow_approval(c) => "Awaiting approval",
+        "action-required" => "Awaiting action",
+        "success" => "Passed",
+        "failure" => "Failed",
+        "cancelled" => "Cancelled",
+        "skipped" => "Skipped",
+        _ => "Neutral",
     }
 }
 

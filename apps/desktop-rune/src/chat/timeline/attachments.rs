@@ -2,9 +2,10 @@ use crate::{
     App,
     data::s,
     icons,
-    theme::{self, T},
+    theme::{self, AlphaMul, T},
 };
 use super::media::{self, Kind, Loaded};
+use crate::chat::snapshot;
 use rune::{Drag, El, Key, Phase, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -121,6 +122,9 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
         })
         .flat_map(|v| super::rows::array(v, "attachments").iter().cloned())
         .collect();
+    // A playing clip's time and progress move; the poll's one-second wake redraws them.
+    let playing = app.ui.chat.timeline.assets.ready.values().any(|l| l.player().is_some_and(|p| p.is_audio() && p.is_playing()));
+    let media_changed = media_changed | playing;
     let waker = app.ui.panel.waker.clone();
     let Some(net) = app.src.net() else {
         return media_changed;
@@ -196,6 +200,9 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
         let tile = el().w(240.0).child(media::video(id, name, asset, failed, None, t));
         return media::with_actions(tile, id, &source, false);
     }
+    if kind == Some(Kind::Audio) && attachment["downloadable"] != false {
+        return audio(attachment, asset, app.ui.chat.timeline.assets.failed.contains(id), t);
+    }
     let mut content = if s(attachment, "mimeType").starts_with("image/") {
         let mut frame = el()
             .size(240.0, 180.0)
@@ -204,6 +211,9 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
             .fill(t.c.message_surface);
         if let Some(loaded) = asset {
             frame = frame.pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit);
+            if snapshot::is_snapshot(&attachment["source"]) {
+                frame = frame.child(snapshot::overlay(app, &attachment["source"], format!("snapshot-contents-{id}")));
+            }
         }
         frame
     } else {
@@ -224,6 +234,79 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
             });
     }
     content
+}
+
+/// "m:ss".
+fn audio_time(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+const AUDIO_CHIP_WIDTH: f32 = 256.0;
+
+/// InlineAudioPreview's chip: play or pause, the name (pressed to preview the file), and the
+/// time over a progress fill; "Unavailable" when it can't play.
+fn audio(attachment: &Value, asset: Option<&Loaded>, failed: bool, t: &T) -> El {
+    let name = s(attachment, "name").to_owned();
+    let accent = crate::chat::composer::chips::look("file", None).map_or(t.c.info_foreground, |(accent, _)| accent);
+    let player = asset.and_then(Loaded::player).cloned();
+    let failed = failed || asset.is_some_and(Loaded::failed);
+    let state = player.as_ref().map(rune::Player::state);
+    let loading = !failed && matches!(state, None | Some(rune::PlayerState::Loading));
+    let playing = player.as_ref().is_some_and(rune::Player::is_playing);
+    let duration = player.as_ref().and_then(rune::Player::duration).filter(|d| d.is_finite()).unwrap_or(0.0);
+    let elapsed = player.as_ref().map_or(0.0, rune::Player::time);
+    let (action, glyph) = match () {
+        _ if failed => ("Open", &icons::TRIANGLE_ALERT),
+        _ if loading => ("Loading", &icons::LOADER_CIRCLE),
+        _ if playing => ("Pause", &icons::PAUSE),
+        _ => ("Play", &icons::PLAY),
+    };
+    let time = match () {
+        _ if failed => "Unavailable".to_owned(),
+        _ if loading => "...".to_owned(),
+        _ if duration > 0.0 && (elapsed > 0.0 || playing) => format!("{} / {}", audio_time(elapsed), audio_time(duration)),
+        _ if duration > 0.0 => audio_time(duration),
+        _ => audio_time(elapsed),
+    };
+    let url = asset.map(|a| a.url.clone());
+    let preview = |el: El| match url.clone() {
+        Some(url) => el.cursor(rune::Cursor::Pointer).on_press(move |app: &mut App| crate::panel::open_preview(app, &url)),
+        None => el,
+    };
+    let mut button = el()
+        .size(20.0, 20.0)
+        .center()
+        .radius(theme::radius::SM)
+        .role("button")
+        .label(format!("{}{action} {name}", if failed { "Audio unavailable. " } else { "" }))
+        .child(icon(glyph, 12.0).color(accent));
+    button = match (&player, failed, loading) {
+        (_, true, _) => preview(button.focusable(true)),
+        (Some(player), false, false) => {
+            let toggle = player.clone();
+            button.focusable(true).cursor(rune::Cursor::Pointer).hover(accent.alpha(0.15)).on_press(move |_: &mut App| if toggle.is_playing() { toggle.pause() } else { toggle.play() })
+        }
+        _ => button.disabled(true),
+    };
+    let progress = if duration > 0.0 { (elapsed / duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let label = preview(text(name.clone()).font(theme::TEXT_SM).color(t.c.message_foreground).truncate().grow(1.0).shrink().min_w(0.0).label(format!("Preview {name}")));
+    row()
+        .w(AUDIO_CHIP_WIDTH)
+        .h(32.0)
+        .gap(6.0)
+        .pl(6.0)
+        .pr(10.0)
+        .center_y()
+        .radius(theme::radius::LG)
+        .border(1.0, if failed { t.c.destructive.alpha(0.4) } else { accent.alpha(0.3) })
+        .fill(t.c.message_surface)
+        .clip_rounded(theme::radius::LG)
+        .help(if failed { "Audio unavailable. Open the file or retry playback.".to_owned() } else { name })
+        .child(el().pin(Some(0.0), Some(0.0), None, Some(0.0)).w(AUDIO_CHIP_WIDTH * progress).fill(accent.alpha(0.17)))
+        .child(button)
+        .child(label)
+        .child(text(time).font(theme::TEXT_3XS).color(t.c.muted_foreground).shrink().min_w(0.0))
 }
 
 /// UserFileCard: the file's name and size, pressed to preview it in the panel, and Download
@@ -315,6 +398,16 @@ fn siblings(app: &App, id: &str) -> Vec<String> {
                 .then(|| list.iter().filter(|a| s(a, "mimeType").starts_with("image/")).map(|a| s(a, "id").to_owned()).collect())
         })
         .unwrap_or_default()
+}
+
+/// The open picture's `SnapShotSource`, when it is a snapshot sent in this thread.
+fn snapshot_source<'a>(app: &'a App, id: &str) -> Option<&'a Value> {
+    let crate::Route::Thread(thread) = app.frame_route() else { return None };
+    let p = &app.state().thread_views.get(thread)?.projection;
+    let messages = p["messages"].as_array().into_iter().flatten();
+    let items = p["visibleTurnItems"].as_array().into_iter().flatten().map(|i| &i["item"]);
+    let attachment = messages.chain(items).flat_map(|m| m["attachments"].as_array().into_iter().flatten()).find(|a| s(a, "id") == id)?;
+    Some(&attachment["source"]).filter(|source| snapshot::is_snapshot(source))
 }
 
 fn close(app: &mut App) {
@@ -551,6 +644,52 @@ pub fn lightbox(app: &App) -> Option<El> {
             media::with_actions(el().key(STAGE).w_full().grow(1.0).min_h(0.0).pixels_fit(pixels, rune::SurfaceFit::Fit), id, &source, false)
         }
     };
+    let source = snapshot_source(app, id);
+    let details = source.and_then(snapshot::details);
+    let showing = details.is_some() && app.ui.chat.snapshot.lightbox.as_ref() == Some(id);
+    // SnapShotAccessibilityData in the picture's place (the lightbox is dark in both themes).
+    let picture = match details.as_ref().filter(|_| showing) {
+        Some(d) => {
+            let dark = theme::theme(true);
+            let panel = el()
+                .w_full()
+                .max_w(672.0)
+                .max_h(640.0)
+                .padding(16.0)
+                .radius(theme::radius::LG)
+                .fill(dark.c.background)
+                .border(1.0, dark.c.border.alpha_mul(0.7))
+                .child(snapshot::data_view(app, &dark, d, &format!("lightbox-data-{id}")))
+                .scroll(rune::ScrollSpec { stick_bottom: false });
+            el().key(STAGE).w_full().grow(1.0).min_h(0.0).center().child(panel)
+        }
+        None => picture,
+    };
+    let contents = match (&details, source) {
+        (Some(d), _) => {
+            let label = if showing { "Show screenshot" } else if d.json { "Show accessibility JSON" } else { "Show extracted text" };
+            let open = id.clone();
+            Some(
+                el().key("image-lightbox-contents")
+                    .size(18.0, 18.0)
+                    .center()
+                    .radius(theme::radius::SM)
+                    .fill(rune::Color::BLACK.alpha(0.35))
+                    .hover(rune::Color::BLACK.alpha(0.6))
+                    .cursor(rune::Cursor::Pointer)
+                    .role("button")
+                    .label(label)
+                    .help(label)
+                    .child(icon(if showing { &icons::IMAGE } else { &icons::TEXT }, 12.0).color(rune::Color::WHITE))
+                    .on_press(move |app: &mut App| {
+                        let shown = &mut app.ui.chat.snapshot.lightbox;
+                        *shown = if shown.as_ref() == Some(&open) { None } else { Some(open.clone()) };
+                    }),
+            )
+        }
+        (None, Some(source)) => Some(snapshot::contents_button(app, source, "image-lightbox-contents".into())),
+        _ => None,
+    };
     let place = place(&app.ui.chat.timeline.assets);
     let caption = match place {
         Some((index, count)) => format!("{} ({}/{count})", loaded.name, index + 1),
@@ -599,7 +738,7 @@ pub fn lightbox(app: &App) -> Option<El> {
                                     .h_full()
                                     .gap(8.0)
                                     .child(picture)
-                                    .child(row().w_full().justify_center().child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate())),
+                                    .child(row().w_full().justify_center().center_y().gap(6.0).child(text(caption).font(theme::TEXT_XS).color(rune::Color::WHITE.alpha(0.8)).truncate()).children(contents)),
                             )
                             .children(place.map(|_| button("image-lightbox-next", &icons::CHEVRON_RIGHT, "Next media").on_press(|app: &mut App| step(app, 1)))),
                     )

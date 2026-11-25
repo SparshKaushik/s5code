@@ -99,6 +99,12 @@ struct Stream {
     /// The iOS event log, streaming while its section is open.
     log: Option<inspect::Feed<Vec<inspect::LogEntry>>>,
     feeds_seen: u64,
+    /// An Android foldable's posture.
+    fold: Arc<Mutex<Fold>>,
+    /// Web `DeviceDuoControls`' `settledVertical` and `standVertical`: how the Duo is held, from
+    /// the last settled screen and from when it went into a stand.
+    duo_vertical: Option<bool>,
+    stand_vertical: Option<bool>,
 }
 
 #[derive(Default)]
@@ -345,6 +351,9 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         ax: None,
         log: None,
         feeds_seen: 0,
+        fold: Arc::default(),
+        duo_vertical: None,
+        stand_vertical: None,
     };
     let wake = app.ui.panel.waker.clone();
     let wake = move || {
@@ -352,16 +361,16 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
             wake();
         }
     };
-    let net = app.src.net_ref().map(|n| (n.base_url().to_owned(), n.bearer().to_owned()));
+    let net = app.src.net_ref().map(|n| (n.base_url().to_owned(), n.auth().clone()));
     match (transport, net) {
-        (Transport::Semu, Some((base, bearer))) => {
+        (Transport::Semu, Some((base, auth))) => {
             let (input, rx) = input::Input::channel(true);
             let query = format!("device={}&frame-meta=1&hostId={}", encode(&device), encode(&host));
-            video::spawn_semu(base, bearer, query, rx, input.state.clone(), stream.pixels.clone(), stream.shared.clone(), stream.stop.clone(), wake);
+            video::spawn_semu(base, auth, query, rx, input.state.clone(), stream.pixels.clone(), stream.shared.clone(), stream.stop.clone(), wake);
             stream.input = Some(input);
         }
-        (_, Some((base, bearer))) => {
-            stream.input = Some(input::Input::open(base, bearer, &host, &device, wake));
+        (_, Some((base, auth))) => {
+            stream.input = Some(input::Input::open(base, auth, &host, &device, wake));
             stream.ticket = app.src.net().map(|n| n.http_request("POST", "/api/auth/websocket-ticket/media", json!({})));
         }
         (_, None) => {}
@@ -397,6 +406,9 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         ax: None,
         log: None,
         feeds_seen: 0,
+        fold: Arc::default(),
+        duo_vertical: None,
+        stand_vertical: None,
     }
 }
 
@@ -438,7 +450,7 @@ fn act(app: &mut App, action: Value) {
 /// serve-sim's PNG screenshot, saved to Downloads as web's download.
 fn screenshot(app: &mut App, name: &str) {
     let Some(net) = app.src.net_ref() else { return };
-    let (base, bearer) = (net.base_url().to_owned(), net.bearer().to_owned());
+    let (base, auth) = (net.base_url().to_owned(), net.auth().clone());
     let wake = app.ui.panel.waker.clone();
     let Some(stream) = app.ui.panel.device.stream.as_ref() else { return };
     let Some((host, device)) = stream.key.split_once('\u{0}') else { return };
@@ -454,7 +466,7 @@ fn screenshot(app: &mut App, name: &str) {
     let shared = stream.shared.clone();
     let path = format!("/api/device-hub/vendor/{}/api/screenshot", if stream.transport == Transport::Semu { "serve-emu" } else { "serve-sim" });
     std::thread::spawn(move || {
-        let saved = s5_net::api_post_read(&base, &bearer, &path, &query, 64 << 20)
+        let saved = s5_net::api_post_read(&base, &auth, &path, &query, 64 << 20)
             .map_err(|e| format!("Screenshot capture failed ({e}). Try again."))
             .and_then(|png| if png.is_empty() { Err("The device returned an empty screenshot. Try again.".to_owned()) } else { Ok(png) })
             .and_then(|png| {
@@ -484,12 +496,182 @@ fn power_off(app: &mut App) {
     }
 }
 
-/// The hub connection a readout thread uses: base URL, bearer, the device's host and id, and the wake.
-fn hub(app: &App) -> Option<(String, String, String, String, impl Fn() + Send + 'static)> {
+/// Web's `DeviceDuoGlyph`: the Duo's fold shapes (upright, or a quarter turn for a flat phone)
+/// and its stands, which also stand for an Android foldable's postures.
+static CLOSED: rune::Icon = rune::Icon { name: "fold-closed", view: 24.0, body: "<rect x=\"5.8\" y=\"3\" width=\"12.4\" height=\"18\" rx=\"2.2\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><circle cx=\"15.4\" cy=\"5.7\" r=\".6\" fill=\"currentColor\"/><path d=\"M10.6 18.2h2.8\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static CLOSED_ROTATED: rune::Icon = rune::Icon { name: "fold-closed-rotated", view: 24.0, body: "<rect x=\"3\" y=\"5.8\" width=\"18\" height=\"12.4\" rx=\"2.2\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><circle cx=\"18.3\" cy=\"15.4\" r=\".6\" fill=\"currentColor\"/><path d=\"M5.8 10.6v2.8\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static BOOK: rune::Icon = rune::Icon { name: "fold-book", view: 24.0, body: "<path d=\"M4.6 18.1V5.9Q4.6 4.9 5.9 4.9L12 7.5L18.1 4.9Q19.4 4.9 19.4 5.9V18.1Q19.4 19.1 18.1 19.1L12 16.5L5.9 19.1Q4.6 19.1 4.6 18.1Z\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static BOOK_ROTATED: rune::Icon = rune::Icon { name: "fold-book-rotated", view: 24.0, body: "<path d=\"M5.9 4.6L18.1 4.6Q19.1 4.6 19.1 5.9L16.5 12L19.1 18.1Q19.1 19.4 18.1 19.4L5.9 19.4Q4.9 19.4 4.9 18.1L7.5 12L4.9 5.9Q4.9 4.6 5.9 4.6Z\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static OPEN: rune::Icon = rune::Icon { name: "fold-open", view: 24.0, body: "<rect x=\"2.5\" y=\"5\" width=\"19\" height=\"14\" rx=\"2.4\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M10.5 16.3h3\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static OPEN_ROTATED: rune::Icon = rune::Icon { name: "fold-open-rotated", view: 24.0, body: "<rect x=\"5\" y=\"2.5\" width=\"14\" height=\"19\" rx=\"2.4\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M7.7 10.5v3\" stroke=\"currentColor\" stroke-width=\"1.35\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static LAPTOP: rune::Icon = rune::Icon { name: "stance-laptop", view: 22.0, body: "<path d=\"M2.7351 15.9857 L15.8128 14.4159 L14.4114 6.3787 C14.1943 5.134 13.1275 4.2319 12.0283 4.3639 L2.9308 5.4559 C1.8317 5.5879 1.1167 6.7038 1.3337 7.9485 L2.7351 15.9857 Z M2.7351 15.9857 L15.8128 14.4159 L19.9103 15.8914 C20.5449 16.1199 20.1683 16.4121 19.0692 16.5441 L9.9717 17.6361 C8.8725 17.7681 7.4672 17.6898 6.8326 17.4612 L2.7351 15.9857 Z\" stroke=\"currentColor\" stroke-width=\"1.25\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+static TENT: rune::Icon = rune::Icon { name: "stance-tent", view: 22.0, body: "<path d=\"M3.2522 5.7267 L18.7478 4.4816 L16.696 12.7017 C16.3782 13.9748 15.0649 15.0915 13.7626 15.1962 L2.983 16.0623 C1.6807 16.167 0.8826 15.2199 1.2004 13.9468 L3.2522 5.7267 Z M3.2522 5.7267 L18.7478 4.4816 L20.7996 13.6909 C21.1174 15.1172 20.3193 16.3581 19.017 16.4628 L8.2374 17.3289 C6.9351 17.4336 5.6218 16.3623 5.304 14.936 L3.2522 5.7267 Z\" stroke=\"currentColor\" stroke-width=\"1.25\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
+
+const FOLD_PATH: &str = "/api/device-hub/vendor/serve-emu/api/fold";
+const FOLD_TIMEOUT: Duration = Duration::from_secs(12);
+const FOLD_RETRY: Duration = Duration::from_secs(3);
+
+/// Web's `AndroidFoldState`: serve-emu's readout of an emulated foldable.
+#[derive(Clone, Debug, PartialEq)]
+struct FoldState {
+    supported: bool,
+    posture: Option<String>,
+    hinge_angle: Option<f64>,
+}
+
+impl FoldState {
+    /// Web's `foldAngle`.
+    fn angle(&self) -> f64 {
+        self.hinge_angle.unwrap_or(if self.posture.as_deref() == Some("closed") { 0. } else { 180. })
+    }
+}
+
+fn parse_fold(body: &[u8]) -> Result<FoldState, String> {
+    let bad = || "Unexpected Android fold response.".to_owned();
+    let payload: Value = serde_json::from_slice(body).map_err(|_| bad())?;
+    let fold = &payload["fold"];
+    if payload["ok"] != true || !fold.is_object() {
+        return Err(bad());
+    }
+    let posture = match &fold["posture"] {
+        Value::Null => None,
+        Value::String(p) if matches!(p.as_str(), "closed" | "half_opened" | "opened" | "flipped" | "tent") => Some(p.clone()),
+        _ => return Err(bad()),
+    };
+    let hinge_angle = match &fold["hingeAngle"] {
+        Value::Null => None,
+        angle => Some(angle.as_f64().ok_or_else(bad)?),
+    };
+    Ok(FoldState { supported: fold["supported"].as_bool().ok_or_else(bad)?, posture, hinge_angle })
+}
+
+/// Web's fold error: serve-emu's own reason, else the status.
+fn fold_error(error: &str) -> String {
+    if error.contains("timed out") {
+        return "Fold command timed out.".into();
+    }
+    if let Some(reason) = serde_json::from_str::<Value>(error).ok().and_then(|v| v["error"].as_str().map(str::to_owned)) {
+        return reason;
+    }
+    match error.strip_prefix("HTTP ") {
+        Some(code) if code.parse::<u16>().is_ok() => format!("Fold command failed ({code})."),
+        _ => error.to_owned(),
+    }
+}
+
+/// `DeviceAndroidFoldControls`' state, shared with its request threads.
+#[derive(Default)]
+struct Fold {
+    state: Option<FoldState>,
+    /// The hinge angle shown: the readout's, or the posture a change asked for while it runs.
+    angle: Option<f64>,
+    /// The screen size the readout is for; a posture change resizes the screen, so a new size reads again.
+    read_for: Option<(u32, u32)>,
+    pending: bool,
+    error: Option<String>,
+    rev: u64,
+}
+
+impl Fold {
+    /// Whether to read for a screen of `size`: a change in flight owns the posture.
+    fn wants_read(&mut self, size: (u32, u32)) -> bool {
+        let wants = !self.pending && size.0 > 0 && self.read_for != Some(size);
+        if wants {
+            self.read_for = Some(size);
+        }
+        wants
+    }
+
+    /// A readout for `size`; false once it is stale and the reader should stop.
+    fn read(&mut self, size: (u32, u32), read: Result<FoldState, String>) -> Option<bool> {
+        if self.pending || self.read_for != Some(size) {
+            return Some(false);
+        }
+        let fold = read.ok()?;
+        self.angle = fold.supported.then(|| fold.angle());
+        self.state = Some(fold);
+        self.rev += 1;
+        Some(true)
+    }
+
+    /// Starts a change to `posture`, showing its angle; false while another runs.
+    fn begin(&mut self, posture: &str) -> bool {
+        if self.pending {
+            return false;
+        }
+        (self.pending, self.error) = (true, None);
+        self.angle = Some(if posture == "closed" { 0. } else { 180. });
+        self.rev += 1;
+        true
+    }
+
+    /// A change's result. A failure restores the angle and says why, and either way the
+    /// readout runs again, so the panel recovers wherever the hinge really ended up.
+    fn finish(&mut self, result: Result<FoldState, String>) {
+        self.pending = false;
+        match result {
+            Ok(fold) => {
+                self.angle = Some(fold.angle());
+                self.state = Some(fold);
+            }
+            Err(e) => {
+                self.angle = self.state.as_ref().filter(|f| f.supported).map(FoldState::angle);
+                self.error = Some(e);
+            }
+        }
+        self.read_for = None;
+        self.rev += 1;
+    }
+}
+
+/// Web's `androidFoldReadAtom`: reads the posture for each screen size, every three seconds
+/// until it answers.
+fn read_fold(stream: &Stream, hub: (String, s5_net::Auth, String, String, impl Fn() + Send + 'static)) {
+    let size = stream.pixels.size();
+    if !stream.fold.lock().unwrap_or_else(|e| e.into_inner()).wants_read(size) {
+        return;
+    }
+    let (base, auth, host, device, wake) = hub;
+    let (shared, stop) = (stream.fold.clone(), stream.stop.clone());
+    let query = format!("device={}&hostId={}", encode(&device), encode(&host));
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let read = s5_net::api_get(&base, &auth, FOLD_PATH, &query, 1 << 16).and_then(|body| parse_fold(&body));
+            match shared.lock().unwrap_or_else(|e| e.into_inner()).read(size, read) {
+                Some(true) => return wake(),
+                Some(false) => return,
+                None => std::thread::sleep(FOLD_RETRY),
+            }
+        }
+    });
+}
+
+/// Web's Fold device and Unfold device.
+fn change_fold(app: &mut App, posture: &'static str) {
+    if !input_ready(app) {
+        return;
+    }
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
+    let Some(shared) = app.ui.panel.device.stream.as_ref().map(|s| s.fold.clone()) else { return };
+    if !shared.lock().unwrap_or_else(|e| e.into_inner()).begin(posture) {
+        return;
+    }
+    let query = format!("device={}&hostId={}", encode(&device), encode(&host));
+    std::thread::spawn(move || {
+        let result = s5_net::api_post_json(&base, &auth, FOLD_PATH, &query, &json!({"posture": posture}), FOLD_TIMEOUT, 1 << 16)
+            .map_err(|e| fold_error(&e))
+            .and_then(|body| parse_fold(&body));
+        shared.lock().unwrap_or_else(|e| e.into_inner()).finish(result);
+        wake();
+    });
+}
+
+/// The hub connection a readout thread uses: base URL, credentials, the device's host and id, and the wake.
+fn hub(app: &App) -> Option<(String, s5_net::Auth, String, String, impl Fn() + Send + 'static)> {
     let net = app.src.net_ref()?;
     let (host, device) = app.ui.panel.device.stream.as_ref()?.key.split_once('\u{0}')?;
     let wake = app.ui.panel.waker.clone();
-    Some((net.base_url().to_owned(), net.bearer().to_owned(), host.to_owned(), device.to_owned(), move || {
+    Some((net.base_url().to_owned(), net.auth().clone(), host.to_owned(), device.to_owned(), move || {
         if let Some(wake) = &wake {
             wake();
         }
@@ -511,10 +693,10 @@ fn toggle_ax(app: &mut App) {
         return;
     }
     let android = stream.android;
-    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
     let (path, query) = ax_endpoint(android, &host, &device);
     if let Some(stream) = app.ui.panel.device.stream.as_mut() {
-        stream.ax = Some(inspect::spawn_ax(base, bearer, path, query, android, wake));
+        stream.ax = Some(inspect::spawn_ax(base, auth, path, query, android, wake));
     }
 }
 
@@ -523,10 +705,10 @@ fn toggle_log(app: &mut App) {
     if stream.log.take().is_some() {
         return;
     }
-    let Some((base, bearer, host, device, wake)) = hub(app) else { return };
+    let Some((base, auth, host, device, wake)) = hub(app) else { return };
     let query = format!("device={}&limit={}&hostId={}", encode(&device), inspect::LOG_LIMIT, encode(&host));
     if let Some(stream) = app.ui.panel.device.stream.as_mut() {
-        stream.log = Some(inspect::spawn_log(base, bearer, "/api/device-hub/vendor/serve-sim/api/event-log/events".into(), query, wake));
+        stream.log = Some(inspect::spawn_log(base, auth, "/api/device-hub/vendor/serve-sim/api/event-log/events".into(), query, wake));
     }
 }
 
@@ -595,6 +777,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         changed = true;
     }
     sync_stream(app, tx);
+    let ready = input_ready(app);
+    let fold_hub = hub(app);
     let base = app.src.net_ref().map(|n| n.base_url().to_owned()).unwrap_or_default();
     let wake = app.ui.panel.waker.clone();
     let Some(stream) = app.ui.panel.device.stream.as_mut() else { return changed };
@@ -642,7 +826,28 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     let seen = shared.frames * 4 + u64::from(shared.failed.is_some()) * 2 + u64::from(shared.capturing);
     drop(shared);
-    let feeds = stream.ax.as_ref().map_or(0, |f| f.rev()) + stream.log.as_ref().map_or(0, |f| f.rev());
+    if stream.android
+        && ready
+        && let Some(hub) = fold_hub
+    {
+        read_fold(stream, hub);
+    }
+    let mut feeds = stream.ax.as_ref().map_or(0, |f| f.rev()) + stream.log.as_ref().map_or(0, |f| f.rev()) + stream.fold.lock().unwrap_or_else(|e| e.into_inner()).rev;
+    if let Some(input) = &stream.input {
+        let mut state = input.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let expired = state.duo.expire(now);
+        state.rev += u64::from(expired);
+        if let Some(at) = state.duo.deadline() {
+            tx.wake_after(at.saturating_duration_since(now));
+        }
+        if let Some(fold) = state.screen.as_ref().filter(|s| s.supports_hinge).map(input::duo_fold)
+            && fold.settled
+        {
+            stream.duo_vertical = Some(fold.phone_vertical);
+        }
+        feeds += state.rev;
+    }
     if feeds != stream.feeds_seen {
         stream.feeds_seen = feeds;
         changed = true;
@@ -934,7 +1139,86 @@ fn rail(app: &App, stream: Option<&Stream>, name: &str, t: &T, overlays: &mut Ve
         kit::MenuItem::new(if kind == "simlock" { "Return device to the pool" } else { "Power off device" }).icon(&icons::POWER).variant("destructive").disabled(app.ui.panel.device.powering_off.is_some()).on_select(power_off),
     ];
     pill = pill.child(rail_menu(app, Menu::More, kit::Button::new("More device actions").icon(&icons::ELLIPSIS), more, t, overlays));
-    col().key("device-controls").label("Device controls").w(56.).h_full().pr(8.).py(12.).center().child(pill)
+    let mut rail = col().key("device-controls").label("Device controls").w(56.).h_full().pr(8.).py(12.).gap(8.).center().child(pill);
+    if let Some(stream) = stream {
+        rail = if android { rail.children(fold_controls(stream, ready, t)) } else { rail.children(duo_controls(stream, ready, t)) };
+    }
+    rail
+}
+
+fn hinge_group(label: &str, buttons: Vec<El>, t: &T) -> El {
+    col().role("group").label(label.to_owned()).gap(4.).padding(4.).radius(999.).items_center().fill(t.c.background.alpha_mul(0.8)).border(1., t.c.border.alpha_mul(0.5)).children(buttons)
+}
+
+fn hinge_button(label: &str, glyph: &'static rune::Icon, pressed: bool, disabled: bool, t: &T, f: impl Fn(&mut App) + 'static) -> El {
+    kit::Button::new(label.to_owned()).icon(glyph).variant(if pressed { "secondary" } else { "ghost" }).size("icon").disabled(disabled).on_press(f).build(t).help(label.to_owned()).checked(pressed)
+}
+
+/// Web's "!" beside hinge controls whose last command failed.
+fn hinge_error(error: Option<String>, t: &T) -> Option<El> {
+    error.map(|e| text("!").font(theme::TEXT_XS).color(t.c.destructive).role("alert").label(e.clone()).focusable(true).help(e))
+}
+
+/// `DeviceAndroidFoldControls`, once serve-emu says the emulator folds.
+fn fold_controls(stream: &Stream, enabled: bool, t: &T) -> Vec<El> {
+    let fold = stream.fold.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = fold.state.as_ref().filter(|f| f.supported) else { return vec![] };
+    let posture = state.posture.as_deref();
+    let disabled = fold.pending || !enabled;
+    let buttons = vec![
+        hinge_button("Fold device", &CLOSED, posture == Some("closed"), disabled, t, |s| change_fold(s, "closed")),
+        hinge_button("Unfold device", &OPEN, posture == Some("opened"), disabled, t, |s| change_fold(s, "opened")),
+    ];
+    let angle = fold.angle.map(|a| text(format!("{}\u{b0}", a.round())).font(theme::TEXT_3XS).color(t.c.muted_foreground).label(format!("Hinge at {} degrees", a.round())));
+    let group = col().label("Android fold controls").gap(4.).items_center().child(hinge_group("Fold posture", buttons, t)).children(angle).children(hinge_error(fold.error.clone(), t));
+    vec![group]
+}
+
+fn duo_send(command: Value) -> impl Fn(&mut App) + 'static {
+    move |s: &mut App| {
+        if let Some(input) = input(s) {
+            input.duo(command.clone());
+        }
+    }
+}
+
+/// `DeviceDuoControls`: an iPhone Duo's fold shapes and stands.
+fn duo_controls(stream: &Stream, enabled: bool, t: &T) -> Vec<El> {
+    let Some(input) = &stream.input else { return vec![] };
+    let state = input.state.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(screen) = state.screen.as_ref().filter(|s| s.supports_hinge) else { return vec![] };
+    let fold = input::duo_fold(screen);
+    let settled_vertical = stream.duo_vertical.unwrap_or(fold.phone_vertical);
+    let stand_vertical = stream.stand_vertical.unwrap_or(settled_vertical);
+    let vertical = if fold.stand { stand_vertical } else { settled_vertical };
+    // Only one command waits behind the one in flight, so a fold waits for a stand's rotation.
+    let waits = state.duo.pending() && (fold.stand || state.duo.requested().is_some_and(|c| c["control"] == "pose"));
+    let folds = [("closed", 0, "Closed", &CLOSED, &CLOSED_ROTATED), ("half", 90, if vertical { "Book" } else { "Laptop" }, &BOOK, &BOOK_ROTATED), ("open", 180, "Open", &OPEN, &OPEN_ROTATED)]
+        .into_iter()
+        .map(|(id, angle, label, upright, flat)| {
+            let hold = fold.stand.then(|| json!({"control": "orientation", "value": input::duo_hold(stand_vertical, screen.screen_id)}));
+            hinge_button(label, if vertical { upright } else { flat }, !fold.stand && fold.fold == id, !enabled || waits, t, move |s| {
+                if let Some(hold) = &hold {
+                    duo_send(hold.clone())(s);
+                }
+                duo_send(json!({"control": "angle", "value": angle}))(s);
+            })
+        })
+        .collect();
+    let stands = [("laptop", "Laptop stand", &LAPTOP), ("tent", "Tent stand", &TENT)]
+        .into_iter()
+        .map(|(id, label, glyph)| {
+            let stand = fold.stand;
+            hinge_button(label, glyph, screen.hinge_pose.as_deref() == Some(id), !enabled, t, move |s| {
+                if !stand && let Some(stream) = s.ui.panel.device.stream.as_mut() {
+                    stream.stand_vertical = Some(settled_vertical);
+                }
+                duo_send(json!({"control": "pose", "value": id}))(s);
+            })
+        })
+        .collect();
+    let group = col().label("iPhone Duo stands").gap(8.).items_center().child(hinge_group("Fold shape", folds, t)).child(hinge_group("Device stance", stands, t)).children(hinge_error(state.duo.error.clone(), t));
+    vec![group]
 }
 
 /// Web's `floatActive`: the device moves over the chat and the right panel closes.
@@ -1533,6 +1817,34 @@ mod tests {
         let names: Vec<(&str, Vec<&str>)> = groups.iter().map(|(t, l)| (*t, l.iter().map(|d| data::s(d, "name")).collect())).collect();
         assert_eq!(names, vec![("iOS Simulators", vec!["iPad", "iPhone SE"]), ("Android Emulators", vec!["Pixel"])]);
         assert_eq!(subtitle(&devices, &devices["devices"][2]), "This Mac · iOS 18 · Running");
+    }
+
+    #[test]
+    fn a_failed_fold_change_restores_the_angle_and_reads_the_posture_again() {
+        let opened = br#"{"ok":true,"fold":{"supported":true,"posture":"opened","hingeAngle":null}}"#;
+        assert_eq!(parse_fold(opened), Ok(FoldState { supported: true, posture: Some("opened".into()), hinge_angle: None }));
+        assert_eq!(parse_fold(br#"{"ok":true,"fold":{"supported":true,"posture":"sideways","hingeAngle":null}}"#), Err("Unexpected Android fold response.".into()));
+        assert_eq!(parse_fold(br#"{"ok":false}"#), Err("Unexpected Android fold response.".into()));
+        assert_eq!(fold_error(r#"{"ok":false,"error":"Emulator has no hinge"}"#), "Emulator has no hinge");
+        assert_eq!(fold_error("HTTP 502"), "Fold command failed (502).");
+        assert_eq!(fold_error("http://h/api: timed out reading response"), "Fold command timed out.");
+
+        let mut fold = Fold::default();
+        let size = (1080, 2400);
+        assert!(fold.wants_read(size) && !fold.wants_read(size), "one readout per screen size");
+        assert_eq!(fold.read(size, Err("HTTP 503".into())), None, "a failed read retries");
+        assert_eq!(fold.read(size, parse_fold(opened)), Some(true));
+        assert_eq!(fold.angle, Some(180.));
+        assert!(fold.begin("closed") && !fold.begin("opened"), "one change at a time");
+        assert_eq!(fold.angle, Some(0.), "the change shows the angle it asked for");
+        assert!(!fold.wants_read((1080, 1200)), "a change in flight owns the posture");
+        fold.finish(Err(fold_error("HTTP 500")));
+        assert_eq!((fold.angle, fold.error.as_deref(), fold.pending), (Some(180.), Some("Fold command failed (500)."), false));
+        assert!(fold.wants_read(size), "after a failure the posture is read again, even at the same size");
+        let closed = parse_fold(br#"{"ok":true,"fold":{"supported":true,"posture":"closed","hingeAngle":3}}"#);
+        assert_eq!(fold.read((1080, 1200), closed.clone()), Some(false), "a readout for another size is stale");
+        assert_eq!(fold.read(size, closed), Some(true));
+        assert_eq!((fold.angle, fold.state.as_ref().and_then(|f| f.posture.as_deref())), (Some(3.), Some("closed")));
     }
 
     #[test]
