@@ -1490,6 +1490,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
     }),
+    ("panel-diff-test-files-shown", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, false);
+    }),
+    ("panel-diff-test-files-hidden", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, true);
+    }),
     ("panel-diff-tree", |s| {
         scene(s, Some(Surface::Diff));
         diff::tree_fixture(s);
