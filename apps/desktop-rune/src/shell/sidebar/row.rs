@@ -114,6 +114,12 @@ fn verb_badge(t: &T, v: Verb) -> El {
 }
 
 /// A small text action that appears over the time on hover (Snooze, Settle, Wake, Un-settle).
+/// A hover action's accessible name, and its tooltip where the web gives one.
+fn named(e: El, name: &str, tip: bool) -> El {
+    let e = e.role("button").label(name);
+    if tip { e.help(name) } else { e }
+}
+
 pub(super) fn hover_action(t: &T, key: String, glyph: &'static rune::Icon, size: f32, label: Option<&str>, px: f32) -> El {
     let mut b = row()
         .key(key)
@@ -510,20 +516,24 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             let mut actions = row().h_full();
             if draft {
                 let id = th.id.clone();
-                actions = actions.child(hover_action(t, format!("sb-discard-{}", th.id), &i::X, 14.0, None, 6.0).help("Discard draft").on_press(move |s: &mut App| super::drafts::discard(s, &id)));
+                actions = actions.child(named(hover_action(t, format!("sb-discard-{}", th.id), &i::X, 14.0, None, 6.0), "Discard draft", true).on_press(move |s: &mut App| super::drafts::discard(s, &id)));
             }
             // `showSnoozeButton`: operate access, a loaded config, and a thread that can snooze.
-            if th.can_snooze() && super::can_operate(s, &[th]) && super::config_of(s, th).is_some() {
+            let supported = super::config_of(s, th).is_some();
+            if supported && th.can_snooze(model.now) && super::can_operate(s, &[th]) {
                 let id = th.id.clone();
-                actions = actions.child(hover_action(t, format!("sb-snooze-{}", th.id), &i::CLOCK, 12.0, None, 6.0).on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                actions = actions.child(named(hover_action(t, format!("sb-snooze-{}", th.id), &i::CLOCK, 12.0, None, 6.0), "Snooze thread", true).on_press_tx(move |s: &mut App, tx: &mut Tx| {
                     let _ = tx;
                     if let Some(m) = Model::build(s).thread(&id).map(|_| super::menu::Menu::snooze_for(id.clone())) {
                         s.ui.shell.sidebar.menu = Some(m);
                     }
                 }));
             }
-            let id = th.id.clone();
-            actions = actions.child(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)));
+            // `settlementSupported`: the row's server config is in.
+            if supported {
+                let id = th.id.clone();
+                actions = actions.child(named(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 14.0, Some("Settle"), 6.0), "Settle thread", true).on_press(move |s: &mut App| super::checked(s, &id, super::settle)));
+            }
             slot = slot.child(actions.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }
         line1 = line1.child(slot);
@@ -708,12 +718,14 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
             None => rest,
         };
         let mut slot = row().ml(4.0).h(24.0).min_w(32.0).justify_end().center_y().shrink().child(rest.opacity(if hovered && !woke && rc.jump.is_none() { 0.0 } else { 1.0 }));
-        if hovered {
+        // Wake, Un-settle and Settle wait for the row's server config (`snoozeSupported`,
+        // `settlementSupported`); only Wake has no tooltip.
+        if hovered && super::config_of(s, th).is_some() {
             let id = th.id.clone();
             let action = match rc.section {
-                Section::Snoozed => hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsnooze)),
-                Section::Settled => hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0).on_press(move |s: &mut App| super::checked(s, &id, super::unsettle)),
-                _ => hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0).on_press(move |s: &mut App| super::checked(s, &id, super::settle)),
+                Section::Snoozed => named(hover_action(t, format!("sb-wake-{}", th.id), &i::ALARM_CLOCK_OFF, 12.0, None, 6.0), "Wake thread now", false).on_press(move |s: &mut App| super::checked(s, &id, super::unsnooze)),
+                Section::Settled => named(hover_action(t, format!("sb-unsettle-{}", th.id), &i::UNDO_2, 14.0, None, 6.0), "Un-settle thread", true).on_press(move |s: &mut App| super::checked(s, &id, super::unsettle)),
+                _ => named(hover_action(t, format!("sb-settle-{}", th.id), &i::CHECK, 12.0, None, 8.0), "Settle thread", true).on_press(move |s: &mut App| super::checked(s, &id, super::settle)),
             };
             slot = slot.child(action.pin(None, Some(0.0), Some(-4.0), Some(0.0)));
         }
