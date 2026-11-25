@@ -3,7 +3,7 @@ pub(crate) mod agent;
 pub(crate) mod stream;
 pub mod browser;
 pub(crate) mod closed;
-mod device;
+pub(crate) mod device;
 pub(crate) mod diff;
 pub mod drawer;
 mod favicon;

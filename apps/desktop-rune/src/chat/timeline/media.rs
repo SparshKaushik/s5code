@@ -11,6 +11,11 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_os = "macos"))]
+mod mp4;
+#[cfg(not(target_os = "macos"))]
+mod soft;
+
 const IMAGE_EXTENSIONS: [&str; 13] = ["avif", "bmp", "gif", "ico", "heic", "heif", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"];
 const VIDEO_EXTENSIONS: [&str; 7] = ["avi", "m4v", "mkv", "mov", "mp4", "ogv", "webm"];
 const AUDIO_EXTENSIONS: [&str; 11] = ["mp3", "wav", "ogg", "oga", "flac", "aac", "m4a", "opus", "aiff", "webm-audio", "weba"];
@@ -72,12 +77,24 @@ pub struct Loaded {
     pub pixels: Pixels,
     broken: Arc<AtomicBool>,
     player: Option<Player>,
+    /// Off macOS, where Rune's player can't play: MP4 and QuickTime H.264, decoded here.
+    #[cfg(not(target_os = "macos"))]
+    soft: Option<soft::SoftPlayer>,
 }
 
 impl Loaded {
     /// `side`: the longest side a picture decodes to.
     pub fn new(url: String, name: String, kind: Option<Kind>, side: u32, waker: Option<rune::Waker>) -> Self {
-        let mut loaded = Self { url, name, kind, pixels: Pixels::new(), broken: Arc::default(), player: None };
+        let mut loaded = Self {
+            url,
+            name,
+            kind,
+            pixels: Pixels::new(),
+            broken: Arc::default(),
+            player: None,
+            #[cfg(not(target_os = "macos"))]
+            soft: None,
+        };
         match kind {
             Some(Kind::Image) => {
                 let (url, pixels, broken) = (loaded.url.clone(), loaded.pixels.clone(), loaded.broken.clone());
@@ -91,6 +108,9 @@ impl Loaded {
                     }
                 });
             }
+            #[cfg(not(target_os = "macos"))]
+            Some(Kind::Video) => loaded.soft = Some(soft::SoftPlayer::url(loaded.url.clone(), waker)),
+            #[cfg(target_os = "macos")]
             Some(Kind::Video) => {
                 let player = Player::url(loaded.url.clone());
                 if let Some(wake) = waker {
@@ -118,13 +138,19 @@ impl Loaded {
 
     /// The picture could not be read, or the video cannot play here.
     pub fn failed(&self) -> bool {
-        self.broken.load(Ordering::Relaxed) || self.player.as_ref().is_some_and(|p| matches!(p.state(), PlayerState::Failed(_)))
+        #[cfg(not(target_os = "macos"))]
+        let soft = self.soft.as_ref().is_some_and(|p| matches!(p.status(), soft::Status::Failed(_)));
+        #[cfg(target_os = "macos")]
+        let soft = false;
+        soft || self.broken.load(Ordering::Relaxed) || self.player.as_ref().is_some_and(|p| matches!(p.state(), PlayerState::Failed(_)))
     }
 
 
     /// What a memoized view of this media reads, so it rebuilds when it changes.
     fn stamp(&self) -> String {
         let player = self.player.as_ref().map(|p| format!("{:?}{}{:?}", p.state(), p.is_playing(), p.natural_size()));
+        #[cfg(not(target_os = "macos"))]
+        let player = player.or_else(|| self.soft.as_ref().map(|p| format!("{:?}{}{:?}", p.status(), p.is_playing(), p.natural_size())));
         format!("{}:{:?}:{player:?}", self.failed(), self.pixels.size())
     }
 }
@@ -727,8 +753,8 @@ fn unavailable_label(what: &str, alt: &str, font: rune::TextStyle, t: &T) -> El 
         .child(text(label).font(font).color(t.c.muted_foreground).shrink().min_w(0.0))
 }
 
-/// MediaVideoPlayer: the video, pressed to play or pause. One that can't play (Rune plays video
-/// only on macOS) shows web's failure card: Retry video, and Open in browser for a web URL.
+/// MediaVideoPlayer: the video, pressed to play or pause. One that can't play (off macOS, all but
+/// MP4 and QuickTime H.264) shows web's failure card: Retry video, and Open in browser for a web URL.
 pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, original: Option<&str>, t: &T) -> El {
     if failed || loaded.is_some_and(Loaded::failed) {
         let src = loaded.map(|l| l.url.as_str());
@@ -760,26 +786,33 @@ pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, orig
             .child(unavailable_label("Video unavailable", label, theme::TEXT_SM, t))
             .child(buttons);
     }
-    let Some(player) = loaded.and_then(|l| l.player.clone()) else {
-        return el().w_full().aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading video");
-    };
-    let (w, h) = player.natural_size().unwrap_or((16, 9));
-    let playing = player.is_playing();
+    let loading = || el().w_full().aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading video");
+    #[cfg(not(target_os = "macos"))]
+    if let Some(player) = loaded.and_then(|l| l.soft.clone()) {
+        let Some(size) = player.natural_size() else { return loading() };
+        let playing = player.is_playing();
+        let surface = el().fill(Color::BLACK).pixels_fit(player.pixels(), SurfaceFit::Fit);
+        return player_frame(surface, size, playing, label).on_press(move |_: &mut App| if player.is_playing() { player.pause() } else { player.play() });
+    }
+    let Some(player) = loaded.and_then(|l| l.player.clone()) else { return loading() };
+    let size = player.natural_size().unwrap_or((16, 9));
+    let surface = el().fill(Color::BLACK).video(&player, SurfaceFit::Fit);
+    player_frame(surface, size, player.is_playing(), label).on_press(move |_: &mut App| if player.is_playing() { player.pause() } else { player.play() })
+}
+
+/// The video's frame at its aspect ratio, pressed to play or pause, with a play badge while paused.
+fn player_frame(surface: El, (w, h): (u32, u32), playing: bool, label: &str) -> El {
     let name = if label.trim().is_empty() { "Play video".to_owned() } else { format!("Play {label}") };
-    let toggle = player.clone();
-    let mut shown = el()
+    let mut shown = surface
         .w_full()
         .aspect_ratio(w as f32 / h.max(1) as f32)
         .radius(8.0)
         .clip_rounded(8.0)
-        .fill(Color::BLACK)
-        .video(&player, SurfaceFit::Fit)
         .center()
         .focusable(true)
         .role("button")
         .cursor(rune::Cursor::Pointer)
-        .label(if playing { "Pause video".to_owned() } else { name })
-        .on_press(move |_: &mut App| if toggle.is_playing() { toggle.pause() } else { toggle.play() });
+        .label(if playing { "Pause video".to_owned() } else { name });
     if !playing {
         shown = shown.child(el().size(32.0, 32.0).center().radius(theme::radius::FULL).fill(Color::BLACK.alpha(0.5)).child(icon(&icons::PLAY, 16.0).color(Color::WHITE)));
     }
@@ -951,15 +984,16 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
         _ => None,
     };
     let (key, media, _) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
-    let loaded = (!failed).then(|| checker(&media));
+    let loaded = (!failed).then(|| scene_loaded(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.clone(), Entry { media, request: None, loaded, failed });
     Some(key)
 }
 
-/// Scenes: a pull request's linked media under `key` (`linked_key`), drawn without loading.
+/// Scenes: a pull request's linked media under `key` (`linked_key`), drawn without loading; a
+/// video is a clip made here, where it can play.
 pub fn scene_linked(app: &mut App, key: &str, name: &str, kind: Kind, failed: bool) {
     let media = Media { kind, name: name.to_owned(), reference: None, open_file: None };
-    let loaded = (!failed).then(|| checker(&media));
+    let loaded = (!failed).then(|| scene_loaded(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.to_owned(), Entry { media, request: None, loaded, failed });
 }
 
@@ -968,6 +1002,38 @@ pub fn scene_open(app: &mut App, gallery: Vec<String>) {
     let assets = &mut app.ui.chat.timeline.assets;
     assets.open = gallery.first().cloned();
     assets.gallery = gallery;
+}
+
+/// Scenes: a test picture, or for a video a clip made here where it can play.
+fn scene_loaded(media: &Media) -> Loaded {
+    match media.kind {
+        #[cfg(target_os = "linux")]
+        Kind::Video => Loaded { soft: Some(soft::SoftPlayer::bytes(scene_clip(), None)), ..checker(media) },
+        _ => checker(media),
+    }
+}
+
+/// A short H.264 clip, encoded here: a square crossing a gradient (scenes and tests).
+#[cfg(target_os = "linux")]
+pub(crate) fn scene_clip() -> Vec<u8> {
+    use openh264::encoder::Encoder;
+    use openh264::formats::{RgbSliceU8, YUVBuffer};
+    let (w, h) = (320usize, 176usize);
+    let Ok(mut encoder) = Encoder::new() else { return Vec::new() };
+    let units: Vec<Vec<u8>> = (0..30usize)
+        .filter_map(|f| {
+            let rgb: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let square = (20 + f * 8..60 + f * 8).contains(&x) && (68..108).contains(&y);
+                    if square { [240, 240, 250] } else { [(40 + x * 90 / w) as u8, 52, (120 + y * 80 / h) as u8] }
+                })
+                .collect();
+            let bits = encoder.encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)))).ok()?.to_vec();
+            (!bits.is_empty()).then_some(bits)
+        })
+        .collect();
+    mp4::write(&units, w as u16, h as u16, 30)
 }
 
 fn checker(media: &Media) -> Loaded {
