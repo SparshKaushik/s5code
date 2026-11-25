@@ -276,15 +276,13 @@ fn notice_row(entry: &Entry, open: bool, t: &T) -> El {
         );
     let mut head = row().w_full().center_y().hover(t.c.muted.alpha_mul(0.35)).child(trigger);
     if let Some(url) = entry.source_url.clone() {
-        head = head.child(
-            Button::new(format!("View project source for {}", entry.name))
-                .icon(&icons::EXTERNAL_LINK)
-                .size("icon-micro")
-                .variant("ghost-muted")
-                .build(t)
-                .mr(16.0)
-                .on_press(move |s: &mut App| super::auth::open_url(s, &url)),
-        );
+        let source = Button::new(format!("View project source for {}", entry.name))
+            .icon(&icons::EXTERNAL_LINK)
+            .size("icon-micro")
+            .variant("ghost-muted")
+            .build(t)
+            .on_press(move |s: &mut App| super::auth::open_url(s, &url));
+        head = head.child(super::permissions::tip(&format!("license-source-{}", entry.name), source, "Project source".into()).mr(16.0));
     }
     let mut out = col().w_full().child(head);
     if open {

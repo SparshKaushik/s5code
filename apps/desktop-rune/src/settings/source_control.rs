@@ -910,13 +910,8 @@ fn accounts(s: &App, t: &T, kind: &str, label: &str, cr: &Credentials, auth: &Va
 }
 
 fn rescan(pending: bool, t: &T) -> El {
-    crate::kit::Button::new("Rescan server environment")
-        .variant("ghost-muted")
-        .size("icon-xs")
-        .icon(&icons::REFRESH_CW)
-        .disabled(pending)
-        .on_press(scan)
-        .build(t)
+    let button = crate::kit::Button::new("Rescan server environment").variant("ghost-muted").size("icon-xs").icon(&icons::REFRESH_CW).disabled(pending).on_press(scan).build(t);
+    super::permissions::tip("source-control-rescan", button, "Rescan Git and hosting integrations".into())
 }
 
 /// The scan sections, in web order after Repositories.

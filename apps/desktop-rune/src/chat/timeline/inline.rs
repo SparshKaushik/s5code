@@ -8,7 +8,7 @@ use rune::tok::TextStyle;
 use rune::{Color, El, InlinePicture, Link, PICTURE_MARK, Span, Tx, text};
 
 use crate::App;
-use crate::theme::{AlphaMul, T};
+use crate::theme::{self, AlphaMul, T};
 
 pub(super) struct Picture {
     pub pixels: rune::Pixels,
@@ -17,6 +17,10 @@ pub(super) struct Picture {
     pub copy: String,
     /// The media key pressing it opens in the lightbox.
     pub open: Option<String>,
+    /// Points from its top to the text baseline; `None` centres it on the line.
+    pub baseline: Option<f32>,
+    /// Web's media frame: rounded, with a faint border.
+    pub framed: bool,
 }
 
 /// Link ids that open a picture in the lightbox rather than go anywhere.
@@ -47,6 +51,7 @@ pub(super) fn paragraph(source: &str, mut formulas: Vec<Option<Picture>>, image:
         return None;
     }
     let link_ink = t.c.info_foreground;
+    let frame = t.c.border.alpha_mul(0.4);
     let mut content = String::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
@@ -61,7 +66,14 @@ pub(super) fn paragraph(source: &str, mut formulas: Vec<Option<Picture>>, image:
         if let Some(key) = picture.open {
             links.push((at..content.len(), format!("{MEDIA}{key}")));
         }
-        pictures.push(InlinePicture::new(at, picture.pixels, picture.size[0], picture.size[1]).copy_as(picture.copy));
+        let mut shown = InlinePicture::new(at, picture.pixels, picture.size[0], picture.size[1]).copy_as(picture.copy);
+        if let Some(baseline) = picture.baseline {
+            shown = shown.baseline(baseline);
+        }
+        if picture.framed {
+            shown = shown.radius(theme::radius::LG).border(1.0, frame);
+        }
+        pictures.push(shown);
     };
     for event in Parser::new(source) {
         match event {

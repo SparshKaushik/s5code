@@ -480,7 +480,7 @@ fn option_grid(s: &App, t: &T, featured: bool) -> El {
         cards.push(option);
     }
     // Web's `grid sm:grid-cols-2` inside a `gap-3` radio group: two equal columns.
-    let mut grid = col().w_full().gap(12.0).role("radiogroup");
+    let mut grid = col().w_full().gap(12.0).role("radiogroup").label(if featured { "Provider" } else { "More providers" });
     let mut cards = cards.into_iter();
     while let Some(first) = cards.next() {
         let mut pair = row().w_full().child(row().w_frac(0.5).pr(6.0).child(first));

@@ -241,6 +241,12 @@ fn entry(link: &Value, project: &str) -> Value {
     e
 }
 
+pub(super) fn launcher_target(app: &App) -> Option<Value> {
+    super::context(app)?;
+    let url = crate::chat::details::pr::panel_url(app)?;
+    in_app_entry(&app.state().projects, &url)
+}
+
 /// `useOpenChangeRequestLink`: while "Open pull requests in T3 Code" is on, a change request of a
 /// project's own repository opens in the pull requests view. False leaves the link to the browser.
 pub(crate) fn open_in_app(app: &mut App, url: &str) -> bool {
@@ -248,7 +254,11 @@ pub(crate) fn open_in_app(app: &mut App, url: &str) -> bool {
         return false;
     }
     let Some(entry) = in_app_entry(&app.state().projects, url) else { return false };
-    crate::pages::pr_tabs::restore(app, entry);
+    if super::context(app).is_some() {
+        super::open_pull_request(app, entry);
+    } else {
+        crate::pages::pr_tabs::restore(app, entry);
+    }
     true
 }
 
