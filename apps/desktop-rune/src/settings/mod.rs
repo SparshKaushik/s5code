@@ -4,7 +4,7 @@ pub(crate) use access::grants as session_grants;
 pub(crate) use connections::env_machine_icon;
 mod accent;
 mod acp_icons;
-mod add_provider;
+pub(crate) mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
@@ -15,7 +15,7 @@ pub mod client;
 pub(crate) mod connection_diagnosis;
 mod checkout_grouping;
 pub(crate) mod connections;
-mod controls;
+pub(crate) mod controls;
 pub(crate) use controls::valid_search_template;
 mod restore;
 pub(crate) mod thread_details;
@@ -41,7 +41,7 @@ mod scope;
 pub mod search;
 pub(crate) mod snapshots;
 mod snooze;
-mod source_control;
+pub(crate) mod source_control;
 pub(crate) mod storage;
 pub(crate) mod browser_profiles;
 mod diagnostics;
@@ -1415,6 +1415,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-connections-outdated", |s| {
         scene(s, "connections");
         connections::scene(s, "outdated");
+    }),
+    ("settings-connections-t3-connect", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect");
+    }),
+    ("settings-connections-t3-connect-signing-in", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-signing-in");
+    }),
+    ("settings-connections-t3-connect-route", |s| {
+        scene(s, "connections");
+        connections::scene(s, "t3-connect-route");
+    }),
+    ("settings-connections-trace", |s| {
+        scene(s, "connections");
+        connections::scene(s, "trace");
     }),
     ("settings-connections-machines", |s| {
         scene(s, "connections");

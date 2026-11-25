@@ -336,6 +336,21 @@ fn replies_from_any_environment_reach_the_client_on_screen() {
 }
 
 #[test]
+fn a_closed_connection_keeps_its_trace_until_it_opens() {
+    let (mut net, incoming, _commands) = offline();
+    incoming.send(Incoming::Trace(Some("0af7651916cd43dd8448eb211c80319c".into()))).unwrap();
+    incoming.send(Incoming::Connection(Conn::Closed("Could not connect relay environment: HTTP 502".into()))).unwrap();
+    assert!(net.drain());
+    assert_eq!(net.state().conn_trace.as_deref(), Some("0af7651916cd43dd8448eb211c80319c"));
+    incoming.send(Incoming::Connection(Conn::Connecting)).unwrap();
+    net.drain();
+    assert!(net.state().conn_trace.is_some(), "a retry does not hide the last failure's trace");
+    incoming.send(Incoming::Connection(Conn::Open)).unwrap();
+    net.drain();
+    assert_eq!(net.state().conn_trace, None);
+}
+
+#[test]
 fn shell_items_bump_the_revision_merged_lists_watch() {
     let mut state = State::default();
     state.fold(Route::Shell, json!({"kind":"project.updated","project":{"id":"p"}}));

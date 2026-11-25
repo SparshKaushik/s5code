@@ -3,7 +3,7 @@
 #![allow(dead_code, unused_imports)]
 mod actions;
 mod combobox;
-pub use combobox::{Combobox, ComboboxOption, ComboboxState};
+pub use combobox::{Combobox, ComboboxOption, ComboboxState, Suggestions};
 mod spinner;
 pub use spinner::Spinner;
 mod toggle;

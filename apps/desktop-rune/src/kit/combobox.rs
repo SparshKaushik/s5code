@@ -1,4 +1,5 @@
-//! Searchable select with virtual rows and Rune's IME-safe list keyboard behavior.
+//! Searchable select with virtual rows and Rune's IME-safe list keyboard behavior, and
+//! `Suggestions`, the free-text field's datalist.
 use super::{Popover, Select};
 use crate::{
     icons,
@@ -525,5 +526,193 @@ impl<S: 'static> Combobox<S> {
                     .child(list.scroll_bar_styled(scrollbar)),
             );
         popover.child(body).build(k, layer)
+    }
+}
+
+type EditAccess<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut TextEdit>;
+
+/// The next highlighted row among `len` enabled rows: the first down or the last up from none.
+fn stepped(position: Option<usize>, len: usize, delta: isize) -> usize {
+    match position {
+        None if delta > 0 => 0,
+        None => len - 1,
+        Some(p) => (p as isize + delta).rem_euclid(len as isize) as usize,
+    }
+}
+
+/// A free-text field's suggestions, as a `<datalist>`: the text stays the value, the matches show
+/// below the focused field once it is typed in or Down is pressed, and picking one replaces the
+/// text. `Suggestions::new("models", &s.hints, &s.edit, &values, |s| &mut s.hints, |s| &mut s.edit)
+/// .on_pick(|s, value, tx| ...).build(field, &kit, &mut layer)`, where `field` is the input that
+/// edits `s.edit`; its own Enter still submits while nothing is highlighted. The list anchors
+/// to the field, so `layer` must land after the field's own layer (a dialog's included).
+pub struct Suggestions<S> {
+    key: String,
+    state: ComboboxState,
+    edit: TextEdit,
+    options: Rc<Vec<ComboboxOption>>,
+    access: Access<S>,
+    edit_access: EditAccess<S>,
+    pick: Option<Choose<S>>,
+    max_height: f32,
+}
+impl<S: 'static> Suggestions<S> {
+    pub fn new(
+        key: impl Into<String>,
+        state: &ComboboxState,
+        edit: &TextEdit,
+        values: &[String],
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut ComboboxState + 'static,
+        edit_access: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            state: state.clone(),
+            edit: edit.clone(),
+            options: Rc::new(values.iter().map(|v| ComboboxOption::new(v.clone(), v.clone())).collect()),
+            access: Rc::new(access),
+            edit_access: Rc::new(edit_access),
+            pick: None,
+            max_height: 224.0,
+        }
+    }
+    /// Runs once a picked suggestion has replaced the field's text.
+    pub fn on_pick(mut self, pick: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
+        self.pick = Some(Rc::new(pick));
+        self
+    }
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.max_height = height;
+        self
+    }
+    pub fn build(self, field: El, k: &Kit, layer: &mut Vec<El>) -> El {
+        let anchor = format!("{}-field", self.key);
+        let matches = filtered(&self.options, &self.edit.text);
+        let active = self
+            .state
+            .active
+            .as_ref()
+            .and_then(|a| matches.iter().copied().find(|i| &self.options[*i].id == a));
+        let put: Rc<dyn Fn(&mut S, &str, &mut Tx)> = {
+            let (access, edit_access, pick) = (self.access.clone(), self.edit_access.clone(), self.pick.clone());
+            Rc::new(move |s: &mut S, value: &str, tx: &mut Tx| {
+                let state = access(s);
+                state.open = false;
+                state.active = None;
+                let edit = edit_access(s);
+                edit.replace_text(value.to_string());
+                edit.set_caret(value.len());
+                if let Some(pick) = &pick {
+                    pick(s, value, tx);
+                }
+            })
+        };
+        let (access, edit_access, options, key, enter) =
+            (self.access.clone(), self.edit_access.clone(), self.options.clone(), self.key.clone(), put.clone());
+        let mut field = field.on_input_key(move |s: &mut S, ev, tx| {
+            let edit = edit_access(s);
+            if edit.preedit.is_some() {
+                return false;
+            }
+            let text = edit.text.clone();
+            let state = access(s);
+            let plain = !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt && !ev.mods.logo;
+            match &ev.key {
+                Key::Escape if state.open => {
+                    state.open = false;
+                    state.active = None;
+                    true
+                }
+                Key::Enter if state.open => {
+                    let picked = state.active.clone().filter(|a| filtered(&options, &text).iter().any(|i| &options[*i].id == a));
+                    let Some(value) = picked else {
+                        state.open = false;
+                        return false;
+                    };
+                    if !tx.key_repeat() {
+                        enter(s, &value, tx);
+                    }
+                    true
+                }
+                Key::Down | Key::Up if plain => {
+                    let rows = filtered(&options, &text);
+                    if rows.is_empty() {
+                        return false;
+                    }
+                    let position = state.active.as_ref().and_then(|a| rows.iter().position(|i| &options[*i].id == a));
+                    let id = options[rows[stepped(position, rows.len(), if ev.key == Key::Down { 1 } else { -1 })]].id.clone();
+                    tx.scroll_into_view(format!("{key}-option-{id}"));
+                    state.open = true;
+                    state.active = Some(id);
+                    true
+                }
+                Key::Text(_) | Key::Backspace | Key::Delete if !ev.mods.cmd && !ev.mods.ctrl => {
+                    state.open = true;
+                    state.active = None;
+                    false
+                }
+                _ => false,
+            }
+        });
+        if let Some(i) = active {
+            field = field.active_descendant(format!("{}-option-{}", self.key, self.options[i].id));
+        }
+        let field = row().key(anchor.clone()).w_full().child(field);
+        if !self.state.open || !self.edit.focused || matches.is_empty() {
+            return field;
+        }
+        let width = rune::memo::layout_with(&anchor, |r| r[2]).unwrap_or(180.0).max(120.0);
+        let mut rows = col().w_full();
+        for (position, original) in matches.iter().copied().enumerate() {
+            let option = &self.options[original];
+            let highlighted = active == Some(original);
+            let (access, id) = (self.access.clone(), option.id.clone());
+            let (put, value) = (put.clone(), option.id.clone());
+            rows = rows.child(
+                row()
+                    .key(format!("{}-option-{}", self.key, option.id))
+                    .role("option")
+                    .label(&option.label)
+                    .position_in_set(position + 1, matches.len())
+                    .focus_selected(highlighted)
+                    .w_full()
+                    .h(28.)
+                    .px(8.)
+                    .center_y()
+                    .radius(4.)
+                    .fill(if highlighted { k.c.text_base.alpha_mul(0.09) } else { Color::TRANSPARENT })
+                    .child(text(&option.label).font(theme::TEXT_SM).color(k.c.text_base).grow(1.).truncate())
+                    .on_hover(move |s: &mut S| access(s).active = Some(id.clone()))
+                    .on_press_tx(move |s: &mut S, tx| put(s, &value, tx)),
+            );
+        }
+        let list = col()
+            .key(format!("{}-suggestions", self.key))
+            .w(width)
+            .h((matches.len() as f32 * 28.).min(self.max_height) + 8.)
+            .padding(4.)
+            .role("listbox")
+            .preserve_focus_on_press(true)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(rows);
+        let list = super::menu::glass(list, k, false);
+        layer.push(super::motion::popup(rune_kit::popover::anchored(k, list, &anchor, Placement::BottomStart, 4.)));
+        field
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_step_from_none_to_either_end_and_wrap() {
+        assert_eq!(stepped(None, 3, 1), 0);
+        assert_eq!(stepped(None, 3, -1), 2);
+        assert_eq!(stepped(Some(2), 3, 1), 0);
+        assert_eq!(stepped(Some(0), 3, -1), 2);
+        let options: Vec<_> = ["claude-haiku-4-5", "gpt-5", "claude-opus-4-1"].iter().map(|v| ComboboxOption::new(*v, *v)).collect();
+        assert_eq!(filtered(&options, "opus"), vec![2], "what is typed narrows the suggestions");
+        assert_eq!(filtered(&options, "").len(), 3);
     }
 }

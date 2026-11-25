@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rune::{Color, Cursor, El, ScrollSpec, Tx, col, el, icon, row, spacer, text};
 use rune_kit::diff::{FileDiff, LineKind};
@@ -78,6 +80,8 @@ pub struct Ui {
     pub checkout_menu: bool,
     /// `git.preparePullRequestThread` in flight (startHandoff).
     checkout: Option<Checkout>,
+    /// The environment picked to act on, by pull request key (actingScope).
+    pub(super) acting: Option<(String, String)>,
     /// The detail's error was the host's not-found.
     pub not_found: bool,
     /// A copyable value reading "Copied" until the given time.
@@ -86,6 +90,77 @@ pub struct Ui {
     pub number_menu: Option<(f32, f32)>,
     pub(super) live: super::pull_requests::Live,
     pub meta: super::pr_meta::Ui,
+    /// The header's condensed state per tab, which the scrollers set (condensedByTab).
+    pub(super) condense: Arc<Condense>,
+    /// `sourceControl.appAccess` for the repository: what was asked, the request, the status.
+    pub(super) app_access: (String, Option<u64>, Option<String>),
+}
+
+/// Bits by tab, and the offset that keeps the content still once a header condenses.
+#[derive(Default)]
+pub(super) struct Condense {
+    tabs: AtomicU8,
+    anchor: Mutex<Option<(usize, f32)>>,
+}
+
+impl Condense {
+    pub(super) fn on(&self, tab: usize) -> bool {
+        self.tabs.load(Ordering::Relaxed) & (1 << tab) != 0
+    }
+    pub(super) fn set(&self, tab: usize, on: bool) {
+        if on {
+            self.tabs.fetch_or(1 << tab, Ordering::Relaxed);
+        } else {
+            self.tabs.fetch_and(!(1 << tab), Ordering::Relaxed);
+        }
+    }
+}
+
+/// The header body that folds away, and the one-line header that replaces it.
+const FOLD: &str = "pr-detail-fold";
+const CONDENSED_H: f32 = 28.0;
+
+/// The web's onScrollCapture: the header condenses once its fold has scrolled past with 32px to
+/// spare and opens again near the top. Condensing names the offset that keeps the content where
+/// it was, since the scroller grows by the height the header gave up.
+pub(super) fn next_condensed(condensed: bool, top: f32, fold: f32) -> (bool, Option<f32>) {
+    if condensed {
+        return (top >= 4.0, None);
+    }
+    if fold > 0.0 && top > fold + 32.0 {
+        return (true, Some((top - (fold - CONDENSED_H)).max(0.0)));
+    }
+    (false, None)
+}
+
+/// A tab scroller's offsets drive its header; a change wakes the window.
+pub(super) fn condense_reporter(s: &App, tab: usize) -> impl Fn(rune::ScrollPos) + 'static {
+    let (condense, waker) = (s.ui.pages.detail.condense.clone(), s.ui.panel.waker.clone());
+    move |at: rune::ScrollPos| {
+        let was = condense.on(tab);
+        let fold = rune::memo::layout_with(FOLD, |r| r[3]).unwrap_or(0.0);
+        let (now, anchor) = next_condensed(was, at.offset[1], fold);
+        if now == was {
+            return;
+        }
+        condense.set(tab, now);
+        if let (Some(y), Ok(mut held)) = (anchor, condense.anchor.lock()) {
+            *held = Some((tab, y));
+        }
+        if let Some(waker) = &waker {
+            waker();
+        }
+    }
+}
+
+/// Restores the condensed tab's scroll offset before the next paint.
+pub fn anchor_header(s: &mut App, tx: &mut Tx) -> bool {
+    let u = &s.ui.pages.detail;
+    let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return false };
+    if tab == u.tab && u.condense.on(tab) {
+        tx.scroll_to_y(if tab == 2 { "pr-code-view/scroll".to_string() } else { format!("pr-detail-scroll-{tab}") }, y);
+    }
+    true
 }
 
 /// A checkout being prepared: the thread opens in `project` on it, its composer holding `task`
@@ -95,6 +170,8 @@ struct Checkout {
     request: u64,
     mode: &'static str,
     project: String,
+    /// The environment preparing it, and whose thread opens on it.
+    env: String,
     /// The prompt and its attached threads for the draft thread, once it opens.
     task: Option<(String, Vec<Value>)>,
     /// startHandoff's kind, so only its own control reads as preparing.
@@ -134,6 +211,7 @@ pub fn poll(s: &mut App) -> bool {
     let mut changed = release_confirms(ui(s), crate::data::now_ms(), blurred);
     changed |= poll_checkout(s);
     changed |= live_refresh(s, on);
+    changed |= sync_app_access(s);
     if !on {
         return changed;
     }
@@ -197,6 +275,7 @@ pub fn poll(s: &mut App) -> bool {
                     u.diff_truncated = d["truncated"].as_bool().unwrap_or(false);
                     s.ui.pages.code.fresh = true;
                     s.ui.pages.code.next = d["nextCursor"].as_str().map(str::to_owned);
+                    s.ui.pages.code.first_mark = Some(super::pr_code::page_mark(&d));
                     s.ui.pages.code.raw = super::pr_code::unparsed(d["patch"].as_str().unwrap_or(""), u.files.as_deref().unwrap_or(&[]));
                 }
                 Err(e) => u.diff_error = Some(message(&e, "Could not load the changes.")),
@@ -417,15 +496,156 @@ fn confirm_catcher(s: &App, overlays: &mut Vec<El>) {
     }
 }
 
-/// The checkout's folder: the pull request's workspace, else its project's.
-fn checkout_root(s: &App, d: &Value) -> Option<String> {
-    let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
-    [d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
+/// SourceControlAppAccessNotice's query: asked once the environment has the GitHub app signed in
+/// on the pull request's host, else nothing (the env, host and repository it reads).
+fn app_access_input(s: &App, entry: &Value) -> Option<(String, Value)> {
+    let host = entry["host"].as_str().unwrap_or("github.com").to_lowercase();
+    let github = crate::panel::pull_requests::provider(field(entry, "url")) == "github" || entry["provider"] == "github";
+    if !github || host != "github.com" || field(entry, "repository").is_empty() {
+        return None;
+    }
+    let env = crate::env::of(s, entry);
+    let settings = crate::env::source(s, &env).and_then(|src| src.state().config.as_ref()).map(|c| &c["settings"]);
+    let signed_in = settings.and_then(|v| v["sourceControlHosts"]["github"]["signIns"][host.as_str()].as_str()).is_some_and(|v| !v.is_empty());
+    signed_in.then(|| (env, json!({"provider": "github", "host": host, "repository": field(entry, "repository")})))
 }
 
-/// usePreparePullRequestThreadAction's grant, and for a worktree the right to operate threads.
-fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
+fn sync_app_access(s: &mut App) -> bool {
+    let wanted = s.ui.pages.detail.entry.as_ref().and_then(|e| app_access_input(s, e));
+    let asked = wanted.as_ref().map(|(env, input)| format!("{env}\0{input}")).unwrap_or_default();
+    if ui(s).app_access.0 != asked {
+        let id = wanted.as_ref().and_then(|(env, input)| crate::env::net_of(s, env).map(|net| net.request("sourceControl.appAccess", input.clone())));
+        ui(s).app_access = (asked, id, None);
+        return true;
+    }
+    let (Some(id), Some((env, _))) = (ui(s).app_access.1, wanted) else { return false };
+    let Some(reply) = crate::env::net_of(s, &env).and_then(|net| net.take_reply(id)) else { return false };
+    let u = ui(s);
+    u.app_access.1 = None;
+    u.app_access.2 = reply.ok().and_then(|v| v["status"].as_str().map(str::to_string));
+    true
+}
+
+/// The app isn't installed on the repository's owner, so its requests use the user's own login.
+fn app_access_notice(s: &App, t: &T, d: &Value) -> Option<El> {
+    if s.ui.pages.detail.app_access.2.as_deref() != Some("not-covered") {
+        return None;
+    }
+    let repository = field(d, "repository");
+    let owner = repository.split('/').next().unwrap_or(repository).to_string();
+    let muted = t.c.muted_foreground;
+    let app = crate::settings::source_control::APP_NAME;
+    let lead = format!("{app} isn\u{2019}t installed on ");
+    let start = lead.len();
+    let line = text(format!("{lead}{owner}, so requests here use your own GitHub login and its lower rate limit."))
+        .color(muted)
+        .spans(vec![rune::Span::new(start, start + owner.len()).color(t.c.foreground)]);
+    let install = kit::Button::new(format!("Install on {owner}"))
+        .variant("link")
+        .size("xs")
+        .build(t)
+        .child(icon(&i::EXTERNAL_LINK, 12.0).color(t.c.foreground))
+        .role("link")
+        .on_press_tx(|_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(crate::settings::source_control::APP_INSTALL);
+        });
+    Some(
+        row()
+            .key("pr-app-access")
+            .role("note")
+            .w_full()
+            .px(16.0)
+            .py(8.0)
+            .gap(10.0)
+            .center_y()
+            .fill(t.c.muted.alpha_mul(0.4))
+            .child(icon(&i::INFO, 16.0).color(muted))
+            .child(line.font(theme::TEXT_XS).grow(1.0).shrink().min_w(0.0).wrap())
+            .child(install),
+    )
+}
+
+/// An environment the checkout and handoffs can run on (PickableEnvironment).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Pickable {
+    pub env: String,
+    pub project: String,
+    pub root: String,
+}
+
+fn repository_key(project: &Value) -> Option<String> {
+    let identity = &project["repositoryIdentity"];
+    identity["origin"]["canonicalKey"].as_str().or(identity["canonicalKey"].as_str()).filter(|k| !k.is_empty()).map(str::to_lowercase)
+}
+
+/// resolvePickableEnvironments: the pull request's own project, then the same repository on each
+/// other environment; none when no other environment has it.
+pub(super) fn pickable(s: &App, entry: &Value) -> Vec<Pickable> {
     let env = crate::env::of(s, entry);
+    let keys = crate::env::keys(s);
+    let projects = &s.state().projects;
+    let on = |p: &Value, key: &str| crate::env::of(s, p) == key;
+    let pick = |p: &Value| Pickable { env: crate::env::of(s, p), project: field(p, "id").to_string(), root: field(p, "workspaceRoot").to_string() };
+    let Some(own) = projects.iter().find(|p| on(p, &env) && field(p, "id") == field(entry, "projectId")) else { return Vec::new() };
+    let Some(key) = repository_key(own).filter(|_| keys.contains(&env)) else { return Vec::new() };
+    let others: Vec<Pickable> =
+        keys.iter().filter(|k| **k != env).filter_map(|k| projects.iter().find(|p| on(p, k) && repository_key(p).as_deref() == Some(key.as_str()))).map(pick).collect();
+    if others.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(pick(own)).chain(others).collect()
+}
+
+/// The environment picked for this pull request when it is still pickable, else none (the
+/// pull request's own).
+fn acting(s: &App) -> Option<Pickable> {
+    let u = &s.ui.pages.detail;
+    let entry = u.entry.as_ref()?;
+    let key = super::pull_requests::key(entry);
+    let chosen = u.acting.as_ref().filter(|(k, _)| *k == key).map_or_else(|| crate::env::of(s, entry), |(_, env)| env.clone());
+    pickable(s, entry).into_iter().find(|p| p.env == chosen)
+}
+
+fn pick_environment(s: &mut App, env: &str) {
+    let Some(entry) = ui(s).entry.as_ref() else { return };
+    let key = super::pull_requests::key(entry);
+    ui(s).acting = Some((key, env.to_string()));
+}
+
+/// The project a handoff's thread opens in: the picked environment's copy, else the pull request's.
+fn acting_project(s: &App) -> Option<String> {
+    let own = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string());
+    acting(s).map(|a| a.project).or(own).filter(|p| !p.is_empty())
+}
+
+/// ActOnEnvironmentPicker: a radio per pickable environment, after a separator.
+fn environment_picker(s: &App, menu: Menu) -> Menu {
+    let u = &s.ui.pages.detail;
+    let Some(entry) = u.entry.as_ref() else { return menu };
+    let environments = pickable(s, entry);
+    if environments.is_empty() {
+        return menu;
+    }
+    let chosen = acting(s).map_or_else(|| crate::env::of(s, entry), |a| a.env);
+    environments.into_iter().fold(menu.separator(), |menu, p| {
+        let on = p.env == chosen;
+        let item = MenuItem::new(crate::env::label(s, &p.env)).icon(crate::settings::connections::env_machine_icon(s, &p.env)).radio(on).disabled(u.checkout.is_some());
+        menu.item(item.on_select(move |s: &mut App| pick_environment(s, &p.env)))
+    })
+}
+
+/// The checkout's folder: the picked environment's copy, else the pull request's workspace, else
+/// its project's.
+fn checkout_root(s: &App, d: &Value) -> Option<String> {
+    let project = crate::chat::composer::project_by_id(s, field(d, "projectId"));
+    let picked = acting(s).map(|a| a.root);
+    [picked.as_deref(), d["workspaceRoot"].as_str(), project.and_then(|p| p["workspaceRoot"].as_str())].into_iter().flatten().find(|r| !r.is_empty()).map(str::to_string)
+}
+
+/// usePreparePullRequestThreadAction's grant, and for a worktree the right to operate threads, on
+/// the environment acting.
+fn checkout_allowed(s: &App, entry: &Value, mode: &str) -> bool {
+    let env = acting(s).map_or_else(|| crate::env::of(s, entry), |a| a.env);
     let can = |scope: &str| crate::settings::permissions::can_on(s, &env, scope);
     can("source-control:write") && (mode == "local" || can("orchestration:operate"))
 }
@@ -461,17 +681,19 @@ fn start_handoff(s: &mut App, mode: &'static str, kind: &'static str, task: Opti
     let d = u.detail.clone().unwrap_or_else(|| entry.clone());
     let term = super::pr_row::term(&d);
     let Some(root) = checkout_root(s, &d).filter(|_| checkout_allowed(s, &entry, mode)) else { return };
-    let project = field(&d, "projectId").to_string();
+    let picked = acting(s);
+    let project = picked.as_ref().map_or_else(|| field(&d, "projectId").to_string(), |a| a.project.clone());
+    let env = picked.map_or_else(|| crate::env::of(s, &entry), |a| a.env);
     if crate::chat::composer::project_by_id(s, &project).is_none() {
         crate::shell::palette::toast_error_brief(s, "Could not open a thread for the checkout", Some("Try again from the project, or open a thread first."));
         return;
     }
     let thread = crate::panel::drawer::draft_thread(s, &project);
     let input = json!({"cwd": root, "reference": field(&d, "url"), "mode": mode, "threadId": thread});
-    match super::pull_requests::net_for(s, &entry) {
+    match crate::env::net_of(s, &env) {
         Some(net) => {
             let request = net.request("git.preparePullRequestThread", input);
-            ui(s).checkout = Some(Checkout { request, mode, project, task, kind });
+            ui(s).checkout = Some(Checkout { request, mode, project, env, task, kind });
             crate::shell::palette::toast(s, &format!("Preparing the {term} checkout..."), None);
         }
         None => crate::shell::palette::toast_error_brief(s, &format!("Could not prepare the {term} checkout"), Some("Actions need a connected environment.")),
@@ -482,8 +704,8 @@ fn start_handoff(s: &mut App, mode: &'static str, kind: &'static str, task: Opti
 /// toast says why not.
 fn poll_checkout(s: &mut App) -> bool {
     let u = ui(s);
-    let (Some(Checkout { request, mode, project, task, .. }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
-    let Some(reply) = super::pull_requests::net_for(s, &entry).and_then(|net| net.take_reply(request)) else { return false };
+    let (Some(Checkout { request, mode, project, env, task, .. }), Some(entry)) = (u.checkout.clone(), u.entry.clone()) else { return false };
+    let Some(reply) = crate::env::net_of(s, &env).and_then(|net| net.take_reply(request)) else { return false };
     ui(s).checkout = None;
     let term = super::pr_row::term(&entry);
     let prepared = match reply {
@@ -851,7 +1073,7 @@ fn asked(text: &str, term: &str) -> String {
 pub(crate) fn ask(s: &mut App, text: String, chips: Vec<Value>) {
     ui(s).menu = false;
     let Some(d) = ui(s).detail.clone() else { return };
-    if crate::chat::composer::project_by_id(s, field(&d, "projectId")).is_none() {
+    if acting_project(s).is_none_or(|p| crate::chat::composer::project_by_id(s, &p).is_none()) {
         crate::shell::palette::toast_error_brief(s, "Could not open a thread", Some("Try again from the project, or open a thread first."));
         return;
     }
@@ -876,7 +1098,7 @@ pub(crate) fn resolve_text(d: &Value) -> String {
 
 /// Opens the project's new-thread draft holding `text`, and the PR chip when there is one.
 pub(super) fn handoff(s: &mut App, text: String, chip: Option<Value>) {
-    let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
+    let project = acting_project(s);
     ui(s).menu = false;
     compose(s, Route::Home { project_id: project }, text, chip.into_iter().collect());
 }
@@ -962,7 +1184,11 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         _ => {}
     }
     let d = u.detail.as_ref().unwrap_or(entry);
-    panel = panel.child(header_body(s, t, d, overlays)).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
+    let header = if u.condense.on(u.tab) { condensed_header(s, t, d, overlays) } else { header_body(s, t, d, overlays).key(FOLD) };
+    panel = panel.child(header).child(rule(t)).child(tab_bar(s, t, d, overlays)).child(rule(t));
+    if let Some(notice) = app_access_notice(s, t, d) {
+        panel = panel.child(notice).child(rule(t));
+    }
     if u.tab == 2 {
         let panel = panel.child(code(s, t, overlays)).children(super::pr_edit::composer(s, t, d, overlays));
         confirm_catcher(s, overlays);
@@ -975,7 +1201,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     };
     let key = format!("pr-detail-scroll-{}", u.tab);
     super::pr_edit::reaction_picker(s, t, overlays);
-    let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
+    let panel = panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(condense_reporter(s, u.tab)).child(content), t)).children(super::pr_edit::composer(s, t, d, overlays));
     confirm_catcher(s, overlays);
     panel
 }
@@ -1013,6 +1239,8 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
                 .help(on_host)
                 .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
                 .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
+                // onAuxClick: a middle click opens it too.
+                .pointer_buttons([rune::PointerButton::Middle])
                 .on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&open_url);
                 })
@@ -1112,7 +1340,7 @@ fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El
     // MenuPopup grows to its longest line, and a menu measures its height before a description
     // wraps: the menu holds each one on a line (menu padding, item padding, borders).
     let width = if u.checkout_menu { [WORKTREE, HERE].map(|v| rune::text::measure(v, &[], theme::TEXT_XS, None).0 + 32.0).into_iter().fold(160.0, f32::max) } else { 160.0 };
-    Menu::new("pr-checkout")
+    let menu = Menu::new("pr-checkout")
         .trigger(trigger)
         .placement(Placement::BottomEnd)
         .min_width(width)
@@ -1131,8 +1359,8 @@ fn checkout_menu(s: &App, t: &T, d: &Value, compact: bool, overlays: &mut Vec<El
                 .description(HERE)
                 .disabled(!checkout_allowed(s, entry, "local"))
                 .on_select(|s: &mut App| start_checkout(s, "local")),
-        )
-        .build(&kit::theme(t), overlays)
+        );
+    environment_picker(s, menu).build(&kit::theme(t), overlays)
 }
 
 /// PullRequestPrimaryAction: the armed auto-merge badge beside any other control, then the one
@@ -1267,6 +1495,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, p: Option<Primary>, gate: super::pr_a
     if let Some(item) = super::pr_guide::menu_item(s) {
         menu = menu.item(item);
     }
+    menu = environment_picker(s, menu);
     menu = super::pr_meta::maintainer_entries(s, t, d, menu.separator());
     if open {
         let draft = d["isDraft"] == true;
@@ -1430,6 +1659,47 @@ fn header_body(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         .child(super::pr_edit::title(s, t, d))
         .child(meta)
         .child(branches)
+}
+
+/// The condensed row: the author and when it moved, the branches, and the change counts.
+fn condensed_header(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
+    let muted = t.c.muted_foreground;
+    let mono = theme::mono(theme::TEXT_2XS);
+    let ink = muted.alpha_mul(0.65);
+    let mut who = row().gap(6.0).center_y().shrink().child(avatar(&s.ui.pages.avatars, &d["author"], 16.0, t));
+    if let Some(at) = ts(d, "updatedAt") {
+        who = who.child(text(relative(at, s.now_ms)).font(theme::TEXT_XS).color(muted));
+    }
+    let head = field(d, "headBranch").to_string();
+    let branches = row()
+        .gap(6.0)
+        .center_y()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .child(super::pr_meta::base_branch(s, t, d, mono, ink, overlays))
+        .child(icon(&i::ARROW_LEFT, 12.0).color(ink.alpha_mul(0.6)).role("img").label("receives changes from"))
+        .child(text(head.clone()).font(mono).color(ink).shrink().help(head));
+    let files = d["changedFiles"].as_i64().unwrap_or(0);
+    let counts = row()
+        .gap(8.0)
+        .center_y()
+        .child(row().gap(4.0).center_y().label(format!("{files} changed {}", if files == 1 { "file" } else { "files" })).child(icon(&i::FILE_DIFF, 12.0).color(muted)).child(text(files.to_string()).font(theme::TEXT_2XS.features("'tnum' 1")).color(muted)))
+        .child(text(format!("+{}", d["additions"].as_i64().unwrap_or(0))).font(mono.features("'tnum' 1")).color(t.c.diff_addition_foreground))
+        .child(text(format!("-{}", d["deletions"].as_i64().unwrap_or(0))).font(mono.features("'tnum' 1")).color(t.c.diff_deletion_foreground));
+    row()
+        .key("pr-detail-condensed")
+        .w_full()
+        .h(CONDENSED_H)
+        .px(16.0)
+        .pt(4.0)
+        .pb(8.0)
+        .gap(8.0)
+        .center_y()
+        .child(who)
+        .child(el().w(1.0).h(12.0).shrink().fill(t.c.border.alpha_mul(0.7)))
+        .child(branches)
+        .child(counts)
 }
 
 /// PullRequestCopyableCode: the value reads "Copied" for 1.6 s after a press copies it.
@@ -2357,7 +2627,7 @@ pub(super) fn scene_resolving(u: &mut Ui) {
     if let Some(d) = &mut u.detail {
         d["mergeability"] = json!("conflicting");
     }
-    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), task: Some((String::new(), Vec::new())), kind: "conflicts" });
+    u.checkout = Some(Checkout { request: 0, mode: "worktree", project: String::new(), env: String::new(), task: Some((String::new(), Vec::new())), kind: "conflicts" });
 }
 
 #[cfg(test)]
@@ -2729,6 +2999,77 @@ mod tests {
         let draft = &s.ui.chat.composer.drafts[&crate::chat::composer::home_key(&project)];
         assert!(draft.edit.text.starts_with("Fix it.") && draft.contexts.len() == 1, "the task and its thread land in the draft");
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Checkout ready"));
+    }
+
+    #[test]
+    fn the_checkout_runs_on_the_picked_environment_in_its_copy_of_the_repository() {
+        let mut s = App::new();
+        let mut local = crate::data::empty_state();
+        local.projects = vec![
+            json!({"id": "p1", "workspaceRoot": "/w/app", "repositoryIdentity": {"canonicalKey": "github.com/acme/app"}}),
+            json!({"id": "pb", "workspaceRoot": "/srv/app", "repositoryIdentity": {"canonicalKey": "GitHub.com/Acme/App"}, "_environment": "box"}),
+            json!({"id": "pf", "workspaceRoot": "/srv/other", "repositoryIdentity": {"canonicalKey": "github.com/acme/other"}, "_environment": "far"}),
+        ];
+        s.src = crate::data::Source::Fixture(local);
+        s.ui.env.active = crate::env::LOCAL.into();
+        for id in ["box", "far"] {
+            s.ui.env.saved.push(crate::env::Saved { id: id.into(), label: id.into(), base: format!("https://{id}.test"), bearer: String::new() });
+            crate::env::park(&mut s, id, crate::data::Source::Live(s5_net::Net::offline()));
+        }
+        crate::env::adopt(&mut s, "pb", "box");
+        crate::settings::permissions::set_session(&mut s, "box", json!({"authenticated": true, "permissions": ["source-control:write", "orchestration:operate"]}));
+        let entry = |n: u64| json!({"projectId": "p1", "repository": "acme/app", "host": "github.com", "number": n, "url": format!("https://github.com/acme/app/pull/{n}")});
+        s.ui.pages.detail.entry = Some(entry(7));
+        s.ui.pages.detail.detail = Some(entry(7));
+        let p = |env: &str, project: &str, root: &str| Pickable { env: env.into(), project: project.into(), root: root.into() };
+        assert_eq!(pickable(&s, &entry(7)), vec![p(crate::env::LOCAL, "p1", "/w/app"), p("box", "pb", "/srv/app")], "its own first, then the same repository elsewhere");
+        assert_eq!(checkout_root(&s, &entry(7)).as_deref(), Some("/w/app"));
+
+        pick_environment(&mut s, "box");
+        assert_eq!((checkout_root(&s, &entry(7)).as_deref(), acting_project(&s).as_deref()), (Some("/srv/app"), Some("pb")));
+        s.ui.pages.detail.entry = Some(entry(8));
+        assert_eq!(acting(&s).map(|a| a.env).as_deref(), Some(crate::env::LOCAL), "the pick belongs to the pull request it was made on");
+        s.ui.pages.detail.entry = Some(entry(7));
+
+        start_checkout(&mut s, "worktree");
+        let Some(Checkout { request, env, project, .. }) = s.ui.pages.detail.checkout.clone() else { panic!("FAILED: the picked environment prepares the checkout") };
+        assert_eq!((env.as_str(), project.as_str()), ("box", "pb"));
+        let prepared = json!({"branch": "fix", "worktreePath": "/srv/app-pr-7", "isOnPullRequestHead": true});
+        crate::env::net_of(&mut s, "box").unwrap().put_reply(request, Ok(prepared));
+        assert!(poll_checkout(&mut s));
+        assert_eq!(s.ui.chat.home.workspace.as_ref().map(|w| w.0.as_str()), Some("pb"), "the draft opens in the picked environment's project");
+        assert_eq!(s.ui.env.active, "box", "and the window switches to that environment");
+    }
+
+    #[test]
+    fn app_access_is_asked_only_where_the_github_app_is_signed_in() {
+        let mut s = App::new();
+        let mut remote = crate::data::empty_state();
+        remote.config = Some(json!({"settings": {"sourceControlHosts": {"github": {"signIns": {"github.com": "redacted"}}}}}));
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(remote));
+        let entry = |url: &str, host: &str| json!({"url": url, "host": host, "repository": "acme/app", "_environment": "box"});
+        let pr = "https://github.com/acme/app/pull/7";
+        assert_eq!(app_access_input(&s, &entry(pr, "GitHub.com")), Some(("box".into(), json!({"provider": "github", "host": "github.com", "repository": "acme/app"}))));
+        assert_eq!(app_access_input(&s, &entry(pr, "github.example.com")), None, "the app reaches github.com only");
+        assert_eq!(app_access_input(&s, &entry("https://gitlab.com/acme/app/-/merge_requests/7", "gitlab.com")), None);
+        if let Some(crate::data::Source::Fixture(st)) = crate::env::source_mut(&mut s, "box") {
+            st.config = Some(json!({"settings": {"sourceControlHosts": {"github": {"signIns": {"github.com": ""}}}}}));
+        }
+        assert_eq!(app_access_input(&s, &entry(pr, "github.com")), None, "signed out, there is nothing to ask");
+    }
+
+    #[test]
+    fn the_header_condenses_past_its_fold_and_keeps_the_content_still() {
+        assert_eq!(next_condensed(false, 140.0, 120.0), (false, None), "within 32px of the fold it stays open");
+        assert_eq!(next_condensed(false, 160.0, 120.0), (true, Some(160.0 - (120.0 - CONDENSED_H))));
+        assert_eq!(next_condensed(false, 500.0, 0.0), (false, None), "no fold measured yet");
+        assert_eq!(next_condensed(true, 40.0, 0.0), (true, None));
+        assert_eq!(next_condensed(true, 3.0, 0.0), (false, None), "near the top it opens again");
+        let c = Condense::default();
+        c.set(2, true);
+        assert!(c.on(2) && !c.on(0), "each tab keeps its own");
+        c.set(2, false);
+        assert!(!c.on(2));
     }
 
     #[test]

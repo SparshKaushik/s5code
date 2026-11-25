@@ -123,6 +123,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(body)
         .children(timeline::scroll_to_end(s, cx, t, &lane))
         .children(timeline::minimap(s, cx, t, &lane))
+        .child(timeline::announcer(s))
         .children(timeline::banners::lane(s, t, &lane))
         .children(timeline::banners::stack(s, cx, t, &lane))
         .child(bar.unwrap_or_else(|| composer::view(s, cx, t, &lane)))
@@ -221,9 +222,11 @@ fn type_to_composer(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         return composer::insert_at_end(s, &c);
     }
     if e.key == Key::Command('v') && !e.mods.alt {
-        tx.read_clipboard(|s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| {
-            if content.files().is_empty() && !content.text().is_empty() {
-                composer::insert_at_end(s, content.text());
+        // Mod+Shift+V is Paste as Text (isPasteAsTextShortcut): no folding into a file.
+        let as_text = e.mods.shift;
+        tx.read_clipboard(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| {
+            if content.files().is_empty() {
+                composer::paste_at_end(s, content.text(), content.html(), as_text);
             }
         });
         return true;
@@ -269,6 +272,14 @@ mod tests {
         let d = &s.ui.chat.composer.drafts["t1"];
         assert_eq!(d.edit.text, "hi x");
         assert!(d.edit.focused);
+        // A stray paste: long text folds into a file, unless Mod+Shift+V pasted it as text.
+        let long = "y".repeat(composer::attachments::PASTED_TEXT_THRESHOLD);
+        assert!(composer::paste_at_end(&mut s, &long, None, false));
+        let d = &s.ui.chat.composer.drafts["t1"];
+        assert_eq!((d.edit.text.as_str(), d.attachments.len()), ("hi x", 1), "FAILED: a long stray paste folds into pasted-text.txt");
+        assert!(composer::paste_at_end(&mut s, &long, None, true));
+        let d = &s.ui.chat.composer.drafts["t1"];
+        assert_eq!((d.edit.text.len(), d.attachments.len()), (4 + long.len(), 1), "FAILED: Paste as Text lands verbatim at the end");
         s.ui.shell.palette.open = true;
         assert!(!type_to_composer(&mut s, &e, &mut tx), "an open palette keeps its keys");
     }
