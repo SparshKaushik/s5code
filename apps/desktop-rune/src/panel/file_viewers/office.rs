@@ -316,7 +316,7 @@ impl Office {
                             .on_press(move |app: &mut App| select(app, index)).build(t)
                     })));
                 (format!("{} sheets", sheets.len()), col().grow(1.0).min_h(0.0)
-                    .child(sheet_view(sheet, current, t)).child(super::divider(t)).child(tabs))
+                    .child(sheet_view(sheet, current)).child(super::divider(t)).child(tabs))
             }
         };
         col().grow(1.0).min_h(0.0).min_w(0.0)
@@ -341,6 +341,9 @@ fn page_view(page: &Page, slide: bool) -> El {
     let ink = rune::Color::BLACK;
     let mut paper = col().w_full().max_w(816.0).min_w(0.0).min_h(if slide { 300.0 } else { 640.0 })
         .padding(if slide { 28.0 } else { 36.0 }).gap(12.0).fill(rune::Color::WHITE);
+    if slide {
+        paper = paper.aspect_ratio(16.0 / 9.0);
+    }
     for block in &page.blocks {
         paper = paper.child(match block {
             Block::Paragraph { text: value, heading } => text(value.clone())
@@ -362,9 +365,10 @@ fn column_label(column: usize) -> String {
     else { format!("A{}", (b'A' + (column - 26) as u8) as char) }
 }
 
-fn sheet_view(sheet: &Sheet, current: usize, t: &T) -> El {
+fn sheet_view(sheet: &Sheet, current: usize) -> El {
+    let t = &theme::theme(false);
     let cell = |value: &str, heading| {
-        row().w(112.0).h(24.0).px(6.0).center_y().border(1.0, t.c.border)
+        row().w(112.0).h(28.0).px(6.0).center_y().fill(if heading { t.c.muted } else { t.c.background }).border(1.0, t.c.border)
             .child(text(value.to_owned()).font(if heading { theme::XS_MEDIUM } else { theme::TEXT_XS })
                 .color(t.c.foreground).truncate().selectable(!heading))
     };
@@ -375,7 +379,7 @@ fn sheet_view(sheet: &Sheet, current: usize, t: &T) -> El {
             .children((0..sheet.columns).map(|column| cell(values.get(column).map_or("", String::as_str), false)))
     }));
     el().key(format!("office-worksheet-{current}")).label(sheet.name.clone()).grow(1.0)
-        .min_h(0.0).min_w(0.0).scroll_xy().child(grid)
+        .min_h(0.0).min_w(0.0).fill(t.c.background).scroll_xy().child(grid)
 }
 
 pub(super) fn fixture(format: Format) -> Result<Office, String> {
