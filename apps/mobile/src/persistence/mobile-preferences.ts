@@ -157,6 +157,8 @@ export interface Preferences {
   readonly connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
   readonly collapsedProjectGroups?: readonly string[];
   readonly dismissedDatabaseStorageNotices?: readonly string[];
+  /** Per host, when the newest T3 Connect device this phone has announced first signed in. */
+  readonly connectDevicesSeenThrough?: Readonly<Record<string, number>>;
   /** Hardware-keyboard Return behavior in the composer. */
   readonly composerEnterBehavior?: ComposerEnterBehavior;
   readonly followUpBehavior?: FollowUpBehavior;
@@ -167,6 +169,8 @@ export interface Preferences {
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
   readonly toolCallVisibility?: ToolCallVisibility;
   readonly workingShelfEnabled?: boolean;
+  /** The kind of question the Workflows tab's Needs you list was last narrowed to. */
+  readonly workflowQuestionKind?: string;
   readonly useLastProjectForNewThreads?: boolean;
   readonly lastThreadProject?: typeof ThreadProject.Type;
   readonly modelFavorites?: ReadonlyArray<{
@@ -248,6 +252,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
     collapsedProjectGroups?: readonly string[];
     dismissedDatabaseStorageNotices?: readonly string[];
+    connectDevicesSeenThrough?: Readonly<Record<string, number>>;
     composerEnterBehavior?: ComposerEnterBehavior;
     followUpBehavior?: FollowUpBehavior;
     language?: string;
@@ -256,6 +261,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     projectGroupingMode?: SidebarProjectGroupingMode;
     toolCallVisibility?: ToolCallVisibility;
     workingShelfEnabled?: boolean;
+    workflowQuestionKind?: string;
     useLastProjectForNewThreads?: boolean;
     lastThreadProject?: typeof ThreadProject.Type;
     modelFavorites?: Preferences["modelFavorites"];
@@ -356,6 +362,16 @@ function sanitizePreferences(parsed: Preferences): Preferences {
       (value): value is string => typeof value === "string",
     );
   }
+  if (
+    typeof parsed.connectDevicesSeenThrough === "object" &&
+    parsed.connectDevicesSeenThrough !== null
+  ) {
+    preferences.connectDevicesSeenThrough = Object.fromEntries(
+      Object.entries(parsed.connectDevicesSeenThrough).filter(
+        (entry): entry is [string, number] => typeof entry[1] === "number",
+      ),
+    );
+  }
   if (parsed.composerEnterBehavior === "send" || parsed.composerEnterBehavior === "newline") {
     preferences.composerEnterBehavior = parsed.composerEnterBehavior;
   }
@@ -387,6 +403,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.workingShelfEnabled === "boolean") {
     preferences.workingShelfEnabled = parsed.workingShelfEnabled;
+  }
+  if (typeof parsed.workflowQuestionKind === "string") {
+    preferences.workflowQuestionKind = parsed.workflowQuestionKind;
   }
   if (typeof parsed.useLastProjectForNewThreads === "boolean") {
     preferences.useLastProjectForNewThreads = parsed.useLastProjectForNewThreads;

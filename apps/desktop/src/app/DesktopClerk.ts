@@ -24,7 +24,6 @@ import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
-import { openClerkTokenStorage } from "./ClerkTokenStore.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
@@ -235,13 +234,7 @@ function installClerkDesktopOriginFilter(
   });
 }
 
-export function createDesktopClerkBridge(
-  stateDir: string,
-  isDevelopment: boolean,
-  userDataPath = ".",
-) {
-  const openStorage = () =>
-    openClerkTokenStorage(stateDir, (directory) => storage({ path: directory }), userDataPath);
+export function createDesktopClerkBridge(tokenDirectory: string, isDevelopment: boolean) {
   // main.ts registers scheme privileges before `ready`. Clerk re-registers the
   // scheme when `renderer` is passed, after `ready`, which throws and kills
   // startup, so suppress the duplicate.
@@ -254,7 +247,7 @@ export function createDesktopClerkBridge(
   ).protocol;
   if (typeof protocol?.registerSchemesAsPrivileged !== "function") {
     return createClerkBridge({
-      storage: openStorage(),
+      storage: storage({ path: tokenDirectory }),
       manageSingleInstanceLock: false,
       passkeys: true,
       renderer: {
@@ -267,7 +260,7 @@ export function createDesktopClerkBridge(
   protocol.registerSchemesAsPrivileged = () => undefined;
   try {
     return createClerkBridge({
-      storage: openStorage(),
+      storage: storage({ path: tokenDirectory }),
       manageSingleInstanceLock: false,
       passkeys: true,
       renderer: {
@@ -285,6 +278,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const electronApp = yield* ElectronApp.ElectronApp;
   const shell = yield* ElectronShell.ElectronShell;
+  const path = yield* Path.Path;
   yield* discardIncompatibleClerkTokens({
     stateDir: environment.stateDir,
     publishableKey:
@@ -342,7 +336,10 @@ export const make = Effect.gen(function* () {
   yield* Effect.acquireRelease(
     Effect.try({
       try: () =>
-        createDesktopClerkBridge(environment.stateDir, environment.isDevelopment, userDataPath),
+        createDesktopClerkBridge(
+          path.resolve(environment.stateDir, "clerk"),
+          environment.isDevelopment,
+        ),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
           stateDir: environment.stateDir,

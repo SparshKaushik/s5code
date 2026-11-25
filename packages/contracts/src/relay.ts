@@ -1306,6 +1306,11 @@ const RelayHooksGroup = HttpApiGroup.make("hooks")
   )
   .annotate(OpenApi.Description, "Forward webhook requests to an environment.");
 
+// Clerk signs with Svix headers; the handler reads raw bytes to verify the signature.
+const RelayAccountWebhooksGroup = HttpApiGroup.make("accountWebhooks")
+  .add(HttpApiEndpoint.post("clerk", "/v1/webhooks/clerk"))
+  .annotate(OpenApi.Description, "Receive Clerk account lifecycle events.");
+
 export const RelayApi = HttpApi.make("RelayApi")
   .add(
     RelayHealthGroup,
@@ -1316,6 +1321,7 @@ export const RelayApi = HttpApi.make("RelayApi")
     RelayDpopClientGroup,
     RelayServerGroup,
     RelayHooksGroup,
+    RelayAccountWebhooksGroup,
   )
   .annotate(OpenApi.Title, "T3 Code Relay API")
   .annotate(OpenApi.Version, "1.0.0")

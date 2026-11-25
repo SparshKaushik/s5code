@@ -77,9 +77,10 @@ const layerDesktopClerk = (
     copyText: () => Effect.void,
   },
   listeners = new Map<string, (...args: unknown[]) => void>(),
+  stateDir = clerkStateDir,
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
-    stateDir: clerkStateDir,
+    stateDir,
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
     platform,
@@ -294,9 +295,24 @@ describe("DesktopClerk", () => {
       assert.deepEqual(storageMock.mock.calls, [
         [{ path: NodePath.join(NodePath.resolve(clerkStateDir), "clerk") }],
       ]);
-      assert.notStrictEqual(createClerkBridgeMock.mock.calls[0]?.[0]?.storage, storageAdapter);
+      assert.strictEqual(createClerkBridgeMock.mock.calls[0]?.[0]?.storage, storageAdapter);
     },
   );
+
+  it.effect("keeps Clerk tokens under a relative state directory instead of userData", () => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+
+    return Effect.sync(() => {
+      assert.deepEqual(storageMock.mock.calls, [
+        [{ path: NodePath.resolve("relative-state", "clerk") }],
+      ]);
+    }).pipe(
+      Effect.provide(
+        layerDesktopClerk(true, [], "darwin", undefined, undefined, undefined, "relative-state"),
+      ),
+    );
+  });
 
   it.effect.each(["before configure", "after configure"] as const)(
     "reveals the running window when a second instance launches %s",
@@ -396,10 +412,9 @@ describe("DesktopClerk", () => {
     storageMock.mockReturnValue(storageAdapter);
     createClerkBridgeMock.mockReturnValue(bridge);
 
-    assert.equal(DesktopClerk.createDesktopClerkBridge(clerkStateDir, isDevelopment), bridge);
-    assert.deepEqual(storageMock.mock.calls, [
-      [{ path: NodePath.join(NodePath.resolve(clerkStateDir), "clerk") }],
-    ]);
+    const tokenDirectory = NodePath.resolve(clerkStateDir, "clerk");
+    assert.equal(DesktopClerk.createDesktopClerkBridge(tokenDirectory, isDevelopment), bridge);
+    assert.deepEqual(storageMock.mock.calls, [[{ path: tokenDirectory }]]);
     const { storage: _storage, ...options } = createClerkBridgeMock.mock.calls[0]?.[0] ?? {};
     assert.deepEqual(options, {
       manageSingleInstanceLock: false,
@@ -419,7 +434,10 @@ describe("DesktopClerk", () => {
     });
     const before = Electron.protocol.registerSchemesAsPrivileged;
 
-    assert.equal(DesktopClerk.createDesktopClerkBridge(clerkStateDir, false), bridge);
+    assert.equal(
+      DesktopClerk.createDesktopClerkBridge(NodePath.resolve(clerkStateDir, "clerk"), false),
+      bridge,
+    );
 
     // The late duplicate registration never reaches Electron, and the
     // original is restored for later callers.
