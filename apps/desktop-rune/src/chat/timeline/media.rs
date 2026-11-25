@@ -979,6 +979,13 @@ pub fn save_attachment(app: &mut App, url: String, name: String, tx: &mut Tx) {
     });
 }
 
+/// Replaces a scene entry's picture.
+pub(super) fn scene_repaint(app: &mut App, key: &str, w: u32, h: u32, rgba: Vec<u8>) {
+    if let Some(loaded) = app.ui.chat.timeline.assets.media.entries.get(key).and_then(|e| e.loaded.as_ref()) {
+        loaded.pixels.set(w, h, rgba);
+    }
+}
+
 /// Scenes: a Markdown media entry in a given state, drawn without loading anything.
 pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> Option<String> {
     let root = super::workspace_root(app);

@@ -66,7 +66,7 @@ pub struct Ui {
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
-    responding: HashMap<String, u64>,
+    responding: HashMap<String, (u64, &'static str)>,
     response_errors: HashMap<String, String>,
     pub expanded: HashSet<String>,
     pub question_index: HashMap<String, usize>,
@@ -797,13 +797,24 @@ fn send(app: &mut App, request: &str, command: Value) {
         return;
     }
     if let Some(net) = app.src.net() {
+        let fallback = failure_fallback(&command);
         let rpc = net.dispatch(command);
         app.ui
             .chat
             .timeline
             .responding
-            .insert(request.to_owned(), rpc);
+            .insert(request.to_owned(), (rpc, fallback));
         app.ui.chat.timeline.response_errors.remove(request);
+    }
+}
+
+/// What a failed answer says when its error has no message (usePendingThreadRequests).
+fn failure_fallback(command: &Value) -> &'static str {
+    match (s(command, "type"), command.get("answers").is_some()) {
+        ("thread.user-input.dismiss", _) => "Failed to dismiss the question.",
+        ("runtime-request.respond", true) => "Failed to submit user input.",
+        ("runtime-request.respond", false) => "Failed to submit approval decision.",
+        _ => "An error occurred.",
     }
 }
 
@@ -821,13 +832,13 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
         return changed;
     };
     let ui = &mut app.ui.chat.timeline;
-    ui.responding.retain(|id, rpc| {
+    ui.responding.retain(|id, (rpc, fallback)| {
         let Some(reply) = net.take_reply(*rpc) else {
             return true;
         };
         changed = true;
         if let Err(error) = reply {
-            ui.response_errors.insert(id.clone(), crate::shell::palette::error_message(&error, "An error occurred."));
+            ui.response_errors.insert(id.clone(), crate::shell::palette::error_message(&error, fallback));
         }
         false
     });
@@ -1372,6 +1383,15 @@ mod tests {
         assert!(!super::in_side_pane(&app, "parent"), "the chat keeps its own follow state");
         app.route = crate::Route::Thread("other".into());
         assert!(!super::in_side_pane(&app, "side"));
+    }
+
+    #[test]
+    fn a_failed_answer_names_what_failed() {
+        use super::{failure_fallback, requests::command};
+        use serde_json::json;
+        assert_eq!(failure_fallback(&command("t", "r", json!({"decision": "accept"}))), "Failed to submit approval decision.");
+        assert_eq!(failure_fallback(&command("t", "r", json!({"answers": {}}))), "Failed to submit user input.");
+        assert_eq!(failure_fallback(&json!({"type": "thread.user-input.dismiss"})), "Failed to dismiss the question.");
     }
 
     #[test]

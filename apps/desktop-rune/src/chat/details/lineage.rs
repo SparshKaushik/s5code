@@ -891,7 +891,7 @@ pub fn view(s: &App, t: &T, thread: &str, divided: bool) -> Option<El> {
     let ctx = Ctx { s, t, current: thread, lineage: &lineage, projection, can_operate: crate::chat::can_operate(s) };
     let ui = ui(s, thread);
     let workflow_open = ui.is_some_and(|u| !u.workflows.is_empty());
-    let list = |rows: El| rows.max_h(if workflow_open { 448.0 } else { 216.0 }).scroll(rune::ScrollSpec { stick_bottom: false });
+    let list = |rows: El| rows.role("list").label("Related threads").max_h(if workflow_open { 448.0 } else { 216.0 }).scroll(rune::ScrollSpec { stick_bottom: false });
     let mut body = col().key("details-lineage").w_full();
     if let Some(delegated) = delegated {
         body = body.child(delegated);
