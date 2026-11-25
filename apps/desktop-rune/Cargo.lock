@@ -3109,6 +3109,7 @@ dependencies = [
  "base64",
  "futures-util",
  "image",
+ "naga",
  "openh264",
  "pulldown-cmark",
  "qrcodegen",
@@ -3123,6 +3124,7 @@ dependencies = [
  "tungstenite",
  "unicode-normalization",
  "ureq",
+ "wgpu",
  "zbus 6.2.1",
  "zip",
 ]
