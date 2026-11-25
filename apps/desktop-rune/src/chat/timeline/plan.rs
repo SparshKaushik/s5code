@@ -308,7 +308,9 @@ fn save(app: &mut App) {
     if relative.is_empty() {
         return crate::shell::palette::toast(app, "Enter a workspace path", None);
     }
-    let Some(cwd) = super::workspace_root(app) else { return };
+    let Some(cwd) = super::workspace_root(app) else {
+        return crate::shell::palette::toast_error(app, "Workspace path is unavailable", Some("This thread does not have a workspace path to save into."));
+    };
     let contents = format!("{}\n", markdown.trim_end());
     let Some(net) = app.src.net() else { return };
     let request = net.request("projects.writeFile", json!({"cwd": cwd, "relativePath": relative, "contents": contents}));

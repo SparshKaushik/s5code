@@ -342,7 +342,19 @@ fn inline_image(app: &mut App) {
     let src = format!("{}/docs/latency.png", root.trim_end_matches('/'));
     let text = format!("The latency jump ![Latency]({src}) lines up with the deploy at 14:02, so see [the deploy log](https://example.com/log) before rolling back.");
     push_visible(app, vec![serde_json::json!({"id": "scene-inline-image", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
-    super::media::scene_entry(app, "Latency", &src, false);
+    // A light chart with flat edges, so the frame's faint border shows against it.
+    if let Some(key) = super::media::scene_entry(app, "Latency", &src, false) {
+        let (w, h) = (640u32, 360u32);
+        let curve = |x: u32| -> u32 { if x < 400 { 250 } else { 110 } };
+        let rgba = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let line = x > 40 && x < 600 && y.abs_diff(curve(x)) < 3;
+                if line { [37, 99, 235, 255] } else { [244, 244, 245, 255] }
+            })
+            .collect();
+        super::media::scene_repaint(app, &key, w, h, rgba);
+    }
 }
 
 /// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph is
