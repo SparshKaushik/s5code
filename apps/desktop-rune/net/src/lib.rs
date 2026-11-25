@@ -6,7 +6,7 @@
 //! Network I/O runs on background threads; the UI thread calls [`Net::drain`] from its poll hook
 //! and gets woken through the callback passed to [`Net::connect`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -95,6 +95,8 @@ pub struct Net {
     bearer: String,
     incoming_tx: Sender<Incoming>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Threads followed only through [`Net::keep_thread`]; any [`Net::watch_thread`] adopts one.
+    kept_only: HashSet<String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -164,6 +166,7 @@ impl Net {
             bearer: token,
             incoming_tx,
             wake,
+            kept_only: HashSet::new(),
         }
     }
     /// A client with no worker, for tests: each request is answered at once that the worker stopped.
@@ -183,6 +186,7 @@ impl Net {
             bearer: String::new(),
             incoming_tx,
             wake: Arc::new(|| {}),
+            kept_only: HashSet::new(),
         }
     }
     /// A connection over an in-memory transport that drops what it is sent and never answers,
@@ -204,6 +208,7 @@ impl Net {
             bearer: String::new(),
             incoming_tx,
             wake: Arc::new(|| {}),
+            kept_only: HashSet::new(),
         }
     }
     /// [`Net::in_memory`] that keeps the requests it is sent, so a client test can check what
@@ -290,6 +295,7 @@ impl Net {
         }
     }
     pub fn watch_thread(&mut self, thread_id: &str) {
+        self.kept_only.remove(thread_id);
         if self.state.thread_views.contains_key(thread_id) {
             return;
         }
@@ -299,6 +305,20 @@ impl Net {
         let _ = self
             .tx
             .send(Command::Watch(Route::Thread(thread_id.to_owned())));
+    }
+    /// Follows a thread for a background reader (the running-thread keep-alive) without claiming
+    /// it: [`Net::release_thread`] then drops it unless something watched it meanwhile.
+    pub fn keep_thread(&mut self, thread_id: &str) {
+        if self.state.thread_views.contains_key(thread_id) {
+            return;
+        }
+        self.watch_thread(thread_id);
+        self.kept_only.insert(thread_id.to_owned());
+    }
+    pub fn release_thread(&mut self, thread_id: &str) {
+        if self.kept_only.remove(thread_id) {
+            self.unwatch_thread(thread_id);
+        }
     }
     pub fn unwatch_thread(&mut self, thread_id: &str) {
         self.state.thread_views.remove(thread_id);
