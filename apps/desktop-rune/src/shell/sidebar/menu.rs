@@ -160,9 +160,11 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     } else {
         out.push(leaf(item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
             close(s);
-            for id in &fresh {
-                super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
-            }
+            super::batched(s, "Failed to regenerate thread titles", |s| {
+                for id in &fresh {
+                    super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
+                }
+            });
             s.ui.shell.sidebar.selected.clear();
         })));
     }

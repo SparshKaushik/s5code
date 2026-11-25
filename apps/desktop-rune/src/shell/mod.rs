@@ -56,6 +56,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_titled(s, "Replay showcase");
         chatgpt_welcome::scene(s);
     }),
+    ("sidebar-regenerating", |s| {
+        open_titled(s, "Replay showcase");
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            for t in state.threads.iter_mut().filter(|t| t["title"] != "Replay showcase").take(3) {
+                t["titleRegeneration"] = serde_json::json!({"requestedAt": "2026-01-01T00:00:00.000Z"});
+            }
+        }
+        palette::toast(s, "Thread search is unavailable on this server.", Some("Update the server to enable it."));
+    }),
 ];
 
 fn open_titled(s: &mut App, title: &str) {

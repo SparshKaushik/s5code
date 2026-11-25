@@ -23,12 +23,8 @@ fn hue(index: usize, dark: bool) -> Color {
     if dark { DARK[index] } else { LIGHT[index] }
 }
 
-/// `ProjectFavicon` without an icon: the name's monogram on a 14% tint of its colour.
-pub fn monogram(t: &T, name: &str, dim: bool) -> El {
-    monogram_at(t, name, dim, 16.0)
-}
-
-/// The favicon's SVG scaled to `size` (its 16-unit viewBox drawn smaller).
+/// `ProjectFavicon` without an icon: the name's monogram on a 14% tint of its colour, its 16-unit
+/// viewBox scaled to `size`.
 pub(super) fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
     let k = size / 16.0;
     let glyphs = logic::monogram(name);
@@ -443,6 +439,8 @@ fn surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: 
 /// The row title, or ThreadRenameInput while it is being renamed: Enter commits, Escape cancels.
 fn title(s: &App, th: &Thread, t: &T, font: rune::TextStyle, color: rune::Color) -> El {
     let Some((_, edit)) = s.ui.shell.sidebar.rename.as_ref().filter(|(id, _)| *id == th.id) else {
+        // Web dims the title while the server regenerates it.
+        let color = if th.title_regenerating { color.alpha_mul(0.55) } else { color };
         return text(th.title.clone()).font(font).color(color).truncate().grow(1.0).shrink();
     };
     rune::text_input(edit, theme::SM_MEDIUM)
