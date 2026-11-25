@@ -53,11 +53,24 @@ pub struct State {
     pub vcs: HashMap<String, Value>,
     /// Bumps whenever a shell item touches `projects`, `threads` or `archived`.
     pub shell_revision: u64,
+    /// The trace ID of the failure behind `Conn::Closed`, from the relay or the server's
+    /// `traceparent`, so a failure can be reported. Cleared once connected.
+    pub conn_trace: Option<String>,
+}
+
+/// How a socket authorizes.
+#[derive(Clone)]
+pub enum Auth {
+    /// A token sent in the upgrade's `Authorization` header.
+    Bearer(String),
+    /// A socket URL minted before each attempt: T3 Connect's DPoP ticket and upgrade proof.
+    Socket(Arc<dyn Fn() -> Result<String, cloud::Failure> + Send + Sync>),
 }
 
 /// A finished one-shot request: `Ok(value)` for `Exit Success`, `Err(cause)` for a failure.
 pub type Reply = Result<Value, Value>;
 
+pub mod cloud;
 mod pairing;
 mod projection;
 pub use pairing::{fetch_descriptor, resolve_pairing};
@@ -96,6 +109,7 @@ impl Default for State {
             thread_views: HashMap::new(),
             vcs: HashMap::new(),
             shell_revision: 0,
+            conn_trace: None,
         }
     }
 }
@@ -114,16 +128,27 @@ impl Net {
     pub fn connect_requests_only(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
         Self::spawn(base_url, token, false, wake)
     }
+    /// A connection whose socket authorizes some other way than a bearer token. HTTP routes
+    /// (`api_get` and friends) still need [`Net::bearer`], which is empty here.
+    pub fn connect_with(base_url: &str, auth: Auth, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn_with(base_url, auth, true, wake)
+    }
     fn spawn(base_url: &str, token: &str, subscribe_shell: bool, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        Self::spawn_with(base_url, Auth::Bearer(token.to_owned()), subscribe_shell, wake)
+    }
+    fn spawn_with(base_url: &str, auth: Auth, subscribe_shell: bool, wake: impl Fn() + Send + Sync + 'static) -> Net {
+        let token = match &auth {
+            Auth::Bearer(token) => token.clone(),
+            Auth::Socket(_) => String::new(),
+        };
         let (tx, commands) = mpsc::channel();
         let (incoming, rx) = mpsc::channel();
         let incoming_tx = incoming.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let worker_wake = wake.clone();
         let base = base_url.to_owned();
-        let worker_token = token.to_owned();
         std::thread::spawn(move || {
-            transport::run(base, worker_token, subscribe_shell, commands, incoming, move || {
+            transport::run(base, auth, subscribe_shell, commands, incoming, move || {
                 worker_wake()
             })
         });
@@ -136,7 +161,7 @@ impl Net {
             resources: HashMap::new(),
             resource_events: HashMap::new(),
             base_url: base_url.to_owned(),
-            bearer: token.to_owned(),
+            bearer: token,
             incoming_tx,
             wake,
         }
@@ -202,8 +227,15 @@ impl Net {
                             v.synchronized = false;
                         }
                     }
+                    if conn == Conn::Open {
+                        self.state.conn_trace = None;
+                    }
                     changed |= self.state.conn != conn;
                     self.state.conn = conn;
+                }
+                Incoming::Trace(trace) => {
+                    changed |= self.state.conn_trace != trace;
+                    self.state.conn_trace = trace;
                 }
                 Incoming::Item(route, item) => {
                     if let Route::Resource(method, _) = &route {

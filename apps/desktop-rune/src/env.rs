@@ -27,6 +27,9 @@ mod catalog;
 pub const LOCAL: &str = "";
 /// Marks a row copied in from another environment, holding that environment's key.
 pub(crate) const TAG: &str = "_environment";
+/// The credential of a route reached through T3 Connect (web profile `authorization:
+/// "t3-connect"`): its socket mints a DPoP ticket per attempt instead of sending a bearer.
+pub const T3_CONNECT: &str = "t3-connect";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Saved {
@@ -198,7 +201,9 @@ fn connect_to(s: &App, id: &str, base: &str, bearer: &str) -> Source {
             w()
         }
     };
-    Source::Live(if s.ui.env.outdated.contains_key(id) {
+    Source::Live(if bearer == T3_CONNECT {
+        s5_net::Net::connect_with(base, crate::cloud::socket_auth(id), wake)
+    } else if s.ui.env.outdated.contains_key(id) {
         s5_net::Net::connect_requests_only(base, bearer, wake)
     } else {
         s5_net::Net::connect(base, bearer, wake)
@@ -327,6 +332,34 @@ pub fn short_status(s: &App, key: &str) -> &'static str {
         s5_net::Conn::Closed(reason) if rejected(reason) => "Connection failed",
         s5_net::Conn::Closed(_) => "Reconnecting…",
     }
+}
+
+/// Some route of the saved environment goes through T3 Connect.
+pub fn reached_by_relay(s: &App, id: &str) -> bool {
+    routes(s, id).iter().any(|r| r.bearer == T3_CONNECT)
+}
+
+/// Saves an account computer reached through T3 Connect: `Some(true)` for a new environment,
+/// `Some(false)` for a fallback route on one saved over another address, `None` when it
+/// already had one.
+pub(crate) fn add_relay(s: &mut App, linked: &s5_net::cloud::relay::Linked) -> Option<bool> {
+    let base = linked.http.trim_end_matches('/').to_owned();
+    if s.ui.env.saved.iter().any(|e| e.id == linked.id) {
+        if reached_by_relay(s, &linked.id) {
+            return None;
+        }
+        let mut all = routes(s, &linked.id);
+        all.push(Alt { base, bearer: T3_CONNECT.into() });
+        set_routes(s, &linked.id, all);
+        return Some(false);
+    }
+    let label = if linked.label.is_empty() { linked.id.clone() } else { linked.label.clone() };
+    let env = Saved { id: linked.id.clone(), label, base, bearer: T3_CONNECT.into() };
+    let src = connect(s, &env);
+    s.ui.env.parked.push((env.id.clone(), src));
+    s.ui.env.saved.push(env);
+    s.ui.env.error = persist(s);
+    Some(true)
 }
 
 /// The base URL a saved environment was paired at.
@@ -1177,6 +1210,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene_failing(s);
         crate::wizard::scene_pairing(s);
     }),
+    ("wizard-t3-connect", |s| {
+        scene_failing(s);
+        crate::wizard::scene_computers(s);
+        crate::cloud::scene_signed_in(s);
+    }),
+    ("wizard-t3-connect-signed-out", |s| {
+        scene_failing(s);
+        crate::wizard::scene_computers(s);
+    }),
+    ("wizard-chatgpt-account", crate::wizard::scene_chatgpt),
 ];
 
 #[cfg(test)]

@@ -113,9 +113,10 @@ fn endpoints(base: &str) -> Option<(String, String)> {
     Some((http, ws))
 }
 
-/// SSH tunnels are loopback ports that only live with this process, so they stay out.
+/// SSH tunnels are loopback ports that only live with this process, so they stay out, and
+/// T3 Connect routes carry no bearer for Electron's catalog to hold.
 fn exportable(e: &Saved) -> bool {
-    s5_net::url::Url::parse(&e.base).is_ok_and(|u| !matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")))
+    e.bearer != super::T3_CONNECT && s5_net::url::Url::parse(&e.base).is_ok_and(|u| !matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")))
 }
 
 fn rows<'a>(inner: &'a mut Value, key: &str) -> &'a mut Vec<Value> {

@@ -138,6 +138,26 @@ fn open_detail(s: &mut App, tab: usize, then: impl Fn(&mut pr_detail::Ui)) {
     then(&mut s.ui.pages.detail);
 }
 
+/// The checkout menu with the repository on a second machine too: the environment picker.
+fn scene_checkout_environments(s: &mut App) {
+    open_detail(s, 0, |u| u.checkout_menu = true);
+    let Some(project) = s.ui.pages.detail.entry.as_ref().map(|e| crate::data::s(e, "projectId").to_string()) else { return };
+    let crate::data::Source::Fixture(state) = &mut s.src else { return };
+    let Some(own) = state.projects.iter_mut().find(|p| crate::data::s(p, "id") == project) else { return };
+    own["repositoryIdentity"]["canonicalKey"] = json!("github.com/sparshkaushik/s5code");
+    let mut copy = own.clone();
+    copy["id"] = json!("box-copy");
+    copy["workspaceRoot"] = json!("/srv/code/s5code");
+    let mut remote = crate::data::empty_state();
+    remote.config = Some(json!({"environment": {"environmentId": "box-id", "label": "Build box"}, "settings": {"environmentIcon": "server"}}));
+    remote.projects = vec![copy.clone()];
+    copy[crate::env::TAG] = json!("box");
+    state.projects.push(copy);
+    s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Build box".into(), base: "https://box.example.com".into(), bearer: String::new() });
+    crate::env::park(s, "box", crate::data::Source::Fixture(remote));
+    crate::env::adopt(s, "box-copy", "box");
+}
+
 /// Usage over "Replay showcase", with the recorded limits patched onto codex and Claude.
 fn open_usage(s: &mut App, metric: &'static str) {
     crate::scene_clock(s);
@@ -643,6 +663,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_tabs::scene(s, 1, Some(360.0));
     }),
     ("pull-requests-detail-checkout-menu", |s| open_detail(s, 0, |u| u.checkout_menu = true)),
+    ("pull-requests-detail-checkout-menu-environments", scene_checkout_environments),
+    ("pull-requests-detail-condensed", |s| open_detail(s, 0, |u| u.condense.set(0, true))),
+    ("pull-requests-detail-app-access", |s| open_detail(s, 0, |u| u.app_access.2 = Some("not-covered".into()))),
     ("pull-requests-detail-resolve-preparing", |s| open_detail(s, 0, pr_detail::scene_resolving)),
     ("pull-requests-detail-checks-stale", |s| {
         open_detail(s, 0, |u| u.checks_popover = true);
@@ -1032,6 +1055,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-prices-checking", |s| {
         open_usage(s, "cost");
         usage_prices::checking_scene(s);
+    }),
+    ("usage-prices-suggestions", |s| {
+        open_usage(s, "cost");
+        usage_prices::open(s, Some("kimi"));
+        usage_prices::suggestions_scene(s);
     }),
     ("usage-prices-read-only", |s| {
         open_usage(s, "cost");

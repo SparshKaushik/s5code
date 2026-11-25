@@ -107,7 +107,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         overlays.extend(swipe::indicator(s, cx.layout_with("main", |r| r), t));
     }
     // Everything under the frame is content: switching or loading a thread lands at once.
-    let mut body = crate::kit::motion::content(row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main));
+    // A maximized right panel takes the chat column's room (`w-0` and inert on the web).
+    let maximized = panel::maximized(s, cx.layout_with("shell", |r| r[2]));
+    let mut body = crate::kit::motion::content(row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).children((!maximized).then_some(main)));
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t, &mut overlays));
     }

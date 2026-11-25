@@ -10,6 +10,7 @@ pub(crate) mod macos;
 #[cfg(unix)]
 pub mod cli;
 pub mod capture;
+pub mod capture_config;
 pub mod capture_linux;
 pub mod exposure;
 pub mod policy;
@@ -345,25 +346,53 @@ fn wheel_zoom_step(travel: &mut f32, delta: f32) -> Option<f32> {
     Some(step)
 }
 
+/// DesktopApplicationMenu.ts's accelerators Rune handles itself; AppKit's menus take them first on
+/// macOS. Numpad 0, + and - arrive as the same characters.
+#[derive(Debug, PartialEq)]
+enum Accelerator {
+    Settings,
+    Reload { force: bool },
+    Zoom(Option<f32>),
+    FullScreen,
+    Minimize,
+    /// Cmd/Ctrl+W nothing took: it never closes the window.
+    Swallow,
+}
+
+fn accelerator(e: &KeyEvent, mac: bool) -> Option<Accelerator> {
+    if e.key == Key::Function(11) && !mac && !e.mods.cmd && !e.mods.alt && !e.mods.shift {
+        return Some(Accelerator::FullScreen);
+    }
+    let Key::Command(c) = e.key else { return None };
+    if e.mods.alt || (mac && e.mods.ctrl) {
+        return None;
+    }
+    let shift = e.mods.shift;
+    Some(match c {
+        ',' if !shift => Accelerator::Settings,
+        'r' => Accelerator::Reload { force: shift },
+        '0' if !shift => Accelerator::Zoom(None),
+        // CmdOrCtrl+=, CmdOrCtrl+Plus, and Cmd+Shift+= on macOS.
+        '=' | '+' => Accelerator::Zoom(Some(ZOOM_STEP)),
+        '-' if !shift => Accelerator::Zoom(Some(-ZOOM_STEP)),
+        // Window › Minimize's role accelerator, which the auto-hidden menu bar still answers.
+        'm' if !shift && !mac => Accelerator::Minimize,
+        'w' => Accelerator::Swallow,
+        _ => return None,
+    })
+}
+
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
-/// reload and zoom first). Cmd/Ctrl+W nothing took is swallowed: it never closes the window.
+/// reload and zoom first).
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    if e.key == Key::Function(11) && !cfg!(target_os = "macos") && !e.mods.cmd && !e.mods.alt && !e.mods.shift {
-        toggle_fullscreen();
-        return true;
-    }
-    let Key::Command(c) = e.key else { return false };
-    if e.mods.alt || (cfg!(target_os = "macos") && e.mods.ctrl) {
-        return false;
-    }
-    match c {
-        ',' if !e.mods.shift => open_settings(s),
-        'r' => reload(s, e.mods.shift),
-        '0' => zoom(s, tx, None),
-        '=' | '+' => zoom(s, tx, Some(ZOOM_STEP)),
-        '-' | '_' => zoom(s, tx, Some(-ZOOM_STEP)),
-        'w' => {}
-        _ => return false,
+    let Some(accelerator) = accelerator(e, cfg!(target_os = "macos")) else { return false };
+    match accelerator {
+        Accelerator::Settings => open_settings(s),
+        Accelerator::Reload { force } => reload(s, force),
+        Accelerator::Zoom(step) => zoom(s, tx, step),
+        Accelerator::FullScreen => toggle_fullscreen(),
+        Accelerator::Minimize => tx.minimize(),
+        Accelerator::Swallow => {}
     }
     true
 }
@@ -507,6 +536,40 @@ mod tests {
         assert_eq!(wheel_zoom_step(&mut travel, -0.1), None, "turning back starts over");
         assert_eq!(wheel_zoom_step(&mut travel, -0.1), Some(ZOOM_STEP));
         assert_eq!(travel, 0.0);
+    }
+
+    #[test]
+    fn menu_accelerators_match_electrons() {
+        use Accelerator as A;
+        let key = |k: Key, shift: bool, alt: bool| {
+            let mut e = KeyEvent::from(k);
+            (e.mods.cmd, e.mods.shift, e.mods.alt) = (true, shift, alt);
+            e
+        };
+        let c = |ch: char, shift: bool| key(Key::Command(ch), shift, false);
+        for (e, mac, want) in [
+            (c(',', false), false, Some(A::Settings)),
+            (c(',', true), false, None),
+            (c('r', false), false, Some(A::Reload { force: false })),
+            (c('r', true), true, Some(A::Reload { force: true })),
+            (c('0', false), false, Some(A::Zoom(None))),
+            (c('0', true), false, None),
+            (c('=', false), false, Some(A::Zoom(Some(ZOOM_STEP)))),
+            (c('+', true), true, Some(A::Zoom(Some(ZOOM_STEP)))),
+            (c('-', false), false, Some(A::Zoom(Some(-ZOOM_STEP)))),
+            (c('-', true), false, None),
+            (c('_', true), false, None),
+            (c('m', false), false, Some(A::Minimize)),
+            (c('m', false), true, None),
+            (c('m', true), false, None),
+            (c('w', false), false, Some(A::Swallow)),
+            (c('i', true), false, None),
+            (key(Key::Command('r'), false, true), false, None),
+            (KeyEvent::from(Key::Function(11)), false, Some(A::FullScreen)),
+            (KeyEvent::from(Key::Function(11)), true, None),
+        ] {
+            assert_eq!(accelerator(&e, mac), want, "FAILED: {:?} shift={} mac={mac}", e.key, e.mods.shift);
+        }
     }
 
     #[test]

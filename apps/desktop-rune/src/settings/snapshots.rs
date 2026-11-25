@@ -4,6 +4,7 @@
 
 use super::controls as c;
 use crate::desktop::capture::{self, State, Test};
+use crate::desktop::capture_config::{self as config, Desktop, Operation};
 use crate::desktop::capture_linux::{self as linux, Backend, ExtensionStatus as Ext};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route, icons, kit};
@@ -36,6 +37,32 @@ pub struct Ui {
     candidate: Option<(Value, Result<(), String>)>,
     sound_open: bool,
     advanced: bool,
+    config: Config,
+}
+
+type Slot<O> = std::sync::Arc<std::sync::Mutex<Option<O>>>;
+
+/// `CaptureShortcutConfig` on Niri and Hyprland: keys, the reviewed change, and its result.
+#[derive(Default)]
+struct Config {
+    /// Recorded keys; unset means the preview's or Ctrl+Shift+2.
+    keys: Option<Value>,
+    preview: Option<config::Preview>,
+    applied: Option<config::Applied>,
+    /// The message, and Advanced's troubleshooting detail.
+    error: Option<(&'static str, Option<String>)>,
+    /// A file chosen in Advanced, read again for later reviews.
+    file: Option<std::path::PathBuf>,
+    reading: Option<Slot<Result<config::Preview, String>>>,
+    writing: Option<Slot<Result<config::Applied, String>>>,
+    advanced: bool,
+    copied_until: i64,
+}
+
+impl Config {
+    fn working(&self) -> bool {
+        self.reading.is_some() || self.writing.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +152,15 @@ fn kind(state: &State) -> Kind {
     }
 }
 
+/// Niri and Hyprland bind capture in their own config instead of a recorded shortcut.
+fn managed(state: &State) -> Option<Desktop> {
+    match kind(state) {
+        Kind::Niri => Some(Desktop::Niri),
+        Kind::Hyprland => Some(Desktop::Hyprland),
+        _ => None,
+    }
+}
+
 /// `captureSetupAccessReady`.
 fn access_ready(state: &State) -> bool {
     if state.message.is_some() || (on_linux(state) && state.linux.is_none()) {
@@ -175,9 +211,11 @@ fn linux_status(state: &State, enabled: bool) -> &'static str {
     } else if kind(state) == Kind::Picker {
         "Manual capture only. You'll choose a window each time"
     } else if state.shortcut_pending {
-        "Waiting for shortcut permission"
+        if kind(state) == Kind::Hyprland { "Connecting your shortcut…" } else { "Waiting for shortcut permission" }
     } else if state.shortcut_verified {
         "Ready to capture"
+    } else if (kind(state) == Kind::Niri && state.shortcut_binding.is_some()) || (kind(state) == Kind::Hyprland && state.shortcut_action_registered == Some(true)) {
+        "Use your shortcut from another app"
     } else if state.shortcut_registered {
         "Shortcut saved"
     } else {
@@ -320,9 +358,13 @@ pub fn recording(s: &App) -> bool {
 
 fn start_recording(s: &mut App) {
     let ui = &mut s.ui.settings.snapshots;
+    if ui.config.working() {
+        return;
+    }
     ui.recording = true;
     ui.held.clear();
     ui.candidate = None;
+    ui.config.error = None;
 }
 
 fn stop_recording(s: &mut App) {
@@ -331,8 +373,23 @@ fn stop_recording(s: &mut App) {
     ui.held.clear();
 }
 
+/// The wizard's config recorder is open instead of the settings shortcut's.
+fn config_recording(s: &App) -> bool {
+    s.ui.settings.snapshots.wizard.is_some_and(|w| w.step == Step::Shortcut) && managed(&state(s)).is_some()
+}
+
 fn record(s: &mut App, shortcut: Value) {
     stop_recording(s);
+    if config_recording(s) {
+        // `allowModifierPairs: false`: a compositor binding needs a key.
+        if capture::pair_modifier(&shortcut).is_none() {
+            let c = &mut s.ui.settings.snapshots.config;
+            c.keys = Some(shortcut);
+            c.preview = None;
+            c.error = None;
+        }
+        return;
+    }
     let unchanged = same(&shortcut, &saved(s));
     let check = capture::availability(&shortcut);
     s.ui.settings.snapshots.candidate = (!unchanged).then_some((shortcut, check));
@@ -363,7 +420,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
 pub fn on_modifier(s: &mut App, e: &rune::KeyEvent) -> bool {
     use rune::Modifier as M;
     let rune::Key::Modifier { modifier, pressed } = &e.key else { return false };
-    if !recording(s) {
+    if !recording(s) || config_recording(s) {
         return false;
     }
     let held = &mut s.ui.settings.snapshots.held;
@@ -404,19 +461,27 @@ fn save_candidate(s: &mut App) -> bool {
 
 /// `openSetup`: macOS always starts on Access, and enabling waits for a passing test.
 fn open_setup(s: &mut App) {
+    open_setup_at(s, Step::Access);
+}
+
+/// `captureSetupInitialStep`: a requested step past Access waits for access to be ready.
+fn open_setup_at(s: &mut App, step: Step) {
     cancel_candidate(s);
     capture::reset_test();
     capture::check_permissions(s, false);
     capture::refresh_linux(s);
     let was_enabled = enabled(s);
+    let step = if access_ready(&state(s)) { step } else { Step::Access };
     let ui = &mut s.ui.settings.snapshots;
     ui.advanced = false;
-    ui.wizard = Some(Wizard { step: Step::Access, was_enabled });
+    ui.config = Config::default();
+    ui.wizard = Some(Wizard { step, was_enabled });
 }
 
 /// `closeSetup`: leaving before finishing turns off what the wizard turned on.
 fn close_setup(s: &mut App, completed: bool) {
     let Some(wizard) = s.ui.settings.snapshots.wizard.take() else { return };
+    s.ui.settings.snapshots.config = Config::default();
     if enabled(s) && !wizard.was_enabled && !completed {
         super::update(s, "snapShotEnabled", json!(false));
     }
@@ -575,13 +640,14 @@ pub fn view(s: &App, t: &T) -> El {
             })
         };
         rows.push(setting(t, title("Include app text", true, t), "Include text and controls when the app makes them available.", linux_text_status(&state).map(str::to_owned), text_control));
-        rows.push(setting(
-            t,
-            title("Capture shortcut", true, t),
-            if picker && linux { "Choose a window to capture from any app." } else { "Capture the window you're using without switching apps." },
-            shortcut_status(ui, &state),
-            shortcut_controls(ui, &display_shortcut(s), t),
-        ));
+        let description = if picker && linux { "Choose a window to capture from any app." } else { "Capture the window you're using without switching apps." };
+        rows.push(if managed(&state).is_some() {
+            let busy = state.linux_busy || state.test == Test::Running;
+            let change = kit::Button::new("Change shortcut").variant("outline").size("xs").disabled(busy).on_press(|s: &mut App| open_setup_at(s, Step::Shortcut));
+            setting(t, title("Capture shortcut", true, t), description, None, change.build(t))
+        } else {
+            setting(t, title("Capture shortcut", true, t), description, shortcut_status(ui, &state), shortcut_controls(ui, &display_shortcut(s), t))
+        });
         let sound = sound_select(s).label("Capture sound").on_toggle(|s: &mut App| s.ui.settings.snapshots.sound_open ^= true).trigger(&kit::theme(t));
         rows.push(setting(t, title("Capture sound", true, t), "Choose the sound played when capture starts.", None, row().child(sound)));
         let effects = effects_status(&state).map(str::to_owned);
@@ -747,6 +813,7 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
     let small = |copy: String, color| text(copy).font(theme::TEXT_XS.lh(18.0)).color(color).wrap();
     let (heading, description) = match wizard.step {
         Step::Access if linux => linux_access_copy(&state, ready),
+        Step::Shortcut if managed(&state).is_some() => ("Choose your shortcut", "Click the shortcut, then press the keys you want."),
         Step::Shortcut if linux => ("Choose your shortcut", "Choose your keys, then approve the permission prompt if asked."),
         Step::Access if state.message.is_some() && state.permissions.is_none() => ("Let's try that again", "Couldn't check snapshots. Try again to continue."),
         Step::Access if permissions_ready(&state, text_on) => ("Allow snapshots", "Test a snapshot of the current window. If macOS asks to bypass its window picker, choose Allow. The test image is discarded."),
@@ -760,6 +827,11 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
     match wizard.step {
         Step::Access if linux => {}
         Step::Access => body = body.child(checklist(&state, text_on, busy, t)),
+        Step::Shortcut if managed(&state).is_some() => {
+            if let Some(desktop) = managed(&state) {
+                body = body.child(config_panel(s, &state, desktop, busy || !ready, t));
+            }
+        }
         Step::Shortcut => {
             let mut shortcut = col().gap(12.0).child(row().child(recorder(ui, &display_shortcut(s), t)));
             if let Some(status) = shortcut_status(ui, &state) {
@@ -824,7 +896,10 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
     }
     let later = if wizard.was_enabled { "Close" } else { "Finish later" };
     footer = footer.child(kit::Button::new(later).variant("ghost").disabled(busy).on_press(|s: &mut App| close_setup(s, false)).build(t));
+    let config_shortcut = wizard.step == Step::Shortcut && managed(&state).is_some();
     footer = footer.child(match wizard.step {
+        // `CaptureShortcutConfig` saves and finishes on its own.
+        Step::Shortcut if config_shortcut => el(),
         Step::Access if linux && kind == Kind::Gnome && !ready && ext != Some(Ext::Enabled) => {
             let install = matches!(ext, Some(Ext::NotInstalled | Ext::UpdateRequired));
             let enable = ext == Some(Ext::Disabled);
@@ -885,6 +960,356 @@ fn wizard(s: &App, t: &T, layer: &mut Vec<El>) {
         .build(t, layer);
 }
 
+fn spawn<O: Send + 'static>(s: &App, work: impl FnOnce() -> O + Send + 'static) -> Slot<O> {
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (out, waker) = (slot.clone(), s.ui.panel.waker.clone());
+    std::thread::spawn(move || {
+        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(work());
+        if let Some(waker) = waker {
+            waker();
+        }
+    });
+    slot
+}
+
+fn take<O>(slot: &Option<Slot<O>>) -> Option<O> {
+    slot.as_ref().and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).take())
+}
+
+/// The recorder's keys as `shortcutToKeybindingInput`; Rune records Super as the mod key.
+fn keys_input(shortcut: &Value) -> String {
+    let flag = |k: &str| shortcut[k].as_bool().unwrap_or(false);
+    let mut parts: Vec<String> = [(flag("ctrlKey"), "Ctrl"), (flag("altKey"), "Alt"), (flag("shiftKey"), "Shift"), (flag("metaKey") || flag("modKey"), "Super")]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_owned())
+        .collect();
+    parts.push(shortcut["key"].as_str().unwrap_or_default().to_uppercase());
+    parts.join("+")
+}
+
+/// A label like "Ctrl+Shift+2" as the recorder's shortcut.
+fn keys_value(label: &str) -> Value {
+    let mut shortcut = json!({"key": "", "metaKey": false, "ctrlKey": false, "altKey": false, "shiftKey": false, "modKey": false});
+    for part in label.split('+').map(|p| p.trim().to_lowercase()) {
+        match part.as_str() {
+            "ctrl" | "control" => shortcut["ctrlKey"] = json!(true),
+            "alt" => shortcut["altKey"] = json!(true),
+            "shift" => shortcut["shiftKey"] = json!(true),
+            "super" | "meta" | "mod" => shortcut["modKey"] = json!(true),
+            _ => shortcut["key"] = json!(part),
+        }
+    }
+    shortcut
+}
+
+fn config_keys(c: &Config) -> Value {
+    c.keys.clone().unwrap_or_else(|| keys_value(c.preview.as_ref().map_or("Ctrl+Shift+2", |p| p.shortcut.as_str())))
+}
+
+const PREPARE_FAILED: &str = "Couldn't prepare the changes. Check Advanced for help.";
+const SAVE_FAILED: &str = "Couldn't save your shortcut. Review the changes and try again.";
+
+/// `CaptureShortcutConfig.read`: previews the change to `file` (or the desktop's own config).
+fn read_config(s: &mut App, file: Option<std::path::PathBuf>, operation: Operation) {
+    let Some(desktop) = managed(&state(s)) else { return };
+    if s.ui.settings.snapshots.config.working() || s.ui.settings.snapshots.recording {
+        return;
+    }
+    let requested = s.ui.settings.snapshots.config.keys.as_ref().map(keys_input);
+    let path = file.clone().unwrap_or_else(|| config::default_path(desktop).0);
+    let slot = spawn(s, move || config::preview(desktop, &path, linux::APP_ID, operation, requested.as_deref()));
+    let c = &mut s.ui.settings.snapshots.config;
+    c.preview = None;
+    c.applied = None;
+    c.error = None;
+    c.file = file;
+    c.reading = Some(slot);
+}
+
+fn choose_config_file(s: &mut App, tx: &mut rune::Tx) {
+    let state = state(s);
+    let Some(desktop) = managed(&state) else { return };
+    if s.ui.settings.snapshots.config.working() {
+        return;
+    }
+    let current = s.ui.settings.snapshots.config.file.clone().or_else(|| state.shortcut_config_path.map(Into::into));
+    let mut options = rune::FileDialogOptions { title: "Choose your desktop config".into(), directory: current.as_ref().and_then(|p| p.parent()).map(Into::into), ..Default::default() };
+    options = match desktop {
+        Desktop::Niri => options.filter("Desktop config", &["kdl"]),
+        Desktop::Hyprland => options.filter("Desktop config", &["conf", "lua"]),
+    };
+    tx.open_file(options, |s: &mut App, picked: rune::FileDialogResult, _| {
+        if let Ok(Some(path)) = picked {
+            read_config(s, Some(path), Operation::Install);
+        }
+    });
+}
+
+fn apply_config(s: &mut App) {
+    let c = &s.ui.settings.snapshots.config;
+    let Some(preview) = c.preview.clone().filter(|_| !c.working()) else { return };
+    let slot = spawn(s, move || config::apply(&preview));
+    s.ui.settings.snapshots.config.writing = Some(slot);
+}
+
+/// Picks up finished reviews and saves; a clean install closes the wizard as web's `onComplete`.
+pub fn poll(s: &mut App) -> bool {
+    let c = &mut s.ui.settings.snapshots.config;
+    let mut changed = false;
+    if let Some(result) = take(&c.reading) {
+        c.reading = None;
+        match result {
+            Ok(preview) => c.preview = Some(preview),
+            Err(detail) => c.error = Some((PREPARE_FAILED, Some(detail))),
+        }
+        changed = true;
+    }
+    if let Some(result) = take(&c.writing) {
+        c.writing = None;
+        changed = true;
+        match result {
+            Ok(applied) => {
+                let finished = applied.warning.is_none() && c.preview.as_ref().is_some_and(|p| p.operation == Operation::Install);
+                let shortcut = c.preview.as_ref().map(|p| p.shortcut.clone()).unwrap_or_default();
+                c.applied = Some(applied);
+                if finished && s.ui.settings.snapshots.wizard.is_some() {
+                    crate::shell::palette::toast(s, "Shortcut saved", Some(&format!("Use {shortcut} from another app.")));
+                    close_setup(s, true);
+                }
+            }
+            Err(detail) => {
+                c.error = Some((SAVE_FAILED, Some(detail)));
+                c.preview = None;
+            }
+        }
+    }
+    changed
+}
+
+/// The unified diff's lines: `+`, `-`, ` ` with three lines of context, `@` between hunks.
+fn diff_lines<'a>(before: &'a str, after: &'a str) -> Vec<(char, &'a str)> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suffix = a[prefix..].iter().rev().zip(b[prefix..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (old, new) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    let mut all: Vec<(char, &str)> = a[..prefix].iter().map(|l| (' ', *l)).collect();
+    if old.len() * new.len() <= 250_000 {
+        // Longest common subsequence over the changed middle only.
+        let w = new.len() + 1;
+        let mut lcs = vec![0u32; (old.len() + 1) * w];
+        for i in (0..old.len()).rev() {
+            for j in (0..new.len()).rev() {
+                lcs[i * w + j] = if old[i] == new[j] { lcs[(i + 1) * w + j + 1] + 1 } else { lcs[(i + 1) * w + j].max(lcs[i * w + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < new.len() {
+            if i < old.len() && j < new.len() && old[i] == new[j] {
+                all.push((' ', old[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if i < old.len() && (j == new.len() || lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
+                all.push(('-', old[i]));
+                i += 1;
+            } else {
+                all.push(('+', new[j]));
+                j += 1;
+            }
+        }
+    } else {
+        all.extend(old.iter().map(|l| ('-', *l)));
+        all.extend(new.iter().map(|l| ('+', *l)));
+    }
+    all.extend(a[a.len() - suffix..].iter().map(|l| (' ', *l)));
+    let near = |i: usize| all[i.saturating_sub(3)..(i + 4).min(all.len())].iter().any(|(m, _)| *m != ' ');
+    let mut out = Vec::new();
+    let mut skipped = false;
+    for (i, line) in all.iter().enumerate() {
+        if near(i) {
+            if skipped && !out.is_empty() {
+                out.push(('@', ""));
+            }
+            skipped = false;
+            out.push(*line);
+        } else {
+            skipped = true;
+        }
+    }
+    out
+}
+
+fn diff_view(preview: &config::Preview, t: &T) -> El {
+    let mut lines = col().w_full().py(4.0);
+    for (mark, line) in diff_lines(&preview.before, &preview.after) {
+        let (fill, color, sign) = match mark {
+            '+' => (t.c.success.alpha_mul(0.12), t.c.foreground, "+"),
+            '-' => (t.c.destructive.alpha_mul(0.12), t.c.foreground, "-"),
+            '@' => (t.c.muted.alpha_mul(0.5), t.c.muted_foreground, "⋯"),
+            _ => (t.c.background.alpha_mul(0.0), t.c.muted_foreground, " "),
+        };
+        lines = lines.child(
+            row()
+                .w_full()
+                .px(8.0)
+                .gap(8.0)
+                .fill(fill)
+                .child(text(sign).font(theme::MONO_XS).color(color))
+                .child(text(line.to_owned()).font(theme::MONO_XS).color(color).wrap().grow(1.0).min_w(0.0)),
+        );
+    }
+    let header = row().w_full().px(8.0).py(6.0).fill(t.c.muted.alpha_mul(0.4)).child(text(preview.path.display().to_string()).font(theme::MONO_XS).color(t.c.muted_foreground).wrap());
+    kit::scroll_area(
+        "snap-shot-config-diff",
+        col().w_full().max_h(320.0).radius(8.0).border(1.0, t.c.border).label("Shortcut changes").scroll(rune::ScrollSpec { stick_bottom: false }).child(header).child(lines),
+        t,
+    )
+}
+
+/// Web `CaptureShortcutConfig`: record keys, review the exact change, then save it with a backup.
+fn config_panel(s: &App, state: &State, desktop: Desktop, disabled: bool, t: &T) -> El {
+    let ui = &s.ui.settings.snapshots;
+    let c = &ui.config;
+    let busy = disabled || c.working();
+    let action_busy = busy || ui.recording;
+    let niri = desktop == Desktop::Niri;
+    let small = |copy: String, color| text(copy).font(theme::TEXT_XS.lh(18.0)).color(color).wrap();
+    let body_text = |copy: String, color| text(copy).font(theme::TEXT_SM).color(color).wrap();
+    let mut panel = col().w_full().gap(16.0);
+    if c.applied.is_none() {
+        panel = panel.child(row().w_full().center_y().child(body_text("Shortcut".into(), t.c.foreground)).child(el().grow(1.0)).child(recorder(ui, &config_keys(c), t)));
+    }
+    if ui.recording {
+        panel = panel.child(small("Press your shortcut. Esc cancels.".into(), t.c.muted_foreground).role("status"));
+    }
+    let preview = c.preview.as_ref();
+    if let Some(applied) = &c.applied {
+        let copy = if applied.warning.is_some() {
+            "Saved, but the shortcut needs attention. Check Advanced for help.".to_owned()
+        } else if preview.is_some_and(|p| p.operation == Operation::Remove) {
+            "Shortcut removed.".to_owned()
+        } else {
+            format!("Use {} from another app to capture a window.", preview.map_or("", |p| p.shortcut.as_str()))
+        };
+        panel = panel.child(body_text(copy, t.c.foreground).role("status"));
+    } else if let Some(preview) = preview {
+        let changed = preview.changed();
+        let install = preview.operation == Operation::Install;
+        let copy = match (changed, install) {
+            (true, false) => "Review the change below to remove your shortcut.",
+            (true, true) => "Review the change below, then save your shortcut.",
+            (false, false) => "There's no capture shortcut to remove.",
+            (false, true) => "This shortcut is already set up.",
+        };
+        panel = panel.child(body_text(copy.into(), t.c.muted_foreground));
+        if changed {
+            panel = panel.child(diff_view(preview, t)).child(small("Only these changes will be saved. We'll keep a backup.".into(), t.c.muted_foreground));
+        }
+        let mut buttons = row().gap(8.0);
+        if changed || install {
+            let label = match (c.writing.is_some(), changed, install) {
+                (true, ..) => "Saving…",
+                (_, true, true) => "Save shortcut",
+                (_, true, false) => "Remove shortcut",
+                _ => "Done",
+            };
+            let save = kit::Button::new(label).disabled(action_busy || (install && state.shortcut_action_registered == Some(false))).on_press(apply_config);
+            buttons = buttons.child(save.build(t));
+        }
+        buttons = buttons.child(kit::Button::new("Cancel").variant("ghost").disabled(action_busy).on_press(|s: &mut App| s.ui.settings.snapshots.config.preview = None).build(t));
+        panel = panel.child(buttons);
+    } else {
+        panel = panel.child(body_text("Allow T3 Code to read your desktop settings. You'll review any changes here before saving.".into(), t.c.muted_foreground)).child(
+            row().child(
+                kit::Button::new(if c.reading.is_some() { "Preparing changes…" } else { "Review changes" })
+                    .disabled(action_busy)
+                    .on_press(|s: &mut App| {
+                        let file = s.ui.settings.snapshots.config.file.clone();
+                        read_config(s, file, Operation::Install);
+                    })
+                    .build(t),
+            ),
+        );
+    }
+    if let Some((message, _)) = &c.error {
+        panel = panel.child(body_text((*message).into(), t.c.destructive).role("alert"));
+    }
+    if state.shortcut_action_registered == Some(false) && state.shortcut_message.is_some() {
+        let copy = if state.shortcut_pending { "Connecting to your desktop…" } else { "Restart T3 Code to finish connecting your shortcut." };
+        panel = panel.child(body_text(copy.into(), t.c.muted_foreground).role("status"));
+    }
+    let open = c.advanced;
+    let mut advanced = col().w_full().gap(12.0).child(
+        row()
+            .gap(4.0)
+            .center_y()
+            .role("button")
+            .label("Advanced")
+            .cursor(rune::Cursor::Pointer)
+            .on_press(|s: &mut App| s.ui.settings.snapshots.config.advanced ^= true)
+            .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground))
+            .child(text("Advanced").font(theme::TEXT_XS).color(t.c.muted_foreground)),
+    );
+    if open {
+        let strong = |copy: &str| text(copy.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground);
+        let detail = c.error.as_ref().and_then(|(_, d)| d.clone()).or_else(|| c.applied.as_ref().and_then(|a| a.warning.clone()));
+        if let Some(detail) = detail {
+            advanced = advanced.child(col().gap(4.0).child(strong("Troubleshooting")).child(small(detail, t.c.muted_foreground)));
+        }
+        let path = preview.map(|p| p.path.display().to_string()).or_else(|| state.shortcut_config_path.clone()).unwrap_or_else(|| (if niri { "~/.config/niri/config.kdl" } else { "~/.config/hypr/hyprland.conf" }).into());
+        let mut file = col().gap(4.0).child(strong("Settings file")).child(text(path).font(theme::MONO_XS).color(t.c.muted_foreground).wrap());
+        if niri {
+            file = file.child(small("T3 Code also reads any files included by this file.".into(), t.c.muted_foreground));
+        }
+        if let Some(p) = preview.filter(|p| p.resolved != p.path) {
+            file = file.child(small(format!("Linked to {}. The link will be kept.", p.resolved.display()), t.c.muted_foreground));
+        }
+        advanced = advanced.child(file);
+        let mut actions = row().gap(8.0)
+            .child(kit::Button::new("Choose a different file…").variant("outline").size("sm").disabled(action_busy).build(t).on_press_tx(choose_config_file))
+            .child(kit::Button::new("Remove shortcut…").variant("ghost").size("sm").disabled(action_busy).on_press(|s: &mut App| {
+                let file = s.ui.settings.snapshots.config.file.clone();
+                read_config(s, file, Operation::Remove);
+            }).build(t));
+        if c.applied.is_some() {
+            actions = actions.child(kit::Button::new("Review changes").variant("outline").size("sm").disabled(action_busy).on_press(|s: &mut App| {
+                let file = s.ui.settings.snapshots.config.file.clone();
+                read_config(s, file, Operation::Install);
+            }).build(t));
+        }
+        advanced = advanced.child(actions);
+        let location = if niri { "A custom --config or NIRI_CONFIG can change its location." } else { "On Omarchy, use your own bindings file, not its defaults." };
+        advanced = advanced.child(small(format!("Use your desktop's shortcut settings file. {location}"), t.c.muted_foreground));
+        if let Some(backup) = c.applied.as_ref().and_then(|a| a.backup.as_ref()) {
+            advanced = advanced.child(small(format!("Backup: {}", backup.display()), t.c.muted_foreground));
+        }
+        let manual = if niri { "Paste this inside binds { … } in your Niri config, then save." } else { "Add this binding to your Hyprland config, then save." };
+        let binding = state.shortcut_binding.clone().unwrap_or_default();
+        let copied = crate::data::now_ms() < c.copied_until;
+        let copy_binding = binding.clone();
+        advanced = advanced
+            .child(strong("Manual setup"))
+            .child(small(format!("{manual} Change the keys if needed."), t.c.muted_foreground))
+            .child(col().w_full().max_h(160.0).radius(12.0).padding(12.0).fill(t.c.muted.alpha_mul(0.5)).child(text(binding.clone()).font(theme::MONO_XS).color(t.c.foreground).wrap()))
+            .child(row().child(kit::Button::new(if copied { "Copied" } else { "Copy shortcut" }).variant("outline").size("sm").disabled(action_busy || binding.is_empty()).build(t).on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+                if copy_binding.is_empty() {
+                    return;
+                }
+                tx.copy(copy_binding.clone());
+                s.ui.settings.snapshots.config.copied_until = crate::data::now_ms() + 2000;
+                tx.wake_after(std::time::Duration::from_millis(2000));
+            })))
+            .child(small(format!("Turn capture off in T3 Code to stop it. Remove the shortcut from {} to free up the keys.", desktop.name()), t.c.muted_foreground));
+        if state.shortcut_action_registered == Some(false)
+            && let Some(message) = &state.shortcut_message
+        {
+            advanced = advanced.child(small(message.clone(), t.c.muted_foreground).role("status"));
+        }
+        let done = kit::Button::new("I've added the shortcut").variant("outline").size("sm").disabled(action_busy || state.shortcut_action_registered == Some(false)).on_press(|s: &mut App| close_setup(s, true));
+        advanced = advanced.child(row().child(done.build(t)));
+    }
+    panel.child(advanced)
+}
+
 fn scene_state(screen_recording: bool) -> State {
     State {
         supported: true,
@@ -906,6 +1331,17 @@ fn linux_state(backend: Backend, ext: Option<Ext>) -> State {
     }
 }
 
+/// Hyprland serving the capture action its config binding calls.
+fn hyprland_state() -> State {
+    State {
+        shortcut_action_registered: Some(true),
+        shortcut_message: Some("Managed by Hyprland. Add the binding to your config and save it.".into()),
+        shortcut_binding: Some(config::manual_binding(Desktop::Hyprland, linux::APP_ID, false)),
+        shortcut_config_path: Some("/home/you/.config/hypr/hyprland.conf".into()),
+        ..linux_state(Backend::Hyprland, None)
+    }
+}
+
 /// The page on macOS, forced on any platform for scenes.
 fn mac_scene(s: &mut App, enabled: bool, state: State) {
     super::scene(s, "snap-shot");
@@ -920,10 +1356,23 @@ pub(crate) const SCENES: &[(&str, fn(&mut App))] = &[
         let shortcut = json!({"key": "2", "metaKey": false, "ctrlKey": true, "altKey": false, "shiftKey": true, "modKey": false});
         s.client_settings.values.insert("snapShotShortcut".into(), shortcut);
     }),
-    ("settings-snap-shot-hyprland", |s| {
-        mac_scene(s, true, State { shortcut_registered: true, ..linux_state(Backend::Hyprland, None) });
-        let shortcut = json!({"key": "2", "metaKey": false, "ctrlKey": true, "altKey": false, "shiftKey": true, "modKey": false});
-        s.client_settings.values.insert("snapShotShortcut".into(), shortcut);
+    ("settings-snap-shot-hyprland", |s| mac_scene(s, true, hyprland_state())),
+    ("settings-snap-shot-wizard-hyprland-config", |s| {
+        mac_scene(s, true, hyprland_state());
+        let ui = &mut s.ui.settings.snapshots;
+        ui.wizard = Some(Wizard { step: Step::Shortcut, was_enabled: true });
+        ui.config.advanced = true;
+    }),
+    ("settings-snap-shot-wizard-niri-config", |s| {
+        let binding = config::niri_binding(linux::APP_ID);
+        let state = State { shortcut_action_registered: Some(true), shortcut_message: Some("Set up the shortcut to add it to your Niri config.".into()), shortcut_config_path: Some("/home/you/.config/niri/config.kdl".into()), shortcut_binding: Some(binding.clone()), ..linux_state(Backend::Niri, None) };
+        mac_scene(s, true, state);
+        let before = "input {\n    keyboard {\n        xkb {\n            layout \"us\"\n        }\n    }\n}\n\nbinds {\n    Mod+T { spawn \"alacritty\"; }\n    Mod+Q { close-window; }\n}\n";
+        let after = before.replace("    Mod+Q { close-window; }\n", &format!("    Mod+Q {{ close-window; }}\n    {}\n", binding.replace("Ctrl+Shift+2", "Ctrl+Alt+S")));
+        let ui = &mut s.ui.settings.snapshots;
+        ui.wizard = Some(Wizard { step: Step::Shortcut, was_enabled: true });
+        ui.config.keys = Some(json!({"key": "s", "metaKey": false, "ctrlKey": true, "altKey": true, "shiftKey": false, "modKey": false}));
+        ui.config.preview = Some(config::scene_preview(Desktop::Niri, "/home/you/.config/niri/config.kdl", before, &after, "Ctrl+Alt+S"));
     }),
     ("settings-snap-shot-wizard-niri", |s| {
         mac_scene(s, false, linux_state(Backend::Niri, None));
@@ -982,6 +1431,32 @@ pub(crate) const SCENES: &[(&str, fn(&mut App))] = &[
 mod tests {
     use super::*;
     use rune::{Key, KeyEvent, Mods};
+
+    #[test]
+    fn config_shortcuts_review_and_read_like_web() {
+        let ctrl_shift_2 = json!({"key": "2", "metaKey": false, "ctrlKey": true, "altKey": false, "shiftKey": true, "modKey": false});
+        assert_eq!(keys_input(&ctrl_shift_2), "Ctrl+Shift+2");
+        assert_eq!(keys_input(&json!({"key": "f5", "altKey": true, "modKey": true})), "Alt+Super+F5", "Rune records Super as the mod key");
+        assert_eq!(keys_input(&keys_value("Ctrl+Shift+2")), "Ctrl+Shift+2");
+        assert_eq!(keys_input(&keys_value("Super+A")), "Super+A");
+
+        let before = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let after = "a\nb\nc\nd\ne\nf\ng\nh\nbind\ni\nj\n";
+        assert_eq!(diff_lines(before, after), vec![(' ', "f"), (' ', "g"), (' ', "h"), ('+', "bind"), (' ', "i"), (' ', "j")], "three lines of context");
+        let two = diff_lines("x\n1\n2\n3\n4\n5\n6\n7\n8\ny\n", "1\n2\n3\n4\n5\n6\n7\n8\n");
+        assert_eq!(two.iter().filter(|(m, _)| *m == '@').count(), 1, "far-apart changes are separate hunks");
+        assert_eq!((two[0], *two.last().unwrap()), (('-', "x"), ('-', "y")));
+        assert_eq!(diff_lines("a\nold\nb\n", "a\nnew\nb\n"), vec![(' ', "a"), ('-', "old"), ('+', "new"), (' ', "b")], "removals before additions");
+
+        let niri = State { shortcut_binding: Some("Ctrl+Shift+2 { … }".into()), ..linux_state(Backend::Niri, None) };
+        assert_eq!(status(&niri, true), "Use your shortcut from another app");
+        let connecting = State { shortcut_pending: true, ..linux_state(Backend::Hyprland, None) };
+        assert_eq!(status(&connecting, true), "Connecting your shortcut…");
+        let refused = State { shortcut_action_registered: Some(false), ..linux_state(Backend::Hyprland, None) };
+        assert_eq!(status(&refused, true), "Finish shortcut setup");
+        assert_eq!(status(&State { shortcut_action_registered: Some(true), ..refused }, true), "Use your shortcut from another app");
+        assert_eq!(managed(&linux_state(Backend::Kde, None)), None);
+    }
 
     #[test]
     fn statuses_read_like_web() {

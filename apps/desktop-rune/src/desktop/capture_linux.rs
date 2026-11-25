@@ -820,6 +820,16 @@ pub fn app_text(window: &Window) -> Option<String> {
     (window.pid > 0).then(|| bus::app_text(window.pid, &window.title)).flatten()
 }
 
+/// `startNiriCaptureShortcut` and Hyprland's `PortalCaptureShortcut`: serves the action the
+/// compositor's binding calls until `stop`. `ready` says once whether it was registered (Hyprland
+/// may refuse the action) or why it failed; `trigger` runs on each press.
+pub fn serve_shortcut(desktop: crate::desktop::capture_config::Desktop, stop: &std::sync::atomic::AtomicBool, ready: &dyn Fn(Result<bool, String>), trigger: std::sync::Arc<dyn Fn() + Send + Sync>) {
+    match desktop {
+        crate::desktop::capture_config::Desktop::Niri => bus::niri_endpoint(stop, ready, trigger),
+        crate::desktop::capture_config::Desktop::Hyprland => bus::hyprland_shortcut(stop, ready, &*trigger, sandboxed()),
+    }
+}
+
 /// Plays a capture sound through PipeWire, else PulseAudio.
 pub fn play(path: &Path) {
     for player in ["pw-play", "paplay"] {
@@ -1180,6 +1190,107 @@ mod bus {
         Ok((meta, raw, named))
     }
 
+    /// The object Niri's `gdbus call` reaches.
+    struct NiriEndpoint(std::sync::Arc<dyn Fn() + Send + Sync>);
+
+    #[zbus::interface(name = "com.t3tools.SnapShot")]
+    impl NiriEndpoint {
+        fn capture(&self) {
+            (self.0)();
+        }
+    }
+
+    async fn wait_for(stop: &std::sync::atomic::AtomicBool) {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub(super) fn niri_endpoint(stop: &std::sync::atomic::AtomicBool, ready: &dyn Fn(Result<bool, String>), trigger: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        let result = block(|conn| async move {
+            conn.object_server().at(crate::desktop::capture_config::NIRI_PATH, NiriEndpoint(trigger)).await.map_err(message)?;
+            // DO_NOT_QUEUE (4); 1 is PRIMARY_OWNER.
+            let owner: u32 = timed(call(&conn, (DBUS, DBUS_PATH), DBUS, "RequestName", &(format!("{APP_ID}.SnapShot"), 4u32))).await.map_err(message)?;
+            if owner != 1 {
+                return Err("Another T3 Code instance already owns the capture shortcut.".to_owned());
+            }
+            ready(Ok(true));
+            wait_for(stop).await;
+            Ok(())
+        });
+        if let Err(e) = result {
+            ready(Err(e));
+        }
+    }
+
+    const SHORTCUTS: &str = "org.freedesktop.portal.GlobalShortcuts";
+    const NO_SESSION: &str = "Your desktop could not create a capture shortcut session.";
+
+    /// A portal request: subscribe to its `Response`, then make the (lazy) call, and take the results.
+    async fn portal_response(conn: &Connection, sender: &str, token: &str, request: impl Future<Output = zbus::Result<OwnedObjectPath>>) -> Result<HashMap<String, OwnedVariant>, String> {
+        let path = format!("{PORTAL_PATH}/request/{sender}/{token}");
+        let proxy = Proxy::new(conn, PORTAL, path.as_str(), "org.freedesktop.portal.Request").await.map_err(message)?;
+        let mut responses = proxy.receive_signal("Response").await.map_err(message)?;
+        let handle = timed(request).await.map_err(message)?;
+        if handle.as_str() != path {
+            return Err(NO_SESSION.into());
+        }
+        let response = tokio::time::timeout(RESPONSE_TIMEOUT, responses.next()).await.ok().flatten().ok_or(NO_SESSION)?;
+        let (status, results): (u32, HashMap<String, OwnedVariant>) = response.body().deserialize().map_err(message)?;
+        if status == 0 { Ok(results) } else { Err(NO_SESSION.into()) }
+    }
+
+    /// Electron's `PortalCaptureShortcut` managed by Hyprland: the app names itself to the portal,
+    /// binds `capture-window` with no trigger, and Hyprland's `global` binding fires it.
+    pub(super) fn hyprland_shortcut(stop: &std::sync::atomic::AtomicBool, ready: &dyn Fn(Result<bool, String>), trigger: &dyn Fn(), sandboxed: bool) {
+        use crate::desktop::capture_config::HYPRLAND_ACTION;
+        let result = block(|conn| async move {
+            let conn = &conn;
+            if !sandboxed {
+                let registered = timed(call::<_, ()>(conn, (PORTAL, PORTAL_PATH), "org.freedesktop.host.portal.Registry", "Register", &(APP_ID, HashMap::<&str, Variant>::new()))).await;
+                if let Err(e) = registered
+                    && !missing(&e)
+                {
+                    return Err(message(e));
+                }
+            }
+            let sender = conn.unique_name().ok_or(NO_SESSION)?.trim_start_matches(':').replace('.', "_");
+            let portal = Proxy::new(conn, PORTAL, PORTAL_PATH, SHORTCUTS).await.map_err(message)?;
+            let mut activated = portal.receive_signal("Activated").await.map_err(message)?;
+            let id = s5_net::uuid().replace('-', "");
+            let (token, session_token) = (format!("t3_capture_{id}"), format!("t3_capture_session_{id}"));
+            let options = HashMap::from([("handle_token", Variant::from(token.as_str())), ("session_handle_token", Variant::from(session_token.as_str()))]);
+            let body = (options,);
+            let created = portal_response(conn, &sender, &token, portal.call::<_, _, OwnedObjectPath>("CreateSession", &body)).await?;
+            let session = text(&created, "session_handle").unwrap_or_else(|| format!("{PORTAL_PATH}/session/{sender}/{session_token}"));
+            if !session.starts_with(&format!("{PORTAL_PATH}/session/{sender}/")) {
+                return Err("Invalid shortcut session handle.".into());
+            }
+            let handle = OwnedObjectPath::try_from(session.clone()).map_err(|_| "Invalid shortcut session handle.".to_owned())?;
+            let bind_token = format!("t3_capture_bind_{id}");
+            let shortcuts = vec![(HYPRLAND_ACTION, HashMap::from([("description", Variant::from("Capture a window"))]))];
+            let options = HashMap::from([("handle_token", Variant::from(bind_token.as_str()))]);
+            let body = (&handle, shortcuts, "", options);
+            let bound = portal_response(conn, &sender, &bind_token, portal.call::<_, _, OwnedObjectPath>("BindShortcuts", &body)).await?;
+            ready(Ok(bound.get("shortcuts").is_some_and(|v| format!("{v:?}").contains(HYPRLAND_ACTION))));
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let Ok(next) = tokio::time::timeout(Duration::from_millis(250), activated.next()).await else { continue };
+                let Some(signal) = next else { break };
+                if let Ok((from, shortcut, _, _)) = signal.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedVariant>)>()
+                    && from.as_str() == session
+                    && shortcut == HYPRLAND_ACTION
+                {
+                    trigger();
+                }
+            }
+            let _ = timed(call::<_, ()>(conn, (PORTAL, session.as_str()), "org.freedesktop.portal.Session", "Close", &())).await;
+            Ok(())
+        });
+        if let Err(e) = result {
+            ready(Err(e));
+        }
+    }
+
     const ATSPI_ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
     const ATSPI_TEXT: &str = "org.a11y.atspi.Text";
     /// `STATE_ACTIVE` in the first word of `GetState`.
@@ -1275,6 +1386,12 @@ mod bus {
 mod bus {
     use super::Probe;
     const UNSUPPORTED: &str = "Snapshots on Linux need a Wayland session.";
+    pub(super) fn niri_endpoint(_: &std::sync::atomic::AtomicBool, ready: &dyn Fn(Result<bool, String>), _: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        ready(Err(UNSUPPORTED.into()));
+    }
+    pub(super) fn hyprland_shortcut(_: &std::sync::atomic::AtomicBool, ready: &dyn Fn(Result<bool, String>), _: &dyn Fn(), _: bool) {
+        ready(Err(UNSUPPORTED.into()));
+    }
     pub(super) fn probe(_: bool, _: bool) -> Result<Probe, String> {
         Err(UNSUPPORTED.into())
     }

@@ -989,6 +989,12 @@ pub(super) fn enable_cursor(s: &mut App, key: &str) {
     }
 }
 
+/// The models the given environments' answered scans used, for the price table's suggestions.
+pub(super) fn scanned_models(u: &Ui, keys: &[String]) -> Vec<String> {
+    let buckets = u.scans.iter().filter(|scan| keys.contains(&scan.key)).filter_map(|scan| scan.summary.as_ref()).flat_map(|s| s["buckets"].as_array().into_iter().flatten());
+    buckets.filter_map(|b| b["model"].as_str()).filter(|m| !m.is_empty()).map(str::to_string).collect()
+}
+
 /// Scenes: `key` asked for the requested window, answered with `summary` or still scanning.
 pub(super) fn scene_scan(s: &mut App, key: &str, summary: Option<Value>) {
     let Some(requested) = s.ui.pages.usage.requested.clone() else { return };
