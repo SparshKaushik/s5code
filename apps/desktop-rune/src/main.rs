@@ -12,6 +12,7 @@ mod desktop;
 mod env;
 mod host;
 mod icons;
+mod keep_alive;
 mod kit;
 mod links;
 mod not_found;
@@ -79,6 +80,7 @@ pub struct Ui {
     pub env: env::Ui,
     pub links: links::Ui,
     pub wizard: wizard::Ui,
+    pub keep_alive: keep_alive::Ui,
 }
 
 pub struct App {
@@ -204,6 +206,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= links::poll(s);
     changed |= cloud::poll(s);
     changed |= add_to_machine::poll(s);
+    keep_alive::poll(s);
     changed |= settings::codex_callback::poll(s);
     changed |= wizard::poll(s);
     changed |= search::poll(s);

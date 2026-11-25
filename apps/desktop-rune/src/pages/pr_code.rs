@@ -120,6 +120,8 @@ pub struct Ui {
     refetch: Option<(u64, String)>,
     /// The shown first page's `page_mark`, which a reread compares against.
     pub(super) first_mark: Option<u64>,
+    /// Counts the host gave for files whose content it withheld, by path (omittedFileStats).
+    pub(super) omitted: HashMap<String, (usize, usize)>,
     /// Pages the parser read no file from, shown as text (getRenderablePatch's raw kind).
     pub(super) raw: Vec<String>,
 }
@@ -834,6 +836,7 @@ pub(super) fn poll(s: &mut App) -> bool {
         c.editing = None;
         c.full_comments.clear();
         c.raw.clear();
+        c.omitted.clear();
         changed = true;
     }
     changed |= sync_refetch(s, &entry);
@@ -882,6 +885,12 @@ pub fn answer_reveal(s: &mut App, tx: &mut Tx) -> bool {
         None => load_more(s),
     }
 }
+
+/// The diff view and its scroller, a direct child: `SCROLLER` is the key path Rune resolves
+/// through the nearest keyed ancestor, for layout reads and scroll requests alike.
+const VIEW_KEY: &str = "pr-code-view";
+const SCROLL_KEY: &str = "scroll";
+pub(super) const SCROLLER: &str = "pr-code-view/scroll";
 
 /// backgroundRefreshToken: a finished turn reads the diff's first page and the viewed ticks
 /// again, keeping the pages read so far while the first is unchanged.
@@ -950,7 +959,27 @@ fn first_page(s: &mut App, d: &Value) {
     let c = &mut s.ui.pages.code;
     c.next = d["nextCursor"].as_str().map(str::to_owned);
     c.first_mark = Some(page_mark(d));
+    c.omitted.clear();
+    absorb_omitted(c, d);
     c.fresh = true;
+}
+
+/// A page's omittedFileStats, kept beside the pages read before it.
+pub(super) fn absorb_omitted(c: &mut Ui, d: &Value) {
+    for f in d["omittedFileStats"].as_array().into_iter().flatten() {
+        let n = |key: &str| f[key].as_u64().unwrap_or(0) as usize;
+        c.omitted.insert(field(f, "path").to_owned(), (n("additions"), n("deletions")));
+    }
+}
+
+/// A file header's counts: what its patch shows, or for a file the host withheld (none shown),
+/// the counts the host reported for it.
+fn header_counts(c: &Ui, file: &FileDiff) -> (usize, usize) {
+    let path = file.path();
+    match c.counts.get(path).copied().unwrap_or_else(|| file_counts(file)) {
+        (0, 0) => c.omitted.get(path).copied().unwrap_or((0, 0)),
+        shown => shown,
+    }
 }
 
 /// The page's patch when the parser read no file from it.
@@ -986,6 +1015,7 @@ fn sync_page(s: &mut App, entry: &Value) -> bool {
             let raw = unparsed(patch, &more);
             s.ui.pages.code.raw.extend(raw);
             s.ui.pages.code.pages.push(more.len());
+            absorb_omitted(&mut s.ui.pages.code, &d);
             let u = &mut s.ui.pages.detail;
             if let Some(files) = &mut u.files {
                 files.extend(more);
@@ -1917,7 +1947,7 @@ fn thread_card(s: &App, t: &T, th: &Value) -> El {
         let body = match &c.editing {
             Some((on, draft)) if *on == cid => comment_editor(s, t, draft),
             _ => {
-                let mut line = row().w_full().gap(4.0).items_start().child(super::pr_detail::markdown(t, field(comment, "body")).grow(1.0).shrink().min_w(0.0));
+                let mut line = row().w_full().gap(4.0).items_start().child(super::pr_media::view(s, t, field(comment, "body")).grow(1.0).shrink().min_w(0.0));
                 if can_edit(s, comment) {
                     let shown = field(comment, "body").to_owned();
                     line = line.child(super::pr_edit::pencil(t, "Edit comment", move |s: &mut App| start_edit(s, &cid, &shown)));
@@ -1980,7 +2010,7 @@ fn comment_editor(s: &App, t: &T, draft: &EditDraft) -> El {
         .build(&kit::theme(t))
         .label("Markdown editor mode");
     let body = if draft.preview {
-        let shown = if empty { text("Nothing to preview.").font(theme::TEXT_XS).color(t.c.muted_foreground) } else { super::pr_detail::markdown(t, &draft.edit.text) };
+        let shown = if empty { text("Nothing to preview.").font(theme::TEXT_XS).color(t.c.muted_foreground) } else { super::pr_media::view(s, t, &draft.edit.text) };
         col().w_full().px(12.0).py(8.0).radius(radius::LG).border(1.0, t.c.border.alpha_mul(0.6)).child(shown)
     } else {
         let input = super::pr_edit::area(t, "pr-code-edit-comment".into(), &draft.edit, 6.0, "Edit comment".into(), "");
@@ -2040,7 +2070,7 @@ fn diff_view(s: &App, t: &T) -> El {
     look.comments = can_select(s);
     let look = Rc::new(look);
     let wrap = st.wraps();
-    if !wrap && let Some(r) = rune::memo::layout("pr-code-view/scroll") {
+    if !wrap && let Some(r) = rune::memo::layout(SCROLLER) {
         st.set_viewport(r);
     }
     let mut list = col().key("rows").w_full().growth(GrowthSpec::default()).selection_group(true).role("list").label("Diff");
@@ -2057,10 +2087,10 @@ fn diff_view(s: &App, t: &T) -> El {
             let changed = s.ui.pages.code.diff.set_visible_rows(rows);
             (near_end && load_more(s)) || changed
         });
-    let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
+    let scroll = col().key(SCROLL_KEY).w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).on_scroll_offset(super::pr_detail::condense_reporter(s, 2));
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
     let footer = s.ui.pages.code.next.is_some().then(|| page_footer(s, t));
-    let mut root = col().key("pr-code-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
+    let mut root = col().key(VIEW_KEY).focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list).children(footer));
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }
@@ -2125,7 +2155,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
             .child(icon(&i::ARROW_RIGHT, 12.0).color(muted).key("arrow"));
     }
     name = name.child(text(path.clone()).font(theme::TEXT_XS).color(t.c.code_foreground).truncate_head().min_w(0.0).shrink().key("title"));
-    let (adds, dels) = s.ui.pages.code.counts.get(&path).copied().unwrap_or_else(|| file_counts(file));
+    let (adds, dels) = header_counts(&s.ui.pages.code, file);
     let mut inner = row()
         .key("inner")
         .w_full()
@@ -2390,6 +2420,12 @@ fn tree(s: &App, t: &T, width: Option<f32>) -> El {
 /// page to read), `file-order` (sources by import, then tests, then generated files, as the tree
 /// lists them), `pending-review` (two comments
 /// pending, for the composer) and `line-comment` (a pending comment and a ranged draft).
+/// A binary file, a file too large to inline, a pure rename and a copy with a change.
+const WITHHELD_PATCH: &str = "diff --git a/assets/icon.png b/assets/icon.png\nBinary files a/assets/icon.png and b/assets/icon.png differ\n\
+diff --git a/data/fixtures/large.json b/data/fixtures/large.json\nindex 1111111..2222222 100644\n\
+diff --git a/src/old_name.rs b/src/new_name.rs\nsimilarity index 100%\nrename from src/old_name.rs\nrename to src/new_name.rs\n\
+diff --git a/src/base.rs b/src/copy.rs\nsimilarity index 90%\ncopy from src/base.rs\ncopy to src/copy.rs\n--- a/src/base.rs\n+++ b/src/copy.rs\n@@ -1 +1 @@\n-old\n+new\n";
+
 pub(super) fn scene(s: &mut App, kind: &str) {
     let usage = "apps/desktop-rune/src/pages/usage.rs";
     let pending = |n: u32, line: u32, body: &str| json!({"id": format!("pending-review-comment-{n}"), "path": usage, "position": {"kind": "added", "newLine": line}, "body": body});
@@ -2446,6 +2482,13 @@ pub(super) fn scene(s: &mut App, kind: &str) {
             s.ui.pages.code.find = Some(Find::default());
             s.ui.pages.code.find_edit = TextEdit::new("wall");
             diff_find::refresh(s, Host::PullRequest);
+        }
+        "withheld" => {
+            s.ui.pages.detail.files = Some(rune_kit::diff::parse(WITHHELD_PATCH));
+            s.ui.pages.detail.diff_truncated = true;
+            s.ui.pages.code.pages.clear();
+            absorb_omitted(&mut s.ui.pages.code, &json!({"omittedFileStats": [{"path": "data/fixtures/large.json", "additions": 4210, "deletions": 96}]}));
+            show(s);
         }
         "raw" => {
             s.ui.pages.detail.files = Some(vec![]);
@@ -2904,6 +2947,25 @@ mod tests {
         s.ui.pages.code.reveal = Some("later.rs".into());
         assert!(!answer_reveal(&mut s, &mut tx), "no page is left to read it from");
         assert_eq!(s.ui.pages.code.reveal.as_deref(), Some("later.rs"), "kept until a page brings it");
+    }
+
+    #[test]
+    fn a_withheld_file_counts_what_the_host_reported() {
+        let files = rune_kit::diff::parse(WITHHELD_PATCH);
+        let paths: Vec<&str> = files.iter().map(FileDiff::path).collect();
+        assert_eq!(paths, ["assets/icon.png", "data/fixtures/large.json", "src/new_name.rs", "src/copy.rs"], "binary, withheld, renamed and copied files each get a row");
+        assert!(matches!(files[2].status, FileStatus::Renamed) && files[2].old_path.as_deref() == Some("src/old_name.rs"));
+        assert!(matches!(files[3].status, FileStatus::Copied) && files[3].old_path.as_deref() == Some("src/base.rs"));
+        let mut c = Ui::default();
+        absorb_omitted(&mut c, &json!({"omittedFileStats": [{"path": "data/fixtures/large.json", "additions": 4210, "deletions": 96}]}));
+        assert_eq!(header_counts(&c, &files[1]), (4210, 96), "omittedFileStats stand in for an empty patch");
+        assert_eq!(header_counts(&c, &files[0]), (0, 0));
+        assert_eq!(header_counts(&c, &files[3]), (1, 1), "a file with a patch keeps its own counts");
+    }
+
+    #[test]
+    fn the_scroller_path_names_the_view_and_its_scroll_child() {
+        assert_eq!(SCROLLER, format!("{VIEW_KEY}/{SCROLL_KEY}"));
     }
 
     #[test]

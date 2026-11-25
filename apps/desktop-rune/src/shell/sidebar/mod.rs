@@ -15,8 +15,6 @@ mod snooze;
 mod stage;
 mod updates;
 
-pub use self::row::monogram;
-
 use std::collections::{HashMap, HashSet};
 
 use rune::{Cx, El, Key, KeyEvent, TextEdit, Tx, col, el, row};
@@ -72,6 +70,9 @@ pub struct Inflight {
     pub thread: String,
     pub title: &'static str,
     pub rollback: Vec<String>,
+    /// The bulk action it belongs to: only that action's first failure toasts.
+    pub batch: Option<u64>,
+    pub quiet: bool,
 }
 
 #[derive(Default)]
@@ -102,6 +103,9 @@ pub struct Ui {
     pub patches: HashMap<String, Patch>,
     /// Commands awaiting their reply, to toast and roll back a failure.
     pub inflight: Vec<Inflight>,
+    /// The bulk action dispatching now, and the toast its failure shows.
+    batch: Option<(u64, &'static str)>,
+    batches: u64,
     /// The threads a drop is changing, while it dispatches: a failure rolls back all of them.
     drop_group: Option<Vec<String>>,
     pub back: Vec<Route>,
@@ -674,8 +678,18 @@ fn dispatch(s: &mut App, kind: &str, id: &str, extra: Value) {
     if let Some(title) = title {
         let ui = &mut s.ui.shell.sidebar;
         let rollback = ui.drop_group.clone().unwrap_or_else(|| vec![id.to_string()]);
-        ui.inflight.push(Inflight { request, thread: id.to_string(), title, rollback });
+        let (title, batch) = ui.batch.map_or((title, None), |(batch, title)| (title, Some(batch)));
+        ui.inflight.push(Inflight { request, thread: id.to_string(), title, rollback, batch, quiet: false });
     }
+}
+
+/// Runs a bulk action whose failures share one toast, as web's "Failed to delete threads".
+pub(crate) fn batched(s: &mut App, title: &'static str, f: impl FnOnce(&mut App)) {
+    let ui = &mut s.ui.shell.sidebar;
+    ui.batches += 1;
+    ui.batch = Some((ui.batches, title));
+    f(s);
+    s.ui.shell.sidebar.batch = None;
 }
 
 /// Takes command replies: a failure toasts its title and undoes the optimistic state it set.
@@ -705,6 +719,12 @@ fn poll_inflight(s: &mut App) -> bool {
 fn failed(s: &mut App, done: &Inflight, error: &Value) {
     for id in &done.rollback {
         s.ui.shell.sidebar.patches.remove(id);
+    }
+    if done.quiet {
+        return;
+    }
+    for other in s.ui.shell.sidebar.inflight.iter_mut().filter(|f| done.batch.is_some() && f.batch == done.batch) {
+        other.quiet = true;
     }
     let message = crate::shell::palette::error_message(error, "An error occurred.");
     crate::shell::palette::toast_error_brief(s, done.title, Some(&message));
@@ -996,9 +1016,11 @@ pub fn request_delete_many(s: &mut App, ids: Vec<String>) {
 }
 
 fn delete_many(s: &mut App, ids: &[String]) {
-    for (n, id) in ids.iter().enumerate() {
-        delete_after(s, id, &ids[..n]);
-    }
+    batched(s, "Failed to delete threads", |s| {
+        for (n, id) in ids.iter().enumerate() {
+            delete_after(s, id, &ids[..n]);
+        }
+    });
     s.ui.shell.sidebar.selected.retain(|id| !ids.contains(id));
 }
 
@@ -1278,9 +1300,18 @@ pub fn open_thread(s: &mut App, id: &str) {
 
 /// `chat.new`: with several open projects, pick one in the palette; otherwise `chat.newLocal`.
 pub fn new_thread(s: &mut App) {
+    new_thread_click(s, false);
+}
+
+/// `shouldCreateNewThreadInCurrentProject`: Shift, a single open project, or none at all.
+pub(crate) fn new_thread_in_current_project(s: &App, shift: bool) -> bool {
     let projects = &s.state().projects;
-    let open = projects.iter().filter(|p| p["archivedAt"].is_null()).count();
-    if open == 1 || projects.is_empty() {
+    shift || projects.is_empty() || projects.iter().filter(|p| p["archivedAt"].is_null()).count() == 1
+}
+
+/// The header's New thread: Shift+click starts one in the current project.
+pub(crate) fn new_thread_click(s: &mut App, shift: bool) {
+    if new_thread_in_current_project(s, shift) {
         new_local(s);
     } else {
         crate::shell::palette::open_new_thread_in(s);
@@ -1980,12 +2011,31 @@ mod tests {
         for id in ["a", "b", "c"] {
             patch(&mut s, id, |p| p.pinned = Some(true));
         }
-        let done = Inflight { request: 1, thread: "a".into(), title: "Failed to pin thread", rollback: vec!["a".into(), "b".into()] };
+        let done = Inflight { request: 1, thread: "a".into(), title: "Failed to pin thread", rollback: vec!["a".into(), "b".into()], batch: None, quiet: false };
         failed(&mut s, &done, &json!({"message": "denied"}));
         let ui = &s.ui.shell.sidebar;
         assert!(!ui.patches.contains_key("a") && !ui.patches.contains_key("b"), "FAILED: the dropped group returns to the server's order");
         assert!(ui.patches.contains_key("c"), "FAILED: an unrelated patch stays");
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Failed to pin thread"));
+    }
+
+    #[test]
+    fn a_bulk_action_s_failures_share_one_toast() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Live(s5_net::Net::in_memory("http://local.test"));
+        s.src.net().expect("live").state_mut().threads = vec![json!({"id": "a"}), json!({"id": "b"})];
+        dispatch(&mut s, "thread.delete", "a", json!({}));
+        batched(&mut s, "Failed to delete threads", |s| {
+            dispatch(s, "thread.delete", "a", json!({}));
+            dispatch(s, "thread.delete", "b", json!({}));
+        });
+        let titles: Vec<_> = s.ui.shell.sidebar.inflight.iter().map(|f| (f.title, f.batch.is_some())).collect();
+        assert_eq!(titles, [("Failed to delete thread", false), ("Failed to delete threads", true), ("Failed to delete threads", true)]);
+        let first = s.ui.shell.sidebar.inflight.remove(1);
+        failed(&mut s, &first, &json!({"message": "denied"}));
+        assert_eq!(crate::shell::palette::toast_description(&s), Some("denied"));
+        let flags: Vec<bool> = s.ui.shell.sidebar.inflight.iter().map(|f| f.quiet).collect();
+        assert_eq!(flags, [false, true], "FAILED: the rest of the bulk action stays quiet, a lone delete does not");
     }
 
     #[test]

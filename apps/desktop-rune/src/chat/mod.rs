@@ -8,6 +8,7 @@ pub mod guest;
 pub mod home;
 pub mod server_update;
 pub mod side;
+pub mod snapshot;
 pub mod subagent_bar;
 pub mod thread_title;
 pub mod timeline;
@@ -35,6 +36,7 @@ pub struct Ui {
     /// A file drag is over the chat (WorkspaceFileDropOverlay shows).
     drop_over: bool,
     pub guest: guest::State,
+    pub snapshot: snapshot::State,
 }
 
 const LAST_ROUTE: &str = "lastRoute";
@@ -140,6 +142,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(timeline::chip::overlay(s, t))
         .children(timeline::chip::quote_toolbar(s, cx, t))
         .children(timeline::attachments::lightbox(s))
+        .children(snapshot::popover(s, t))
         .children(topbar::overlays(s, t));
     if takes_files {
         stack = stack

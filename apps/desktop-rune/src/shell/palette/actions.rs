@@ -106,7 +106,7 @@ pub fn thread_items(s: &App) -> Vec<Item> {
         out.push(v);
     }
     let current = thread(s);
-    if current.is_some() && config(s)["threadFind"] == true {
+    if current.is_some() && supports_thread_find(s) {
         let mut v = item("Find in current thread", "Actions", &icons::TEXT_SEARCH, "", Action::Find);
         v.shortcut = shortcut_label(s, "chat.find");
         v.fields = keywords(&["find", "search", "messages", "plans"]);
@@ -251,6 +251,9 @@ pub fn triage(s: &mut App) {
 }
 fn triage_failed(s: &mut App, message: &str) {
     crate::chat::triage::failed(s, message);
+}
+pub fn supports_thread_find(s: &App) -> bool {
+    config(s)["threadFind"] == true
 }
 /// `chat.find`: the thread's find bar.
 pub fn find(s: &mut App) {

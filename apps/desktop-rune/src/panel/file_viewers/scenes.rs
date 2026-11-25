@@ -128,7 +128,7 @@ fn audio(app: &mut App) {
 
 fn video(app: &mut App) {
     scene(app, "captures/build.webm", true);
-    let html = r#"<!doctype html><style>:root{color-scheme:dark;font:12px system-ui}body{margin:0;display:grid;place-items:center;height:100dvh}video{max-width:95%;max-height:95%}</style>
+    let html = r##"<!doctype html><style>:root{color-scheme:dark;font:12px system-ui}body{margin:0;display:grid;place-items:center;height:100dvh}video{max-width:95%;max-height:95%}</style>
 <video controls muted autoplay playsinline></video><script>
 const canvas=document.createElement("canvas");canvas.width=640;canvas.height=360;
 const ctx=canvas.getContext("2d");ctx.fillStyle="#17243a";ctx.fillRect(0,0,640,360);
@@ -138,7 +138,7 @@ const video=document.querySelector("video");
 video.addEventListener("playing",()=>window.__s5Frame?.("file-preview-ready"));
 video.srcObject=canvas.captureStream(1);
 setTimeout(()=>ctx.fillRect(29,30,1,6),100);
-</script>"#;
+</script>"##;
     shot(app, Mode::Video, html_frame::data_url(html), true);
 }
 

@@ -145,8 +145,8 @@ pub(crate) fn run(
                     );
                     req
                 }
-                crate::Auth::Socket(mint) => {
-                    let url = mint().map_err(|refused| {
+                crate::Auth::Dpop(dpop) => {
+                    let url = dpop.socket().map_err(|refused| {
                         trace = refused.trace.clone();
                         refused.message
                     })?;
@@ -176,6 +176,10 @@ pub(crate) fn run(
                     .map_err(|e| e.to_string())?;
             }
             emit(Incoming::Connection(Conn::Open));
+            let _renewal = match &auth {
+                crate::Auth::Dpop(dpop) => Some(crate::auth::renew_while_open(dpop.clone())),
+                crate::Auth::Bearer(_) => None,
+            };
             let connected_at = Instant::now();
             let mut pending = HashSet::new();
             let mut inbound = Instant::now();
@@ -587,14 +591,26 @@ mod socket_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let (events, incoming) = std::sync::mpsc::channel();
         let attempts = std::sync::Arc::new(AtomicUsize::new(0));
-        let counted = attempts.clone();
-        let mint = std::sync::Arc::new(move || {
-            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(crate::cloud::Failure { message: "Could not connect relay environment: HTTP 502".into(), trace: Some("0af7651916cd43dd8448eb211c80319c".into()), status: Some(502) });
+        struct Mint(std::sync::Arc<AtomicUsize>, std::net::SocketAddr);
+        impl crate::Dpop for Mint {
+            fn socket(&self) -> Result<String, crate::cloud::Failure> {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(crate::cloud::Failure { message: "Could not connect relay environment: HTTP 502".into(), trace: Some("0af7651916cd43dd8448eb211c80319c".into()), status: Some(502) });
+                }
+                Ok(format!("ws://{}/ws?wsTicket=t-1&dpop=proof", self.1))
             }
-            Ok(format!("ws://{address}/ws?wsTicket=t-1&dpop=proof"))
-        });
-        let worker = std::thread::spawn(move || run("http://unused.invalid".into(), crate::Auth::Socket(mint), false, rx, events, || {}));
+            fn token(&self, _: Option<&str>) -> Result<String, crate::cloud::Failure> {
+                Ok("unused".into())
+            }
+            fn expires_at(&self) -> Option<u64> {
+                None
+            }
+            fn proof(&self, _: &str, _: &str, _: &str) -> Result<String, crate::cloud::Failure> {
+                Ok("unused".into())
+            }
+        }
+        let mint = crate::Auth::Dpop(std::sync::Arc::new(Mint(attempts.clone(), address)));
+        let worker = std::thread::spawn(move || run("http://unused.invalid".into(), mint, false, rx, events, || {}));
         let (tcp, _) = listener.accept().unwrap();
         let mut seen = None;
         let _ws = tungstenite::accept_hdr(tcp, |request: &Request, response: Response| -> Result<Response, ErrorResponse> {

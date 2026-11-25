@@ -139,7 +139,7 @@ fn note(message: String, t: &T) -> El {
     )
 }
 
-fn settings_row(t: &T, title: El, description: El, control: Option<El>) -> El {
+fn settings_row(_t: &T, title: El, description: El, control: Option<El>) -> El {
     let copy = col().grow(1.0).min_w(0.0).gap(4.0).child(title).child(description);
     let mut out = row().w_full().px(16.0).py(12.0).gap(32.0).center_y().child(copy);
     if let Some(control) = control {

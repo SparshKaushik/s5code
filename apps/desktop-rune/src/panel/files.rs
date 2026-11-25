@@ -1324,7 +1324,7 @@ pub(super) fn image_fixture(app: &mut App) {
     });
     let mut png = Cursor::new(Vec::new());
     if picture.write_to(&mut png, image::ImageFormat::Png).is_err() { return }
-    let mut cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+    let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
     let decoded = cache.load(png.into_inner());
     let deadline = Instant::now() + Duration::from_secs(4);
     while !decoded.is_ready() && Instant::now() < deadline {

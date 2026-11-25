@@ -3,7 +3,7 @@ use std::io::{Cursor, Read};
 use std::ops::Range;
 use std::sync::Arc;
 
-use rune::{El, Pixels, ScrollSpec, col, el, icon, row, text};
+use rune::{El, Pixels, ScrollSpec, col, el, icon, text};
 
 use super::{Content, Job, action, bar, byte_size, divider, loading, note};
 use crate::panel::file_preview as fp;

@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
 use rune::tok::TextStyle;
-use rune::{Color, El, el, row, text};
+use rune::{Color, El, el};
 
 use super::math::Inline;
 use crate::App;
@@ -87,20 +87,20 @@ pub struct State {
     pub generation: u64,
     /// The typesetting page's `file:` URL once written; `Err` when it could not be.
     page: Option<Result<String, ()>>,
-    /// Scenes' stand-in pictures by TeX and display, in any ink and size.
+    /// Scenes' pictures by TeX and display, in any ink and size.
     stills: HashMap<(String, bool), (Shot, f32, f32)>,
 }
 
-/// The picture of `tex` in `ink` at text size `size`, or `None` until it has been typeset
-/// (asking for it) or when it can't be.
-pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<El> {
+/// The picture of `tex` in `ink` at text size `size` and its size in points, or `None` until it
+/// has been typeset (asking for it) or when it can't be.
+fn still(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<(rune::Pixels, f32, f32)> {
     let state = &app.ui.chat.timeline.katex;
     if let Some((shot, w, h)) = state.stills.get(&(tex.to_owned(), display)) {
-        return Some(el().w(*w).h(*h).pixels(&shot.pixels).label(tex.to_owned()));
+        return Some((shot.pixels.clone(), *w, *h));
     }
     let key = Key { tex: tex.to_owned(), display, size: (size * 10.).round() as u32, ink: ink.hex() };
     match state.entries.get(&key) {
-        Some(Entry::Ready(shot, w, h)) => Some(el().w(*w).h(*h).pixels(&shot.pixels).label(tex.to_owned())),
+        Some(Entry::Ready(shot, w, h)) => Some((shot.pixels.clone(), *w, *h)),
         Some(_) => None,
         None => {
             if let Ok(mut wanted) = state.wanted.try_borrow_mut()
@@ -116,103 +116,31 @@ pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color
     }
 }
 
-/// An inline-math paragraph laid out a word at a time, its formulas as pictures, once all of
-/// them are typeset: Rune's text can't hold a picture. `None` keeps it TeX source, as do
-/// links, images and HTML, which this layout doesn't draw.
-pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> Option<El> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+/// [`still`] as an element.
+pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color) -> Option<El> {
+    let (pixels, w, h) = still(app, tex, display, size, ink)?;
+    Some(el().w(w).h(h).pixels(&pixels).label(tex.to_owned()))
+}
+
+/// An inline-math paragraph as one text, its formulas laid out in its lines once all of them
+/// are typeset. `None` keeps it TeX source.
+pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, t: &crate::theme::T) -> Option<El> {
     let mut source = String::new();
     let mut formulas = Vec::new();
     for part in parts {
         match part {
             Inline::Text(text) => source.push_str(text),
             Inline::Math { tex, display } => {
-                source.push_str(&format!("\u{e000}{}\u{e001}", formulas.len()));
-                formulas.push(picture(app, tex, *display, font.size, ink));
+                source.push_str(&super::inline::placeholder(formulas.len()));
+                let copy = if *display { format!("$${tex}$$") } else { format!("${tex}$") };
+                formulas.push(still(app, tex, *display, font.size, ink).map(|(pixels, w, h)| super::inline::Picture { pixels, size: [w, h], copy, open: None }));
             }
         }
     }
-    if formulas.iter().any(Option::is_none) || source.lines().any(|l| block_syntax(l.trim_start())) {
+    if formulas.iter().any(Option::is_none) {
         return None;
     }
-    let mut words: Vec<El> = Vec::new();
-    let mut word = row().center_y();
-    let mut empty = true;
-    let (mut strong, mut emphasis) = (0, 0);
-    let finish = |word: &mut El, empty: &mut bool, words: &mut Vec<El>| {
-        if !*empty {
-            words.push(std::mem::replace(word, row().center_y()));
-            *empty = true;
-        }
-    };
-    for event in Parser::new(&source) {
-        let (piece, mono) = match event {
-            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => continue,
-            Event::Start(Tag::Strong) => {
-                strong += 1;
-                continue;
-            }
-            Event::End(TagEnd::Strong) => {
-                strong -= 1;
-                continue;
-            }
-            Event::Start(Tag::Emphasis) => {
-                emphasis += 1;
-                continue;
-            }
-            Event::End(TagEnd::Emphasis) => {
-                emphasis -= 1;
-                continue;
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                finish(&mut word, &mut empty, &mut words);
-                continue;
-            }
-            Event::Text(t) => (t.into_string(), false),
-            Event::Code(t) => (t.into_string(), true),
-            _ => return None,
-        };
-        let style = match (mono, strong > 0) {
-            (true, _) => TextStyle { size: font.size * 0.85, ..theme::mono(font) },
-            (false, true) => theme::weight(font, 600.),
-            (false, false) => font,
-        };
-        let style = if emphasis > 0 && !mono { style.italic() } else { style };
-        for (n, chunk) in piece.split(' ').enumerate() {
-            if n > 0 {
-                finish(&mut word, &mut empty, &mut words);
-            }
-            let mut rest = chunk;
-            while !rest.is_empty() {
-                let (before, formula, after) = match rest.find('\u{e000}') {
-                    Some(at) => {
-                        let close = rest[at..].find('\u{e001}').map_or(rest.len(), |c| at + c);
-                        let index: usize = rest[at + '\u{e000}'.len_utf8()..close].parse().ok()?;
-                        (&rest[..at], Some(index), rest.get(close + '\u{e001}'.len_utf8()..).unwrap_or_default())
-                    }
-                    None => (rest, None, ""),
-                };
-                if !before.is_empty() {
-                    word = word.child(text(before.to_owned()).font(style).color(ink).single_line());
-                    empty = false;
-                }
-                if let Some(index) = formula {
-                    word = word.child(formulas.get_mut(index)?.take()?);
-                    empty = false;
-                }
-                rest = after;
-            }
-        }
-    }
-    finish(&mut word, &mut empty, &mut words);
-    Some(row().w_full().flex_wrap().gap(4.0).center_y().min_h(font.line_px()).children(words))
-}
-
-/// Lines a word-at-a-time layout would draw wrong: headings, quotes, lists, tables and fences.
-fn block_syntax(line: &str) -> bool {
-    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    line.starts_with(['#', '>', '|', '<', '-', '*', '+', '`', '~', '='])
-        || (digits > 0 && (line[digits..].starts_with(". ") || line[digits..].starts_with(") ")))
+    super::inline::paragraph(&source, formulas, &|_, _| None, font, ink, t)
 }
 
 /// What a Markdown view holding math reads of the typesetting state.
@@ -309,23 +237,32 @@ fn encode_component(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// Scenes: a formula already typeset, drawn here as a striped stand-in of its size since the
-/// render host has no Chrome.
-pub fn scene_seed(app: &mut App, tex: &str, display: bool, (w, h): (f32, f32)) {
-    let shot = Shot::new(String::new(), 0, true);
-    let (pw, ph) = ((w * 2.) as u32, (h * 2.) as u32);
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    for y in ph / 4..ph * 3 / 4 {
-        for x in 0..pw {
-            if (x / 6) % 3 != 2 {
-                let at = ((y * pw + x) * 4) as usize;
-                rgba[at..at + 4].copy_from_slice(&[0xa1, 0xa1, 0xaa, 0xff]);
-            }
+/// Scenes with Chrome (`S5_CHROME`): typesets each formula for real, waiting here since a
+/// headless run's clock does not wait on Chrome. The pictures then stand for their formula in
+/// any ink and size; without Chrome the formulas stay TeX source and the reason goes to stderr.
+pub fn scene_typeset(app: &mut App, formulas: &[(&str, bool)]) {
+    if app.ui.panel.waker.is_none() {
+        app.ui.panel.waker = Some(std::sync::Arc::new(|| {}));
+    }
+    let ink = theme::theme(app.appearance != crate::Appearance::Light).c.foreground.hex();
+    let size = (theme::TEXT_SM.size * 10.).round() as u32;
+    let keys: Vec<Key> = formulas.iter().map(|(tex, display)| Key { tex: (*tex).to_owned(), display: *display, size, ink: ink.clone() }).collect();
+    app.ui.chat.timeline.katex.wanted.get_mut().extend(keys.iter().cloned());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let waiting = |state: &State| keys.iter().any(|k| matches!(state.entries.get(k), None | Some(Entry::Queued | Entry::Pending(_))));
+    poll(app);
+    while waiting(&app.ui.chat.timeline.katex) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        poll(app);
+    }
+    crate::panel::browser::shutdown();
+    let state = &mut app.ui.chat.timeline.katex;
+    for key in &keys {
+        if let Some(Entry::Ready(shot, w, h)) = state.entries.get(key) {
+            state.stills.insert((key.tex.clone(), key.display), (shot.clone(), *w, *h));
         }
     }
-    shot.pixels.set(pw, ph, rgba);
-    let state = &mut app.ui.chat.timeline.katex;
-    state.stills.insert((tex.to_owned(), display), (shot, w, h));
+    eprintln!("scene: KaTeX typeset {} of {} formulas", state.stills.len(), keys.len());
     state.generation += 1;
 }
 
@@ -342,5 +279,23 @@ mod tests {
         assert!(picture(&app, "x^2", false, 14., ink).is_none());
         assert!(app.ui.chat.timeline.katex.wanted.borrow().is_empty(), "a failed formula isn't asked for again");
         assert!(!poll(&mut app));
+    }
+
+    #[test]
+    fn a_paragraph_flows_around_its_formulas_even_inside_a_link() {
+        let mut app = App::new();
+        app.ui.chat.timeline.katex.stills.insert(("x".into(), false), (Shot::new(String::new(), 0, true), 8., 14.));
+        let ink = Color { r: 1., g: 1., b: 1., a: 1. };
+        let t = theme::theme(true);
+        let math = || Inline::Math { tex: "x".into(), display: false };
+        let around = |before: &str, after: &str| vec![Inline::Text(before.into()), math(), Inline::Text(after.into())];
+        let flows = |parts: &[Inline]| flow(&app, parts, theme::TEXT_SM, ink, &t).is_some();
+        assert!(flows(&around("See [the **docs**](https://example.com) for ", ".")));
+        assert!(flows(&[Inline::Text("[see ".into()), math(), Inline::Text("](https://example.com)".into())]));
+        // An image needs its own picture; a list needs rune_kit's layout.
+        assert!(!flows(&around("![chart](a.png) and ", "")));
+        assert!(!flows(&around("- item ", "")));
+        // An untypeset formula keeps the paragraph TeX source.
+        assert!(!flows(&[Inline::Text("a ".into()), Inline::Math { tex: "y".into(), display: false }]));
     }
 }

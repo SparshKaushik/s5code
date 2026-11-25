@@ -26,6 +26,7 @@ pub mod pr;
 pub mod run_on;
 pub mod scripts;
 pub mod servers;
+pub(crate) mod lineage;
 pub(crate) mod strip;
 pub(crate) mod usage;
 
@@ -38,6 +39,7 @@ pub struct Ui {
     pub menu: Option<Menu>,
     /// The context strip control the open run context or branch menu opened from.
     strip: Option<&'static str>,
+    lineage: lineage::State,
     /// Refs from `vcs.listRefs` for `refs_query`, page after page; `None` while the first loads.
     refs: Option<Vec<Ref>>,
     refs_query: String,
@@ -247,6 +249,8 @@ pub enum Menu {
     RunContext,
     /// The workspace row's context menu: "Copy full path".
     Path,
+    /// The Lineage section's "More thread actions".
+    Lineage,
 }
 
 pub const GAP: f32 = 12.0;
@@ -1040,7 +1044,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | cleanup::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | super::topbar::poll(s) | run_on::poll(s) | cleanup::poll(s) | servers::poll(s) | automations::poll(s) | child_work::poll(s) | html_render::poll(s) | lineage::poll(s);
     poll_branch(s) || changed
 }
 
@@ -1389,6 +1393,12 @@ fn card(s: &App, t: &T, cap: f32) -> Option<El> {
             body = body.child(panel);
             divided = true;
         }
+        if on("lineage")
+            && let Some(panel) = lineage::view(s, t, id, divided)
+        {
+            body = body.child(panel);
+            divided = true;
+        }
         if on("sideChats")
             && let Some(panel) = super::side::details_list(s, t, id, divided)
         {
@@ -1429,6 +1439,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
     let (anchor, list) = match which {
         Menu::Git => ("details-git-menu", surface().children(git::menu_rows(s, t))),
         Menu::Scripts => ("details-scripts-menu", surface().children(scripts::menu_rows(s, t))),
+        Menu::Lineage => ("details-lineage-more", surface().children(lineage::menu_rows(s, t))),
         Menu::Branch => ("details-branch", branch_picker(s, t, surface())),
         Menu::RunContext => ("details-env", surface().children(run_context_rows(s, t))),
         Menu::Path => {

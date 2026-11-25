@@ -8,10 +8,12 @@ pub mod banners;
 pub mod chips;
 mod code_block;
 pub(crate) mod context;
+mod imports;
 pub mod fanout;
 mod lists;
 mod menu;
 mod picker;
+mod prepare;
 pub mod provider_icons;
 mod search;
 mod stash;
@@ -144,6 +146,10 @@ pub struct Ui {
     /// Threads whose next send keeps its full history instead of compacting first.
     keep_full: HashSet<String>,
     thumbs: attachments::Thumbs,
+    /// Pasted image and file chips whose attachments are downloading.
+    imports: imports::Imports,
+    /// Queued pictures being fitted under the image limits, by path.
+    preparing: Vec<(String, prepare::Slot)>,
 }
 
 /// useComposerTypingGuard: a question or approval that arrives within `TYPING_IDLE_MS` of a
@@ -1089,6 +1095,11 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     if editing_run(s).is_none() && banners::send_feedback(s) {
         return;
     }
+    // A send now would leave a picture still being prepared behind.
+    if draft(s).is_some_and(|d| s.ui.chat.composer.preparing.iter().any(|(p, _)| d.attachments.contains(p))) {
+        crate::shell::palette::toast(s, "Still compressing a pasted image.", Some("Send again once its thumbnail appears."));
+        return;
+    }
     if rewinding(s)
         || send_busy(s)
         || send_block(s).is_some()
@@ -1388,8 +1399,60 @@ pub(crate) fn add_files(s: &mut App, paths: impl IntoIterator<Item = String>) {
         d.edit.insert(" ");
         d.edit.focused = true;
     }
-    let error = attachments::intake(&mut d.attachments, files);
+    let error = attachments::intake(&mut d.attachments, files.iter().cloned());
+    let queued: Vec<String> = files.into_iter().filter(|f| d.attachments.contains(f)).collect();
     crate::chat::timeline::error_banner::set_local(s, &key, error.as_deref());
+    let waker = s.ui.panel.waker.clone();
+    for path in queued {
+        let Some(mime) = attachments::image_type(&attachments::file_name(&path)) else { continue };
+        let composer = &mut s.ui.chat.composer;
+        if prepare::needed(&path, mime, attachments::MAX_IMAGE_BYTES) && !composer.preparing.iter().any(|(p, _)| *p == path) {
+            let slot = prepare::start(path.clone(), attachments::file_name(&path), mime, attachments::MAX_IMAGE_BYTES as usize, waker.clone());
+            composer.preparing.push((path, slot));
+        }
+    }
+}
+
+/// Pictures done preparing take their originals' places; a refused one leaves its drafts with
+/// web's reason in the thread's error banner.
+fn poll_prepared(s: &mut App) -> bool {
+    let composer = &mut s.ui.chat.composer;
+    let mut finished = Vec::new();
+    composer.preparing.retain(|(path, slot)| match slot.lock().unwrap().take() {
+        Some(result) => {
+            finished.push((path.clone(), result));
+            false
+        }
+        None => true,
+    });
+    let changed = !finished.is_empty();
+    for (path, result) in finished {
+        let composer = &mut s.ui.chat.composer;
+        match result {
+            Ok(None) => {}
+            Ok(Some(prepared)) => {
+                let prepared = prepared.display().to_string();
+                for d in composer.drafts.values_mut() {
+                    d.attachments.iter_mut().filter(|a| **a == path).for_each(|a| *a = prepared.clone());
+                }
+                composer.thumbs.rename(&path, &prepared);
+            }
+            Err(failure) => {
+                let mut keys = Vec::new();
+                for (key, d) in &mut composer.drafts {
+                    if d.attachments.contains(&path) {
+                        d.attachments.retain(|a| *a != path);
+                        keys.push(key.clone());
+                    }
+                }
+                let reason = prepare::message(&attachments::file_name(&path), &failure);
+                for key in keys {
+                    crate::chat::timeline::error_banner::set_local(s, &key, Some(&reason));
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Sends a message, or launches the thread it starts, with its stored attachments.
@@ -1499,11 +1562,11 @@ fn poll_thumbs(s: &mut App) -> bool {
 
 /// Folds server replies the composer waits on (launches, file searches). Called from `poll`.
 pub fn poll(s: &mut App) -> bool {
-    let local = guard_typing(s, data::now_ms()) | poll_thumbs(s);
+    let local = guard_typing(s, data::now_ms()) | poll_thumbs(s) | poll_prepared(s);
     if s.src.net().is_none() {
         return local;
     }
-    let mut changed = local | persist(s) | stash::persist(s) | usage_limits::poll(s);
+    let mut changed = local | persist(s) | stash::persist(s) | usage_limits::poll(s) | imports::poll(s);
     let Some(net) = s.src.net() else { return false };
     let composer = &mut s.ui.chat.composer;
     let mut failed = Vec::new();
@@ -2632,19 +2695,23 @@ fn attachment_chips(s: &App, t: &T, paths: &[String]) -> El {
 /// A queued image's 64-point tile (ComposerImageThumbnail): its thumbnail cropped to fill, or its
 /// name while the thumbnail decodes or when it can't.
 fn image_tile(s: &App, t: &T, i: usize, path: &str, name: &str) -> El {
+    let thumb = s.ui.chat.composer.thumbs.get(path);
+    // A snapshot's tile is wider, with its app and window along the bottom (SNAP_SHOT_ATTACHMENT_FRAME_CLASS).
+    let snapshot = thumb.and_then(|th| th.source.as_ref()).filter(|source| crate::chat::snapshot::is_snapshot(source));
+    let (w, h) = if snapshot.is_some() { (208.0, 112.0) } else { (64.0, 64.0) };
     let tile = el()
         .key(format!("composer-attachment-{i}"))
-        .size(64.0, 64.0)
+        .size(w, h)
         .radius(radius::LG)
         .border(1.0, t.c.border.alpha_mul(0.8))
         .fill(t.c.background)
         .clip_rounded(radius::LG)
         .help(path.to_owned());
-    let thumb = s.ui.chat.composer.thumbs.get(path);
-    match thumb.filter(|th| !th.failed() && th.pixels.size().0 > 0) {
+    let tile = match thumb.filter(|th| !th.failed() && th.pixels.size().0 > 0) {
         Some(th) => tile.label(name.to_owned()).child(el().w_full().h_full().pixels_fit(&th.pixels, rune::SurfaceFit::Fill)),
         None => tile.center().px(4.0).child(text(name.to_owned()).font(theme::TEXT_2XS).color(t.c.secondary_label).truncate()),
-    }
+    };
+    tile.children(snapshot.map(|source| crate::chat::snapshot::overlay(s, source, format!("composer-snapshot-contents-{i}"))))
 }
 
 /// Any file: a filter list would narrow the macOS picker to its types.
@@ -2841,44 +2908,82 @@ fn insert_chips(d: &mut Draft, text: &str, record: impl Fn(&str) -> Option<Value
 }
 
 /// readPastedComposerContext with useComposerContextImport: pasted text whose HTML carries copied
-/// context (a message's copy) brings its chips back with their records. Terminal excerpts and
-/// review comments that clash with a different record here take a fresh id; a thread on a machine
-/// this one does not link is dropped, as are kinds that need their files imported. False to
-/// paste the text as it is.
+/// context (a message's copy) brings its chips back with their records. Terminal excerpts, review
+/// comments and picked elements that clash with a different record here take a fresh id; a
+/// thread on a machine this one does not link is dropped. A copied image or file, and a picked
+/// element's screenshot, download from this environment into the draft, their chips reading as
+/// their names. False to paste the text as it is.
 fn paste_context(s: &mut App, text: &str, fragment: &Value) -> bool {
     let (_, shown) = chips::editable(text);
     let own = s.state().config.as_ref().map(|c| data::s(&c["environment"], "environmentId").to_owned()).unwrap_or_default();
     let links = s.ui.settings.results.get("peerLinks.list").and_then(|r| r["links"].as_array());
     let reachable = |env: &str| env == own || links.is_some_and(|l| l.iter().any(|link| data::s(link, "environmentId") == env));
-    let records: Vec<Value> = fragment["records"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| shown.iter().any(|c| c.id == data::s(r, "contextId")))
+    let all = fragment["records"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let named = |r: &&Value| shown.iter().any(|c| c.id == data::s(r, "contextId"));
+    let records: Vec<Value> = all
+        .iter()
+        .filter(named)
         .filter(|r| match data::s(r, "kind") {
-            "terminal" | "review-comment" | "environment" => true,
+            "terminal" | "review-comment" | "environment" | "element" | "preview-annotation" => true,
             "thread" => reachable(data::s(r, "environmentId")),
             _ => false,
         })
         .cloned()
         .collect();
-    if records.is_empty() {
+    let files: Vec<Value> = all.iter().filter(named).filter(|r| matches!(data::s(r, "kind"), "image" | "file")).cloned().collect();
+    if records.is_empty() && files.is_empty() {
         return false;
     }
+    let key = active_key(s);
     let d = draft_mut(s);
+    // An annotation's screenshot, by the image record's id, under the annotation's own id.
+    let mut screenshots: Vec<(String, String)> = Vec::new();
     let imported: Vec<(String, Value)> = records
         .into_iter()
         .map(|mut r| {
             let (id, kind) = (data::s(&r, "contextId").to_owned(), data::s(&r, "kind").to_owned());
             let clash = d.contexts.iter().any(|c| data::s(c, "contextId") == id && data::s(c, "kind") == kind && *c != r);
-            if clash && matches!(kind.as_str(), "terminal" | "review-comment") {
-                r["contextId"] = json!(chips::context_id(&kind, &s5_net::uuid()));
+            let same = d.contexts.contains(&r);
+            if clash && matches!(kind.as_str(), "terminal" | "review-comment" | "element" | "preview-annotation") {
+                let fresh = s5_net::uuid();
+                r["contextId"] = json!(chips::context_id(&kind, &fresh));
+                if kind == "preview-annotation" {
+                    r["annotationId"] = json!(fresh);
+                }
+            }
+            let screenshot = data::s(&r, "screenshotContextId");
+            if kind == "preview-annotation" && !screenshot.is_empty() && !same {
+                screenshots.push((screenshot.to_owned(), data::s(&r, "annotationId").to_owned()));
             }
             (id, r)
         })
         .collect();
     insert_chips(d, text, |id| imported.iter().find(|(from, _)| from == id).map(|(_, r)| r.clone()));
     d.edit.focused = true;
+    let wanted: Vec<(Value, String)> = files
+        .into_iter()
+        .map(|r| {
+            let name = data::s(&r, "name").to_owned();
+            (r, name)
+        })
+        .chain(screenshots.into_iter().filter_map(|(image, annotation)| {
+            let record = all.iter().find(|r| data::s(r, "contextId") == image)?;
+            Some((record.clone(), format!("preview-annotation-{annotation}.png")))
+        }))
+        .collect();
+    if wanted.is_empty() {
+        return true;
+    }
+    let here = data::s(&fragment["source"], "environmentId") == own;
+    for (record, file) in wanted {
+        match s.src.net().filter(|_| here) {
+            Some(net) => s.ui.chat.composer.imports.start(net, key.clone(), &record, file),
+            None => {
+                let title = format!("Couldn't bring {} into this message", data::s(&record, "name"));
+                crate::shell::palette::toast_error_brief(s, &title, Some("The environment it came from is not connected. Attach the file again."));
+            }
+        }
+    }
     true
 }
 
@@ -3270,6 +3375,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         draft_mut(s).attachments = vec![shot.clone(), "/home/ubuntu/s5code/README.md".into()];
         s.ui.chat.composer.thumbs.load_now(&shot);
     }),
+    // A queued snapshot's wide tile with its app and window, the accessibility popover open.
+    ("composer-snapshot", |s| {
+        on_replay_showcase(s);
+        let dir = std::env::temp_dir().join("s5-scene-snapshot");
+        let _ = std::fs::create_dir_all(&dir);
+        let shot = dir.join("snapshot.png");
+        let _ = image::DynamicImage::ImageRgba8(crate::chat::snapshot::scene_picture()).save(&shot);
+        let shot = shot.display().to_string();
+        let source = crate::chat::snapshot::scene_source();
+        let _ = std::fs::write(crate::desktop::capture::source_path(&shot), source.to_string());
+        set_text(s, "Why does the download link look disabled?");
+        draft_mut(s).attachments = vec![shot.clone()];
+        s.ui.chat.composer.thumbs.load_now(&shot);
+        s.ui.chat.snapshot.open = Some(("composer-snapshot-contents-0".into(), source));
+    }),
     ("composer-list-continuation", |s| {
         on_replay_showcase(s);
         set_text(s, "Plan:\n1. Reproduce the drop\n2. Add a retry");
@@ -3523,6 +3643,18 @@ mod tests {
         let ids: Vec<&str> = d.contexts.iter().filter(|r| data::s(r, "kind") == "terminal").map(|r| data::s(r, "contextId")).collect();
         assert!(ids.len() == 2 && ids[0] != ids[1], "FAILED: a clashing terminal excerpt is re-minted");
         assert!(!paste_context(&mut s, "no links", &fragment), "FAILED: records the text does not name are not pasted");
+
+        // A picked element comes back as its chip; an image, which must download, as its name.
+        let element = json!({"version": 1, "kind": "element", "contextId": "element_e1", "label": "button.primary", "selector": "button.primary"});
+        let image = json!({"kind": "image", "contextId": "image_i1", "attachmentId": "att-1", "name": "shot.png", "label": "shot.png", "mimeType": "image/png", "sizeBytes": 10});
+        let copied = format!("Fix {} as in {}", link(&element), format!("!{}", link(&image)));
+        let html = context_html(&copied, &context_fragment(&own, Some("t-1"), None, &[element.clone(), image]).unwrap());
+        set_text(&mut s, "");
+        draft_mut(&mut s).contexts.clear();
+        assert!(paste_context(&mut s, &copied, &decode_context_html(&html).unwrap()), "FAILED: an element and an image paste as context");
+        let d = draft(&s).unwrap();
+        assert_eq!(d.contexts, vec![element]);
+        assert_eq!(outgoing(d).0, format!("Fix {} as in shot.png", link(&d.contexts[0])));
     }
 
     #[test]

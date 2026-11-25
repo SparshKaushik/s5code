@@ -123,6 +123,7 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .grow(1.0)
         .color(fg)
         .placeholder("Search", t.sb.sidebar_muted_foreground)
+        .label("Search threads")
         .caret(fg, t.c.primary.alpha_mul(0.3))
         .on_edit(search_edit)
         .on_input_key(|s: &mut App, e, tx| super::search_key(s, e, tx));
@@ -141,6 +142,8 @@ pub fn search_bar(s: &App, t: &T) -> El {
     if searching {
         bar = bar.child(
             el().key("sb-search-clear")
+                .role("button")
+                .label("Clear thread search")
                 .size(20.0, 20.0)
                 .radius(radius::SM)
                 .center()
@@ -150,6 +153,26 @@ pub fn search_bar(s: &App, t: &T) -> El {
                 .on_press(super::clear_search),
         );
     }
+    // `SidebarThreadHeader`: the scope filter and Add project only once there are projects; New
+    // thread needs one too.
+    let has_projects = !s.state().projects.is_empty();
+    let mut actions = row();
+    if has_projects {
+        actions = actions.child(filter_button(s, t)).child(
+            icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false)
+                .role("button")
+                .label("Add project")
+                .help("Add project")
+                .on_press(crate::shell::palette::open_add_project),
+        );
+    }
+    let (label, tip) = new_thread_tip(s);
+    let new_thread = icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).role("button").label(label).help(tip);
+    let new_thread = if has_projects {
+        new_thread.on_press_tx(|s: &mut App, tx: &mut Tx| super::new_thread_click(s, tx.mods().shift))
+    } else {
+        new_thread.opacity(0.5).cursor(Cursor::Default)
+    };
     row().key("sb-search-row")
         .w_full()
         .shrink()
@@ -158,12 +181,22 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .gap(4.0)
         .center_y()
         .child(bar)
-        .child(
-            row()
-                .child(filter_button(s, t))
-                .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(crate::shell::palette::open_add_project))
-                .child(icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::new_thread)),
-        )
+        .child(actions.child(new_thread))
+}
+
+/// The New thread button's name and tooltip: "New thread (⌘N)", and while more than one project
+/// is open, how Shift+click starts one in the current project.
+fn new_thread_tip(s: &App) -> (String, String) {
+    let keys = |command| crate::shell::palette::shortcut_label(s, command);
+    let in_current = super::new_thread_in_current_project(s, false);
+    let shortcut = Some(keys("chat.new")).filter(|k| !k.is_empty()).or_else(|| Some(keys("chat.newLocal")).filter(|k| in_current && !k.is_empty()));
+    let label = shortcut.map_or_else(|| "New thread".to_owned(), |k| format!("New thread ({k})"));
+    if in_current {
+        return (label.clone(), label);
+    }
+    let local = keys("chat.newLocal");
+    let hint = if local.is_empty() { "New thread in current project: Shift+click".to_owned() } else { format!("New thread in current project: Shift+click ({local})") };
+    (label.clone(), format!("{label}\n{hint}"))
 }
 
 /// The scope trigger: the filter glyph, or the scoped groups' favicons (two at most, overlapped).
@@ -659,6 +692,9 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let hits = logic::search(&model.threads, &ui.search.text, ui.content_hits());
     let mut list = col().key("sb-results").w_full().px(8.0).py(8.0).gap(1.0);
+    if !hits.is_empty() {
+        list = list.role("listbox").label("Thread search results");
+    }
     if hits.is_empty() {
         let empty = if ui.content_pending() { "Searching thread messages…" } else { "No threads found" };
         list = list.child(el().w_full().px(8.0).py(24.0).center().role("status").child(text(empty).font(theme::TEXT_XS).color(t.sb.sidebar_muted_foreground)));
@@ -710,7 +746,36 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::scope_items;
+    use super::{new_thread_tip, scope_items};
+    use crate::App;
+
+    #[test]
+    fn new_thread_tip_carries_the_shortcut_and_the_shift_hint_while_several_projects_are_open() {
+        let mut s = App::new();
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!("fixture") };
+        state.config = Some(serde_json::json!({"keybindings": [
+            {"command": "chat.new", "shortcut": {"key": "n", "modKey": true}},
+            {"command": "chat.newLocal", "shortcut": {"key": "n", "modKey": true, "shiftKey": true}},
+        ]}));
+        state.projects.truncate(2);
+        for p in &mut state.projects {
+            p["archivedAt"] = serde_json::Value::Null;
+        }
+        let new = crate::shell::palette::shortcut_label(&s, "chat.new");
+        let local = crate::shell::palette::shortcut_label(&s, "chat.newLocal");
+        let (label, tip) = new_thread_tip(&s);
+        assert_eq!(label, format!("New thread ({new})"));
+        assert_eq!(tip, format!("New thread ({new})\nNew thread in current project: Shift+click ({local})"), "FAILED: two open projects show the Shift hint");
+        assert!(!super::super::new_thread_in_current_project(&s, false));
+        assert!(super::super::new_thread_in_current_project(&s, true), "FAILED: Shift starts it in the current project");
+
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!("fixture") };
+        state.projects.truncate(1);
+        assert_eq!(new_thread_tip(&s), (label.clone(), label), "FAILED: one open project, no hint");
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!("fixture") };
+        state.projects.clear();
+        assert!(super::super::new_thread_in_current_project(&s, false));
+    }
 
     #[test]
     fn scope_search_drops_all_projects_and_matches_names_anywhere() {

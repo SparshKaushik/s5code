@@ -51,6 +51,9 @@ fn select(s: &App, project: &Value) -> kit::Select {
             s.ui.settings.checkout_grouping_open = false;
             let next = with_override(&crate::settings::value(s, KEY), &key, value);
             crate::settings::update(s, KEY, next);
+            if let Some(error) = s.client_settings.error.clone() {
+                crate::shell::palette::toast_error(s, "Could not save grouping rule", Some(&error));
+            }
         });
     for mode in MODES {
         select = select.option_name(mode, label(mode));

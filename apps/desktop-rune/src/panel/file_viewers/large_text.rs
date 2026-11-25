@@ -14,6 +14,10 @@ const COLUMNS: usize = 1024;
 const LINE_HEIGHT: f32 = 20.0;
 const SCROLL: &str = "full-file-scroll";
 
+fn row_key(_: &App, index: usize) -> Cow<'_, str> {
+    Cow::Owned(format!("full-file-row-{index}"))
+}
+
 pub(super) struct LargeText {
     source: String,
     lines: Index,
@@ -126,15 +130,14 @@ impl LargeText {
             format!("{} lines · {bytes}", super::grouped(count as u64))
         };
         let theme = *t;
-        let key = |_: &App, i| Cow::Owned(format!("full-file-row-{i}"));
         let mut list = col().w_full().growth(GrowthSpec::default()).selection_group(true);
         if table.is_some() {
             list = list.min_w(48.0 + index.columns as f32 * 160.0);
         }
-        list = list.virtual_rows(count, LINE_HEIGHT, key, move |app: &App, i| {
+        list = list.virtual_rows(count, LINE_HEIGHT, row_key, move |app: &App, i| {
             let Some(super::Content::Large(file)) = super::active(app) else { return el().h(LINE_HEIGHT) };
             file.row(app, rendered, wrap, i, &theme)
-        });
+        }).virtual_rows_version(rendered);
         let viewport = el().key(SCROLL).grow(1.0).min_h(0.0).min_w(0.0);
         let viewport = if wrap && table.is_none() { viewport.scroll(ScrollSpec { stick_bottom: false }) } else { viewport.scroll_xy() };
         let full = bar(t).child(note("Full file", t).grow(1.0))

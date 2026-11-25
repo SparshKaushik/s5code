@@ -1033,6 +1033,11 @@ pub fn saved(s: &mut App, upsert: bool) {
     }
 }
 
+/// Web clears the saving row whether the write landed or not.
+pub fn failed(s: &mut App) {
+    s.ui.settings.keybindings.saving = None;
+}
+
 /// Escape closes the innermost keybinding overlay first.
 pub fn escape(s: &mut App) -> bool {
     let ui = &mut s.ui.settings.keybindings;

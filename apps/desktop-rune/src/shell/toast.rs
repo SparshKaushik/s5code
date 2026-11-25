@@ -107,6 +107,19 @@ pub(crate) fn add(s: &mut App, mut toast: Toast, timeout: Option<i64>) -> u64 {
     stack.next
 }
 
+/// `toastManager.update`: replaces a toast still open in place, keeping its id. A toast the user
+/// already closed stays closed.
+pub(crate) fn update(s: &mut App, id: u64, mut toast: Toast, timeout: Option<i64>) {
+    let now = crate::data::now_ms();
+    let stack = &mut s.ui.shell.toasts;
+    let start = stack.paused_at.unwrap_or(now);
+    if let Some(slot) = stack.toasts.iter_mut().find(|t| t.id == id) {
+        toast.id = id;
+        toast.until = timeout.map_or(i64::MAX, |ms| start + ms);
+        *slot = toast;
+    }
+}
+
 pub(crate) fn newest(s: &App) -> Option<&Toast> {
     s.ui.shell.toasts.toasts.last()
 }

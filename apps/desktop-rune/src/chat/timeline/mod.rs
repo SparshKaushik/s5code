@@ -10,7 +10,7 @@ pub(crate) mod language_icons;
 pub mod plan;
 pub mod question;
 pub mod queue;
-mod subagent;
+pub(crate) mod subagent;
 pub mod requests;
 mod rows;
 mod scenes;
@@ -25,9 +25,10 @@ mod history;
 pub(crate) mod md_links;
 mod math;
 mod katex;
+mod inline;
 mod announcer;
 pub(crate) mod citation;
-mod media;
+pub mod media;
 mod work;
 mod lifecycle;
 pub mod now;
@@ -1005,8 +1006,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         stack = stack.child(col().key("timeline-row-parent").w_full().child(parent));
         lead += 1;
     }
-    // The minimap lights the prompts in view and finds the turn being read; MCP apps whose rows
-    // leave the virtual list let their pages go.
+    // The minimap lights the prompts in view and finds the turn being read; MCP apps and HTML
+    // pages whose rows leave the virtual list let their pages go.
     if routed {
         let thread = thread_id.to_owned();
         let apps: Vec<(usize, String)> = rows
@@ -1014,8 +1015,13 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
             .enumerate()
             .flat_map(|(index, r)| row_items(r).into_iter().filter(|item| crate::panel::mcp_app::reference(item).is_some()).map(move |item| (index + lead, s(item, "id").to_owned())))
             .collect();
+        let pages: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(index, r)| row_items(r).into_iter().filter_map(move |item| crate::chat::details::html_render::reference(item).map(|(id, _)| (index + lead, id))))
+            .collect();
         stack = stack.on_visible_rows(move |app: &mut App, r: std::ops::Range<usize>| {
-            let apps_changed = crate::panel::mcp_app::in_view(app, &apps, r.clone());
+            let apps_changed = crate::panel::mcp_app::in_view(app, &apps, r.clone()) | crate::panel::html_frame::in_view(app, &pages, r.clone());
             minimap::seen(app, &thread, r.start.saturating_sub(lead)..r.end.saturating_sub(lead)) | apps_changed
         });
     }
