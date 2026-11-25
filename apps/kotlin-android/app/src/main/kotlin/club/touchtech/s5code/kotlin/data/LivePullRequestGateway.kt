@@ -1,0 +1,1169 @@
+package club.touchtech.s5code.kotlin.data
+
+import club.touchtech.s5code.kotlin.transport.EnvironmentSession
+import club.touchtech.s5code.kotlin.transport.RpcFailure
+import club.touchtech.s5code.kotlin.transport.SessionPhase
+import club.touchtech.s5code.kotlin.transport.TransportJson
+import club.touchtech.s5code.kotlin.transport.WsMethods
+import club.touchtech.s5code.kotlin.transport.pullRequestErrorMessage
+import club.touchtech.s5code.kotlin.transport.pullRequestWriteMessage
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffStatDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChecksDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilterOptionsDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelCandidateListDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestListStatsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewGuideResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewerCandidateListDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackHeadDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentsResultDto
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.nullable
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+
+/**
+ * [PullRequestGateway] over the workspace's live sessions, with the cache
+ * policy of `packages/client-runtime/src/state/pullRequests.ts`:
+ *
+ * - each read has a TTL and refetches when a screen subscribes after it;
+ * - `pullRequests.subscribeRefreshes` ticks refetch subscribed reads, and a
+ *   moved revision marks unsubscribed ones stale;
+ * - reads nobody has watched for [IDLE_TTL_MS] drop from memory (the disk
+ *   copy stays), as upstream's writable families idle out after five minutes;
+ * - persisted reads restore from disk first, and a failed refetch keeps the
+ *   last value beside its error.
+ *
+ * Every request is gated on the `pullRequests` capability: a server that does
+ * not know a method drops the socket.
+ */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+class LivePullRequestGateway(
+    private val scope: CoroutineScope,
+    private val workspace: LiveWorkspaceGateway,
+    private val cache: PullRequestCacheStore,
+    private val clock: () -> Long = System::currentTimeMillis,
+) : PullRequestGateway {
+
+    private inner class Entry<T>(
+        val environmentId: String,
+        val key: String,
+        val ttlMs: Long,
+        val serializer: KSerializer<T>,
+        /** Refetch on a refresh tick while subscribed. */
+        val tick: Boolean,
+        val persist: Boolean,
+        /** Refetch interval while subscribed; 0 for none. */
+        val pollMs: Long = 0,
+        val onValue: (T) -> Unit = {},
+        val fetch: suspend (EnvironmentSession) -> T,
+    ) {
+        val state = MutableStateFlow(PullRequestQuery<T>())
+        val subscribers = AtomicInteger(0)
+        val mutex = Mutex()
+        var restored = false
+        var revision: Int? = null
+        var attemptedAt = 0L
+        private var eviction: Job? = null
+
+        /** The [entries] key, which is also the [pages] key of a list read. */
+        val mapKey: String get() = "$environmentId\u0000$key"
+
+        /**
+         * Drops the in-memory value once nobody has watched for [IDLE_TTL_MS].
+         * The entry itself stays mapped, so a flow a screen built earlier keeps
+         * observing the same entry that refreshes and writes update; its next
+         * subscriber restores from disk like a cold start.
+         */
+        private fun scheduleEviction() {
+            eviction?.cancel()
+            eviction =
+                scope.launch {
+                    delay(IDLE_TTL_MS)
+                    mutex.withLock {
+                        if (subscribers.get() > 0) return@withLock
+                        state.value = PullRequestQuery()
+                        restored = false
+                        revision = null
+                        attemptedAt = 0L
+                        pages.update { it - mapKey }
+                    }
+                }
+        }
+
+        fun observe(): Flow<PullRequestQuery<T>> = flow {
+            subscribers.incrementAndGet()
+            ensureWatcher(environmentId)
+            try {
+                coroutineScope {
+                    launch { ensureFresh(this@Entry) }
+                    if (pollMs > 0) {
+                        launch {
+                            while (true) {
+                                delay(pollMs)
+                                this@LivePullRequestGateway.fetch(this@Entry)
+                            }
+                        }
+                    }
+                    state.collect { emit(it) }
+                }
+            } finally {
+                if (subscribers.decrementAndGet() == 0) scheduleEviction()
+            }
+        }
+    }
+
+    private val entries = ConcurrentHashMap<String, Entry<*>>()
+    private val pages = MutableStateFlow<Map<String, PullRequestListPages>>(emptyMap())
+    private val revisions = ConcurrentHashMap<String, Int>()
+    private val watchers = ConcurrentHashMap<String, Job>()
+    private val statsFlows = ConcurrentHashMap<String, MutableStateFlow<Map<String, PullRequestDiffStatDto>>>()
+    private val statsRequested = ConcurrentHashMap.newKeySet<String>()
+    private val statsUpdatedAt = ConcurrentHashMap<String, MutableMap<String, String>>()
+
+    private val listState = MutableStateFlow(PullRequestListState())
+    override val listControls: StateFlow<Map<String, PullRequestListControls>> =
+        listState.map { it.controls }.stateIn(scope, SharingStarted.Eagerly, emptyMap())
+    override val listEnvironment: StateFlow<String?> =
+        listState.map { it.environmentId }.stateIn(scope, SharingStarted.Eagerly, null)
+    override val knownEnvironments: StateFlow<Set<String>> =
+        listState.map { it.environments }.stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    /** Wakes the single list-state writer; conflated, so it always writes the latest state, in order. */
+    private val listStateChanged = Channel<Unit>(Channel.CONFLATED)
+
+    init {
+        scope.launch {
+            val saved = cache.readListState()
+            // Picks made before the file loaded win over the saved ones.
+            listState.update { held ->
+                PullRequestListState(
+                    environmentId = held.environmentId ?: saved.environmentId,
+                    controls = saved.controls + held.controls,
+                    environments = saved.environments + held.environments,
+                )
+            }
+            for (change in listStateChanged) runCatching { cache.writeListState(listState.value) }
+        }
+    }
+
+    private fun updateListState(transform: (PullRequestListState) -> PullRequestListState) {
+        listState.update(transform)
+        listStateChanged.trySend(Unit)
+    }
+
+    override fun setListControls(scope: String, controls: PullRequestListControls) =
+        updateListState { it.copy(controls = it.controls + (scope to controls)) }
+
+    override fun setListEnvironment(environmentId: String?) = updateListState { it.copy(environmentId = environmentId) }
+
+    private fun rememberEnvironment(environmentId: String) {
+        if (environmentId !in listState.value.environments) {
+            updateListState { it.copy(environments = it.environments + environmentId) }
+        }
+    }
+
+    override fun connected(environmentId: String): Flow<Boolean> =
+        workspace.sessionFlow(environmentId)
+            .flatMapLatest { session -> session?.state?.map { it.phase == SessionPhase.Connected } ?: flowOf(false) }
+            .distinctUntilChanged()
+
+    /* ── Lists ───────────────────────────────────────────────────────── */
+
+    private fun pagesKey(target: PullRequestListTarget) = "${target.environmentId}\u0000${target.key}"
+
+    private fun listEntry(target: PullRequestListTarget): Entry<PullRequestListResultDto> =
+        entry(
+            target.environmentId,
+            target.key,
+            ttlMs = LIST_TTL_MS,
+            serializer = PullRequestListResultDto.serializer(),
+            tick = true,
+            persist = true,
+            onValue = { head ->
+                dropMovedStats(target.environmentId, head.entries)
+                pages.update { it + (pagesKey(target) to pullRequestListHead(it[pagesKey(target)], head)) }
+            },
+        ) { session ->
+            session.query(WsMethods.PullRequestsList, target.input.toJson(), PullRequestListResultDto.serializer())
+        }
+
+    override fun list(targets: List<PullRequestListTarget>): Flow<List<PullRequestListSource>> {
+        if (targets.isEmpty()) return flowOf(emptyList())
+        val queries = targets.map { listEntry(it).observe() }
+        return combine(combine(queries) { it.toList() }, pages) { results, loaded ->
+            targets.mapIndexed { index, target ->
+                PullRequestListSource(target, results[index], loaded[pagesKey(target)])
+            }
+        }
+    }
+
+    override suspend fun loadMore(targets: List<PullRequestListTarget>, retry: Boolean) {
+        val failures =
+            coroutineScope {
+                targets.mapNotNull { target ->
+                    val held = pages.value[pagesKey(target)] ?: return@mapNotNull null
+                    val input = nextPullRequestListInput(held, target.input) ?: return@mapNotNull null
+                    val session = readySession(target.environmentId) ?: return@mapNotNull null
+                    async {
+                        runCatching {
+                            val page =
+                                session.query(WsMethods.PullRequestsList, input.toJson(), PullRequestListResultDto.serializer())
+                            if (page.errors.isNotEmpty()) error(page.errors.joinToString("\n") { it.message })
+                            dropMovedStats(target.environmentId, page.entries)
+                            val next = appendPullRequestListPage(pages.value[pagesKey(target)] ?: held, page, input)
+                            pages.update { it + (pagesKey(target) to next) }
+                            val cursors = input.cursors
+                            if (cursors != null && next.nextCursors.isNotEmpty() && cursors == next.nextCursors) {
+                                error("Couldn't advance the list. Try again.")
+                            }
+                        }.exceptionOrNull()
+                    }
+                }.awaitAll()
+            }.filterNotNull()
+        failures.firstOrNull()?.let { if (it is CancellationException) throw it else error(pullRequestErrorMessage(it)) }
+    }
+
+    override suspend fun refreshList(targets: List<PullRequestListTarget>) {
+        val failures =
+            coroutineScope {
+                targets.map { target ->
+                    async {
+                        val session = readySession(target.environmentId) ?: return@async null
+                        runCatching {
+                            session.execute(WsMethods.PullRequestsInvalidate, JsonObject(emptyMap()))
+                        }.exceptionOrNull()?.let { return@async it }
+                        val entry = listEntry(target)
+                        fetch(entry, force = true)?.let { return@async it }
+                        entry.state.value.value?.let { head ->
+                            pages.update { it + (pagesKey(target) to pullRequestListHead(null, head)) }
+                        }
+                        null
+                    }
+                }.awaitAll()
+            }.filterNotNull()
+        failures.firstOrNull()?.let { if (it is CancellationException) throw it else error(pullRequestErrorMessage(it)) }
+    }
+
+    /* ── Diff stats ──────────────────────────────────────────────────── */
+
+    private fun statsFlow(environmentId: String) =
+        statsFlows.getOrPut(environmentId) {
+            MutableStateFlow<Map<String, PullRequestDiffStatDto>>(emptyMap()).also { flow ->
+                scope.launch {
+                    val stored = cache.read(environmentId, STATS_KEY) ?: return@launch
+                    val restored =
+                        runCatching { TransportJson.decodeFromJsonElement(PullRequestListStatsResultDto.serializer(), stored.value) }
+                            .getOrNull() ?: return@launch
+                    flow.update { held -> restored.stats.associateBy(::statKey) + held }
+                }
+            }
+        }
+
+    /** A row whose `updatedAt` moved loses its counts, so the visible rows ask for them again. */
+    private fun dropMovedStats(environmentId: String, listed: List<PullRequestListEntryDto>) {
+        val seen = statsUpdatedAt.getOrPut(environmentId) { HashMap() }
+        val moved = synchronized(seen) { movedPullRequestStatKeys(seen, listed) }
+        if (moved.isEmpty()) return
+        moved.forEach { statsRequested.remove("$environmentId\u0000$it") }
+        statsFlow(environmentId).update { held -> held - moved.toSet() }
+    }
+
+    override fun stats(environmentId: String): StateFlow<Map<String, PullRequestDiffStatDto>> =
+        statsFlow(environmentId).asStateFlow()
+
+    override fun loadStats(environmentId: String, references: List<PullRequestReference>) {
+        val flow = statsFlow(environmentId)
+        val wanted =
+            references.filter {
+                val key = statKey(it)
+                key !in flow.value && statsRequested.add("$environmentId\u0000$key")
+            }.take(MAX_STATS_REFS)
+        if (wanted.isEmpty()) return
+        scope.launch {
+            val session = readySession(environmentId)
+            val result =
+                session?.let {
+                    runCatching {
+                        it.query(
+                            WsMethods.PullRequestsListStats,
+                            buildJsonObject { put("refs", buildJsonArray { wanted.forEach { ref -> add(ref.toJson()) } }) },
+                            PullRequestListStatsResultDto.serializer(),
+                        )
+                    }.getOrNull()
+                }
+            if (result == null) {
+                // Let the rows ask again once they are visible on a live socket.
+                wanted.forEach { statsRequested.remove("$environmentId\u0000${statKey(it)}") }
+                return@launch
+            }
+            flow.update { held -> (held + result.stats.associateBy(::statKey)).entries.toList().takeLast(MAX_STATS).associate { it.toPair() } }
+            runCatching {
+                cache.write(
+                    environmentId,
+                    STATS_KEY,
+                    clock(),
+                    TransportJson.encodeToJsonElement(
+                        PullRequestListStatsResultDto.serializer(),
+                        PullRequestListStatsResultDto(flow.value.values.toList()),
+                    ),
+                )
+            }
+        }
+    }
+
+    /* ── One pull request ────────────────────────────────────────────── */
+
+    private fun detailEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "detail:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestDetailDto.serializer(),
+            tick = true,
+            persist = true,
+        ) { it.query(WsMethods.PullRequestsDetail, reference.toJson(), PullRequestDetailDto.serializer()) }
+
+    private fun activityEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "activity:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestActivityDto.serializer(),
+            tick = true,
+            persist = true,
+        ) { it.query(WsMethods.PullRequestsActivity, reference.toJson(), PullRequestActivityDto.serializer()) }
+
+    private fun stackEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "stack:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestStackDto.serializer().nullable,
+            tick = true,
+            persist = true,
+        ) { it.query(WsMethods.PullRequestsStack, reference.toJson(), PullRequestStackDto.serializer().nullable) }
+
+    override fun detail(environmentId: String, reference: PullRequestReference) =
+        detailEntry(environmentId, reference).observe()
+
+    override fun activity(environmentId: String, reference: PullRequestReference) =
+        activityEntry(environmentId, reference).observe()
+
+    override fun stack(environmentId: String, reference: PullRequestReference) =
+        stackEntry(environmentId, reference).observe()
+
+    override fun linkedThreads(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "linkedThreads:${reference.cacheKey}",
+            ttlMs = 0,
+            serializer = PullRequestLinkedThreadsResultDto.serializer(),
+            tick = true,
+            persist = true,
+            pollMs = LINKED_THREADS_POLL_MS,
+        ) {
+            it.query(WsMethods.PullRequestsLinkedThreads, reference.toJson(), PullRequestLinkedThreadsResultDto.serializer())
+        }.observe()
+
+    override fun filesViewed(environmentId: String, reference: PullRequestReference) =
+        filesViewedEntry(environmentId, reference).observe()
+
+    private fun filesViewedEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "filesViewed:${reference.cacheKey}",
+            ttlMs = FILES_VIEWED_TTL_MS,
+            serializer = PullRequestFilesViewedResultDto.serializer(),
+            tick = false,
+            persist = true,
+        ) {
+            it.query(WsMethods.PullRequestsFilesViewed, reference.toJson(), PullRequestFilesViewedResultDto.serializer())
+        }
+
+    override fun changeBreakdown(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "changeBreakdown:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestChangeBreakdownDto.serializer().nullable,
+            tick = true,
+            persist = true,
+        ) {
+            try {
+                it.query(WsMethods.PullRequestsChangeBreakdown, reference.toJson(), PullRequestChangeBreakdownDto.serializer().nullable)
+            } catch (failure: RpcFailure) {
+                // Servers from before the split don't know the method; the line just stays hidden.
+                if (failure.message.contains("Unknown request tag")) null else throw failure
+            }
+        }.observe()
+
+    private fun reviewerCandidatesEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "reviewerCandidates:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestReviewerCandidateListDto.serializer(),
+            tick = false,
+            persist = false,
+        ) {
+            it.query(WsMethods.PullRequestsReviewerCandidates, reference.toJson(), PullRequestReviewerCandidateListDto.serializer())
+        }
+
+    override fun reviewerCandidates(environmentId: String, reference: PullRequestReference) =
+        reviewerCandidatesEntry(environmentId, reference).observe()
+
+    override suspend fun refreshReviewerCandidates(environmentId: String, reference: PullRequestReference) {
+        fetch(reviewerCandidatesEntry(environmentId, reference), force = true)
+    }
+
+    private fun checksEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "checks:${reference.cacheKey}",
+            ttlMs = CHECKS_TTL_MS,
+            serializer = PullRequestChecksDto.serializer().nullable,
+            tick = true,
+            // Polled every 45-60 s while on screen; the detail's own checks cover a cold start.
+            persist = false,
+        ) { it.query(WsMethods.PullRequestsChecks, reference.toJson(), PullRequestChecksDto.serializer().nullable) }
+
+    override fun checks(environmentId: String, reference: PullRequestReference) =
+        checksEntry(environmentId, reference).observe()
+
+    override suspend fun refreshChecks(environmentId: String, reference: PullRequestReference) {
+        fetch(checksEntry(environmentId, reference), force = true)
+    }
+
+    private fun labelCandidatesEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "labelCandidates:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestLabelCandidateListDto.serializer(),
+            tick = false,
+            persist = false,
+        ) {
+            it.query(WsMethods.PullRequestsLabelCandidates, reference.toJson(), PullRequestLabelCandidateListDto.serializer())
+        }
+
+    override fun labelCandidates(environmentId: String, reference: PullRequestReference) =
+        labelCandidatesEntry(environmentId, reference).observe()
+
+    override suspend fun refreshLabelCandidates(environmentId: String, reference: PullRequestReference) {
+        fetch(labelCandidatesEntry(environmentId, reference), force = true)
+    }
+
+    private val filterOptionAnswers = ConcurrentHashMap<String, Pair<Long, PullRequestFilterOptionsDto>>()
+
+    override suspend fun filterOptions(
+        environmentId: String,
+        kind: String,
+        projectIds: List<String>,
+        host: String?,
+        query: String?,
+    ): PullRequestFilterOptionsDto {
+        val payload =
+            buildJsonObject {
+                put("kind", kind)
+                if (projectIds.size == 1) put("projectId", projectIds.single())
+                else if (projectIds.isNotEmpty()) putJsonArray("projectIds") { projectIds.take(MAX_FILTER_PROJECTS).forEach { add(it) } }
+                host?.takeIf(String::isNotBlank)?.let { put("host", it) }
+                query?.trim()?.takeIf(String::isNotEmpty)?.let { put("query", it.take(MAX_FILTER_QUERY)) }
+            }
+        val key = "$environmentId\u0000$payload"
+        filterOptionAnswers[key]?.let { (at, value) -> if (clock() - at < FILTER_OPTIONS_TTL_MS) return value }
+        val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to search this filter.")
+        val result =
+            try {
+                session.query(WsMethods.PullRequestsFilterOptions, payload, PullRequestFilterOptionsDto.serializer())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                throw IllegalStateException(pullRequestErrorMessage(error), error)
+            }
+        if (filterOptionAnswers.size > MAX_FILTER_ANSWERS) filterOptionAnswers.clear()
+        filterOptionAnswers[key] = clock() to result
+        return result
+    }
+
+    private fun reviewGuideEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "reviewGuide:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestReviewGuideResultDto.serializer(),
+            tick = true,
+            persist = true,
+        ) {
+            it.query(WsMethods.PullRequestsReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
+        }
+
+    override fun reviewGuide(environmentId: String, reference: PullRequestReference) =
+        reviewGuideEntry(environmentId, reference).observe()
+
+    override suspend fun refreshReviewGuide(environmentId: String, reference: PullRequestReference) {
+        fetch(reviewGuideEntry(environmentId, reference), force = true)
+    }
+
+    override suspend fun generateReviewGuide(environmentId: String, reference: PullRequestReference) {
+        val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to write a review guide.")
+        val result =
+            try {
+                session.request(WsMethods.PullRequestsGenerateReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                throw IllegalStateException(pullRequestErrorMessage(error), error)
+            }
+        reviewGuideEntry(environmentId, reference).state.update {
+            PullRequestQuery(value = result, hasValue = true, fetchedAt = clock())
+        }
+    }
+
+    override suspend fun diff(
+        environmentId: String,
+        reference: PullRequestReference,
+        cursor: String?,
+        commit: String?,
+    ): PullRequestDiffResultDto {
+        val session = workspace.session(environmentId) ?: error("That environment is no longer paired.")
+        val payload =
+            JsonObject(
+                reference.toJson() +
+                    buildJsonObject {
+                        cursor?.let { put("cursor", it) }
+                        commit?.let { put("commit", it) }
+                    }
+            )
+        return session.postJson(DIFF_PATH, payload, PullRequestDiffResultDto.serializer())
+    }
+
+    override suspend fun refresh(environmentId: String, reference: PullRequestReference) {
+        coroutineScope {
+            listOf(
+                    detailEntry(environmentId, reference),
+                    activityEntry(environmentId, reference),
+                    stackEntry(environmentId, reference),
+                )
+                .map { async { fetch(it, force = true) } }
+                .awaitAll()
+        }
+    }
+
+    override suspend fun refreshDetail(environmentId: String, reference: PullRequestReference) {
+        fetch(detailEntry(environmentId, reference), force = true)?.let {
+            throw IllegalStateException(pullRequestErrorMessage(it), it)
+        }
+    }
+
+    override fun summary(environmentId: String, reference: PullRequestReference): PullRequestListEntryDto? =
+        pages.value.entries
+            .asSequence()
+            .filter { it.key.startsWith("$environmentId\u0000") }
+            .flatMap { it.value.entries }
+            .firstOrNull {
+                it.projectId == reference.projectId &&
+                    it.number == reference.number &&
+                    it.repository.equals(reference.repository, ignoreCase = true)
+            }
+
+    /* ── Writes ──────────────────────────────────────────────────────── */
+
+    private val writeLocks = ConcurrentHashMap<String, Mutex>()
+    private val viewedLocks = ConcurrentHashMap<String, Mutex>()
+    private val viewedOverlays = ConcurrentHashMap<String, MutableStateFlow<Map<String, Boolean>>>()
+    private val viewedVersions = ConcurrentHashMap<String, Int>()
+
+    /**
+     * Runs [block] on [environmentId]'s write lane with a connected session.
+     * Host refusals surface as their readable message.
+     */
+    private suspend fun <T> write(environmentId: String, block: suspend (EnvironmentSession) -> T): T =
+        writeLocks.getOrPut(environmentId) { Mutex() }.withLock {
+            val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to change this pull request.")
+            try {
+                block(session)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (refused: PullRequestWriteRefused) {
+                throw refused
+            } catch (error: Throwable) {
+                throw IllegalStateException(pullRequestWriteMessage(error), error)
+            }
+        }
+
+    /** A local refusal, already worded for the alert. */
+    private class PullRequestWriteRefused(message: String) : IllegalStateException(message)
+
+    private suspend fun refetch(vararg entries: Entry<*>) {
+        coroutineScope { entries.map { async { fetch(it, force = true) } }.awaitAll() }
+    }
+
+    override suspend fun runAction(
+        environmentId: String,
+        reference: PullRequestReference,
+        action: String,
+        mergeMethod: String?,
+        updateMethod: String?,
+        stackNumber: Int?,
+        expectedStackHeads: List<PullRequestStackHeadDto>?,
+    ) {
+        try {
+            write(environmentId) { session ->
+                var method = mergeMethod
+                if (action == "merge" && stackNumber == null && mergeMethod != null) {
+                    // Preparation runs in the write's lane so it cannot be reordered with
+                    // the writes ahead of it, and against a read that skips every cache.
+                    val fresh = JsonObject(reference.toJson() + buildJsonObject { put("allowStale", false) })
+                    val detail = session.request(WsMethods.PullRequestsDetail, fresh, PullRequestDetailDto.serializer())
+                    if (
+                        detail.state != "open" || detail.isDraft ||
+                        "merge" !in detail.capabilities.actions || "merge" !in detail.viewerPermissions.actions
+                    ) {
+                        throw PullRequestWriteRefused("This pull request cannot be merged.")
+                    }
+                    if (detail.capabilities.stackActions == true) {
+                        val stack = session.request(WsMethods.PullRequestsStack, fresh, PullRequestStackDto.serializer().nullable)
+                        if (stack != null) throw PullRequestWriteRefused("Open this pull request to merge its stack.")
+                    }
+                    method =
+                        runCatching { freshMergeMethod(detail, mergeMethod) }
+                            .getOrElse { throw PullRequestWriteRefused(it.message ?: "Could not choose a merge method.") }
+                }
+                val payload =
+                    JsonObject(
+                        reference.toJson() +
+                            buildJsonObject {
+                                put("action", action)
+                                method?.let { put("mergeMethod", it) }
+                                updateMethod?.let { put("updateMethod", it) }
+                                stackNumber?.let { put("stackNumber", it) }
+                                expectedStackHeads?.let { heads ->
+                                    putJsonArray("expectedStackHeads") {
+                                        heads.forEach { head ->
+                                            addJsonObject {
+                                                put("number", head.number)
+                                                put("headSha", head.headSha)
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                    )
+                session.execute(WsMethods.PullRequestsRunAction, payload)
+            }
+        } finally {
+            // A stack can partly merge before the host reports a failure.
+            refetch(
+                detailEntry(environmentId, reference),
+                activityEntry(environmentId, reference),
+                stackEntry(environmentId, reference),
+            )
+        }
+    }
+
+    override suspend fun comment(environmentId: String, reference: PullRequestReference, body: String) {
+        write(environmentId) { session ->
+            session.execute(WsMethods.PullRequestsComment, JsonObject(reference.toJson() + buildJsonObject { put("body", body) }))
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun submitReview(
+        environmentId: String,
+        reference: PullRequestReference,
+        verdict: String,
+        body: String,
+        comments: List<PendingReviewComment>,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            put("verdict", verdict)
+                            put("body", body)
+                            putJsonArray("comments") { comments.forEach { add(it.toJson()) } }
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSubmitReview, payload)
+        }
+        refetch(detailEntry(environmentId, reference), activityEntry(environmentId, reference))
+    }
+
+    override suspend fun replyToThread(environmentId: String, reference: PullRequestReference, threadId: String, body: String) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            put("threadId", threadId)
+                            put("body", body)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsReplyToThread, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun setThreadResolution(
+        environmentId: String,
+        reference: PullRequestReference,
+        threadId: String,
+        resolved: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            put("threadId", threadId)
+                            put("resolved", resolved)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSetThreadResolution, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun threadComments(
+        environmentId: String,
+        reference: PullRequestReference,
+        threadId: String,
+        cursor: String,
+    ): PullRequestThreadCommentsResultDto {
+        val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to load more replies.")
+        val payload =
+            JsonObject(
+                reference.toJson() +
+                    buildJsonObject {
+                        put("threadId", threadId)
+                        put("cursor", cursor)
+                    },
+            )
+        return try {
+            session.query(WsMethods.PullRequestsThreadComments, payload, PullRequestThreadCommentsResultDto.serializer())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            throw IllegalStateException(pullRequestErrorMessage(error), error)
+        }
+    }
+
+    private fun viewedKey(environmentId: String, reference: PullRequestReference) = "$environmentId\u0000${reference.cacheKey}"
+
+    override fun filesViewedOverlay(environmentId: String, reference: PullRequestReference): StateFlow<Map<String, Boolean>> =
+        viewedOverlays.getOrPut(viewedKey(environmentId, reference)) { MutableStateFlow(emptyMap()) }.asStateFlow()
+
+    override suspend fun setFileViewed(environmentId: String, reference: PullRequestReference, path: String, viewed: Boolean) {
+        val key = viewedKey(environmentId, reference)
+        val overlay = viewedOverlays.getOrPut(key) { MutableStateFlow(emptyMap()) }
+        val pressKey = "$key\u0000$path"
+        val version = viewedVersions.merge(pressKey, 1) { held, one -> held + one } ?: 1
+        overlay.update { it + (path to viewed) }
+        val viewedEntry = filesViewedEntry(environmentId, reference)
+        // One write in flight per pull request: the host applies presses in order.
+        val failure =
+            viewedLocks.getOrPut(key) { Mutex() }.withLock {
+                runCatching {
+                    val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to mark files viewed.")
+                    val payload =
+                        JsonObject(
+                            reference.toJson() +
+                                buildJsonObject {
+                                    putJsonArray("files") {
+                                        addJsonObject {
+                                            put("path", path)
+                                            put("viewed", viewed)
+                                        }
+                                    }
+                                },
+                        )
+                    session.execute(WsMethods.PullRequestsSetFilesViewed, payload)
+                }.exceptionOrNull()
+            }
+        if (failure is CancellationException) throw failure
+        fetch(viewedEntry, force = true)
+        // A later press of the same file owns the overlay now.
+        if (viewedVersions[pressKey] == version) overlay.update { it - path }
+        if (failure != null) {
+            val message = if (failure.message.isNullOrBlank()) "Could not update viewed files." else pullRequestWriteMessage(failure)
+            throw IllegalStateException(message, failure)
+        }
+    }
+
+    override suspend fun requestReviewers(
+        environmentId: String,
+        reference: PullRequestReference,
+        reviewers: List<PullRequestReviewerRequest>,
+        requested: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            putJsonArray("reviewers") {
+                                reviewers.forEach { reviewer ->
+                                    addJsonObject {
+                                        put("id", reviewer.id)
+                                        put("kind", reviewer.kind)
+                                    }
+                                }
+                            }
+                            put("requested", requested)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsRequestReviewers, payload)
+        }
+        val candidatesEntry = reviewerCandidatesEntry(environmentId, reference)
+        val selected = selectedReviewerCandidates(candidatesEntry.state.value.value?.candidates.orEmpty(), reviewers)
+        candidatesEntry.state.update { query ->
+            query.copy(value = query.value?.let { it.copy(candidates = patchReviewerCandidates(it.candidates, selected, requested)) })
+        }
+        val detail = detailEntry(environmentId, reference)
+        val activity = activityEntry(environmentId, reference)
+        detail.state.update { query ->
+            query.copy(value = query.value?.let { it.copy(reviewers = patchRequestedReviewers(it.reviewers, selected, requested)) })
+        }
+        activity.state.update { query ->
+            query.copy(
+                value =
+                    query.value?.let { value ->
+                        value.copy(
+                            reviewers =
+                                value.reviewers?.let { actors ->
+                                    // Someone who already reviewed stays listed after an unrequest.
+                                    patchRequestedReviewers(actors, selected, requested) { actor ->
+                                        value.comments.any { comment ->
+                                            (comment.kind == "review" || comment.kind == "review-comment") &&
+                                                comment.author?.login.equals(actor.login, ignoreCase = true)
+                                        }
+                                    }
+                                },
+                        )
+                    },
+            )
+        }
+        // A typed-in ID has no cached identity to patch with.
+        if (selected.size < reviewers.size) refetch(detail, activity)
+    }
+
+    override suspend fun update(
+        environmentId: String,
+        reference: PullRequestReference,
+        title: String?,
+        body: String?,
+        maintainerCanModify: Boolean?,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            title?.let { put("title", it) }
+                            body?.let { put("body", it) }
+                            maintainerCanModify?.let { put("maintainerCanModify", it) }
+                        },
+                )
+            session.execute(WsMethods.PullRequestsUpdate, payload)
+        }
+        refetch(detailEntry(environmentId, reference))
+    }
+
+    override suspend fun updateComment(
+        environmentId: String,
+        reference: PullRequestReference,
+        commentId: String,
+        kind: String,
+        body: String,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            put("commentId", commentId)
+                            put("kind", kind)
+                            put("body", body)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsUpdateComment, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun setReaction(
+        environmentId: String,
+        reference: PullRequestReference,
+        subjectId: String?,
+        content: String,
+        reacted: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            subjectId?.let { put("subjectId", it) }
+                            put("content", content)
+                            put("reacted", reacted)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSetReaction, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun setLabels(
+        environmentId: String,
+        reference: PullRequestReference,
+        labels: List<String>,
+        applied: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            putJsonArray("labels") { labels.forEach { add(it) } }
+                            put("applied", applied)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSetLabels, payload)
+        }
+        // The `setLabels` onSuccess patch: no reread, the host's label list is slow to settle.
+        val names = labels.toSet()
+        val candidatesEntry = labelCandidatesEntry(environmentId, reference)
+        val candidates = candidatesEntry.state.value.value?.candidates.orEmpty()
+        candidatesEntry.state.update { query ->
+            query.copy(
+                value =
+                    query.value?.let { value ->
+                        value.copy(candidates = value.candidates.map { if (it.name in names) it.copy(isApplied = applied) else it })
+                    },
+            )
+        }
+        detailEntry(environmentId, reference).state.update { query ->
+            query.copy(
+                value =
+                    query.value?.let { value ->
+                        val next =
+                            if (applied) {
+                                value.labels +
+                                    labels.filter { name -> value.labels.none { it.name == name } }.map { name ->
+                                        PullRequestLabelDto(name, candidates.firstOrNull { it.name == name }?.color)
+                                    }
+                            } else {
+                                value.labels.filter { it.name !in names }
+                            }
+                        value.copy(labels = next)
+                    },
+            )
+        }
+    }
+
+    override suspend fun invalidate(environmentId: String, reference: PullRequestReference?) {
+        write(environmentId) { session ->
+            session.execute(
+                WsMethods.PullRequestsInvalidate,
+                buildJsonObject { reference?.let { put("reference", it.toJson()) } },
+            )
+        }
+        reference?.let { refresh(environmentId, it) }
+    }
+
+    /* ── Cache machinery ─────────────────────────────────────────────── */
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> entry(
+        environmentId: String,
+        key: String,
+        ttlMs: Long,
+        serializer: KSerializer<T>,
+        tick: Boolean,
+        persist: Boolean,
+        pollMs: Long = 0,
+        onValue: (T) -> Unit = {},
+        fetch: suspend (EnvironmentSession) -> T,
+    ): Entry<T> =
+        entries.getOrPut("$environmentId\u0000$key") {
+            Entry(environmentId, key, ttlMs, serializer, tick, persist, pollMs, onValue, fetch)
+        } as Entry<T>
+
+    private fun readySession(environmentId: String): EnvironmentSession? =
+        workspace.session(environmentId)?.takeIf {
+            val state = it.state.value
+            state.phase == SessionPhase.Connected && state.capabilities.pullRequests
+        }
+
+    private suspend fun <T> restore(entry: Entry<T>) {
+        if (!entry.persist || entry.restored) return
+        entry.restored = true
+        val stored = runCatching { cache.read(entry.environmentId, entry.key) }.getOrNull() ?: return
+        val value = runCatching { TransportJson.decodeFromJsonElement(entry.serializer, stored.value) }.getOrElse { return }
+        if (entry.state.value.hasValue) return
+        entry.state.value = PullRequestQuery(value = value, hasValue = true, fetchedAt = stored.fetchedAt, fromCache = true)
+        entry.onValue(value)
+    }
+
+    private suspend fun <T> ensureFresh(entry: Entry<T>) {
+        entry.mutex.withLock { restore(entry) }
+        val current = entry.state.value
+        val stale =
+            isPullRequestQueryStale(
+                fetchedAt = current.fetchedAt.takeIf { current.hasValue },
+                now = clock(),
+                ttlMs = entry.ttlMs,
+                fetchedRevision = entry.revision,
+                currentRevision = revisions[entry.environmentId],
+            )
+        if (stale) fetch(entry)
+    }
+
+    /**
+     * Fetches [entry] unless a fetch that began after this call was made has
+     * already finished. Returns the failure, if any; the entry keeps its value.
+     */
+    private suspend fun <T> fetch(entry: Entry<T>, force: Boolean = false): Throwable? {
+        val requestedAt = clock()
+        return entry.mutex.withLock {
+            restore(entry)
+            if (!force && entry.attemptedAt > requestedAt) return@withLock null
+            val session = readySession(entry.environmentId) ?: return@withLock null
+            entry.attemptedAt = clock()
+            val revision = revisions[entry.environmentId]
+            entry.state.update { it.copy(loading = true) }
+            val result = runCatching { entry.fetch(session) }
+            result.fold(
+                onSuccess = { value ->
+                    val now = clock()
+                    entry.revision = revision
+                    entry.state.value = PullRequestQuery(value = value, hasValue = true, fetchedAt = now)
+                    entry.onValue(value)
+                    if (entry.persist) {
+                        scope.launch {
+                            runCatching {
+                                cache.write(
+                                    entry.environmentId,
+                                    entry.key,
+                                    now,
+                                    TransportJson.encodeToJsonElement(entry.serializer, value),
+                                )
+                            }
+                        }
+                    }
+                    null
+                },
+                onFailure = { error ->
+                    if (error is CancellationException) {
+                        entry.state.update { it.copy(loading = false) }
+                        throw error
+                    }
+                    entry.state.update { it.copy(loading = false, error = pullRequestErrorMessage(error)) }
+                    error
+                },
+            )
+        }
+    }
+
+    /**
+     * One refresh subscription per environment while it is connected with
+     * pull request support. Revalidates stale subscribed reads on each
+     * connect, and refetches subscribed reads when the revision moves.
+     */
+    private fun ensureWatcher(environmentId: String) {
+        watchers.computeIfAbsent(environmentId) {
+            scope.launch {
+                workspace.sessionFlow(environmentId).collectLatest { session ->
+                    if (session == null) return@collectLatest
+                    session.state
+                        .map { it.phase == SessionPhase.Connected && it.capabilities.pullRequests }
+                        .distinctUntilChanged()
+                        .collectLatest { ready ->
+                            if (!ready) return@collectLatest
+                            rememberEnvironment(environmentId)
+                            subscribed(environmentId).forEach { scope.launch { ensureFresh(it) } }
+                            session
+                                .subscribe(WsMethods.PullRequestsSubscribeRefreshes, JsonObject(emptyMap()), Int.serializer())
+                                .collect { revision ->
+                                    val previous = revisions.put(environmentId, revision)
+                                    if (previous != null && previous != revision) {
+                                        subscribed(environmentId)
+                                            .filter { it.tick }
+                                            .forEach { scope.launch { fetch(it) } }
+                                    }
+                                }
+                        }
+                }
+            }
+        }
+    }
+
+    private fun subscribed(environmentId: String): List<Entry<*>> =
+        entries.values.filter { it.environmentId == environmentId && it.subscribers.get() > 0 }
+
+    private companion object {
+        const val LIST_TTL_MS = 30_000L
+        const val READ_TTL_MS = 60_000L
+        const val FILES_VIEWED_TTL_MS = 15_000L
+        const val LINKED_THREADS_POLL_MS = 10_000L
+        const val CHECKS_TTL_MS = 45_000L
+        const val FILTER_OPTIONS_TTL_MS = 5 * 60_000L
+        const val MAX_FILTER_ANSWERS = 64
+        const val MAX_FILTER_PROJECTS = 100
+        const val MAX_FILTER_QUERY = 100
+        const val IDLE_TTL_MS = 5 * 60_000L
+        const val MAX_STATS_REFS = 500
+        const val MAX_STATS = 2_000
+        const val STATS_KEY = "listStats"
+        const val DIFF_PATH = "/api/pull-requests/diff"
+
+        fun statKey(stat: PullRequestDiffStatDto) = "${stat.projectId}:${stat.repository}:${stat.number}"
+
+        fun statKey(reference: PullRequestReference) = "${reference.projectId}:${reference.repository}:${reference.number}"
+    }
+}

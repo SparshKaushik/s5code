@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns all app chrome; the platform theme only carries the
+         edge-to-edge window setup before the first frame. The night variant
+         lives in values-night because android:Theme.Material has no DayNight
+         parent below API 29. -->
+    <style name="Theme.S5Code" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+
+    <!--
+      Launch theme. The activity starts on this and swaps to Theme.S5Code in
+      onCreate, so the splash is a window attribute rather than a composable:
+      a Compose splash cannot draw until the process, the Compose runtime, and
+      the first composition are ready, which is exactly the gap being covered.
+
+      API 26-30 have no platform splash screen, so the mark is drawn by the
+      window background here. The v31 variant replaces that with the real
+      SplashScreen attributes; see values-v31/themes.xml.
+    -->
+    <style name="Theme.S5Code.Launch" parent="Theme.S5Code">
+        <item name="android:windowBackground">@drawable/splash_window_background</item>
+    </style>
+</resources>
