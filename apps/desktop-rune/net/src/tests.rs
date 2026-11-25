@@ -316,6 +316,7 @@ fn offline() -> (Net, mpsc::Sender<Incoming>, mpsc::Receiver<Command>) {
         auth: crate::Auth::Bearer(String::new()),
         incoming_tx: incoming.clone(),
         wake: Arc::new(|| {}),
+        kept_only: HashSet::new(),
     };
     (net, incoming, commands)
 }

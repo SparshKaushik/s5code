@@ -18,6 +18,7 @@ pub struct Dialog {
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
     glyph: Option<El>,
+    glyph_above: bool,
 }
 impl Dialog {
     pub fn new(key: impl Into<String>, title: impl Into<String>) -> Self {
@@ -35,6 +36,7 @@ impl Dialog {
             close: None,
             button: None,
             glyph: None,
+            glyph_above: false,
         }
     }
     pub fn open(mut self, open: bool) -> Self {
@@ -44,6 +46,13 @@ impl Dialog {
     /// Shown before the title (web `DialogHeader`'s leading icon).
     pub fn title_icon(mut self, glyph: El) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+    /// Shown on its own line above the title, as a `DialogHeader` whose first child is a mark
+    /// (`mb-2` under it, then the header's `gap-2`).
+    pub fn title_icon_above(mut self, glyph: El) -> Self {
+        self.glyph = Some(glyph.mb(8.));
+        self.glyph_above = true;
         self
     }
     /// Runs of the title drawn differently, such as a `<code>` branch name.
@@ -114,10 +123,12 @@ impl Dialog {
             .color(t.c.contrast_foreground)
             .spans(self.title_spans)
             .wrap();
-        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(match self.glyph {
-            Some(glyph) => row().gap(8.).center_y().child(glyph).child(title.shrink()),
-            None => title,
-        });
+        let mut heading = col().grow(1.).min_w(0.).gap(8.);
+        heading = match self.glyph {
+            Some(glyph) if self.glyph_above => heading.child(glyph).child(title),
+            Some(glyph) => heading.child(row().gap(8.).center_y().child(glyph).child(title.shrink())),
+            None => heading.child(title),
+        };
         if let Some(description) = self.description {
             heading = heading.child(
                 text(description)

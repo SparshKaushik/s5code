@@ -766,6 +766,7 @@
         {
           "key": "defaultRuntimeMode",
           "title": "Permissions",
+          "ariaLabel": "Default permissions",
           "description": "Default permissions for new threads. Projects can override them.",
           "kind": "select",
           "options": [
@@ -778,6 +779,7 @@
         {
           "key": "defaultThreadEnvMode",
           "title": "Workspace",
+          "ariaLabel": "Default workspace",
           "description": "Where new threads start. Projects and their t3.json can override it.",
           "kind": "select",
           "options": [
@@ -920,6 +922,7 @@
         {
           "key": "defaultAutoPull",
           "title": "Automatically pull",
+          "ariaLabel": "Default automatic pull",
           "description": "Keeps the default branch current when the checkout has no local changes or commits. Projects can override it.",
           "kind": "switch",
           "options": []
@@ -934,6 +937,7 @@
         {
           "key": "pullRequestMergeMethod",
           "title": "Default merge method",
+          "ariaLabel": "Default pull request merge method",
           "description": "Pull requests start with this method. Last selected reuses whatever you chose most recently on this device.",
           "kind": "select",
           "options": [

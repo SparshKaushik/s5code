@@ -64,6 +64,10 @@ fn prefill(s: &mut App) {
 }
 
 pub(crate) fn set_link_state(s: &mut App, link: Option<LinkState>) {
+    // Opened before the link state was known: Publish comes first once it is (web waits instead).
+    if let Some(ui) = s.ui.cloud.onboarding.as_mut().filter(|o| link.is_some() && !o.prefilled && !o.applying) {
+        ui.step = Step::Publish;
+    }
     s.ui.cloud.link = link;
     if s.ui.cloud.link.is_none() {
         if let Some(ui) = s.ui.cloud.onboarding.as_mut().filter(|o| o.step == Step::Publish && !o.applying) {

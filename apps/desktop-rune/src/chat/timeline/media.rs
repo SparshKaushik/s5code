@@ -27,6 +27,7 @@ pub const MARKDOWN_DECODE: u32 = 960;
 pub enum Kind {
     Image,
     Video,
+    Audio,
 }
 
 impl Kind {
@@ -34,6 +35,7 @@ impl Kind {
         match self {
             Kind::Image => "image",
             Kind::Video => "video",
+            Kind::Audio => "audio",
         }
     }
 }
@@ -96,9 +98,22 @@ impl Loaded {
                 }
                 loaded.player = Some(player);
             }
+            Some(Kind::Audio) => {
+                let player = Player::audio(loaded.url.clone());
+                if let Some(wake) = waker {
+                    player.set_waker(wake);
+                }
+                // Its length shows before it plays, as web's preload="metadata".
+                player.preload();
+                loaded.player = Some(player);
+            }
             None => {}
         }
         loaded
+    }
+
+    pub fn player(&self) -> Option<&Player> {
+        self.player.as_ref()
     }
 
     /// The picture could not be read, or the video cannot play here.
@@ -194,7 +209,7 @@ fn get(url: &str) -> Result<ureq::Response, String> {
 }
 
 /// `downloadMedia`, to a path the save dialog picked; a video streams to disk.
-fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
     if url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
         return std::fs::write(path, fetch(url)?).map_err(|e| e.to_string());
     }
@@ -239,7 +254,10 @@ pub fn attachment_kind(mime: &str, name: &str) -> Option<Kind> {
         return Some(Kind::Image);
     }
     let generic = mime.is_empty() || mime == "application/octet-stream";
-    (mime.starts_with("video/") || (generic && kind(name) == Some("video"))).then_some(Kind::Video)
+    if mime.starts_with("video/") || (generic && kind(name) == Some("video")) {
+        return Some(Kind::Video);
+    }
+    (mime.starts_with("audio/") || (generic && kind(name) == Some("audio"))).then_some(Kind::Audio)
 }
 
 fn windows_absolute(path: &str) -> bool {
@@ -398,15 +416,17 @@ pub fn actions(media: &Media, available: bool) -> Vec<(Action, String, bool)> {
     items
 }
 
+/// An asset is signed by `env`'s server (the active one when `None`); a pull request's host media
+/// falls back to its own URL when that fails or can't be asked, as web's assets do.
 #[derive(Clone)]
 enum Access {
     Direct(String),
-    Asset(Value),
+    Asset { resource: Value, env: Option<String>, fallback: Option<String> },
 }
 
 struct Entry {
     media: Media,
-    request: Option<u64>,
+    request: Option<(u64, Option<String>, Option<String>)>,
     loaded: Option<Loaded>,
     failed: bool,
 }
@@ -432,43 +452,54 @@ impl State {
     }
 }
 
+fn net_for<'a>(app: &'a mut App, env: Option<&str>) -> Option<&'a mut s5_net::Net> {
+    match env {
+        Some(env) => crate::env::net_of(app, env),
+        None => app.src.net(),
+    }
+}
+
 /// Starts loading the media views asked for, folds in signed URLs, and copies the images read.
 /// Called from `attachments::poll`.
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let waker = app.ui.panel.waker.clone();
     let wanted = std::mem::take(app.ui.chat.timeline.assets.media.wanted.get_mut());
-    let mut net = app.src.net();
-    let state = &mut app.ui.chat.timeline.assets.media;
     let mut changed = false;
     for (key, media, access) in wanted {
-        if state.entries.contains_key(&key) {
+        if app.ui.chat.timeline.assets.media.entries.contains_key(&key) {
             continue;
         }
         let mut entry = Entry { media, request: None, loaded: None, failed: false };
         match access {
             Access::Direct(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
-            Access::Asset(resource) => match net.as_deref_mut() {
-                Some(net) => entry.request = Some(net.request("assets.createUrl", json!({ "resource": resource }))),
-                None => entry.failed = true,
+            Access::Asset { resource, env, fallback } => match (net_for(app, env.as_deref()), fallback) {
+                (Some(net), fallback) => entry.request = Some((net.request("assets.createUrl", json!({ "resource": resource })), env, fallback)),
+                (None, Some(url)) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
+                (None, None) => entry.failed = true,
             },
         }
-        state.entries.insert(key, entry);
+        app.ui.chat.timeline.assets.media.entries.insert(key, entry);
         changed = true;
     }
-    if let Some(net) = net {
-        for entry in state.entries.values_mut() {
-            let Some(reply) = entry.request.and_then(|id| net.take_reply(id)) else { continue };
-            entry.request = None;
-            changed = true;
-            match reply {
-                Ok(reply) => {
-                    let url = format!("{}{}", net.base_url().trim_end_matches('/'), s(&reply, "relativeUrl"));
-                    entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone()));
-                }
-                Err(_) => entry.failed = true,
-            }
+    let pending: Vec<(String, u64, Option<String>)> =
+        app.ui.chat.timeline.assets.media.entries.iter().filter_map(|(k, e)| e.request.as_ref().map(|(id, env, _)| (k.clone(), *id, env.clone()))).collect();
+    for (key, id, env) in pending {
+        let Some(net) = net_for(app, env.as_deref()) else { continue };
+        let Some(reply) = net.take_reply(id) else { continue };
+        let base = net.base_url().trim_end_matches('/').to_owned();
+        let Some(entry) = app.ui.chat.timeline.assets.media.entries.get_mut(&key) else { continue };
+        let fallback = entry.request.take().and_then(|(_, _, fallback)| fallback);
+        changed = true;
+        let url = match reply {
+            Ok(reply) => Some(format!("{base}{}", s(&reply, "relativeUrl"))),
+            Err(_) => fallback,
+        };
+        match url {
+            Some(url) => entry.loaded = Some(Loaded::new(url, entry.media.name.clone(), Some(entry.media.kind), MARKDOWN_DECODE, waker.clone())),
+            None => entry.failed = true,
         }
     }
+    let state = &mut app.ui.chat.timeline.assets.media;
     let errors = state.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
     let copied = state.copied.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
     for (title, description) in errors {
@@ -530,7 +561,7 @@ fn retry(app: &mut App, key: &str) {
 }
 
 /// The `![alt](src)` images of a paragraph holding nothing else.
-fn images(block: &str) -> Option<Vec<(String, String)>> {
+pub fn images(block: &str) -> Option<Vec<(String, String)>> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut out = Vec::new();
     let mut open: Option<(String, String)> = None;
@@ -579,7 +610,7 @@ fn resolve(alt: &str, src: &str, root: Option<&str>, thread: Option<&str>) -> Op
                 Reference::Url(_) => None,
             };
             let resource = json!({"_tag": "media-file", "threadId": thread, "path": path});
-            (format!("media:{thread}:{path}"), Media { kind, name: alt.to_owned(), reference: Some(reference), open_file }, Access::Asset(resource))
+            (format!("media:{thread}:{path}"), Media { kind, name: alt.to_owned(), reference: Some(reference), open_file }, Access::Asset { resource, env: None, fallback: None })
         }
     })
 }
@@ -600,7 +631,7 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
     let mut out = col().w_full().gap(8.0);
     for (key, media, access) in resolved {
         let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
-        let framed = matches!(access, Access::Asset(_));
+        let framed = matches!(access, Access::Asset { .. });
         if entry.is_none() {
             want(app, &key, &media, access);
         }
@@ -615,6 +646,8 @@ pub fn block(app: &App, block: &str, t: &T) -> Option<El> {
                 };
                 col().w_full().max_w(MAX_SIDE).child(video(&key, &media.name, loaded, failed, original, t))
             }
+            // `resolve` leaves audio with the Markdown text.
+            Kind::Audio => continue,
         };
         out = out.child(with_actions(shown, &key, &media, true));
     }
@@ -719,38 +752,43 @@ pub fn video(key: &str, label: &str, loaded: Option<&Loaded>, failed: bool, orig
     shown
 }
 
-/// A pull request's linked picture or video (PullRequestMarkdown). `host` is the cwd and fetch URL
-/// of media its host keeps behind a credential, read through the server. Chat's lightbox and
-/// actions menu aren't drawn on the pull request pages, so a picture opens its URL instead.
-pub fn linked(app: &App, url: &str, kind: Kind, host: Option<(&str, &str)>, t: &T) -> El {
-    let name = if kind == Kind::Video { "Pull request video" } else { "" };
+/// Where a pull request's media is read when its host keeps it behind a credential: `fetch`
+/// through `env`'s server, with the credential it holds for the checkout at `cwd`.
+pub struct Host<'a> {
+    pub env: &'a str,
+    pub cwd: &'a str,
+    pub fetch: &'a str,
+}
+
+/// The entry `linked` files a URL under, for the lightbox's gallery.
+pub fn linked_key(url: &str, host: Option<&Host>) -> String {
+    match host {
+        Some(h) => format!("media:{}:{}:{}", h.env, h.cwd, h.fetch),
+        None => format!("media:{url}"),
+    }
+}
+
+/// A pull request's linked picture or video (PullRequestMarkdown): a picture opens in the
+/// lightbox among `gallery`, the body's other pictures.
+pub fn linked(app: &App, url: &str, name: &str, kind: Kind, host: Option<&Host>, gallery: &[String], t: &T) -> El {
+    let name = if kind == Kind::Video && name.trim().is_empty() { "Pull request video" } else { name };
     let media = Media { kind, name: name.to_owned(), reference: url_reference(url), open_file: None };
-    let (key, access) = match host {
-        Some((cwd, fetch)) => (format!("media:{cwd}:{fetch}"), Access::Asset(json!({"_tag": "github-media", "cwd": cwd, "url": fetch}))),
-        None => (format!("media:{url}"), Access::Direct(url.to_owned())),
+    let key = linked_key(url, host);
+    let access = match host {
+        Some(h) => Access::Asset { resource: json!({"_tag": "github-media", "cwd": h.cwd, "url": h.fetch}), env: Some(h.env.to_owned()), fallback: Some(h.fetch.to_owned()) },
+        None => Access::Direct(url.to_owned()),
     };
     let entry = app.ui.chat.timeline.assets.media.entries.get(&key);
     if entry.is_none() {
         want(app, &key, &media, access);
     }
     let loaded = entry.and_then(|e| e.loaded.as_ref());
-    let failed = entry.is_some_and(|e| e.failed) || loaded.is_some_and(Loaded::failed);
-    if kind == Kind::Video {
-        return col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)).help(url.to_owned());
-    }
-    let size = loaded.map(|l| l.pixels.size()).filter(|(w, h)| *w > 0 && *h > 0);
-    let shown = match (loaded, size) {
-        _ if failed => col().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).center().padding(8.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("alert").child(unavailable_label("Image unavailable", "", theme::TEXT_XS, t)),
-        (Some(loaded), Some((w, h))) => {
-            let ratio = w as f32 / h as f32;
-            el().w_full().max_w((w as f32).min(MAX_SIDE).min(MAX_SIDE * ratio)).aspect_ratio(ratio).pixels_fit(&loaded.pixels, SurfaceFit::Fit)
-        }
-        _ => return el().w_full().max_w(MAX_SIDE).aspect_ratio(16.0 / 9.0).radius(8.0).fill(t.c.muted.alpha_mul(0.6)).role("status").label("Loading image"),
+    let failed = entry.is_some_and(|e| e.failed);
+    let shown = match kind {
+        Kind::Video => col().w_full().max_w(MAX_SIDE).child(video(&key, name, loaded, failed, Some(url), t)),
+        Kind::Image => picture(&key, &media, loaded, failed, false, gallery, t),
     };
-    let open = url.to_owned();
-    shown.focusable(true).role("link").cursor(rune::Cursor::Pointer).label("Open image").help(url.to_owned()).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-        let _ = tx.open_url(&open);
-    })
+    with_actions(shown, &key, &media, true)
 }
 
 /// MediaActions' trigger: the source as a tooltip, and right-click for the actions.
@@ -878,20 +916,59 @@ pub(super) fn scene_entry(app: &mut App, alt: &str, src: &str, failed: bool) -> 
         _ => None,
     };
     let (key, media, _) = resolve(alt, src, root.as_deref(), thread.as_deref())?;
-    let loaded = (!failed).then(|| {
-        let loaded = Loaded::new(String::new(), media.name.clone(), None, MARKDOWN_DECODE, None);
-        let (w, h) = (640u32, 360u32);
-        let rgba = (0..w * h).flat_map(|i| if (i % w / 40 + i / w / 40) % 2 == 0 { [96, 125, 180, 255] } else { [140, 170, 220, 255] }).collect();
-        loaded.pixels.set(w, h, rgba);
-        Loaded { kind: Some(media.kind), ..loaded }
-    });
+    let loaded = (!failed).then(|| checker(&media));
     app.ui.chat.timeline.assets.media.entries.insert(key.clone(), Entry { media, request: None, loaded, failed });
     Some(key)
+}
+
+/// Scenes: a pull request's linked media under `key` (`linked_key`), drawn without loading.
+pub fn scene_linked(app: &mut App, key: &str, name: &str, kind: Kind, failed: bool) {
+    let media = Media { kind, name: name.to_owned(), reference: None, open_file: None };
+    let loaded = (!failed).then(|| checker(&media));
+    app.ui.chat.timeline.assets.media.entries.insert(key.to_owned(), Entry { media, request: None, loaded, failed });
+}
+
+/// Scenes: the lightbox open on the first of `gallery`.
+pub fn scene_open(app: &mut App, gallery: Vec<String>) {
+    let assets = &mut app.ui.chat.timeline.assets;
+    assets.open = gallery.first().cloned();
+    assets.gallery = gallery;
+}
+
+fn checker(media: &Media) -> Loaded {
+    let loaded = Loaded::new(String::new(), media.name.clone(), None, MARKDOWN_DECODE, None);
+    let (w, h) = (640u32, 360u32);
+    let rgba = (0..w * h).flat_map(|i| if (i % w / 40 + i / w / 40) % 2 == 0 { [96, 125, 180, 255] } else { [140, 170, 220, 255] }).collect();
+    loaded.pixels.set(w, h, rgba);
+    Loaded { kind: Some(media.kind), ..loaded }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_media_signs_on_its_environment_and_falls_back_to_the_host_url() {
+        let mut app = App::new();
+        app.src = crate::data::Source::Fixture(crate::data::empty_state());
+        app.ui.env.active = crate::env::LOCAL.into();
+        // An offline client refuses every request at once: its worker is stopped.
+        crate::env::park(&mut app, "far", crate::data::Source::Live(s5_net::Net::offline()));
+        let host = Host { env: "far", cwd: "/srv/app", fetch: "https://example.invalid/user-attachments/assets/ab" };
+        let key = linked_key("https://example.invalid/user-attachments/assets/ab?x=1", Some(&host));
+        let media = Media { kind: Kind::Image, name: String::new(), reference: None, open_file: None };
+        let asset = |env: &str, fallback: Option<&str>| Access::Asset { resource: json!({}), env: Some(env.into()), fallback: fallback.map(str::to_owned) };
+        want(&app, &key, &media, asset("far", Some(host.fetch)));
+        want(&app, "media:gone", &media, asset("gone", None));
+        want(&app, "media:gone-fallback", &media, asset("gone", Some("https://example.invalid/b")));
+        poll(&mut app, &mut Tx::default());
+        let entries = &app.ui.chat.timeline.assets.media.entries;
+        let url = |k: &str| entries[k].loaded.as_ref().map(|l| l.url.clone());
+        assert_eq!(url(key.as_str()).as_deref(), Some(host.fetch), "FAILED: far refused, so the picture reads the host's URL");
+        assert!(entries["media:gone"].failed && url("media:gone").is_none(), "FAILED: not connected, nothing to fall back to");
+        assert_eq!(url("media:gone-fallback").as_deref(), Some("https://example.invalid/b"));
+        assert!(entries.values().all(|e| e.request.is_none()));
+    }
 
     #[test]
     fn media_kinds_follow_the_extension() {
@@ -904,6 +981,8 @@ mod tests {
         assert_eq!(attachment_kind("video/quicktime", "a.mov"), Some(Kind::Video));
         assert_eq!(attachment_kind("", "a.webm"), Some(Kind::Video));
         assert_eq!(attachment_kind("application/pdf", "a.mp4"), None);
+        assert_eq!(attachment_kind("audio/mpeg", "memo.mp3"), Some(Kind::Audio));
+        assert_eq!(attachment_kind("", "memo.m4a"), Some(Kind::Audio));
         assert_eq!(attachment_kind("image/png", "a.png"), Some(Kind::Image));
     }
 

@@ -358,7 +358,7 @@ fn theme_saved(s: &mut App) -> bool {
     if s.client_settings.error.is_none() {
         return true;
     }
-    toast_error(s, "Couldn't save theme selection", Some("Try again."));
+    toast_error(s, "Couldn\u{2019}t save theme selection", Some("Try again."));
     false
 }
 /// "Change appearance": System, Light and Dark, the saved mode marked Current.
@@ -2502,7 +2502,7 @@ mod tests {
         assert_eq!(toast_title(&s), None);
         s.client_settings.error = Some("Could not save client settings: denied".into());
         execute(&mut s, grove, &mut Tx::default());
-        assert_eq!(toast_title(&s), Some("Couldn't save theme selection"));
+        assert_eq!(toast_title(&s), Some("Couldn\u{2019}t save theme selection"));
     }
 
     #[test]

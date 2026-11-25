@@ -6,7 +6,7 @@
 //! Network I/O runs on background threads; the UI thread calls [`Net::drain`] from its poll hook
 //! and gets woken through the callback passed to [`Net::connect`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -89,6 +89,8 @@ pub struct Net {
     auth: Auth,
     incoming_tx: Sender<Incoming>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Threads followed only through [`Net::keep_thread`]; any [`Net::watch_thread`] adopts one.
+    kept_only: HashSet<String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -154,6 +156,7 @@ impl Net {
             auth,
             incoming_tx,
             wake,
+            kept_only: HashSet::new(),
         }
     }
     /// A client with no worker, for tests: each request is answered at once that the worker stopped.
@@ -173,6 +176,7 @@ impl Net {
             auth: Auth::Bearer(String::new()),
             incoming_tx,
             wake: Arc::new(|| {}),
+            kept_only: HashSet::new(),
         }
     }
     /// A connection over an in-memory transport that drops what it is sent and never answers,
@@ -194,6 +198,7 @@ impl Net {
             auth: Auth::Bearer(String::new()),
             incoming_tx,
             wake: Arc::new(|| {}),
+            kept_only: HashSet::new(),
         }
     }
     /// [`Net::in_memory`] that keeps the requests it is sent, so a client test can check what
@@ -280,6 +285,7 @@ impl Net {
         }
     }
     pub fn watch_thread(&mut self, thread_id: &str) {
+        self.kept_only.remove(thread_id);
         if self.state.thread_views.contains_key(thread_id) {
             return;
         }
@@ -289,6 +295,20 @@ impl Net {
         let _ = self
             .tx
             .send(Command::Watch(Route::Thread(thread_id.to_owned())));
+    }
+    /// Follows a thread for a background reader (the running-thread keep-alive) without claiming
+    /// it: [`Net::release_thread`] then drops it unless something watched it meanwhile.
+    pub fn keep_thread(&mut self, thread_id: &str) {
+        if self.state.thread_views.contains_key(thread_id) {
+            return;
+        }
+        self.watch_thread(thread_id);
+        self.kept_only.insert(thread_id.to_owned());
+    }
+    pub fn release_thread(&mut self, thread_id: &str) {
+        if self.kept_only.remove(thread_id) {
+            self.unwatch_thread(thread_id);
+        }
     }
     pub fn unwatch_thread(&mut self, thread_id: &str) {
         self.state.thread_views.remove(thread_id);
@@ -563,6 +583,13 @@ pub fn api_post_read(base: &str, auth: &Auth, path: &str, query: &str, limit: u6
     let url = api_url(base, path, query)?;
     let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(20)).build();
     api_body(auth::send(auth, &agent, "POST", url.as_str(), |req| req.call()).map_err(auth::Failed::text)?, limit)
+}
+/// A JSON POST on one of the server's `/api` routes, its response body at most `limit` bytes.
+pub fn api_post_json(base: &str, auth: &Auth, path: &str, query: &str, body: &Value, timeout: std::time::Duration, limit: u64) -> Result<Vec<u8>, String> {
+    let url = api_url(base, path, query)?;
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(timeout).build();
+    let body = body.to_string();
+    api_body(auth::send(auth, &agent, "POST", url.as_str(), |req| req.set("Content-Type", "application/json").send_string(&body)).map_err(auth::Failed::text)?, limit)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {

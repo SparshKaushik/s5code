@@ -1820,10 +1820,10 @@ pub(super) fn scene(s: &mut App, open: &str) {
             }
         }
         "t3-connect" => crate::cloud::scene_signed_in(s),
-        "t3-connect-account" => {
+        "t3-connect-account" | "t3-connect-mobile" => {
             crate::cloud::scene_signed_in(s);
             crate::cloud::account::scene(s);
-            s.ui.settings.reveal = Some("Registered environments".into());
+            s.ui.settings.reveal = Some(if open == "t3-connect-mobile" { "Mobile clients" } else { "Registered environments" }.into());
         }
         "t3-connect-signing-in" => crate::cloud::scene_signing_in(s),
         "t3-connect-route" => {
