@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use rune::{El, GrowthSpec, ScrollSpec, Tx, col, el, row, text};
 
 use super::{bar, note};
-use crate::panel::file_preview::parse_delimited;
+use crate::panel::file_preview::{parse_delimited, table_number};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
 
@@ -130,14 +130,21 @@ impl LargeText {
             format!("{} lines · {bytes}", super::grouped(count as u64))
         };
         let theme = *t;
-        let mut list = col().w_full().growth(GrowthSpec::default()).selection_group(true);
-        if table.is_some() {
-            list = list.min_w(48.0 + index.columns as f32 * 160.0);
-        }
-        list = list.virtual_rows(count, LINE_HEIGHT, row_key, move |app: &App, i| {
-            let Some(super::Content::Large(file)) = super::active(app) else { return el().h(LINE_HEIGHT) };
-            file.row(app, rendered, wrap, i, &theme)
-        }).virtual_rows_version(rendered);
+        let has_heading = table.is_some() && count > 0;
+        let list = col().w_full().growth(GrowthSpec::default()).selection_group(true)
+            .virtual_rows(count - usize::from(has_heading), LINE_HEIGHT, row_key, move |app: &App, i| {
+                let Some(super::Content::Large(file)) = super::active(app) else { return el().h(LINE_HEIGHT) };
+                match file.display_table(rendered) {
+                    Some((separator, index)) => file.table_row(separator, index, i + 1, &theme),
+                    None => file.source_row(app, wrap, i, &theme),
+                }
+            }).virtual_rows_version(rendered);
+        let content = match table {
+            Some((separator, index)) if has_heading => col().min_w(56.0 + index.columns as f32 * 160.0)
+                .child(self.table_row(separator, index, 0, t).sticky_top(0.0))
+                .child(list),
+            _ => list,
+        };
         let viewport = el().key(SCROLL).grow(1.0).min_h(0.0).min_w(0.0);
         let viewport = if wrap && table.is_none() { viewport.scroll(ScrollSpec { stick_bottom: false }) } else { viewport.scroll_xy() };
         let full = bar(t).child(note("Full file", t).grow(1.0))
@@ -148,19 +155,21 @@ impl LargeText {
         col().grow(1.0).min_h(0.0).min_w(0.0)
             .child(full).child(super::divider(t))
             .child(bar(t).child(note(summary, t)).role("status")).child(super::divider(t))
-            .child(viewport.child(list))
+            .child(viewport.child(content))
     }
 
-    fn row(&self, app: &App, rendered: bool, wrap: bool, i: usize, t: &T) -> El {
-        if let Some((separator, index)) = self.display_table(rendered) {
-            let record = index.record(&self.source, i);
-            let parsed = parse_delimited(record, separator, 1, COLUMNS, 8192);
-            let cells = parsed.rows.into_iter().next().unwrap_or_default();
-            let font = if i == 0 { theme::XS_MEDIUM } else { theme::TEXT_XS };
-            return row().w_full().min_h(28.0).fill(if i == 0 { t.c.muted.alpha_mul(0.5) } else { rune::Color::TRANSPARENT })
-                .children(cells.into_iter().map(|cell| row().w(160.0).px(12.0).py(6.0)
-                    .child(text(cell.clone()).font(font).color(t.c.foreground).truncate().help_when_truncated(cell).selectable(true))));
-        }
+    fn table_row(&self, separator: char, index: &Index, i: usize, t: &T) -> El {
+        let record = index.record(&self.source, i);
+        let parsed = parse_delimited(record, separator, 1, COLUMNS, 8192);
+        let cells = parsed.rows.into_iter().next().unwrap_or_default();
+        let font = if i == 0 { theme::XS_MEDIUM } else { theme::TEXT_XS };
+        row().w_full().min_h(29.0).fill(if i == 0 { t.c.background } else { rune::Color::TRANSPARENT })
+            .child(table_number((i != 0).then_some(i), t))
+            .children(cells.into_iter().map(|cell| row().w(160.0).px(12.0).py(6.0)
+                .child(text(cell.clone()).font(font).color(t.c.foreground).truncate().help_when_truncated(cell).selectable(i != 0))))
+    }
+
+    fn source_row(&self, app: &App, wrap: bool, i: usize, t: &T) -> El {
         let actual = self.lines.record(&self.source, i).trim_start_matches('\u{feff}');
         let end = actual.floor_char_boundary(actual.len().min(16_384));
         let source = if end < actual.len() { format!("{}…", &actual[..end]) } else { actual.to_owned() };
@@ -170,7 +179,8 @@ impl LargeText {
         let content = if wrap { content.grow(1.0).min_w(0.0).wrap_anywhere() } else { content.single_line() };
         row().w_full().min_h(LINE_HEIGHT)
             .fill(if focused { t.c.accent } else { rune::Color::TRANSPARENT })
-            .child(text(format!("{}", i + 1)).font(font).color(t.c.muted_foreground).w(62.0).pl(12.0))
+            .child(row().w(62.0).pl(12.0).fill(t.c.background).sticky_left(0.0)
+                .child(text((i + 1).to_string()).font(font).color(t.c.muted_foreground)))
             .child(content)
     }
 }

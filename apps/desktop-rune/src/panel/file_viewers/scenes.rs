@@ -57,20 +57,34 @@ fn image_zoom(app: &mut App) {
 fn shot(app: &mut App, mode: Mode, url: String, ready: bool) {
     html_frame::scene_waker(app);
     let result = (|| {
-        let live = preview::live(app, url, 768, 686, true, None).ok_or("Chrome is unavailable.")?;
+        let script = match mode {
+            Mode::Font => Some("addEventListener('DOMContentLoaded', () => { document.fonts.load('24px preview').then(() => window.__s5Frame?.('file-preview-ready')); });"),
+            Mode::Audio => Some("addEventListener('loadedmetadata', event => { if (event.target instanceof HTMLAudioElement) window.__s5Frame?.('file-preview-ready'); }, true);"),
+            _ => None,
+        };
+        let live = preview::live(app, url, 768, 686, true, script).ok_or("Chrome is unavailable.")?;
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut painted = None;
         let mut finished = !ready;
+        let mut loaded = false;
         while Instant::now() < deadline {
-            finished |= live.messages().iter().any(|event| event == "file-preview-ready");
-            if finished && live.pixels.size().0 > 0 {
+            for event in live.messages() {
+                loaded |= event == browser::LIVE_LOAD;
+                finished |= event == "file-preview-ready";
+                if let Ok(message) = serde_json::from_str::<serde_json::Value>(&event)
+                    && let Some(error) = message["pdfError"].as_str()
+                {
+                    return Err(format!("Could not render the PDF fixture: {error}"));
+                }
+            }
+            if loaded && finished && live.pixels.size().0 > 0 {
                 let first = painted.get_or_insert_with(Instant::now);
                 if first.elapsed() >= Duration::from_millis(300) { break; }
             }
             std::thread::sleep(Duration::from_millis(30));
         }
         let mut frame = Frame::new(mode, String::new());
-        if live.pixels.size().0 == 0 || !finished {
+        if live.pixels.size().0 == 0 || !loaded || !finished {
             return Err("Chrome could not render this scene.".into());
         }
         frame.still = Some(live.pixels);
@@ -123,7 +137,7 @@ fn audio(app: &mut App) {
     scene(app, "notices/completion.mp3", true);
     let encoded = base64::engine::general_purpose::STANDARD.encode(include_bytes!("../../../assets/notification-completion.mp3"));
     let url = media_url(Mode::Audio, &format!("data:audio/mpeg;base64,{encoded}"), "completion.mp3");
-    shot(app, Mode::Audio, url, false);
+    shot(app, Mode::Audio, url, true);
 }
 
 fn video(app: &mut App) {
@@ -145,7 +159,7 @@ setTimeout(()=>ctx.fillRect(29,30,1,6),100);
 fn font(app: &mut App) {
     scene(app, "fonts/Inter-Regular.ttf", true);
     let data = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-    shot(app, Mode::Font, font_url(data, "Inter-Regular.ttf"), false);
+    shot(app, Mode::Font, font_url(data, "Inter-Regular.ttf"), true);
 }
 
 fn tar() -> Vec<u8> {
@@ -206,5 +220,5 @@ fn notebook(app: &mut App) {
 fn hide_tests(app: &mut App) {
     panel::scene(app, Some(Surface::Diff));
     app.client_settings.values.insert(crate::settings::client::HIDE_TEST_FILES.into(), true.into());
-    panel::diff::fixture(app);
+    panel::diff::hide_tests_fixture(app);
 }

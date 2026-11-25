@@ -270,6 +270,12 @@ pub fn diagram(diagram: El) -> El {
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(row().w_full().justify_center().padding(24.).child(diagram))
 }
 
+pub(super) fn table_number(number: Option<usize>, t: &T) -> El {
+    row().w(56.0).px(8.0).py(6.0).justify_end().fill(t.c.background)
+        .border(1.0, t.c.border.alpha_mul(0.6)).sticky_left(0.0)
+        .children(number.map(|n| text(n.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground)))
+}
+
 /// LargeTextViewer's table: "N rows · C columns", the first row as the header.
 pub fn table(parsed: &Table, t: &T) -> El {
     let columns = parsed.rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -286,7 +292,8 @@ pub fn table(parsed: &Table, t: &T) -> El {
     let mut grid = col();
     for (i, cells) in parsed.rows.iter().enumerate() {
         let header = i == 0;
-        let mut line = row().fill(if header { t.c.muted.alpha_mul(0.5) } else { rune::Color::TRANSPARENT });
+        let line = row().child(table_number((!header).then_some(i), t));
+        let mut line = if header { line.fill(t.c.background).sticky_top(0.0) } else { line };
         for (c, w) in widths.iter().enumerate() {
             let value = cells.get(c).cloned().unwrap_or_default();
             let font = if header { theme::XS_MEDIUM } else { theme::TEXT_XS };

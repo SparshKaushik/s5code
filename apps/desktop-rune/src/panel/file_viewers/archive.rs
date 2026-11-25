@@ -274,7 +274,7 @@ impl Archive {
             }
         } else {
             let children = children(&self.source.entries, &self.folder);
-            let mut table = col().w_full().child(bar(t)
+            let mut table = col().w_full().child(bar(t).fill(t.c.background).sticky_top(0.0)
                 .child(note("Name", t).grow(1.0)).child(note("Size", t).w(64.0)).child(note("Modified", t).w(72.0))).child(divider(t));
             if children.is_empty() { table = table.child(note("This folder is empty.", t).padding(24.0)); }
             for (name, child) in children {

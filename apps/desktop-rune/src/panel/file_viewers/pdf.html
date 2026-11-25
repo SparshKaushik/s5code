@@ -24,7 +24,7 @@
     [hidden]{display:none!important}
   </style>
   <script>{pdfjs}</script>
-  <script type="text/plain" id="worker">{worker}</script>
+  <script {worker_attributes} id="worker">{worker}</script>
   <script type="text/plain" id="fixture">{bytes}</script>
 </head>
 <body>
@@ -183,9 +183,11 @@
     find.addEventListener("keydown", (event) => { if (event.key === "Enter") get("match").click(); });
     (async () => {
       try {
-        const worker = new Blob([get("worker").textContent], {type:"text/javascript"});
-        lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(worker);
         const fixture = get("fixture").textContent;
+        if (!fixture) {
+          const worker = new Blob([get("worker").textContent], {type:"text/javascript"});
+          lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(worker);
+        }
         const input = fixture ? {data:Uint8Array.from(atob(fixture),(c)=>c.charCodeAt(0))} : {url:location.href};
         pdf = await lib.getDocument({...input,isEvalSupported:false,maxImageSize:16_000_000}).promise;
         const first = await pdf.getPage(1);
@@ -194,11 +196,15 @@
           const element = document.createElement("div");
           element.className = "page"; element.dataset.page = i; element.setAttribute("aria-label", `Page ${i + 1}`);
           const row = {element,natural,drawing:false,version:0};
-          rows.push(row); size(row); pages.appendChild(element); observer.observe(element);
+          rows.push(row); size(row); pages.appendChild(element);
         }
-        status.hidden = true; describe();
-      } catch (_) {
+        status.hidden = true;
+        describe();
+        await draw(0);
+        for (const row of rows) observer.observe(row.element);
+      } catch (error) {
         status.textContent = "Unable to load PDF.";
+        window.__s5Frame?.(JSON.stringify({pdfError: String(error)}));
       }
     })();
   </script>

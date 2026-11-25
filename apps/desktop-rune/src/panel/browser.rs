@@ -2441,7 +2441,9 @@ pub(super) fn file_pdf_viewer(url: &str, fixture: Option<&[u8]>) -> String {
         .next().map(|(_, name)| name.into_owned()).unwrap_or_else(|| "PDF".into());
     let title = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('{', "&#123;");
     let bytes = fixture.map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)).unwrap_or_default();
+    let worker_attributes = if fixture.is_some() { "" } else { r#"type="text/plain""# };
     include_str!("file_viewers/pdf.html").replace("{title}", &title).replace("{bytes}", &bytes)
+        .replace("{worker_attributes}", worker_attributes)
         .replacen("{pdfjs}", PDFJS, 1).replacen("{worker}", PDFJS_WORKER, 1)
 }
 

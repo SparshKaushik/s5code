@@ -411,6 +411,7 @@ fn bar(cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) 
         .h(24.0)
         .role("img")
         .label(summary)
+        .help(bar_help(remaining, time_left))
         .child(el().absolute(0.0, 6.0).w(width).h(12.0).radius(radius::FULL).fill(t.c.muted));
     if remaining > 0 {
         track = track.child(el().absolute(0.0, 6.0).w(width * remaining as f32 / 100.0).h(12.0).radius(radius::FULL).fill(color));
@@ -420,6 +421,14 @@ fn bar(cx: &mut Cx<App>, t: &T, key: String, color: Color, w: &Value, now: i64) 
         track = track.child(el().absolute(x - 1.0, 4.0).w(2.0).h(16.0).radius(radius::FULL).fill(t.c.foreground));
     }
     track
+}
+
+/// WindowBar's tooltip: what is left, and what the pace tick marks.
+fn bar_help(remaining: i64, time_left: Option<i64>) -> String {
+    match time_left {
+        Some(p) => format!("{remaining}% left · {p}% of the window left\nThe line is where even spending would be."),
+        None => format!("{remaining}% left"),
+    }
 }
 
 /// LimitWindows, compact: label and share left, the bar, then pace and when it resets.

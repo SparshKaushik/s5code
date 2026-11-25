@@ -1890,6 +1890,14 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
+pub(super) fn hide_tests_fixture(app: &mut App) {
+    fixture(app);
+    let patch = "diff --git a/src/greet.test.ts b/src/greet.test.ts\n--- a/src/greet.test.ts\n+++ b/src/greet.test.ts\n@@ -1 +1 @@\n-expect(greet()).toBe('hi')\n+expect(greet()).toBe('hello')\n";
+    app.ui.panel.diff.files.extend(rune_kit::diff::parse(patch));
+    apply(app);
+    app.ui.panel.diff.state.set_all_collapsed(false);
+}
+
 /// Several files across folders, every one expanded and the file tree open, for headless scenes.
 pub fn tree_fixture(app: &mut App) {
     let mut diff = String::from("diff --git a/src/greet.ts b/src/greet.ts\nindex 1234567..abcdef0 100644\n--- a/src/greet.ts\n+++ b/src/greet.ts\n");

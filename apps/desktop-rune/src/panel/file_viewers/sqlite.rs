@@ -143,7 +143,8 @@ impl Database {
                 text(content.to_owned()).font(font).color(t.c.foreground).wrap_anywhere().selectable(!heading),
             )
         };
-        let mut grid = col().child(row().children(rows.columns.iter().map(|name| cell(name, true))));
+        let mut grid = col().child(row().fill(t.c.background).sticky_top(0.0)
+            .children(rows.columns.iter().map(|name| cell(name, true))));
         if rows.values.is_empty() {
             grid = grid.child(note("This table is empty.", t).padding(24.0));
         }
