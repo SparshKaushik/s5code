@@ -58,6 +58,10 @@ fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize
 
 /// `key` names this run of prose within its message, for the blocks' own keys.
 fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
+    // Find counts matches in the TeX source, so a marked message keeps it.
+    if t.math && marks.is_none() && super::math::may_contain(source) {
+        return typeset(app, source, key, t, ink);
+    }
     let source = if t.math { super::math::literal(source) } else { Cow::Borrowed(source) };
     let source: &str = &source;
     let mut out = col().w_full().gap(10.4);
@@ -100,6 +104,46 @@ fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: 
         out = out.child(content);
     }
     out
+}
+
+/// Prose holding math: display formulas, and paragraphs of inline ones, as KaTeX pictures once
+/// typeset; everything else, and math still typesetting, as Markdown with literal TeX.
+fn typeset(app: &App, source: &str, key: &str, t: &T, ink: rune::Color) -> El {
+    use super::math::Block;
+    let plain = T { math: false, ..*t };
+    let font = theme::TEXT_SM.lh(22.75);
+    let mut out = col().w_full().gap(10.4);
+    let mut pending = String::new();
+    let mut runs = 0;
+    let mut flush = |out: El, pending: &mut String| {
+        if pending.is_empty() {
+            return out;
+        }
+        runs += 1;
+        out.child(prose(app, &std::mem::take(pending), &format!("{key}-m{runs}"), &plain, None, ink))
+    };
+    for block in super::math::blocks(source.trim()) {
+        let picture = match &block {
+            Block::Display(tex) => display_math(app, tex, ink),
+            Block::Inline(parts) => super::katex::flow(app, parts, font, ink),
+            Block::Text(_) => None,
+        };
+        match picture {
+            Some(picture) => out = flush(out, &mut pending).child(picture),
+            None => {
+                if !pending.is_empty() {
+                    pending.push_str("\n\n");
+                }
+                pending.push_str(&block.literal());
+            }
+        }
+    }
+    flush(out, &mut pending)
+}
+
+/// A display formula's picture, centred as `.katex-display` is.
+fn display_math(app: &App, tex: &str, ink: rune::Color) -> Option<El> {
+    super::katex::picture(app, tex, true, theme::TEXT_SM.size, ink).map(|picture| row().w_full().center().child(picture))
 }
 
 fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
@@ -218,7 +262,7 @@ fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color, run: boo
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source), run, t.math);
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, toggled, copied, t.code.to_bits(), media::signature(app, source), run, t.math, super::katex::signature(app, source));
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink, run))
 }
 
@@ -310,7 +354,9 @@ fn render(cx: &Cx, source: &str, scope: &str) -> El {
                 fences += 1;
                 if t.math && closed && language == "math" {
                     // Already literal: `math: false` keeps prose from reading it again.
-                    prose(app, &super::math::display(&code), &format!("{id}-{scope}math{fences}"), &T { math: false, ..*t }, cx.marks, cx.ink)
+                    display_math(app, code.trim(), cx.ink).filter(|_| cx.marks.is_none()).unwrap_or_else(|| {
+                        prose(app, &super::math::display(&code), &format!("{id}-{scope}math{fences}"), &T { math: false, ..*t }, cx.marks, cx.ink)
+                    })
                 } else {
                     fence(cx, &language, &code, closed, format!("{id}-fence-{scope}{}", fences - 1))
                 }

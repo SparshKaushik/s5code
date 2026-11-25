@@ -136,6 +136,36 @@ fn usage_color(t: &T, percent: f64) -> Color {
     if percent > 90.0 { t.c.error } else { t.c.muted_foreground.alpha_mul(0.72) }
 }
 
+/// ThreadDetailsContext's row: the bar fills as context is used; the tick marks auto-compaction.
+pub(crate) fn detail_row(app: &App) -> Option<crate::chat::details::usage::Row> {
+    use crate::chat::details::usage::{Row, Tone};
+    let u = current(app)?;
+    let max = u.max.filter(|m| *m > 0.0);
+    let used = max.and(u.percent()).map(|p| p.clamp(0.0, 100.0).round());
+    let tick = max.zip(u.threshold).filter(|(m, th)| *th > 0.0 && th < m).map(|(m, th)| th / m * 100.0);
+    let used_tokens = tokens(u.used);
+    let mut help = vec![match used {
+        Some(p) => format!("Context: {p}% used"),
+        None => format!("Context: {used_tokens} tokens used"),
+    }];
+    if let Some(m) = max {
+        help.push(format!("{} of {} tokens", thousands(u.used as u64), thousands(m as u64)));
+    }
+    if let Some(threshold) = u.threshold.filter(|n| *n > 0.0) {
+        help.push(compaction_message(None, Some(threshold)));
+    }
+    let tone = match used {
+        Some(p) if p >= 90.0 => Tone::Error,
+        Some(p) if p >= 80.0 => Tone::Warning,
+        _ => Tone::Plain,
+    };
+    let value = match max {
+        Some(m) => format!("{used_tokens} / {}", tokens(m)),
+        None => used_tokens,
+    };
+    Some(Row { label: "Context".into(), fill: used, tone, tick, value, help, muted: true })
+}
+
 fn current(app: &App) -> Option<Usage> {
     let Route::Thread(id) = super::route(app) else { return None };
     usage(&app.state().thread_views.get(&id)?.projection)

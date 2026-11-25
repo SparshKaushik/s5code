@@ -7,7 +7,7 @@ pub(crate) mod attachments;
 pub mod banners;
 pub mod chips;
 mod code_block;
-mod context;
+pub(crate) mod context;
 pub mod fanout;
 mod lists;
 mod menu;
@@ -15,7 +15,7 @@ mod picker;
 pub mod provider_icons;
 mod search;
 mod stash;
-mod usage_limits;
+pub(crate) mod usage_limits;
 
 use std::collections::{HashMap, HashSet};
 
@@ -2092,7 +2092,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         (None, Some(badge)) => stack = stack.child(row().w_full().px(22.0).mb(-17.0).child(spacer()).child(badge)),
         (None, None) => {}
     }
-    stack.child(body).children(detached.map(|banner| col().w_full().pt(16.0).child(banner)))
+    let strip = if side(s) { None } else { crate::chat::details::strip::view(s, t) };
+    stack.child(body).children(strip).children(detached.map(|banner| col().w_full().pt(16.0).child(banner)))
 }
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
@@ -2176,10 +2177,46 @@ fn composer_outline(t: &T) -> Color {
     if t.dark { Color::WHITE.alpha(0.05) } else { Color::BLACK.alpha(0.08) }
 }
 
-/// The permissions chip shows only while the thread differs from the default (accessDisplay).
+/// The permissions chip shows only while the thread differs from the default (accessDisplay),
+/// and not while a new thread's context strip names them (`permissionsShownInStrip`).
 fn permissions_chip_shown(s: &App) -> bool {
     let mode = effective_runtime_mode(s);
-    !mode.is_empty() && mode != default_runtime_mode(s)
+    !mode.is_empty() && mode != default_runtime_mode(s) && !permissions_in_strip(s)
+}
+
+fn permissions_in_strip(s: &App) -> bool {
+    !side(s) && ctx(s).thread.is_none() && crate::chat::details::strip::shown(s)
+}
+
+/// ComposerContextPermissions: a new thread's strip ends with its permissions, default or not.
+pub(crate) fn strip_permissions(s: &App, t: &T) -> Option<El> {
+    if !permissions_in_strip(s) {
+        return None;
+    }
+    let mode = effective_runtime_mode(s);
+    let (_, label, _, glyph) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[0]);
+    let color = if t.dark { t.c.muted_foreground } else { t.c.foreground.alpha_mul(0.7) };
+    let shortcut = crate::shell::palette::shortcut_label(s, "composer.mode");
+    Some(
+        row()
+            .key(keyed(s, "composer-permissions"))
+            .h(24.0)
+            .px(7.0)
+            .gap(6.0)
+            .center_y()
+            .shrink()
+            .min_w(0.0)
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .label(format!("Permissions: {label}"))
+            .help(if shortcut.is_empty() { "Permissions".to_owned() } else { format!("Permissions · {shortcut}") })
+            .expanded(s.ui.chat.composer.permissions_open)
+            .child(icon(glyph, 12.0).color(color))
+            .child(text(label).font(theme::TEXT_XS).color(color).single_line().truncate().max_w(240.0).shrink().min_w(0.0))
+            .on_press(act(s, |s: &mut App| s.ui.chat.composer.permissions_open = !s.ui.chat.composer.permissions_open)),
+    )
 }
 
 /// The model chip's name: the model's short name where it has one.
@@ -3162,6 +3199,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         if let Some(open) = s.ui.chat.composer.usage.open.as_mut() {
             open.1 = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(open.1);
         }
+    }),
+    // The details card with "Usage limits" and "Context window" shown.
+    ("chat-details-usage", |s| {
+        on_replay_showcase(s);
+        patch_config(s, usage_limits::scene_limits);
+        draft_mut(s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        s.client_settings.values.insert("threadDetailsUsageEnabled".into(), serde_json::json!(true));
+        s.now_ms = data::iso_ms("2026-12-01T00:00:00.000Z").unwrap_or(s.now_ms);
     }),
     // `/usage-limits` sent from a side chat's composer opens the panel on that composer.
     ("chat-side-composer-usage-limits", |s| {
