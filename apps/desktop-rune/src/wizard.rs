@@ -302,7 +302,8 @@ fn watch_codex(s: &mut App) {
         return;
     }
     let old = std::mem::replace(&mut s.ui.wizard.codex_watched, wanted.clone());
-    for ((env, id), watch) in old.into_iter().filter(|w| !wanted.contains(w)).map(|w| (w, false)).chain(wanted.into_iter().map(|w| (w, true))) {
+    let stale: Vec<_> = old.into_iter().filter(|w| !wanted.contains(w)).collect();
+    for ((env, id), watch) in stale.into_iter().map(|w| (w, false)).chain(wanted.into_iter().map(|w| (w, true))) {
         if let Some(net) = crate::env::net_of(s, &env) {
             for method in crate::settings::providers::codex::WATCHED {
                 if watch { net.watch_resource(method, json!({"instanceId": id})) } else { net.unwatch_resource(method, json!({"instanceId": id})) }
