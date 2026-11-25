@@ -138,6 +138,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(composer::overlays(s, cx, t))
         .children(timeline::actions::overlays(s, t))
         .children(timeline::plan::overlays(s, t))
+        .children(timeline::markdown::overlays(s, t))
         .children(timeline::chip::overlay(s, t))
         .children(timeline::chip::quote_toolbar(s, cx, t))
         .children(timeline::attachments::lightbox(s))
