@@ -543,7 +543,11 @@ pub fn failure_message(method: &str, environment: &str, cause: &Value) -> String
             .unwrap_or_else(|| "The save failed. Try reconnecting and saving again.".into());
         return format!("Setting not saved. Could not save on {environment}: {detail}");
     }
-    failure_detail(cause).unwrap_or_else(|| "The request failed. Try reconnecting and trying again.".into())
+    // Web `ProviderAuthenticationSection`'s `run`.
+    let fallback = if method == "provider.auth.respond" {
+        "The provider sign-in terminal is no longer available."
+    } else if method.starts_with("provider.auth.") { "Provider sign-in failed. Try again." } else { "The request failed. Try reconnecting and trying again." };
+    failure_detail(cause).unwrap_or_else(|| fallback.into())
 }
 
 pub fn resource<'a>(s: &'a App, method: &str, payload: Value) -> Option<&'a Value> {
@@ -2049,6 +2053,7 @@ mod patch_tests {
         assert_eq!(failure_message("scheduledTasks.upsert", "Mac", &typed), "No such task.");
         let setup = json!([{"_tag":"Fail","error":{"_tag":"ProviderSetupError","detail":"Sign-in expired."}}]);
         assert_eq!(failure_message("provider.auth.start", "Mac", &setup), "Sign-in expired.");
+        assert_eq!(failure_message("provider.auth.start", "Mac", &json!(null)), "Provider sign-in failed. Try again.");
     }
     #[test]
     fn the_reveal_pulse_blinks_twice_then_idles() {

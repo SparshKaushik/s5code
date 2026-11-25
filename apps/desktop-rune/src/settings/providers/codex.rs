@@ -307,17 +307,46 @@ fn button(t: &T, label: &str, variant: &str, disabled: bool, press: impl Fn(&mut
     kit::Button::new(label).variant(variant).size("sm").disabled(disabled).on_press(press).build(t)
 }
 
-pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool) -> Vec<El> {
-    let target = json!({"instanceId": id});
+/// What a managed instance's sign-in and install are doing, read the same way by Settings' row
+/// and the welcome wizard's card.
+struct Flow<'a> {
+    auth: Option<&'a Value>,
+    installation: Option<&'a Value>,
+    phase: Option<&'a str>,
+    installed: bool,
+    authenticated: bool,
+    finishing: bool,
+    /// Web `waitingForAuthState`: a sign-in this client started, before its state arrives.
+    waiting_for_state: bool,
+    handing_off: bool,
+    finished_profile: Option<Value>,
+    auth_active: bool,
+    install_active: bool,
+    pending: bool,
+    query_error: bool,
+    unavailable: bool,
+    busy: bool,
+    methods: Vec<Value>,
+    has_saved: bool,
+    url: Option<String>,
+    flow: Option<String>,
+}
+
+impl Flow<'_> {
+    fn email(&self, method: &str) -> Option<String> {
+        self.methods.iter().find(|m| m["id"] == method).and_then(|m| m["accountEmail"].as_str()).map(str::to_owned)
+    }
+}
+
+/// `auth` and `installation` are the instance's subscriptions on its own environment.
+fn flow<'a>(s: &'a App, id: &str, p: &Value, blocked: bool, auth: Option<&'a Value>, installation: Option<&'a Value>) -> Flow<'a> {
     let handoff = handoff_state(s, id);
     let handing_off = s.ui.settings.providers_ui.codex.handoff.as_ref().is_some_and(|(owner, _)| owner == id);
     let finished_profile = handoff.filter(|h| h["phase"] == "finished").map(|h| h["profile"].clone());
-    let auth = handoff.filter(|h| h["phase"] == "auth").map(|h| &h["state"]).or_else(|| resource(s, "provider.auth.subscribe", target.clone()));
-    let installation = resource(s, "provider.install.subscribe", target);
+    let auth = handoff.filter(|h| h["phase"] == "auth").map(|h| &h["state"]).or(auth);
     let ui = &s.ui.settings.providers_ui.codex;
     let mine = |owner: &str| owner == id;
     let phase = auth.and_then(|a| a["phase"].as_str());
-    let installed = installation.is_some_and(|i| i["installedVersion"].is_string());
     let authenticated = p["auth"]["status"] == "authenticated";
     let awaiting = ui.awaiting.as_deref().is_some_and(mine);
     let finishing = awaiting && !authenticated && phase == Some("succeeded");
@@ -325,15 +354,39 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
     let auth_in_progress = finishing || waiting_for_state || handing_off || matches!(phase, Some("starting" | "waiting" | "verifying"));
     let install_active = installation.is_some_and(|i| RUNNING.contains(&i["phase"].as_str().unwrap_or("")));
     let pending = ui.pending.as_ref().is_some_and(|(owner, ..)| mine(owner)) || ui.after_install.as_ref().is_some_and(|(owner, ..)| mine(owner));
-    let auth_active = auth_in_progress || (pending && !install_active);
     let query_error = [auth, installation].into_iter().flatten().any(|r| r.get("error").is_some());
-    let unavailable = read_only || !enabled || pending || query_error;
-    let busy = pending || auth_in_progress || install_active;
     let methods: Vec<Value> = auth.and_then(|a| a["methods"].as_array()).cloned().unwrap_or_default();
-    let has_saved = methods.iter().any(|m| m["id"].as_str().is_some_and(|m| m.starts_with("chatgpt-profile:")));
-    let email = |method: &str| methods.iter().find(|m| m["id"] == method).and_then(|m| m["accountEmail"].as_str()).map(str::to_owned);
-    let url = auth.and_then(|a| if a["interaction"]["type"] == "browser" { a["interaction"]["url"].as_str() } else { a["authorizationUrl"].as_str() }).map(str::to_owned);
-    let flow = auth.and_then(|a| a["flowId"].as_str()).map(str::to_owned);
+    Flow {
+        auth,
+        installation,
+        phase,
+        installed: installation.is_some_and(|i| i["installedVersion"].is_string()),
+        authenticated,
+        finishing,
+        waiting_for_state,
+        handing_off,
+        finished_profile,
+        auth_active: auth_in_progress || (pending && !install_active),
+        install_active,
+        pending,
+        query_error,
+        unavailable: blocked || pending || query_error,
+        busy: pending || auth_in_progress || install_active,
+        has_saved: methods.iter().any(|m| m["id"].as_str().is_some_and(|m| m.starts_with("chatgpt-profile:"))),
+        methods,
+        url: auth.and_then(|a| if a["interaction"]["type"] == "browser" { a["interaction"]["url"].as_str() } else { a["authorizationUrl"].as_str() }).map(str::to_owned),
+        flow: auth.and_then(|a| a["flowId"].as_str()).map(str::to_owned),
+    }
+}
+
+pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool) -> Vec<El> {
+    let target = json!({"instanceId": id});
+    let f = flow(s, id, p, read_only || !enabled, resource(s, "provider.auth.subscribe", target.clone()), resource(s, "provider.install.subscribe", target));
+    let email = |method: &str| f.email(method);
+    let Flow { auth, installation, phase, installed, authenticated, finishing, handing_off, ref finished_profile, auth_active, install_active, pending, query_error, unavailable, busy, has_saved, ref url, ref flow, .. } = f;
+    let (finished_profile, url, flow) = (finished_profile.clone(), url.clone(), flow.clone());
+    let ui = &s.ui.settings.providers_ui.codex;
+    let mine = |owner: &str| owner == id;
 
     let description = if finishing {
         "Finishing sign-in...".to_owned()
@@ -465,42 +518,7 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
                 .child(rune::icon(if ui.help_open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground)),
         );
         if ui.help_open {
-            let empty = ui.callback.text.trim().is_empty();
-            let (complete_id, open) = (owned.clone(), url.clone());
-            help = help
-                .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.5)))
-                .child(text("If sign-in doesn't return to T3 Code, paste the URL from the final localhost page.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .center_y()
-                        .child(
-                            kit::Input::new(&ui.callback)
-                                .size("sm")
-                                .placeholder("Paste the URL from the sign-in tab")
-                                .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.codex.callback)
-                                .build(t)
-                                .secure()
-                                .single_line()
-                                .grow(1.0)
-                                .label("ChatGPT sign-in redirect URL"),
-                        )
-                        .child(button(t, "Connect", "outline", pending || read_only || empty, move |s: &mut App| {
-                            let value = s.ui.settings.providers_ui.codex.callback.text.trim().to_owned();
-                            s.ui.settings.providers_ui.codex.callback.clear();
-                            send(s, &complete_id, Step::Other, "provider.auth.complete", json!({"instanceId": complete_id, "flowId": flow, "callbackUrl": value}));
-                        })),
-                )
-                .child(
-                    kit::Button::new("Try sign-in in your browser")
-                        .variant("ghost-muted")
-                        .size("xs")
-                        .icon(&icons::EXTERNAL_LINK)
-                        .on_press(move |s: &mut App| super::super::auth::open_url(s, &open))
-                        .build(t)
-                        .self_start(),
-                );
+            help = help.child(callback_form(s, t, id, &flow, &url, pending || read_only));
         }
         rows.push(help);
     }
@@ -515,6 +533,214 @@ pub fn view(s: &App, t: &T, id: &str, p: &Value, enabled: bool, read_only: bool)
         rows.push(text(error).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert").px(16.0).py(8.0));
     }
     rows
+}
+
+/// Web `callbackCompletion`: paste the final localhost page's URL, or open the sign-in again.
+fn callback_form(s: &App, t: &T, id: &str, flow: &str, url: &str, disabled: bool) -> El {
+    let empty = s.ui.settings.providers_ui.codex.callback.text.trim().is_empty();
+    let (complete_id, flow, open) = (id.to_owned(), flow.to_owned(), url.to_owned());
+    col()
+        .w_full()
+        .gap(12.0)
+        .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.5)))
+        .child(text("If sign-in doesn't return to T3 Code, paste the URL from the final localhost page.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())
+        .child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    kit::Input::new(&s.ui.settings.providers_ui.codex.callback)
+                        .size("sm")
+                        .placeholder("Paste the URL from the sign-in tab")
+                        .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.codex.callback)
+                        .build(t)
+                        .secure()
+                        .single_line()
+                        .grow(1.0)
+                        .label("ChatGPT sign-in redirect URL"),
+                )
+                .child(button(t, "Connect", "outline", disabled || empty, move |s: &mut App| {
+                    let value = s.ui.settings.providers_ui.codex.callback.text.trim().to_owned();
+                    s.ui.settings.providers_ui.codex.callback.clear();
+                    send(s, &complete_id, Step::Other, "provider.auth.complete", json!({"instanceId": complete_id, "flowId": flow, "callbackUrl": value}));
+                })),
+        )
+        .child(
+            kit::Button::new("Try sign-in in your browser")
+                .variant("ghost-muted")
+                .size("xs")
+                .icon(&icons::EXTERNAL_LINK)
+                .on_press(move |s: &mut App| super::super::auth::open_url(s, &open))
+                .build(t)
+                .self_start(),
+        )
+}
+
+/// The parts of web's `CodexWelcomeCard` (`CodexSetupSection` with `presentation="onboarding"`).
+pub struct Welcome {
+    pub description: El,
+    pub control: Option<El>,
+    pub secondary: Option<El>,
+    pub footer: Vec<El>,
+}
+
+/// The resources the welcome wizard watches for a managed instance on its computer.
+pub const WATCHED: [&str; 2] = ["provider.auth.subscribe", "provider.install.subscribe"];
+
+/// `f`, run with `env` focused: setup requests, and the replies `poll` reads, use the active
+/// environment, and the wizard can show another computer's agents.
+fn on(env: &str, f: impl Fn(&mut App) + 'static) -> impl Fn(&mut App) + 'static {
+    let env = env.to_owned();
+    move |s: &mut App| {
+        if s.ui.env.active != env {
+            crate::env::switch(s, &env);
+        }
+        f(s)
+    }
+}
+
+/// Web `onModeChange("managed")` with `autoStart`: ChatGPT sign-in, installing Codex first.
+pub fn choose_managed(env: &str, id: &str) -> impl Fn(&mut App) + 'static {
+    let id = id.to_owned();
+    on(env, move |s: &mut App| {
+        set_mode(s, &id, "managed");
+        setup(s, &id, "chatgpt");
+    })
+}
+
+/// Web `onModeChange("existing")`: keep using the Codex CLI already on the computer.
+pub fn choose_existing(env: &str, id: &str) -> impl Fn(&mut App) + 'static {
+    let id = id.to_owned();
+    on(env, move |s: &mut App| set_mode(s, &id, "existing"))
+}
+
+/// Web `ManagedCodexSetup` in the welcome wizard, for instance `id` on computer `env`.
+pub fn welcome(s: &App, t: &T, env: &str, id: &str, p: Option<&Value>, read_only: bool) -> Welcome {
+    let p = p.unwrap_or(&Value::Null);
+    let net = crate::env::source(s, env).and_then(|source| source.net_ref());
+    let watched = |method: &str| net.and_then(|n| n.resource(method, json!({"instanceId": id})));
+    let muted = |label: &str| text(label.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap();
+    if p["setup"]["canAuthenticate"] != true {
+        return Welcome {
+            description: muted("Complete sign-in in your browser."),
+            control: Some(kit::Button::new("Open sign-in page").variant("outline").size("sm").disabled(true).build(t).min_w(176.0)),
+            secondary: Some(button(t, "Cancel", "ghost-muted", true, |_: &mut App| {})),
+            footer: vec![],
+        };
+    }
+    let f = flow(s, id, p, read_only || p["enabled"] == false, watched(WATCHED[0]), watched(WATCHED[1]));
+    let ui = &s.ui.settings.providers_ui.codex;
+    let waiting_url = f.url.clone().filter(|_| f.phase == Some("waiting") && !f.handing_off);
+    let description = if f.install_active {
+        muted(&runtime_description(f.installation))
+    } else if f.authenticated {
+        muted(&match p["auth"]["email"].as_str().map(str::trim).filter(|e| !e.is_empty()) {
+            Some(email) => format!("Signed in as {email}."),
+            None => "Connected to ChatGPT.".into(),
+        })
+    } else if waiting_url.is_some() {
+        row()
+            .gap(6.0)
+            .center_y()
+            .role("button")
+            .label("Having trouble signing in?")
+            .expanded(ui.help_open)
+            .focusable(true)
+            .cursor(rune::Cursor::Pointer)
+            .on_press(|s: &mut App| s.ui.settings.providers_ui.codex.help_open ^= true)
+            .child(muted("Complete sign-in in your browser."))
+            .child(rune::icon(if ui.help_open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground))
+    } else if f.waiting_for_state || matches!(f.phase, Some("starting" | "waiting")) || (f.pending && !f.install_active) {
+        muted("Complete sign-in in your browser.")
+    } else if f.auth_active || matches!(f.phase, Some("failed" | "cancelled")) {
+        muted(&match f.email("chatgpt").filter(|_| f.phase == Some("waiting")) {
+            _ if f.finishing => "Finishing sign-in...".into(),
+            Some(email) => format!("Continue as {email} on OpenAI."),
+            None => f.auth.and_then(|a| a["message"].as_str()).unwrap_or("Finish signing in in your browser.").to_owned(),
+        })
+    } else {
+        muted("Code with your ChatGPT subscription.")
+    };
+    let control = if f.authenticated && !f.busy {
+        row().gap(6.0).center_y().child(rune::icon(&icons::CHECK, 14.0).color(t.c.success_foreground)).child(text("Ready").font(theme::XS_MEDIUM).color(t.c.success_foreground))
+    } else if f.auth_active {
+        let label = if f.finishing || (f.finished_profile.is_some() && !ui.transfer_failed) {
+            "Finishing sign-in..."
+        } else if f.finished_profile.is_some() {
+            "Retry connection"
+        } else {
+            "Open sign-in page"
+        };
+        let disabled = if f.finished_profile.is_some() { f.pending || !ui.transfer_failed } else { f.url.is_none() || f.phase != Some("waiting") };
+        let (page_id, page_flow, page_url, retry, handing_off) = (id.to_owned(), f.flow.clone().unwrap_or_default(), f.url.clone().unwrap_or_default(), f.finished_profile.clone(), f.handing_off);
+        kit::Button::new(label)
+            .variant("outline")
+            .size("sm")
+            .disabled(disabled)
+            .on_press(on(env, move |s: &mut App| match &retry {
+                Some(profile) => import(s, &page_id, profile.clone()),
+                None if handing_off => super::super::auth::open_url(s, &page_url),
+                None => open_page(s, &page_id, &page_flow, &page_url),
+            }))
+            .build(t)
+            .min_w(176.0)
+    } else {
+        let can = if f.installed { p["setup"]["canAuthenticate"] == true } else { p["setup"]["canInstall"] == true };
+        let (go, has_saved) = (id.to_owned(), f.has_saved);
+        let label = if f.install_active || f.pending {
+            "Setting up..."
+        } else if has_saved {
+            "Reconnect account"
+        } else {
+            "Continue with ChatGPT"
+        };
+        kit::Button::new(label)
+            .size("sm")
+            .disabled(f.unavailable || f.busy || !can)
+            .on_press(on(env, move |s: &mut App| if has_saved { open_picker(s, &go) } else { setup(s, &go, "chatgpt") }))
+            .build(t)
+    };
+    let secondary = if (f.auth_active && !f.finishing) || f.install_active {
+        let (cancel_id, cancel_flow, operation, handing_off, auth_active) = (id.to_owned(), f.flow.clone(), f.installation.and_then(|i| i["operationId"].as_str()).map(str::to_owned), f.handing_off, f.auth_active);
+        Some(button(t, "Cancel", "ghost-muted", f.pending || read_only, on(env, move |s: &mut App| {
+            if handing_off {
+                end_handoff(s);
+                s.ui.settings.providers_ui.codex.awaiting = None;
+            } else if let Some(flow) = cancel_flow.clone().filter(|_| auth_active) {
+                let ui = &mut s.ui.settings.providers_ui.codex;
+                (ui.after_install, ui.open_flow, ui.awaiting) = (None, None, None);
+                super::super::codex_callback::cancel(&cancel_id);
+                send(s, &cancel_id, Step::Other, "provider.auth.cancel", json!({"instanceId": cancel_id, "flowId": flow}));
+            } else if let Some(operation) = operation.clone() {
+                s.ui.settings.providers_ui.codex.after_install = None;
+                send(s, &cancel_id, Step::Other, "provider.install.cancel", json!({"instanceId": cancel_id, "operationId": operation}));
+            }
+        })))
+    } else if !f.auth_active && !f.authenticated && f.has_saved {
+        let other = id.to_owned();
+        Some(button(t, "Use a different account", "ghost-muted", f.unavailable || f.busy, on(env, move |s: &mut App| setup(s, &other, CHANGE_ACCOUNT))))
+    } else if !f.auth_active && !f.authenticated {
+        Some(button(t, "Use existing CLI", "ghost-muted", read_only || f.busy, choose_existing(env, id)))
+    } else {
+        None
+    };
+    let mut footer = vec![];
+    if let (Some(url), Some(flow), true) = (&waiting_url, &f.flow, ui.help_open) {
+        footer.push(callback_form(s, t, id, flow, url, f.pending || read_only));
+    }
+    let logout = f.auth.filter(|_| f.phase == Some("idle")).and_then(|a| a["message"].as_str()).filter(|m| m.starts_with("Signed out locally.")).map(str::to_owned);
+    let error = logout.or_else(|| ui.error.as_ref().filter(|(owner, _)| owner == id).map(|(_, e)| e.clone())).or_else(|| {
+        if f.query_error {
+            Some("Could not read setup status. Reconnect and try again.".to_owned())
+        } else {
+            f.installation.filter(|i| i["phase"] == "failed").and_then(|i| i["message"].as_str()).map(str::to_owned)
+        }
+    });
+    if let Some(error) = error {
+        footer.push(text(error).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert"));
+    }
+    Welcome { description, control: Some(control), secondary, footer }
 }
 
 pub fn escape(s: &mut App) -> bool {
