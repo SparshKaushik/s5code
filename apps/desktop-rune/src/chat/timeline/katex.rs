@@ -117,9 +117,9 @@ pub(super) fn picture(app: &App, tex: &str, display: bool, size: f32, ink: Color
 }
 
 /// An inline-math paragraph laid out a word at a time, its formulas as pictures, once all of
-/// them are typeset: Rune's text can't hold a picture. `None` keeps it TeX source, as do
-/// links, images and HTML, which this layout doesn't draw.
-pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> Option<El> {
+/// them are typeset: Rune's text can't hold a picture. A link is one unbroken piece. `None`
+/// keeps it TeX source, as do images, HTML and a formula inside a link.
+pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color, link_ink: Color) -> Option<El> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut source = String::new();
     let mut formulas = Vec::new();
@@ -139,6 +139,8 @@ pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> 
     let mut word = row().center_y();
     let mut empty = true;
     let (mut strong, mut emphasis) = (0, 0);
+    // The open link's URL and the text read so far.
+    let mut link: Option<(String, String)> = None;
     let finish = |word: &mut El, empty: &mut bool, words: &mut Vec<El>| {
         if !*empty {
             words.push(std::mem::replace(word, row().center_y()));
@@ -162,6 +164,34 @@ pub(super) fn flow(app: &App, parts: &[Inline], font: TextStyle, ink: Color) -> 
             }
             Event::End(TagEnd::Emphasis) => {
                 emphasis -= 1;
+                continue;
+            }
+            Event::Start(Tag::Link { dest_url, .. }) if link.is_none() => {
+                link = Some((dest_url.into_string(), String::new()));
+                continue;
+            }
+            Event::End(TagEnd::Link) => {
+                let (url, label) = link.take()?;
+                let style = if strong > 0 { theme::weight(font, 600.) } else { font };
+                let help = super::md_links::help(&url);
+                let mut target = rune::Link::new(0..label.len(), url);
+                if let Some(help) = help {
+                    target = target.help(help);
+                }
+                word = word.child(text(label).font(style).color(link_ink).single_line().link(target).on_link(super::md_links::open));
+                empty = false;
+                continue;
+            }
+            Event::Text(t) | Event::Code(t) if link.is_some() => {
+                let (_, label) = link.as_mut()?;
+                if t.contains('\u{e000}') {
+                    return None;
+                }
+                label.push_str(&t);
+                continue;
+            }
+            Event::SoftBreak | Event::HardBreak if link.is_some() => {
+                link.as_mut()?.1.push(' ');
                 continue;
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -351,5 +381,18 @@ mod tests {
         assert!(picture(&app, "x^2", false, 14., ink).is_none());
         assert!(app.ui.chat.timeline.katex.wanted.borrow().is_empty(), "a failed formula isn't asked for again");
         assert!(!poll(&mut app));
+    }
+
+    #[test]
+    fn a_paragraph_with_a_link_flows_but_a_formula_inside_one_stays_source() {
+        let mut app = App::new();
+        app.ui.chat.timeline.katex.stills.insert(("x".into(), false), (Shot::new(String::new(), 0, true), 8., 14.));
+        let ink = Color { r: 1., g: 1., b: 1., a: 1. };
+        let math = || Inline::Math { tex: "x".into(), display: false };
+        let around = |before: &str, after: &str| vec![Inline::Text(before.into()), math(), Inline::Text(after.into())];
+        let flows = |parts: &[Inline]| flow(&app, parts, theme::TEXT_SM, ink, ink).is_some();
+        assert!(flows(&around("See [the **docs**](https://example.com) for ", ".")));
+        assert!(!flows(&[Inline::Text("[see ".into()), math(), Inline::Text("](https://example.com)".into())]));
+        assert!(!flows(&around("![chart](a.png) and ", "")));
     }
 }
