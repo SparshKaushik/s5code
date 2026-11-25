@@ -54,10 +54,10 @@ incremental = true
 # screen, maximize and frame theme, and `Tx::focused_role`/`focused_editable`. Every Rune crate in
 # the tree comes from the fork so none mixes the two sources.
 [patch."https://github.com/anomalyco/rune"]
-rune = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-kit = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-mac = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-mermaid = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-motion = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-staging = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
-rune-taffy = { git = "https://github.com/SparshKaushik/rune", rev = "7ef6b01f5abe9f1b3eb4f06434778dfa50f5d10e" }
+rune = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-kit = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-mac = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-mermaid = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-motion = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-staging = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }
+rune-taffy = { git = "https://github.com/SparshKaushik/rune", rev = "547f05d5e6f614e2a7ff8e1c4f5b934509c6c293" }

@@ -391,7 +391,7 @@ fn file_card(app: &mut App) {
     let signed = super::media::Loaded::new("https://example.com/build.log".into(), "build.log".into(), None, 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-file-signed".into(), signed);
 }
-/// Sent audio: one clip signed (on Linux it can't play, so it reads Unavailable) and one still
+/// Sent audio: one clip signed (a local WAV, so it opens and shows its length) and one still
 /// signing, under a file card.
 fn audio(app: &mut App) {
     use serde_json::json;
@@ -400,8 +400,20 @@ fn audio(app: &mut App) {
         "text": "Transcribe these voice notes.", "createdAt": "2026-01-01T00:00:00Z", "attachments": [
             {"type": "file", "id": "scene-audio-signed", "name": "standup-notes.m4a", "mimeType": "audio/mp4", "sizeBytes": 812_000},
             {"type": "file", "id": "scene-audio-signing", "name": "follow-up.mp3", "mimeType": "audio/mpeg", "sizeBytes": 240_000}]})]);
-    let signed = super::media::Loaded::new("https://example.com/standup-notes.m4a".into(), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
+    let signed = super::media::Loaded::new(silent_wav(83), "standup-notes.m4a".into(), Some(super::media::Kind::Audio), 0, None);
     app.ui.chat.timeline.assets.ready.insert("scene-audio-signed".into(), signed);
+}
+/// A `file://` URL of `seconds` of 8 kHz mono silence, written to the temp directory.
+fn silent_wav(seconds: u32) -> String {
+    let bytes = seconds * 8_000 * 2;
+    let mut wav = Vec::with_capacity(44 + bytes as usize);
+    for field in [&b"RIFF"[..], &(36 + bytes).to_le_bytes(), b"WAVEfmt ", &16u32.to_le_bytes(), &1u16.to_le_bytes(), &1u16.to_le_bytes(), &8_000u32.to_le_bytes(), &16_000u32.to_le_bytes(), &2u16.to_le_bytes(), &16u16.to_le_bytes(), b"data", &bytes.to_le_bytes()] {
+        wav.extend_from_slice(field);
+    }
+    wav.resize(44 + bytes as usize, 0);
+    let path = std::env::temp_dir().join(format!("s5code-scene-silence-{seconds}.wav"));
+    let _ = std::fs::write(&path, wav);
+    format!("file://{}", path.display())
 }
 /// A sent snapshot (SnapShotAttachmentDetails), its accessibility popover open.
 fn snapshot(app: &mut App) {
