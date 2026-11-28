@@ -343,8 +343,8 @@ pub fn attach(app: &mut App, thread: &str, id: &str, payload: Value) {
     }
     app.ui.panel.terminal.gone.retain(|(t, i)| !(t == thread && i == id));
     let mut session = Session::new(thread, id);
+    session.stream = Stream::for_terminal(app, thread, id);
     if let Some(net) = app.src.net() {
-        session.stream = Stream::for_terminal(app, thread, id);
         net.watch_resource(session.stream.method(), session.stream.input(&payload));
         session.payload = Some(payload);
     }
