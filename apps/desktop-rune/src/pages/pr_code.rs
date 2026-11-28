@@ -34,7 +34,7 @@ const FLUSH_MS: i64 = 400;
 /// The web keeps this in localStorage (`t3code.pullRequestFileTreeOpen`).
 const TREE_KEY: &str = "pullRequestFileTreeOpen";
 /// The web keeps this in localStorage (`t3code.diffHideTestFiles`).
-const HIDE_TESTS_KEY: &str = "diffHideTestFiles";
+use crate::panel::diff::HIDE_TESTS_KEY;
 const DRAFT: &str = "draft";
 /// Prefixes a review thread's note id.
 const THREAD: &str = "thread:";
@@ -255,7 +255,7 @@ fn ignore_ws(s: &App) -> bool {
 }
 
 fn hide_tests(s: &App) -> bool {
-    setting(s, HIDE_TESTS_KEY, false)
+    crate::panel::diff::hide_test_files(s)
 }
 
 /// The files shown: tests dropped while hidden, except one a reveal asked for, and whitespace-only
@@ -1621,9 +1621,18 @@ fn set_ignore_ws(s: &mut App, on: bool) {
 }
 
 fn set_hide_tests(s: &mut App, hide: bool) {
-    s.client_settings.values.insert(HIDE_TESTS_KEY.into(), json!(hide));
-    s.client_settings.save();
-    show(s);
+    crate::panel::diff::set_hide_test_files(s, hide);
+}
+
+pub(crate) fn refresh_test_filter(s: &mut App) {
+    if s.ui.pages.detail.files.is_some() {
+        show(s);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_file_shown(s: &App) -> bool {
+    s.ui.pages.code.diff.files().iter().any(|f| crate::panel::diff::is_test_file(f.path()))
 }
 
 fn set_tree(s: &mut App, open: bool) {

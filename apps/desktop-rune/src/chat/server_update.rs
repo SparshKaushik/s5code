@@ -87,18 +87,28 @@ pub fn start(app: &mut App, target: &str) {
         return;
     }
     let environment = app.state().config.as_ref().map(|c| c["environment"].clone()).unwrap_or(Value::Null);
-    let from = Some(s(&environment, "serverVersion")).filter(|v| !v.is_empty()).unwrap_or(target).to_owned();
+    let Some(net) = app.src.net() else { return };
+    app.ui.chat.server_update = begin(&environment, net, target);
+}
+
+/// Starts updating the server behind `net`, whose config `environment` is, to `target`.
+pub fn begin(environment: &Value, net: &mut s5_net::Net, target: &str) -> State {
+    let from = Some(s(environment, "serverVersion")).filter(|v| !v.is_empty()).unwrap_or(target).to_owned();
     let streaming = environment["capabilities"]["serverSelfUpdateProgress"] == true;
     let method = s(&environment["capabilities"], "serverSelfUpdate").to_owned();
-    let Some(net) = app.src.net() else { return };
     let input = json!({"targetVersion": target});
     let id = net.request(if streaming { "server.updateServerWithProgress" } else { "server.updateServer" }, input);
-    app.ui.chat.server_update = State {
-        status: Status::Running { stage: Stage::Downloading, from, target: target.to_owned() },
-        step: Step::Request(id, streaming),
-        method,
-        ..State::default()
-    };
+    State { status: Status::Running { stage: Stage::Downloading, from, target: target.to_owned() }, step: Step::Request(id, streaming), method, ..State::default() }
+}
+
+impl State {
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
+    /// An update standing at `status`, for scenes.
+    pub fn at(status: Status) -> State {
+        State { status, ..State::default() }
+    }
 }
 
 /// The transport dropped mid-request, as a restarting server does (isLegacyUpdateHandoffLoss).
@@ -204,10 +214,15 @@ pub fn poll(app: &mut App) -> bool {
     }
     let now = app.now_ms;
     let key = app.ui.env.active.clone();
-    let primary = key == crate::env::LOCAL;
     let lifecycle = &mut app.ui.shell.lifecycle;
     let Some(net) = app.src.net() else { return false };
-    let state = &mut app.ui.chat.server_update;
+    advance(&mut app.ui.chat.server_update, net, lifecycle, &key, now)
+}
+
+/// Moves the update of environment `key`'s server along with what `net` received.
+pub fn advance(state: &mut State, net: &mut s5_net::Net, lifecycle: &mut crate::shell::lifecycle::Ui, key: &str, now: i64) -> bool {
+    let primary = key == crate::env::LOCAL;
+    let key = key.to_owned();
     let (from, target) = match &state.status {
         Status::Running { from, target, .. } => (from.clone(), target.clone()),
         _ => return false,

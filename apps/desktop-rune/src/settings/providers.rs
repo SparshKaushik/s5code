@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 
 mod acp_sessions;
 mod custom_models;
-pub(super) mod policy;
-mod codex;
+pub(crate) mod policy;
+pub(crate) mod codex;
 mod setup;
 pub(crate) mod updates;
 mod usage;
@@ -859,6 +859,9 @@ fn status(live: Option<&Value>, enabled: bool) -> Status {
         _ => "warning",
     };
     let auth = &p["auth"];
+    // Web `isAntigravitySignInUnchecked`: a neutral state, not a warning.
+    let unchecked = p["driver"] == "antigravity" && p["installed"] == true && p["status"] == "warning" && auth["status"] == "unknown" && (auth["type"].is_null() || matches!(auth["type"].as_str(), Some("oauth-personal" | "oauth-business")));
+    let key = if unchecked { "neutral" } else { key };
     let auth_label = auth["label"].as_str().or(auth["type"].as_str());
     let with_label = |head: &str| auth_label.map_or(head.to_owned(), |l| format!("{head} · {l}"));
     let (headline, detail) = if p["status"] == "disabled" {
@@ -867,6 +870,8 @@ fn status(live: Option<&Value>, enabled: bool) -> Status {
         ("Not found".to_owned(), message.or(Some("CLI not detected on PATH.".into())))
     } else if auth["status"] == "unauthenticated" {
         (with_label("Not authenticated"), message)
+    } else if unchecked {
+        ("Installed · Sign-in not checked".to_owned(), message)
     } else if p["status"] == "warning" {
         ("Needs attention".to_owned(), message.or(Some("The provider is installed, but the server could not fully verify it.".into())))
     } else if p["status"] == "error" {
@@ -2471,6 +2476,14 @@ pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_unchecked_antigravity_sign_in_reads_as_neutral() {
+        let unchecked = json!({"driver": "antigravity", "installed": true, "status": "warning", "auth": {"status": "unknown", "type": "oauth-personal"}});
+        let st = status(Some(&unchecked), true);
+        assert_eq!((st.key, st.headline.as_str()), ("neutral", "Installed · Sign-in not checked"));
+        let api_key = json!({"driver": "antigravity", "installed": true, "status": "warning", "auth": {"status": "unknown", "type": "api-key"}});
+        assert_eq!(status(Some(&api_key), true).headline, "Needs attention", "only an OAuth sign-in goes unchecked");
+    }
     #[test]
     fn config_edit_preserves_driver_environment_and_other_config_fields() {
         let settings = json!({"providerInstances":{"custom":{"driver":"codex","environment":[{"name":"FOO","value":"bar"}],"config":{"homePath":"/custom","future":true}}}});

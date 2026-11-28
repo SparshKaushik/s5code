@@ -712,7 +712,9 @@ mod tests {
     use crate::data;
     use serde_json::json;
 
-    /// Rune opens them on this platform: AVFoundation on macOS, its own decoder on Linux.
+    /// Rune opens them on this platform: AVFoundation on macOS, its own decoder on Linux. Rune has
+    /// no Windows audio yet.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_notification_sounds_open() {
         for name in ["notification-completion.mp3", "notification-input.mp3"] {

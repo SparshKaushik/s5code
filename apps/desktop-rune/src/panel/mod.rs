@@ -21,6 +21,8 @@ pub(crate) mod terminal;
 mod tabs;
 pub(crate) mod vt;
 
+pub(crate) use device::Viewport as DeviceViewport;
+
 use crate::{
     App, Route, data, icons, kit,
     theme::{self, AlphaMul, T},
@@ -1465,6 +1467,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("browser-pdf-chrome", |s| browser_page_scene(s, "/reports/q3", "q3")),
     ("browser-auth-chrome", |s| browser_page_scene(s, "/staging", "401 Unauthorized")),
     ("browser-permissions-chrome", |s| browser_page_scene(s, "/permissions", "Permissions ready")),
+    ("browser-title-chrome", |s| browser_page_scene(s, "/late-title", "Title set after load")),
     ("browser-popup-chrome", |s| {
         scene(s, None);
         if let Some(tab) = preview::scene_popup(s) {
@@ -1490,9 +1493,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
     }),
+    ("panel-diff-test-files-shown", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, false);
+    }),
+    ("panel-diff-test-files-hidden", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::test_filter_fixture(s, true);
+    }),
     ("panel-diff-tree", |s| {
         scene(s, Some(Surface::Diff));
         diff::tree_fixture(s);
+    }),
+    ("panel-diff-long", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::long_fixture(s);
     }),
     ("panel-diff-maximized", |s| {
         scene(s, Some(Surface::Diff));
@@ -1570,6 +1585,20 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-device-android", |s| {
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "pixel", "platform": "android"}]));
+    }),
+    ("panel-device-3d-model", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ios-18", "platform": "ios"}]));
+    }),
+    ("panel-device-fold", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "fold", "platform": "android"}]));
+        device::fold_fixture(s);
+    }),
+    ("panel-device-duo", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "duo", "platform": "ios"}]));
+        device::duo_fixture(s);
     }),
     ("panel-device-tools", |s| {
         scene(s, Some(Surface::Device));
