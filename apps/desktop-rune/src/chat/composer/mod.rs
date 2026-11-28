@@ -1828,19 +1828,34 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if stash::on_key(s, e) {
         return true;
     }
+    let answering = question_editor(s).is_some();
+    let bound = SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, e, c));
+    if e.key == Key::Tab && e.mods.shift && bound.is_none() {
+        if !answering && let Some(taken) = code_key(s, e) {
+            return taken;
+        }
+        if !answering && list_edit(s, lists::outdent) {
+            return true;
+        }
+        if !supports_plan(s) {
+            return false;
+        }
+        toggle_plan(s);
+        return true;
+    }
     if let Some(m) = menu::open_menu(s).filter(|_| !asking(s)) {
         let count = menu::items(s, &m).len();
         let active = &mut s.ui.chat.composer.menu_active;
         match e.key {
-            Key::Up if count > 0 => {
+            Key::Up if count > 0 && bound.is_none() => {
                 *active = (*active + count - 1) % count;
                 return true;
             }
-            Key::Down if count > 0 => {
+            Key::Down if count > 0 && bound.is_none() => {
                 *active = (*active + 1) % count;
                 return true;
             }
-            Key::Enter | Key::Tab if count > 0 && !e.mods.shift => {
+            Key::Enter | Key::Tab if count > 0 && !e.mods.shift && bound.is_none() => {
                 let i = (*active).min(count - 1);
                 menu::choose(s, &m, i, tx);
                 return true;
@@ -1854,9 +1869,9 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let thread = ctx(s).thread.map(|t| data::s(t, "id").to_owned());
     let plain = !e.mods.shift && !e.mods.cmd && !e.mods.alt && !e.mods.ctrl && !e.mods.logo;
-    let answering = question_editor(s).is_some();
-    // composerSubmissionIntentForKey: the bound send variants, each under its own `when`.
-    let bound = SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, e, c));
+    if tx.key_repeat() && bound.is_some() {
+        return true;
+    }
     match bound {
         Some("thread.steerQueuedMessage") => {
             if let Some(thread) = thread {
@@ -1867,7 +1882,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         Some("thread.editQueuedMessage") if !answering => {
             return thread.is_some_and(|thread| crate::chat::timeline::queue::edit_latest(s, &thread));
         }
-        Some("composer.sendAlternate" | "composer.sendBackground" | "composer.sendAndNewThread") if !answering && !tx.key_repeat() => {
+        Some("composer.sendAlternate" | "composer.sendBackground" | "composer.sendAndNewThread") if !answering => {
             send_with(s, bound == Some("composer.sendAlternate"), bound != Some("composer.sendAlternate"));
             return true;
         }
@@ -1886,7 +1901,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
                 if !list_edit(s, lists::enter) {
                     draft_mut(s).edit.insert("\n");
                 }
-            } else {
+            } else if !tx.key_repeat() {
                 send(s, false);
             }
             true
@@ -1896,13 +1911,6 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up | Key::Down if plain && !answering => recall(s, e.key == Key::Up),
         Key::Escape if editing_run(s).is_some() => {
             cancel_queued_edit(s);
-            true
-        }
-        Key::Tab if e.mods.shift => {
-            let lifted = !answering && list_edit(s, lists::outdent);
-            if !lifted && supports_plan(s) {
-                toggle_plan(s);
-            }
             true
         }
         Key::Tab if plain && !answering => list_edit(s, lists::indent),
@@ -1938,6 +1946,9 @@ fn rich_text(s: &App) -> bool {
 fn list_edit(s: &mut App, edit: fn(&str, usize, usize, &[std::ops::Range<usize>]) -> Option<lists::Edit>) -> bool {
     let d = draft_mut(s);
     let (start, end) = d.edit.range();
+    if start != end {
+        return false;
+    }
     let pills: Vec<std::ops::Range<usize>> = d.edit.pills().map(|(range, _)| range).collect();
     let Some(edit) = edit(&d.edit.text, start, end, &pills) else { return false };
     for (from, to, with) in edit.changes.iter().rev() {
@@ -3889,6 +3900,18 @@ mod tests {
         assert_eq!(resolved(&s, false), Some("composer.sendAlternate"), "FAILED: a running turn flips steer and queue");
         draft_mut(&mut s).edit.focused = false;
         assert_eq!(resolved(&s, false), None, "FAILED: the prompt must have the keys");
+
+        s.navigate(Route::Home { project_id: Some(s.state().projects[0]["id"].as_str().unwrap().to_owned()) });
+        set_text(&mut s, "/model");
+        draft_mut(&mut s).edit.focused = true;
+        let menu = menu::open_menu(&s).expect("slash suggestion");
+        assert!(!menu::items(&s, &menu).is_empty());
+        let mut e = KeyEvent::from(Key::Enter);
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        assert!(on_key(&mut s, &e, &mut Tx::default()));
+        assert_eq!(s.ui.chat.composer.background.len(), 1);
+        assert!(!s.ui.chat.composer.picker.open);
     }
 
     #[test]
@@ -4071,5 +4094,13 @@ mod tests {
         assert_eq!(draft(&s).unwrap().edit.text, "- one\n  - ");
         set_text(&mut s, "plain");
         assert!(!list_edit(&mut s, lists::enter));
+        s.client_settings.values.insert("planModeEnabled".into(), json!(false));
+        let mut shift_tab = KeyEvent::from(Key::Tab);
+        shift_tab.mods.shift = true;
+        assert!(!on_key(&mut s, &shift_tab, &mut Tx::default()));
+        set_text(&mut s, "  - one");
+        draft_mut(&mut s).edit.set_selection(0, 7);
+        assert!(!list_edit(&mut s, lists::outdent));
+        assert_eq!(draft(&s).unwrap().edit.text, "  - one");
     }
 }

@@ -268,6 +268,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
     let rail = strips
         .key("timeline-minimap")
         .focusable(true)
+        .focus_ring(2.0, -2.0, t.c.ring)
         .role("button")
         .label(label)
         .cursor(rune::Cursor::Pointer)

@@ -155,6 +155,7 @@ pub(super) fn paragraph(source: &str, mut formulas: Vec<Option<Picture>>, image:
             assets.gallery = gallery.clone();
         }
         None => super::md_links::open(app, url, tx),
-    });
+    })
+    .on_link_secondary(super::md_links::file_menu);
     Some(pictures.into_iter().fold(shown, El::picture))
 }

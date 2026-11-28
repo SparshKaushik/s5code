@@ -212,6 +212,16 @@ fn relative(path: &str, root: Option<&str>) -> Option<String> {
     (!rest.starts_with("../")).then(|| rest.to_owned())
 }
 
+pub fn file_menu(app: &mut App, url: &str, at: rune::PointerPress, _: &mut Tx) {
+    let Target::File { path, .. } = classify(url) else { return };
+    let Some(root) = super::workspace_root(app) else { return };
+    let Some(rel) = relative(&path, Some(&root)) else { return };
+    let absolute = format!("{}/{rel}", root.trim_end_matches('/'));
+    if crate::panel::workspace_path(app, &absolute).is_some() {
+        crate::panel::file_menu(app, absolute, (at.x, at.y));
+    }
+}
+
 fn open_file(app: &mut App, path: &str, line: Option<usize>) {
     if let Some(rel) = relative(path, super::workspace_root(app).as_deref()) {
         crate::panel::open_file_at(app, rel, line);
@@ -450,6 +460,7 @@ fn inline(app: &App, src: &str, key: &str, t: &T, ink: rune::Color, font: TextSt
             self::open(app, url, tx);
         }
     })
+    .on_link_secondary(file_menu)
 }
 
 pub fn help(url: &str) -> Option<String> {

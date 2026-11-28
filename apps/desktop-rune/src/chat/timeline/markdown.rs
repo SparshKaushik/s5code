@@ -96,6 +96,7 @@ fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: 
                 .selectable(true)
                 .highlights(marks_for(marks, block))
                 .on_link_tx(md_links::open)
+                .on_link_secondary(md_links::file_menu)
                 .link_style(md_links::look(t))
                 .link_help(md_links::help)
                 .render(&block_style);
@@ -152,6 +153,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
             .selectable(true)
             .highlights(marks_for(marks, source))
             .on_link_tx(md_links::open)
+            .on_link_secondary(md_links::file_menu)
             .link_style(md_links::look(t))
             .link_help(md_links::help)
             .render(&style(t, ink));
@@ -216,6 +218,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
                         Markdown::new(*cell)
                             .highlights(marks_for(marks, cell))
                             .on_link_tx(md_links::open)
+                            .on_link_secondary(md_links::file_menu)
                             .link_style(md_links::look(t))
                             .link_help(md_links::help)
                             .selectable(true)
