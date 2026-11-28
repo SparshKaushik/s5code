@@ -441,7 +441,12 @@ fn title(s: &App, th: &Thread, t: &T, font: rune::TextStyle, color: rune::Color)
     let Some((_, edit)) = s.ui.shell.sidebar.rename.as_ref().filter(|(id, _)| *id == th.id) else {
         // Web dims the title while the server regenerates it.
         let color = if th.title_regenerating { color.alpha_mul(0.55) } else { color };
-        return text(th.title.clone()).font(font).color(color).truncate().grow(1.0).shrink();
+        let title = text(th.title.clone()).font(font).color(color).truncate().grow(1.0).shrink();
+        if !th.title_regenerating {
+            return title;
+        }
+        // Web's screen-reader-only "Regenerating title" status beside the dimmed title.
+        return row().grow(1.0).shrink().min_w(0.0).center_y().child(title).child(el().role("status").label("Regenerating title").size(0.0, 0.0).absolute(0.0, 0.0));
     };
     rune::text_input(edit, theme::SM_MEDIUM)
         .key("sb-rename")

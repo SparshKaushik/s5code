@@ -904,8 +904,26 @@ pub fn snooze(s: &mut App, id: &str, until: i64) {
     snooze_many(s, &[id.to_string()], until);
 }
 
+/// A snooze menu choice: `pickSnoozePreset` refuses a time that passed while the menu was open.
+pub fn snooze_picked(s: &mut App, ids: &[String], until: i64) {
+    if until <= crate::data::now_ms() {
+        let toast = crate::shell::toast::Toast::new("Could not snooze thread", Some("That snooze time has passed. Choose another time."), crate::shell::toast::Kind::Warning);
+        crate::shell::toast::add(s, toast, None);
+        return;
+    }
+    snooze_many(s, ids, until);
+}
+
 /// Snoozes every target; the open one moves on past its co-snoozing rows.
 pub fn snooze_many(s: &mut App, ids: &[String], until: i64) {
+    // Several threads share one failure toast, as web's bulk snooze.
+    if ids.len() > 1 {
+        return batched(s, "Failed to snooze threads", |s| snooze_each(s, ids, until));
+    }
+    snooze_each(s, ids, until);
+}
+
+fn snooze_each(s: &mut App, ids: &[String], until: i64) {
     let parking: HashSet<String> = ids.iter().cloned().collect();
     let forward = ids.iter().find_map(|id| forward_after_park(s, id, &parking));
     for id in ids {
@@ -1439,7 +1457,12 @@ pub fn width(s: &App, cx: &mut Cx<App>) -> f32 {
     let (viewport, brand) = bounds(cx);
     let ui = &s.ui.shell.sidebar;
     let stored = ui.width.get().unwrap_or_else(|| {
-        let saved = crate::desktop::prefs().get::<f32>(WIDTH_KEY).filter(|w| w.is_finite()).unwrap_or(layout::SIDEBAR_W);
+        let stored = crate::desktop::prefs().get::<Value>(WIDTH_KEY);
+        let saved = stored.as_ref().and_then(Value::as_f64).map(|w| w as f32).filter(|w| w.is_finite());
+        if stored.is_some_and(|v| !v.is_null()) && saved.is_none() {
+            eprintln!("s5code-rune: Could not read persisted thread sidebar width.");
+        }
+        let saved = saved.unwrap_or(layout::SIDEBAR_W);
         ui.width.set(Some(saved));
         saved
     });
@@ -1450,8 +1473,8 @@ fn save_width(width: Option<f32>) {
     let mut prefs = crate::desktop::prefs();
     if let Some(w) = width {
         let _ = prefs.set(WIDTH_KEY, &w);
-    } else {
-        let _ = prefs.remove(WIDTH_KEY);
+    } else if prefs.remove(WIDTH_KEY).is_err() {
+        eprintln!("s5code-rune: Could not clear persisted thread sidebar width.");
     }
 }
 
@@ -1823,6 +1846,15 @@ mod tests {
 
     fn thread(id: &str) -> Thread {
         Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn a_snooze_time_that_passed_while_the_menu_was_open_warns() {
+        let mut s = App::new();
+        snooze_picked(&mut s, &["t".to_owned()], crate::data::now_ms() - 1);
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not snooze thread"));
+        assert_eq!(crate::shell::palette::toast_description(&s), Some("That snooze time has passed. Choose another time."));
+        assert!(s.ui.shell.sidebar.inflight.is_empty(), "FAILED: nothing is sent");
     }
 
     #[test]

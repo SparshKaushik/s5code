@@ -624,7 +624,7 @@ fn channel(version: &str) -> &'static str {
 }
 
 /// Web `resolveVersionMismatch`: the server is behind the client.
-fn behind(server: &str, client: &str) -> bool {
+pub(crate) fn behind(server: &str, client: &str) -> bool {
     let (server, client) = (server.trim(), client.trim());
     if server.is_empty() || client.is_empty() {
         return false;
@@ -645,18 +645,42 @@ pub(crate) fn crosses_track(from: &str, to: &str) -> bool {
 }
 
 /// Web `savedServerUpdateTargets` and `ServerUpdatesAction`'s `eligible`, for one environment's config.
+#[cfg(test)]
 fn target_for(key: &str, label: &str, config: &Value, client: &str, connected: bool) -> Option<Target> {
+    assess(key, label, Some(config), client, connected, false)?.ok()
+}
+
+/// Web `collectServerUpdateTargets` for one saved server: `None` while it is current, else the
+/// update it can take or why update everything skips it. Update everything also holds a preview
+/// server to its channel; a single server's update only refuses crossing Stable and Nightly.
+fn assess(key: &str, label: &str, config: Option<&Value>, client: &str, connected: bool, same_channel: bool) -> Option<Result<Target, String>> {
+    let Some(config) = config else { return Some(Err("not connected".into())) };
     let environment = &config["environment"];
-    let server = environment["serverVersion"].as_str()?;
-    let self_update = environment["capabilities"]["serverSelfUpdate"].as_str()?;
-    let desktop_app = environment["capabilities"]["desktopAppUpdate"] == true;
-    if !connected || !behind(server, client) || (self_update == "desktop-managed" && !desktop_app) {
+    let server = environment["serverVersion"].as_str().unwrap_or_default();
+    if !behind(server, client) {
         return None;
     }
-    if config["managedPolicy"]["limits"]["updates"]["mode"] == "off" || crosses_track(server, client) {
-        return None;
+    if !connected {
+        return Some(Err("not connected".into()));
     }
-    Some(Target { key: key.to_owned(), label: label.to_owned(), self_update: self_update.to_owned(), target_version: client.trim().to_owned() })
+    let self_update = environment["capabilities"]["serverSelfUpdate"].as_str();
+    let policy = &config["managedPolicy"];
+    let organization = policy["organization"].as_str().unwrap_or_default();
+    // `managedMachineUpdateDenial`: a desktop app's own feed isn't held to the nightly limit.
+    if policy["limits"]["updates"]["mode"] == "off" {
+        return Some(Err(format!("{organization} manages T3 Code updates.")));
+    }
+    if self_update != Some("desktop-managed") && policy["limits"]["updates"]["allowNightly"] == false && channel(client) != "stable" {
+        return Some(Err(format!("{organization} manages T3 Code updates. Only stable releases can be installed.")));
+    }
+    let Some(self_update) = self_update else { return Some(Err("needs a manual update".into())) };
+    if self_update == "desktop-managed" && environment["capabilities"]["desktopAppUpdate"] != true {
+        return Some(Err("needs a newer desktop app".into()));
+    }
+    if self_update != "desktop-managed" && (crosses_track(server, client) || (same_channel && channel(server) != channel(client))) {
+        return Some(Err(format!("on the {} channel", channel(server))));
+    }
+    Some(Ok(Target { key: key.to_owned(), label: label.to_owned(), self_update: self_update.to_owned(), target_version: client.trim().to_owned() }))
 }
 
 /// The version this client ships: the server it bundles.
@@ -677,21 +701,27 @@ pub(crate) fn config_version_gap(config: &Value) -> Option<(String, &'static str
     behind(server, client).then(|| (server.to_owned(), client))
 }
 
-pub(crate) fn targets(s: &App) -> Vec<Target> {
+/// Every saved server behind this client: its update, or why it can't take one.
+pub(crate) fn assessed(s: &App, same_channel: bool) -> Vec<(String, String, Result<Target, String>)> {
     let client = client_version();
     s.ui.env
         .saved
         .iter()
         .filter(|e| !s.ui.env.off.contains(&e.id))
         .filter_map(|e| {
-            let state = env::source(s, &e.id)?.state();
+            let state = env::source(s, &e.id).map(|src| src.state());
             // Web `OutdatedServerUpdateAction`: an outdated server's descriptor stands in for its config.
-            if let Some(descriptor) = env::outdated(s, &e.id) {
-                return target_for(&e.id, &e.label, &json!({"environment": descriptor}), client, state.conn == s5_net::Conn::Open);
-            }
-            target_for(&e.id, &e.label, state.config.as_ref()?, client, env::connected(s, &e.id))
+            let verdict = match (env::outdated(s, &e.id), state) {
+                (Some(descriptor), state) => assess(&e.id, &e.label, Some(&json!({"environment": descriptor})), client, state.is_some_and(|st| st.conn == s5_net::Conn::Open), same_channel),
+                (None, state) => assess(&e.id, &e.label, state.and_then(|st| st.config.as_ref()), client, env::connected(s, &e.id), same_channel),
+            };
+            verdict.map(|v| (e.id.clone(), e.label.clone(), v))
         })
         .collect()
+}
+
+pub(crate) fn targets(s: &App) -> Vec<Target> {
+    assessed(s, false).into_iter().filter_map(|(_, _, verdict)| verdict.ok()).collect()
 }
 
 fn update_all(s: &mut App) {
@@ -997,6 +1027,29 @@ mod tests {
         assert!(target_for("k", "Box", &config("desktop-managed", true, "auto"), "0.1.7", true).is_some());
         assert!(target_for("k", "Box", &config("binary", false, "off"), "0.1.7", true).is_none(), "managed updates off");
         assert!(target_for("k", "Box", &config("binary", false, "auto"), "0.1.6", true).is_none(), "current");
+
+        // Update everything lists the rest as skipped, with web's reasons in its order.
+        let reason = |config: Option<&Value>, client: &str, connected: bool| assess("k", "Box", config, client, connected, true).and_then(Result::err);
+        assert_eq!(reason(None, "0.1.7", false).as_deref(), Some("not connected"), "no config yet");
+        assert_eq!(reason(Some(&config("binary", false, "auto")), "0.1.7", false).as_deref(), Some("not connected"));
+        assert_eq!(reason(Some(&config("binary", false, "auto")), "0.1.6", false), None, "a current server isn't listed");
+        let mut manual = config("binary", false, "auto");
+        manual["environment"]["capabilities"]["serverSelfUpdate"] = Value::Null;
+        assert_eq!(reason(Some(&manual), "0.1.7", true).as_deref(), Some("needs a manual update"));
+        assert_eq!(reason(Some(&config("desktop-managed", false, "auto")), "0.1.7", true).as_deref(), Some("needs a newer desktop app"));
+        let mut org = config("binary", false, "off");
+        org["managedPolicy"]["organization"] = json!("Acme");
+        assert_eq!(reason(Some(&org), "0.1.7", true).as_deref(), Some("Acme manages T3 Code updates."));
+        org["managedPolicy"]["limits"]["updates"] = json!({"mode": "auto", "allowNightly": false});
+        assert_eq!(reason(Some(&org), "0.1.8-nightly.20261101.1", true).as_deref(), Some("Acme manages T3 Code updates. Only stable releases can be installed."));
+        assert_eq!(reason(Some(&org), "0.1.7", true), None, "a stable target is allowed");
+        let mut nightly = config("boot-service", false, "auto");
+        nightly["environment"]["serverVersion"] = json!("0.1.6-nightly.20261101.1");
+        assert_eq!(reason(Some(&nightly), "0.1.7", true).as_deref(), Some("on the nightly channel"));
+        let mut preview = config("boot-service", false, "auto");
+        preview["environment"]["serverVersion"] = json!("0.1.6-preview.20261101.1");
+        assert_eq!(reason(Some(&preview), "0.1.7", true).as_deref(), Some("on the preview channel"));
+        assert!(target_for("k", "Box", &preview, "0.1.7", true).is_some(), "FAILED: a single server's update may leave preview");
     }
 
     #[test]

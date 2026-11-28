@@ -359,7 +359,7 @@ pub(crate) fn scene_host(s: &mut App) {
     start_new(s);
     let host = |kind: &str, account: &str| json!({"kind": kind, "status": "available", "auth": {"status": "authenticated", "account": account}});
     let add = &mut s.ui.shell.palette.add;
-    add.discovery = Some(json!({"sourceControlProviders": [host("github", "octo"), host("gitlab", "octo")]}));
+    add.discovery = Some(json!({"sourceControlProviders": [host("github", "octo"), host("gitlab", "octo"), host("forgejo", "octo"), host("bitbucket", "octo")]}));
     add.publish = true;
     add.host_open = true;
     s.ui.shell.palette.query = rune::TextEdit::new("demo-app");

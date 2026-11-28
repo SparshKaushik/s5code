@@ -32,6 +32,7 @@ pub struct MenuItem {
     checked: Option<bool>,
     radio: bool,
     option: bool,
+    hide_indicator: bool,
     inset: bool,
     touch: bool,
     danger: bool,
@@ -63,6 +64,7 @@ impl MenuItem {
             checked: None,
             radio: false,
             option: false,
+            hide_indicator: false,
             inset: false,
             touch: false,
             danger: false,
@@ -122,6 +124,11 @@ impl MenuItem {
         self.checked = Some(value);
         self.radio = true;
         self.option = true;
+        self
+    }
+    /// Web `SelectItem hideIndicator`: the picked option shows by its fill alone, without a check.
+    pub fn hide_indicator(mut self) -> Self {
+        self.hide_indicator = true;
         self
     }
     pub fn radio(mut self, value: bool) -> Self {
@@ -384,7 +391,7 @@ impl MenuItem {
                     }),
             );
         }
-        if self.radio && !native {
+        if self.radio && !native && !self.hide_indicator {
             e = e.child(mark(self.checked == Some(true)));
         }
         if let Some(trailing) = self.trailing {
