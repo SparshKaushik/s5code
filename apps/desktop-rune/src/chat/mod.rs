@@ -27,7 +27,7 @@ pub struct Ui {
     pub home: home::Ui,
     pub details: details::Ui,
     pub topbar: topbar::Ui,
-    pub server_update: server_update::State,
+    pub server_update: server_update::Updates,
     pub side: side::State,
     /// The composer's notice stack (ComposerBannerStack).
     pub banners: composer::banners::State,
@@ -137,6 +137,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(details::menu(s, t))
         .children(composer::overlays(s, cx, t))
         .children(timeline::actions::overlays(s, t))
+        .children(timeline::background_setup::overlays(s, t))
         .children(timeline::plan::overlays(s, t))
         .children(timeline::markdown::overlays(s, t))
         .children(timeline::chip::overlay(s, t))

@@ -19,6 +19,7 @@ pub mod banners;
 mod child_approvals;
 mod link;
 pub(crate) mod worktree_setup;
+pub(super) mod background_setup;
 mod inspector;
 mod history;
 pub(crate) mod md_links;
@@ -829,7 +830,7 @@ pub(crate) fn rpc_failure(cause: &Value) -> &Value {
 
 pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
     let mut changed = attachments::poll(app, tx) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app)
-        | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | subagent::poll(app) | worktree_setup::poll(app)
+        | link::poll(app) | banners::poll(app) | child_approvals::poll(app) | subagent::poll(app) | worktree_setup::poll(app) | background_setup::poll(app)
         | inspector::poll(app) | md_links::poll(app) | history::poll(app, tx) | crate::chat::server_update::poll(app)
         | pending::poll(app, tx) | crate::chat::guest::poll(app) | katex::poll(app) | announcer::poll(app);
     let Some(net) = app.src.net() else {
@@ -990,6 +991,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     let targets = rows::revert_targets(&view.projection, view.has_more_history);
     let changes = changed::by_reply(&view.projection);
     let keys = row_keys(&rows);
+    let background = worktree_setup::background(app, thread_id);
     let routed = !in_side_pane(app, thread_id);
     let anchor_row = pending::anchor(app, thread_id).filter(|_| routed).and_then(|id| {
         rows.iter().position(|r| matches!(r, Row::User(i) if s(i, "messageId") == id || s(i, "id") == id)).map(|at| keys[at].clone())
@@ -1200,7 +1202,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
             ),
             // AssistantMetaTimelineRow: always shown, under the work it follows.
             Row::Meta { id, item } => (id, col().w_full().px(4.0).pb(8.0).child(row().child(actions::assistant(app, thread_id, item, t)))),
-            Row::Working { id, label, compacting } => (id, work::working_view(label, compacting, t)),
+            Row::Working { id, label, compacting } => (id, work::working_view(label, compacting, background.map(|snapshot| background_setup::chip(app, thread_id, snapshot, t)), t)),
             Row::Work { id, label, items } => {
                 let expanded = app.ui.chat.timeline.expanded.contains(&id);
                 let toggle_id = id.clone();

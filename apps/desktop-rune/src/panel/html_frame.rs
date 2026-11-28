@@ -260,7 +260,18 @@ fn page_key(e: &rune::KeyEvent) -> Option<LiveInput> {
 /// A live page over its row: its picture, taking the pointer and keys, and the wheel once
 /// pressed. Escape hands focus back to the app and runs `escape`.
 pub(super) fn surface(live: &Live, key: String, on_down: impl Fn(&mut App) + 'static, escape: impl Fn(&mut App) + 'static) -> El {
+    interactive_surface(live, key, on_down, escape, false)
+}
+
+pub(super) fn interactive_surface(
+    live: &Live,
+    key: String,
+    on_down: impl Fn(&mut App) + 'static,
+    escape: impl Fn(&mut App) + 'static,
+    owns_scroll: bool,
+) -> El {
     let id = live.id;
+    let file_pdf = live.file_pdf;
     el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .pixels(&live.pixels)
         .focusable(true)
@@ -292,13 +303,17 @@ pub(super) fn surface(live: &Live, key: String, on_down: impl Fn(&mut App) + 'st
             }
         })
         .on_wheel(move |s: &mut App, w, _| {
-            if s.ui.panel.html_frames.engaged != Some(id) {
+            if !owns_scroll && s.ui.panel.html_frames.engaged != Some(id) {
                 return false;
             }
             input(s, id, LiveInput::Wheel { x: w.x, y: w.y, dx: w.dx, dy: w.dy });
             true
         })
         .on_key(move |s: &mut App, e, tx| {
+            if file_pdf && (e.mods.cmd || e.mods.ctrl) && matches!(&e.key, Key::Text(value) if value.eq_ignore_ascii_case("f")) {
+                super::preview::inline_frame_cmd(s, Cmd::LiveEval(id, "document.getElementById('find')?.focus()".into()));
+                return true;
+            }
             if matches!(e.key, Key::Escape) {
                 s.ui.panel.html_frames.engaged = None;
                 tx.blur();

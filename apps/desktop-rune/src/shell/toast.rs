@@ -63,6 +63,7 @@ pub(crate) struct Toast {
     pub details_labels: Option<(&'static str, &'static str)>,
     /// `data.threadId`: shown only while this thread is open.
     pub thread: Option<String>,
+    pub notification_key: Option<String>,
     /// `hideCopyButton`: an error toast copies its description unless this is set.
     pub hide_copy: bool,
 }
@@ -83,6 +84,7 @@ impl Toast {
             details_open: false,
             details_labels: None,
             thread: None,
+            notification_key: None,
             hide_copy: false,
         }
     }
@@ -133,6 +135,13 @@ pub(crate) fn newest_mut(s: &mut App) -> Option<&mut Toast> {
 
 pub(crate) fn close(s: &mut App, id: u64) {
     s.ui.shell.toasts.toasts.retain(|t| t.id != id);
+}
+
+pub(crate) fn close_notifications(s: &mut App, hide: impl Fn(&str) -> bool) -> bool {
+    let toasts = &mut s.ui.shell.toasts.toasts;
+    let before = toasts.len();
+    toasts.retain(|toast| !toast.notification_key.as_deref().is_some_and(&hide));
+    toasts.len() != before
 }
 
 /// Closes every toast titled `title`.

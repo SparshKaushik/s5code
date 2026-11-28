@@ -373,7 +373,20 @@ pub(crate) fn panel_name<'a>(app: &'a App, id: &str) -> Option<&'a str> {
     app.ui.chat.timeline.assets.ready.get(id).map(|loaded| loaded.name.as_str())
 }
 
-pub(crate) fn panel_view(app: &App, id: &str, t: &T) -> El {
+/// Attachment `id`'s served URL and name, when it is a file with no picture or player.
+pub(crate) fn panel_file<'a>(app: &'a App, id: &str) -> Option<(&'a str, &'a str)> {
+    let loaded = app.ui.chat.timeline.assets.ready.get(id).filter(|loaded| loaded.kind.is_none())?;
+    Some((&loaded.url, &loaded.name))
+}
+
+/// A served file attachment, for panel scenes.
+pub(crate) fn scene_file(app: &mut App, id: &str, name: &str) {
+    let loaded = Loaded::new(format!("http://127.0.0.1:9/{name}"), name.to_owned(), None, 0, None);
+    app.ui.chat.timeline.assets.ready.insert(id.to_owned(), loaded);
+}
+
+/// `viewer`: the format-aware preview the panel has for this attachment, if any.
+pub(crate) fn panel_view(app: &App, id: &str, t: &T, viewer: Option<El>) -> El {
     let assets = &app.ui.chat.timeline.assets;
     let mut content = col().grow(1.).min_h(0.).w_full().center().gap(8.).padding(16.);
     let id = id.to_owned();
@@ -382,18 +395,22 @@ pub(crate) fn panel_view(app: &App, id: &str, t: &T) -> El {
         return content.child(text(message).font(theme::TEXT_SM).color(t.c.muted_foreground));
     };
     let (url, name) = (loaded.url.clone(), loaded.name.clone());
-    let browser = url.clone();
+    let (browser, file) = (url.clone(), name.clone());
+    let actions = row().gap(6.)
+        .child(crate::kit::Button::new("Open in preview browser").variant("outline").size("xs")
+            .on_press(move |s: &mut App| crate::panel::open_preview(s, &browser)).build(t))
+        .child(crate::kit::Button::new("Download").variant("outline").size("xs").build(t)
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| media::save_attachment(s, url.clone(), file.clone(), tx)));
+    if let Some(viewer) = viewer {
+        return col().grow(1.).min_h(0.).w_full().child(viewer).child(actions.padding(8.));
+    }
     content = match loaded.kind {
         Some(Kind::Image) => content.child(el().w_full().grow(1.).min_h(0.).pixels_fit(&loaded.pixels, rune::SurfaceFit::Fit)),
         Some(Kind::Video) => content.child(media::video(&id, &name, Some(loaded), false, None, t)),
         Some(Kind::Audio) => content.child(audio(&json!({"id": id, "name": name}), Some(loaded), false, t)),
         None => content.child(text(&name).font(theme::SM_MEDIUM).color(t.c.foreground)),
     };
-    content.child(row().gap(6.)
-        .child(crate::kit::Button::new("Open in preview browser").variant("outline").size("xs")
-            .on_press(move |s: &mut App| crate::panel::open_preview(s, &browser)).build(t))
-        .child(crate::kit::Button::new("Download").variant("outline").size("xs").build(t)
-            .on_press_tx(move |s: &mut App, tx: &mut Tx| media::save_attachment(s, url.clone(), name.clone(), tx))))
+    content.child(actions)
 }
 
 /// The pictures sent with the message holding attachment `id`, in order.

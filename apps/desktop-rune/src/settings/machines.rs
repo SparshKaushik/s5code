@@ -639,7 +639,7 @@ pub(crate) fn behind(server: &str, client: &str) -> bool {
 }
 
 /// `crossesReleaseTrack`: Stable and Nightly; preview builds cross nothing.
-fn crosses_track(from: &str, to: &str) -> bool {
+pub(crate) fn crosses_track(from: &str, to: &str) -> bool {
     let (from, to) = (channel(from), channel(to));
     from != to && from != "preview" && to != "preview"
 }
@@ -684,13 +684,26 @@ fn assess(key: &str, label: &str, config: Option<&Value>, client: &str, connecte
 }
 
 /// The version this client ships: the server it bundles.
-fn client_version(s: &App) -> Option<String> {
-    env::source(s, env::LOCAL)?.state().config.as_ref()?["environment"]["serverVersion"].as_str().map(str::to_owned)
+fn client_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        if let Some(version) = option_env!("APP_VERSION").map(str::trim).filter(|version| !version.is_empty()) {
+            return version.to_owned();
+        }
+        let web: Value = serde_json::from_str(include_str!("../../../web/package.json")).expect("web package manifest");
+        web["version"].as_str().expect("web package version").to_owned()
+    })
+}
+
+pub(crate) fn config_version_gap(config: &Value) -> Option<(String, &'static str)> {
+    let server = config["environment"]["serverVersion"].as_str()?.trim();
+    let client = client_version();
+    behind(server, client).then(|| (server.to_owned(), client))
 }
 
 /// Every saved server behind this client: its update, or why it can't take one.
 pub(crate) fn assessed(s: &App, same_channel: bool) -> Vec<(String, String, Result<Target, String>)> {
-    let Some(client) = client_version(s) else { return Vec::new() };
+    let client = client_version();
     s.ui.env
         .saved
         .iter()
@@ -699,8 +712,8 @@ pub(crate) fn assessed(s: &App, same_channel: bool) -> Vec<(String, String, Resu
             let state = env::source(s, &e.id).map(|src| src.state());
             // Web `OutdatedServerUpdateAction`: an outdated server's descriptor stands in for its config.
             let verdict = match (env::outdated(s, &e.id), state) {
-                (Some(descriptor), state) => assess(&e.id, &e.label, Some(&json!({"environment": descriptor})), &client, state.is_some_and(|st| st.conn == s5_net::Conn::Open), same_channel),
-                (None, state) => assess(&e.id, &e.label, state.and_then(|st| st.config.as_ref()), &client, env::connected(s, &e.id), same_channel),
+                (Some(descriptor), state) => assess(&e.id, &e.label, Some(&json!({"environment": descriptor})), client, state.is_some_and(|st| st.conn == s5_net::Conn::Open), same_channel),
+                (None, state) => assess(&e.id, &e.label, state.and_then(|st| st.config.as_ref()), client, env::connected(s, &e.id), same_channel),
             };
             verdict.map(|v| (e.id.clone(), e.label.clone(), v))
         })
@@ -712,8 +725,7 @@ pub(crate) fn targets(s: &App) -> Vec<Target> {
 }
 
 fn update_all(s: &mut App) {
-    let pending: Vec<String> = s.ui.settings.connections.machines.updating.iter().map(|(_, t)| t.key.clone()).collect();
-    let available: Vec<Target> = targets(s).into_iter().filter(|t| !pending.contains(&t.key)).collect();
+    let available: Vec<Target> = targets(s).into_iter().filter(|t| !row_updating(s, &t.key)).collect();
     if available.iter().any(|t| t.self_update == "desktop-managed") {
         s.ui.settings.connections.machines.confirm = Some(available);
         return;
@@ -722,14 +734,14 @@ fn update_all(s: &mut App) {
 }
 
 /// Web `resolveServerConfigVersionMismatch`: `(server, client)` while this server is behind.
-pub(super) fn version_gap(s: &App, key: &str) -> Option<(String, String)> {
-    let client = client_version(s)?;
+pub(crate) fn version_gap(s: &App, key: &str) -> Option<(String, String)> {
+    let client = client_version();
     let environment = match env::outdated(s, key) {
         Some(descriptor) => descriptor,
         None => &env::source(s, key)?.state().config.as_ref()?["environment"],
     };
     let server = environment["serverVersion"].as_str()?.trim().to_owned();
-    behind(&server, &client).then(|| (server, client.trim().to_owned()))
+    behind(&server, client).then(|| (server, client.trim().to_owned()))
 }
 
 /// Web's per-row `ServerUpdateAction`: whether this saved server can update to this client.
@@ -739,10 +751,15 @@ pub(super) fn row_update(s: &App, key: &str) -> bool {
 
 pub(crate) fn row_updating(s: &App, key: &str) -> bool {
     let machines = &s.ui.settings.connections.machines;
-    machines.updating.iter().any(|(_, t)| t.key == key) || machines.committing.iter().any(|(_, t, _)| t.key == key)
+    matches!(crate::chat::server_update::status_on(s, key), crate::chat::server_update::Status::Running { .. })
+        || machines.updating.iter().any(|(_, t)| t.key == key)
+        || machines.committing.iter().any(|(_, t, _)| t.key == key)
 }
 
 pub(super) fn row_failure<'a>(s: &'a App, key: &str) -> Option<&'a str> {
+    if let crate::chat::server_update::Status::Failed { message, .. } = crate::chat::server_update::status_on(s, key) {
+        return Some(message);
+    }
     s.ui.settings.connections.machines.failed.get(key).map(String::as_str)
 }
 
@@ -760,10 +777,16 @@ pub(super) fn update_row(s: &mut App, key: &str) {
 
 fn start(s: &mut App, targets: Vec<Target>) {
     for target in targets {
+        if row_updating(s, &target.key) {
+            continue;
+        }
         s.ui.settings.connections.machines.failed.remove(&target.key);
         // Web `canUpdateServer`: the session there must hold environment:maintain. An outdated
         // server's session can't be read, and web's `OutdatedServerUpdateAction` leaves it to the server.
-        if env::outdated(s, &target.key).is_none() && !super::permissions::can_on(s, &target.key, "environment:maintain") {
+        if env::outdated(s, &target.key).is_none() {
+            if super::permissions::can_on(s, &target.key, "environment:maintain") {
+                crate::chat::server_update::start_on(s, &target.key, &target.target_version, Some(target.label));
+            }
             continue;
         }
         let Some(id) = env::net_of(s, &target.key).map(|net| net.request("server.updateServer", json!({"targetVersion": target.target_version}))) else { continue };
@@ -847,7 +870,7 @@ pub(super) fn update_all_button(s: &App, t: &T) -> Option<El> {
     if targets.is_empty() {
         return None;
     }
-    let pending = !s.ui.settings.connections.machines.updating.is_empty();
+    let pending = targets.iter().any(|target| row_updating(s, &target.key));
     Some(kit::Button::new("Update all").variant("ghost-muted").size("xs").disabled(pending).on_press(update_all).build(t))
 }
 
