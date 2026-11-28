@@ -221,6 +221,14 @@ impl Input {
         self.send(Message::Binary(tagged(TOUCH, &json!({"type": phase, "x": x, "y": y}))));
     }
 
+    /// Web's `sendRawTouch`: a touch at the display's own raw point, as the iPhone Duo's 3D view
+    /// works it out per display.
+    pub fn touch_raw(&self, phase: &str, x: f64, y: f64) {
+        if !self.android {
+            self.send(Message::Binary(tagged(TOUCH, &json!({"type": phase, "x": x.clamp(0., 1.), "y": y.clamp(0., 1.)}))));
+        }
+    }
+
     /// Web's `pressButton`: `home`, `back`, `recents` or `power`.
     pub fn button(&self, button: &str) {
         if self.android {

@@ -26,11 +26,13 @@ pub struct Material {
     pub screen: bool,
     /// A screen shown at its mesh's own UVs (u across, v up) rather than across `Model::screen`.
     pub mapped: bool,
+    /// The iPhone Duo display it shows (1 the cover, 3 the inner), dark while the other one is on.
+    pub panel: u8,
 }
 
 impl Material {
     fn lit(hex: u32, metallic: f32, roughness: f32) -> Material {
-        Material { base: linear(hex), metallic, roughness, texture: None, blend: false, unlit: false, screen: false, mapped: false }
+        Material { base: linear(hex), metallic, roughness, texture: None, blend: false, unlit: false, screen: false, mapped: false, panel: 0 }
     }
 }
 
@@ -44,6 +46,10 @@ pub struct Mesh {
     pub material: usize,
     /// The display, which shows the device's screen.
     pub screen: bool,
+    /// The hinge leaf it moves with: 0 none, 1 the left half, 2 the right.
+    pub part: u8,
+    /// The iPhone Duo display it is, as `Material::panel`.
+    pub panel: u8,
 }
 
 pub struct Image {
@@ -62,18 +68,57 @@ pub struct Model {
     pub faces: Vec<Face>,
     pub min: [f32; 3],
     pub max: [f32; 3],
+    /// The hinge leaves' rest transforms (the left half's, then the right's), for a model that folds.
+    pub hinge: Option<[Mat4; 2]>,
+    /// Each part's bounds in its own space, as `Mesh::part`.
+    pub part_bounds: [([f32; 3], [f32; 3]); 3],
+}
+
+fn grow(min: &mut [f32; 3], max: &mut [f32; 3], p: [f32; 3]) {
+    for k in 0..3 {
+        min[k] = min[k].min(p[k]);
+        max[k] = max[k].max(p[k]);
+    }
 }
 
 impl Model {
     fn bounds(&mut self) {
         let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-        for p in self.meshes.iter().flat_map(|m| &m.positions) {
-            for k in 0..3 {
-                min[k] = min[k].min(p[k]);
-                max[k] = max[k].max(p[k]);
+        self.part_bounds = [([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]); 3];
+        for m in &self.meshes {
+            let part = &mut self.part_bounds[usize::from(m.part.min(2))];
+            for &p in &m.positions {
+                grow(&mut min, &mut max, p);
+                grow(&mut part.0, &mut part.1, p);
             }
         }
         (self.min, self.max) = (min, max);
+    }
+
+    /// Each part's transform with the hinge at `angle` degrees (0 closed, 180 open): web
+    /// `createDuoScene`'s `setAngle`, which turns the halves equally about the spine.
+    pub fn parts(&self, angle: f32) -> [Mat4; 3] {
+        let Some([left, right]) = self.hinge else { return [IDENTITY; 3] };
+        let turn = (180. - angle.clamp(0., 180.)) * std::f32::consts::PI / 360.;
+        let y = |a: f32| {
+            let (s, c) = a.sin_cos();
+            [c, 0., -s, 0., 0., 1., 0., 0., s, 0., c, 0., 0., 0., 0., 1.]
+        };
+        [IDENTITY, mul(&left, &y(turn)), mul(&right, &y(-turn))]
+    }
+
+    /// The bounds with the parts at `parts`.
+    pub fn posed_bounds(&self, parts: &[Mat4; 3]) -> ([f32; 3], [f32; 3]) {
+        let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for (&(lo, hi), part) in self.part_bounds.iter().zip(parts) {
+            if lo[0] > hi[0] {
+                continue;
+            }
+            for i in 0..8 {
+                grow(&mut min, &mut max, point(part, [0, 1, 2].map(|k| if i >> k & 1 == 1 { hi[k] } else { lo[k] })));
+            }
+        }
+        (min, max)
     }
 }
 
@@ -99,6 +144,7 @@ fn linear(hex: u32) -> [f32; 4] {
 // Web's device models.
 
 /// `resolveDeviceModelId`: the devices web draws from a model rather than the procedural phone.
+/// The iPhone Duo's model draws in the Duo's own scene.
 pub fn model_id(android: bool, name: &str) -> Option<&'static str> {
     if android {
         return None;
@@ -116,6 +162,7 @@ fn glb(id: &str) -> Option<&'static [u8]> {
         "iphone-18-pro" => include_bytes!("../../../../web/src/components/device/models/iphone-18-pro.glb"),
         "iphone-18-pro-max" => include_bytes!("../../../../web/src/components/device/models/iphone-18-pro-max.glb"),
         "ipad-pro-13-m5" => include_bytes!("../../../../web/src/components/device/models/ipad-pro-13-m5.glb"),
+        "iphone-duo" => include_bytes!("../../../../web/src/components/device/models/iphone-duo.glb"),
         "ipad-pro-13-m5-magic-keyboard" => include_bytes!("../../../../web/src/components/device/models/ipad-pro-13-m5-magic-keyboard.glb"),
         _ => return None,
     })
@@ -130,7 +177,69 @@ fn load(id: &str) -> Option<Result<Model, String>> {
         let (ipad, keyboard) = (glb("ipad-pro-13-m5")?, glb("ipad-pro-13-m5-magic-keyboard")?);
         return Some(parse_glb(ipad).and_then(|ipad| Ok(attach(ipad, parse(keyboard, false).map_err(|e| format!("Magic Keyboard: {e}"))?))));
     }
+    if id == "iphone-duo" {
+        return Some(parse(glb(id)?, false).and_then(duo));
+    }
     glb(id).map(parse_glb)
+}
+
+/// Web `createDuoScene`: the Duo's two hinge leaves and its three displays, each display mapped
+/// across its panel (the inner one spans both leaves), scaled so the inner display stands 2.2
+/// tall as every other device's display does.
+fn duo(mut model: Model) -> Result<Model, String> {
+    let Some(mut hinge) = model.hinge else { return Err("Duo model must have two hinge groups".into()) };
+    let panel_bounds = |model: &Model, panel: u8| {
+        let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in model.meshes.iter().filter(|m| m.panel == panel).flat_map(|m| &m.positions) {
+            grow(&mut min, &mut max, *p);
+        }
+        (min[0] < max[0] && min[1] < max[1]).then_some((min, max))
+    };
+    let (Some(_), Some((min, max))) = (panel_bounds(&model, 1), panel_bounds(&model, 3)) else {
+        return Err("Duo model must have all three display meshes".into());
+    };
+    let k = SCREEN_HEIGHT / (max[1] - min[1]);
+    for m in &mut model.meshes {
+        for p in &mut m.positions {
+            *p = p.map(|c| c * k);
+        }
+    }
+    for leaf in &mut hinge {
+        for t in &mut leaf[12..15] {
+            *t *= k;
+        }
+    }
+    model.hinge = Some(hinge);
+    let first = model.materials.len();
+    for panel in [1, 3] {
+        model.materials.push(Material { unlit: true, screen: true, mapped: true, panel, ..Material::lit(0xffffff, 0., 1.) });
+    }
+    for panel in [1u8, 3] {
+        let (min, max) = panel_bounds(&model, panel).expect("checked above");
+        let size = [max[0] - min[0], max[1] - min[1]];
+        for m in model.meshes.iter_mut().filter(|m| m.panel == panel) {
+            m.material = first + usize::from(panel == 3);
+            m.screen = true;
+            // Web's UVs (the cover's mirrored), turned to where the panel's frame sits: the
+            // inner panel is mounted a quarter turn from its framebuffer.
+            m.uvs = m
+                .positions
+                .iter()
+                .map(|p| {
+                    let (x, y) = ((p[0] - min[0]) / size[0], (p[1] - min[1]) / size[1]);
+                    if panel == 1 { [1. - x, y] } else { [1. - y, x] }
+                })
+                .collect();
+        }
+    }
+    let [w, h] = size_of(panel_bounds(&model, 3).expect("checked above"));
+    model.screen = [w, h, 0.];
+    model.bounds();
+    Ok(model)
+}
+
+fn size_of((min, max): ([f32; 3], [f32; 3])) -> [f32; 2] {
+    [max[0] - min[0], max[1] - min[1]]
 }
 
 /// `model` with `accessory`'s meshes added in its own space.
@@ -383,6 +492,7 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
                 unlit: false,
                 screen: false,
                 mapped: false,
+                panel: 0,
             }
         })
         .collect();
@@ -391,9 +501,10 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
 
     let mut meshes = Vec::new();
     let scene = &json["scenes"][json["scene"].as_u64().unwrap_or(0) as usize];
-    let mut stack: Vec<(usize, Mat4)> = scene["nodes"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|n| (n as usize, IDENTITY)).collect();
+    let mut stack: Vec<(usize, Mat4, u8)> = scene["nodes"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|n| (n as usize, IDENTITY, 0)).collect();
     let mut visited = 0;
-    while let Some((index, parent)) = stack.pop() {
+    let mut hinge: [Option<Mat4>; 2] = [None, None];
+    while let Some((index, parent, part)) = stack.pop() {
         visited += 1;
         if visited > 10_000 {
             return Err("The node graph has a cycle".into());
@@ -410,12 +521,23 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
                 )
             }
         };
-        let world = mul(&parent, &local);
+        let mut world = mul(&parent, &local);
+        // A hinge leaf (`left-half`, `right-half`) turns as a whole, so what's under it stays in its space.
+        let mut part = part;
+        if let Some(leaf) = ["left-half", "right-half"].iter().position(|n| node["name"] == *n) {
+            hinge[leaf] = Some(world);
+            (world, part) = (IDENTITY, leaf as u8 + 1);
+        }
         for child in node["children"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
-            stack.push((child as usize, world));
+            stack.push((child as usize, world, part));
         }
         let Some(mesh) = node["mesh"].as_u64() else { continue };
         let screen = node["name"] == "device-screen";
+        let panel = match node["name"].as_str() {
+            Some("cover-display") => 1,
+            Some("inner-display-left" | "inner-display-right") => 3,
+            _ => 0,
+        };
         let normals = normal_matrix(&world);
         for primitive in json["meshes"][mesh as usize]["primitives"].as_array().into_iter().flatten() {
             if primitive["mode"].as_u64().unwrap_or(4) != 4 {
@@ -426,7 +548,7 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
             let material = primitive["material"].as_u64().map_or(fallback, |m| (m as usize).min(fallback));
             let (positions, _) = glb.floats(position as usize)?;
             let count = positions.len() / 3;
-            let mut out = Mesh { material, screen, ..Default::default() };
+            let mut out = Mesh { material, screen, part, panel, ..Default::default() };
             out.positions = positions.chunks_exact(3).map(|p| point(&world, [p[0], p[1], p[2]])).collect();
             if let Some(normal) = attributes["NORMAL"].as_u64() {
                 let (n, _) = glb.floats(normal as usize)?;
@@ -462,7 +584,11 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
     }
     let (width, height) = (max[0] - min[0], max[1] - min[1]);
     if !display {
-        let mut model = Model { meshes, materials, images, screen: [0.; 3], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
+        let hinge = match hinge {
+            [Some(left), Some(right)] => Some([left, right]),
+            _ => None,
+        };
+        let mut model = Model { meshes, materials, images, screen: [0.; 3], faces: Vec::new(), min: [0.; 3], max: [0.; 3], hinge, part_bounds: Default::default() };
         model.bounds();
         return Some(model).filter(|m| m.min[0].is_finite()).ok_or_else(|| "Device accessory has invalid bounds".to_owned());
     }
@@ -475,7 +601,7 @@ fn parse(bytes: &[u8], display: bool) -> Result<Model, String> {
     for mesh in meshes.iter_mut().filter(|m| m.screen) {
         mesh.material = screen;
     }
-    let mut model = Model { meshes, materials, images, screen: [width, height, max[2]], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
+    let mut model = Model { meshes, materials, images, screen: [width, height, max[2]], faces: Vec::new(), min: [0.; 3], max: [0.; 3], hinge: None, part_bounds: Default::default() };
     model.bounds();
     Ok(model)
 }
@@ -683,7 +809,7 @@ pub fn phone(profile: &Profile, aspect: f32) -> Model {
     if let Some(f) = profile.flash {
         b.cap(flash, &Builder::circle(0.022), [camera[0] - f[0], camera[1] + f[1]], plate - 0.0325, false, false);
     }
-    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [screen_width, SCREEN_HEIGHT, 0.043], faces: Vec::new(), min: [0.; 3], max: [0.; 3] };
+    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [screen_width, SCREEN_HEIGHT, 0.043], faces: Vec::new(), min: [0.; 3], max: [0.; 3], hinge: None, part_bounds: Default::default() };
     model.bounds();
     model
 }
@@ -896,7 +1022,7 @@ pub fn fold(angle: f32, inner_aspect: f32) -> Model {
         }
     }
 
-    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [2. * (half_width - FOLD_INSET), screen_height, d / 2. + 0.004], faces, min: [0.; 3], max: [0.; 3] };
+    let mut model = Model { meshes: b.meshes, materials, images: Vec::new(), screen: [2. * (half_width - FOLD_INSET), screen_height, d / 2. + 0.004], faces, min: [0.; 3], max: [0.; 3], hinge: None, part_bounds: Default::default() };
     model.bounds();
     model
 }
@@ -943,9 +1069,14 @@ pub struct Camera {
 }
 
 pub fn camera(model: &Model, world: &Mat4, aspect: f32) -> Camera {
+    camera_in((model.min, model.max), world, aspect)
+}
+
+/// `camera` for a model posed within `bounds` (a folding one's).
+pub fn camera_in((lo, hi): ([f32; 3], [f32; 3]), world: &Mat4, aspect: f32) -> Camera {
     let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for i in 0..8 {
-        let corner = [0, 1, 2].map(|k| if i >> k & 1 == 1 { model.max[k] } else { model.min[k] });
+        let corner = [0, 1, 2].map(|k| if i >> k & 1 == 1 { hi[k] } else { lo[k] });
         let p = point(world, corner);
         for k in 0..3 {
             min[k] = min[k].min(p[k]);
@@ -973,7 +1104,8 @@ pub fn camera(model: &Model, world: &Mat4, aspect: f32) -> Camera {
 /// `createDisplayProjection`: where a point of the viewport (0…1 each way, y down) lands on the
 /// device's screen, as the screen's own 0…1 coordinates. `captured` keeps a touch going past the
 /// display's edge by meeting its plane instead.
-pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layout, x: f32, y: f32, captured: bool) -> Option<(f32, f32)> {
+/// The ray through a point of the viewport (0…1 each way, y down), in the model's space.
+fn ray(world: &Mat4, camera: &Camera, x: f32, y: f32) -> ([f32; 3], [f32; 3]) {
     let ndc = [x * 2. - 1., 1. - y * 2.];
     let far = {
         let p = [0, 1, 2, 3].map(|r| camera.inverse[r] * ndc[0] + camera.inverse[4 + r] * ndc[1] + camera.inverse[8 + r] * 1. + camera.inverse[12 + r]);
@@ -982,8 +1114,11 @@ pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layou
     let eye = camera.eye;
     // `world` is a rotation, so its transpose takes the ray into the model's space.
     let back = |v: [f32; 3]| [0, 1, 2].map(|c| world[c * 4] * v[0] + world[c * 4 + 1] * v[1] + world[c * 4 + 2] * v[2]);
-    let origin = back(eye);
-    let dir = back([far[0] - eye[0], far[1] - eye[1], far[2] - eye[2]]);
+    (back(eye), back([far[0] - eye[0], far[1] - eye[1], far[2] - eye[2]]))
+}
+
+pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layout, x: f32, y: f32, captured: bool) -> Option<(f32, f32)> {
+    let (origin, dir) = ray(world, camera, x, y);
     if !model.faces.is_empty() {
         return face_point(&model.faces, origin, dir, layout, captured);
     }
@@ -1008,6 +1143,97 @@ pub fn screen_point(model: &Model, world: &Mat4, camera: &Camera, layout: &Layou
         r if r == PI => (1. - u, v),
         _ => (u, 1. - v),
     })
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+/// A touch on one triangle of a Duo display, which a drag past its edge keeps extending.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DuoTouch {
+    pub panel: u8,
+    tri: [[f32; 3]; 3],
+    uv: [[f32; 2]; 3],
+}
+
+/// The barycentric weights of `p` on the plane of `tri`, inside it or not.
+fn barycentric(tri: &[[f32; 3]; 3], p: [f32; 3]) -> Option<[f32; 3]> {
+    let (v0, v1, v2) = (sub(tri[1], tri[0]), sub(tri[2], tri[0]), sub(p, tri[0]));
+    let (d00, d01, d11, d20, d21) = (dot(v0, v0), dot(v0, v1), dot(v1, v1), dot(v2, v0), dot(v2, v1));
+    let denom = d00 * d11 - d01 * d01;
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let v = (d11 * d20 - d01 * d21) / denom;
+    let w = (d00 * d21 - d01 * d20) / denom;
+    Some([1. - v - w, v, w])
+}
+
+fn raw((tri_uv, w): ([[f32; 2]; 3], [f32; 3])) -> (f32, f32) {
+    let uv = [0, 1].map(|k| tri_uv[0][k] * w[0] + tri_uv[1][k] * w[1] + tri_uv[2][k] * w[2]);
+    // The panels' UVs already sit where their frames do, so the raw point reads straight off.
+    (uv[0], 1. - uv[1])
+}
+
+/// Web `createDuoScene`'s `screenPoint`: where the ray first meets the model, if that's the shown
+/// display `panel`, as the display's raw 0…1 point. `extend` keeps a held touch going across its
+/// triangle's plane.
+#[allow(clippy::too_many_arguments)]
+pub fn duo_point(model: &Model, parts: &[Mat4; 3], world: &Mat4, camera: &Camera, (x, y): (f32, f32), panel: u8, held: &mut Option<DuoTouch>, extend: bool) -> Option<(f32, f32)> {
+    let (origin, dir) = ray(world, camera, x, y);
+    if extend && let Some(touch) = held.filter(|t| t.panel == panel) {
+        let normal = cross(sub(touch.tri[1], touch.tri[0]), sub(touch.tri[2], touch.tri[0]));
+        let denom = dot(normal, dir);
+        if denom.abs() < 1e-12 {
+            return None;
+        }
+        let t = dot(normal, sub(touch.tri[0], origin)) / denom;
+        let p = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+        return barycentric(&touch.tri, p).map(|w| raw((touch.uv, w)));
+    }
+    let mut best: Option<(f32, usize, [usize; 3], [[f32; 3]; 3])> = None;
+    for (index, mesh) in model.meshes.iter().enumerate() {
+        let part = &parts[usize::from(mesh.part.min(2))];
+        for tri in mesh.indices.chunks_exact(3) {
+            let i = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            let p = i.map(|i| point(part, mesh.positions[i]));
+            // Möller–Trumbore, from either side.
+            let (e1, e2) = (sub(p[1], p[0]), sub(p[2], p[0]));
+            let h = cross(dir, e2);
+            let a = dot(e1, h);
+            if a.abs() < 1e-12 {
+                continue;
+            }
+            let s = sub(origin, p[0]);
+            let u = dot(s, h) / a;
+            let q = cross(s, e1);
+            let v = dot(dir, q) / a;
+            if !(0. ..=1.).contains(&u) || v < 0. || u + v > 1. {
+                continue;
+            }
+            let t = dot(e2, q) / a;
+            if t > 0. && best.is_none_or(|(b, ..)| t < b) {
+                best = Some((t, index, i, p));
+            }
+        }
+    }
+    let Some((t, index, i, tri)) = best else {
+        *held = None;
+        return None;
+    };
+    let mesh = &model.meshes[index];
+    if mesh.panel == 0 || mesh.panel != panel || mesh.uvs.len() != mesh.positions.len() {
+        return None;
+    }
+    let p = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+    let touch = DuoTouch { panel, tri, uv: i.map(|i| mesh.uvs[i]) };
+    *held = Some(touch);
+    barycentric(&tri, p).map(|w| raw((touch.uv, w)))
 }
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -1137,5 +1363,27 @@ mod tests {
         let (x, y) = screen_point(&closed, &world, &cam, &inner, 0.5, 0.5, false).unwrap();
         assert!((x - 0.5).abs() < 0.1 && (y - 0.5).abs() < 0.05, "{x} {y}");
         assert!(screen_point(&closed, &world, &cam, &inner, 0.4, 0.5, false).unwrap().0 < x, "the cover reads left to right");
+    }
+
+    #[test]
+    fn the_duo_folds_on_its_hinge_and_touches_its_shown_display() {
+        let duo = load("iphone-duo").unwrap().unwrap_or_else(|e| panic!("{e}"));
+        assert!(duo.hinge.is_some());
+        let panels: Vec<&Mesh> = duo.meshes.iter().filter(|m| m.panel != 0).collect();
+        assert!(panels.len() >= 3 && panels.iter().all(|m| m.screen && m.uvs.len() == m.positions.len() && m.uvs.iter().flatten().all(|c| (-1e-4..=1.0001).contains(c))));
+        let open = duo.parts(180.);
+        assert_eq!(open, [IDENTITY; 3], "open flat, the leaves rest where the model has them");
+        let (lo, hi) = duo.posed_bounds(&open);
+        assert!((hi[1] - lo[1] - SCREEN_HEIGHT).abs() < 0.5, "scaled to the other devices' size: {lo:?} {hi:?}");
+        let (clo, chi) = duo.posed_bounds(&duo.parts(0.));
+        assert!(chi[2] - clo[2] > (hi[2] - lo[2]) * 3. && chi[0] - clo[0] < (hi[0] - lo[0]) * 0.3, "closed, the leaves fold together toward the camera");
+        let world = super::world(super::super::motion::IDENTITY, 0.);
+        let cam = camera_in((lo, hi), &world, 1.4);
+        let mut held = None;
+        let centre = duo_point(&duo, &open, &world, &cam, (0.5, 0.5), 3, &mut held, false).unwrap();
+        assert!((centre.0 - 0.5).abs() < 0.05 && (centre.1 - 0.5).abs() < 0.05, "{centre:?}");
+        assert!(held.is_some_and(|t| t.panel == 3));
+        assert_eq!(duo_point(&duo, &open, &world, &cam, (0.5, 0.5), 1, &mut None, false), None, "the cover is off, so the inner display takes no touch");
+        assert!(duo_point(&duo, &open, &world, &cam, (0.001, 0.5), 3, &mut held, true).is_some(), "a held touch keeps going past the edge");
     }
 }

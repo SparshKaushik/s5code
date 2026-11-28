@@ -14,13 +14,15 @@ pub const MARK: u32 = 0x3D01;
 const SAMPLES: u32 = 4;
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// position, normal, uv, colour.
-const VERTEX_FLOATS: usize = 12;
+/// position, normal, uv, colour, hinge part.
+const VERTEX_FLOATS: usize = 13;
+/// view_proj, world, eye, screen, source, and the three parts' transforms.
+const FRAME_FLOATS: usize = 16 + 16 + 4 + 4 + 4 + 48;
 
 /// `phoneViewer.ts`'s lights: an ambient of 2.4 and three directional lights in sRGB colours,
 /// shaded as three.js's `MeshStandardMaterial` without an environment map.
 pub const MESH_WGSL: &str = "
-struct Frame { view_proj: mat4x4f, world: mat4x4f, eye: vec4f, screen: vec4f }
+struct Frame { view_proj: mat4x4f, world: mat4x4f, eye: vec4f, screen: vec4f, source: vec4f, parts: array<mat4x4f, 3> }
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var screen_tex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
@@ -28,7 +30,7 @@ struct Mat { base: vec4f, params: vec4f }
 @group(1) @binding(0) var<uniform> mat: Mat;
 @group(1) @binding(1) var base_tex: texture_2d<f32>;
 
-struct VIn { @location(0) pos: vec3f, @location(1) normal: vec3f, @location(2) uv: vec2f, @location(3) color: vec4f }
+struct VIn { @location(0) pos: vec3f, @location(1) normal: vec3f, @location(2) uv: vec2f, @location(3) color: vec4f, @location(4) part: f32 }
 struct VOut {
     @builtin(position) clip: vec4f,
     @location(0) world: vec3f,
@@ -39,11 +41,13 @@ struct VOut {
 }
 
 @vertex fn vs(v: VIn) -> VOut {
-    let w = frame.world * vec4f(v.pos, 1.0);
+    // A hinge leaf's transform, for a model that folds; the identity otherwise.
+    let m = frame.world * frame.parts[min(u32(v.part + 0.5), 2u)];
+    let w = m * vec4f(v.pos, 1.0);
     var o: VOut;
     o.clip = frame.view_proj * w;
     o.world = w.xyz;
-    o.normal = (frame.world * vec4f(v.normal, 0.0)).xyz;
+    o.normal = (m * vec4f(v.normal, 0.0)).xyz;
     o.uv = v.uv;
     o.color = v.color;
     o.local = v.pos.xy;
@@ -84,7 +88,11 @@ fn light(dir: vec3f, color: vec3f, n: vec3f, v: vec3f, diffuse: vec3f, f0: vec3f
         let v = (o.local.y + s.y * 0.5) / s.y;
         var uv = vec2f(u, v);
         if (mat.params.w > 0.5) {
-            // A screen at its mesh's own UVs: the foldable's bent inner display and its cover.
+            // A screen at its mesh's own UVs: a foldable's bent inner display and its cover, and
+            // the iPhone Duo's displays, the one not on showing web's dark fill.
+            if (mat.base.x > 0.5 && abs(mat.base.x - frame.source.x) > 0.5) {
+                return vec4f(0.0024, 0.0030, 0.0052, 1.0);
+            }
             uv = o.uv;
         } else if (s.z > 0.5) {
             if (s.w > 0.0) { uv = vec2f(1.0 - v, u); } else { uv = vec2f(v, 1.0 - u); }
@@ -146,6 +154,11 @@ pub struct Scene {
     pub world: [f32; 16],
     pub layout: model::Layout,
     pub pixels: rune::Pixels,
+    /// The hinge leaves' transforms and the bounds they pose the model in.
+    pub parts: [[f32; 16]; 3],
+    pub bounds: ([f32; 3], [f32; 3]),
+    /// The iPhone Duo display that's on (1 the cover, 3 the inner), else 0.
+    pub panel: u8,
 }
 
 struct Uploaded {
@@ -253,7 +266,7 @@ impl Gpu {
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("device-3d composite"), entries: &[uniform_entry(0), texture_entry(1), sampler_entry(2)] });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("device-3d mesh"), source: wgpu::ShaderSource::Wgsl(MESH_WGSL.into()) });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&frame_layout), Some(&material_layout)], immediate_size: 0 });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4, 4 => Float32];
         let pipeline = |blend: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("device-3d mesh"),
@@ -298,7 +311,7 @@ impl Gpu {
             composite_module,
             composites: Vec::new(),
             sampler,
-            frame: buffer(device, 160, wgpu::BufferUsages::UNIFORM),
+            frame: buffer(device, (FRAME_FLOATS * 4) as u64, wgpu::BufferUsages::UNIFORM),
             composite_uniform: buffer(device, 80, wgpu::BufferUsages::UNIFORM),
             white,
             screen: None,
@@ -320,7 +333,9 @@ impl Gpu {
                 let uniform = buffer(device, 32, wgpu::BufferUsages::UNIFORM);
                 let kind = if m.screen { 2.0 } else if m.unlit { 1.0 } else { 0.0 };
                 let view = m.texture.and_then(|t| textures.get(t));
-                queue.write_buffer(&uniform, 0, &floats(&[m.base[0], m.base[1], m.base[2], m.base[3], m.metallic, m.roughness, kind, if view.is_some() || m.mapped { 1.0 } else { 0.0 }]));
+                // A screen's colour is its frame; its base says which Duo display it is, if one.
+                let base = if m.screen { [f32::from(m.panel), 0., 0., 0.] } else { m.base };
+                queue.write_buffer(&uniform, 0, &floats(&[base[0], base[1], base[2], base[3], m.metallic, m.roughness, kind, if view.is_some() || m.mapped { 1.0 } else { 0.0 }]));
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("device-3d material"),
                     layout: &self.material_layout,
@@ -343,6 +358,7 @@ impl Gpu {
                     data.extend_from_slice(m.normals.get(i).unwrap_or(&[0., 0., 1.]));
                     data.extend_from_slice(m.uvs.get(i).unwrap_or(&[0., 0.]));
                     data.extend_from_slice(m.colors.get(i).unwrap_or(&[1.; 4]));
+                    data.push(f32::from(m.part));
                 }
                 let vertices = buffer(device, (data.len() * 4) as u64, wgpu::BufferUsages::VERTEX);
                 queue.write_buffer(&vertices, 0, &floats(&data));
@@ -405,13 +421,17 @@ impl Gpu {
         self.upload(device, queue, &scene.model);
         self.screen(device, queue, &scene.pixels);
         let Some((_, _, _, screen)) = &self.screen else { return false };
-        let camera = model::camera(&scene.model, &scene.world, size.0 as f32 / size.1 as f32);
-        let mut data = Vec::with_capacity(40);
+        let camera = model::camera_in(scene.bounds, &scene.world, size.0 as f32 / size.1 as f32);
+        let mut data = Vec::with_capacity(FRAME_FLOATS);
         data.extend_from_slice(&camera.view_proj);
         data.extend_from_slice(&scene.world);
         data.extend_from_slice(&[camera.eye[0], camera.eye[1], camera.eye[2], 1.]);
         let [w, h, _] = scene.model.screen;
         data.extend_from_slice(&[w, h, if scene.layout.raw_landscape { 1. } else { 0. }, scene.layout.rotation]);
+        data.extend_from_slice(&[f32::from(scene.panel), 0., 0., 0.]);
+        for part in &scene.parts {
+            data.extend_from_slice(part);
+        }
         queue.write_buffer(&self.frame, 0, &floats(&data));
         let frame = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("device-3d frame"),

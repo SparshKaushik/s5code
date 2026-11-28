@@ -2,7 +2,7 @@
 //! spring, coasts and settles after a flick, and springs to the nearest rest view when let go.
 //! Times are milliseconds, as web's `performance.now()`.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
 /// x, y, z, w, as three.js's `Quaternion`.
 pub type Quat = [f32; 4];
@@ -20,8 +20,6 @@ const FLICK_THRESHOLD: f32 = 4.5;
 const FLICK_LIMIT: f32 = 22.;
 const SPIN_DECAY: f32 = 1.1;
 const SETTLE_FREQUENCY: f32 = 2.;
-/// `nearestDeviceView`'s `yawLimit` for a phone: it rests within this yaw, upright.
-const YAW_LIMIT: f32 = PI / 3.;
 
 // Quaternion and vector arithmetic, as three.js does it.
 
@@ -127,6 +125,11 @@ pub fn rotation_vector(q: Quat) -> Vec3 {
     if l < 1e-8 { [0.; 3] } else { scale([q[0], q[1], q[2]], 2. * l.atan2(q[3]) / l) }
 }
 
+/// three.js `Euler(x, y, z, "YXZ")` as a rotation.
+pub fn euler_yxz(x: f32, y: f32, z: f32) -> Quat {
+    mul(mul(axis_angle([0., 1., 0.], y), axis_angle([1., 0., 0.], x)), axis_angle([0., 0., 1.], z))
+}
+
 pub fn from_vector(v: Vec3) -> Quat {
     let angle = length(v);
     if angle < 1e-8 { IDENTITY } else { axis_angle(scale(v, 1. / angle), angle) }
@@ -173,10 +176,6 @@ pub fn nearest_view(rotation: Quat, views: &[(Quat, f32)]) -> Option<Quat> {
     closest
 }
 
-/// A phone's one rest view: upright, facing the camera, turned at most a third of a half turn.
-pub fn phone_view(rotation: Quat) -> Quat {
-    nearest_view(rotation, &[(IDENTITY, YAW_LIMIT)]).unwrap_or(IDENTITY)
-}
 
 struct Spring {
     at: f64,
@@ -399,6 +398,19 @@ impl Motion {
         !self.held && (self.spring.is_some() || self.spin.is_some() || (self.drag.is_some() && (angle_to(self.rotation, self.target) > 0.0005 || length(self.velocity) > 0.005)))
     }
 
+    /// Turns to `next` on the release spring, or at once.
+    pub fn set_pose(&mut self, next: Quat, now: f64, immediate: bool) {
+        self.advance(now);
+        self.drag = None;
+        self.spin = None;
+        self.begin_spring(next, now);
+        if immediate {
+            self.rotation = self.target;
+            self.velocity = [0.; 3];
+            self.spring = None;
+        }
+    }
+
     /// Springs to `next`, ending any gesture.
     pub fn reset(&mut self, next: Quat, now: f64) {
         self.advance(now);
@@ -411,6 +423,13 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const YAW_LIMIT: f32 = std::f32::consts::PI / 3.;
+
+    /// A phone's one rest view, as the device panel chooses it.
+    fn phone_view(rotation: Quat) -> Quat {
+        nearest_view(rotation, &[(IDENTITY, YAW_LIMIT)]).unwrap_or(IDENTITY)
+    }
 
     fn yaw(q: Quat) -> f32 {
         2. * q[1].atan2(q[3])

@@ -3,6 +3,7 @@
 //! serve-sim's input socket. Every other stream is H.264, which this app can't decode.
 
 pub(crate) mod h264;
+mod duo;
 mod input;
 mod inspect;
 mod model;
@@ -113,6 +114,8 @@ struct Stream {
     /// Web `DeviceStreamView`'s "flat" presentation, which the 3D view replaces by default.
     flat: bool,
     motion: motion::Motion,
+    /// An iPhone Duo's hinge and presentation in the 3D view.
+    duo: duo::DuoView,
     /// The hinge angle the 3D view shows, eased to each one the device reports.
     fold_turn: model::FoldTurn,
     fold_shown: Option<f32>,
@@ -347,6 +350,7 @@ fn sync_stream(app: &mut App, tx: &mut Tx) {
         stand_vertical: None,
         flat: false,
         motion: motion::Motion::default(),
+        duo: duo::DuoView::default(),
         fold_turn: model::FoldTurn::default(),
         fold_shown: None,
         keyboard: false,
@@ -410,6 +414,7 @@ fn fixture_stream(key: String, transport: Transport, android: bool, kind: String
         stand_vertical: None,
         flat: false,
         motion: motion::Motion::default(),
+        duo: duo::DuoView::default(),
         fold_turn: model::FoldTurn::default(),
         fold_shown: None,
         keyboard: false,
@@ -689,9 +694,8 @@ fn screen_state(stream: &Stream) -> Option<input::Screen> {
 
 /// Web's `phoneUnavailableReason`, for what this app can't draw in 3D yet too.
 fn unavailable_3d(app: &App, stream: &Stream) -> Option<&'static str> {
-    if model::model_id(stream.android, device_name(app, stream)) == Some("iphone-duo") {
-        let hinged = screen_state(stream).is_some_and(|s| s.supports_hinge);
-        return Some(if hinged { "iPhone Duo 3D isn't in this app yet" } else { "iPhone Duo 3D requires Device Hub 0.11.0 or newer" });
+    if model::model_id(stream.android, device_name(app, stream)) == Some("iphone-duo") && !screen_state(stream).is_some_and(|s| s.supports_hinge) {
+        return Some("iPhone Duo 3D requires Device Hub 0.11.0 or newer");
     }
     stream.ax.is_some().then_some("Turn off accessibility frames to use 3D")
 }
@@ -764,9 +768,11 @@ fn scene_3d(app: &App) -> Option<viewport::Scene> {
     let (_, model) = stream.phone.as_ref()?;
     let (w, h) = stream.pixels.size();
     let layout = model::layout(screen_state(stream).as_ref().map(|s| s.orientation.as_str()), w, h);
-    // A foldable turns with its hinge, not its orientation.
-    let turn = if model.faces.is_empty() { layout.rotation } else { 0. };
-    Some(viewport::Scene { model: model.clone(), world: model::world(stream.motion.rotation, turn), layout, pixels: stream.pixels.clone() })
+    // A foldable turns with its hinge, not its orientation; the Duo's pose presents its rotation.
+    let turn = if model.faces.is_empty() && model.hinge.is_none() { layout.rotation } else { 0. };
+    let parts = model.parts(stream.duo.angle);
+    let panel = if model.hinge.is_some() { screen_state(stream).and_then(|s| s.screen_id).map_or(0, |id| id as u8) } else { 0 };
+    Some(viewport::Scene { model: model.clone(), world: model::world(stream.motion.rotation, turn), layout, pixels: stream.pixels.clone(), parts, bounds: model.posed_bounds(&parts), panel })
 }
 
 /// Milliseconds on one clock, as web's `performance.now()` for the 3D view's motion.
@@ -780,33 +786,46 @@ fn now_ms() -> f64 {
 /// when let go.
 fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
     let Some(scene) = scene_3d(s) else { return };
-    let camera = model::camera(&scene.model, &scene.world, size.0 / size.1);
+    let camera = model::camera_in(scene.bounds, &scene.world, size.0 / size.1);
     let (x, y) = (d.x / size.0, d.y / size.1);
     let Some(stream) = s.ui.panel.device.stream.as_mut() else { return };
     let ended = d.cancelled() || matches!(d.phase, Phase::Up);
     let now = now_ms();
+    let duo = scene.model.hinge.is_some();
+    let choose = chooser(stream);
+    // The Duo's touches land per display, at its raw point; a moving hinge takes none.
+    let point = |stream: &mut Stream, captured: bool| {
+        if !duo {
+            return model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, captured);
+        }
+        if stream.duo.moving() {
+            return None;
+        }
+        model::duo_point(&scene.model, &scene.parts, &scene.world, &camera, (x, y), scene.panel, &mut stream.duo.touch, captured)
+    };
+    let send = |stream: &Stream, phase: &str, u: f64, v: f64| {
+        if let Some(input) = &stream.input {
+            if duo { input.touch_raw(phase, u, v) } else { input.touch(phase, u, v) }
+        }
+    };
     let grab = match (stream.grab, matches!(d.phase, Phase::Down)) {
         (None, true) => {
             stream.wheel_until = None;
-            match model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, false) {
+            match point(stream, false) {
                 Some((u, v)) => {
-                    stream.motion.hold(true, now, &motion::phone_view);
-                    if let Some(input) = &stream.input {
-                        input.touch("begin", f64::from(u), f64::from(v));
-                    }
+                    stream.motion.hold(true, now, &choose);
+                    send(stream, "begin", f64::from(u), f64::from(v));
                     Some(Grab::Touch(f64::from(u), f64::from(v)))
                 }
                 None => {
-                    stream.motion.drag_active(true, now, &motion::phone_view);
+                    stream.motion.drag_active(true, now, &choose);
                     Some(Grab::Orbit(d.x, d.y))
                 }
             }
         }
         (Some(Grab::Touch(u, v)), _) => {
-            let (u, v) = model::screen_point(&scene.model, &scene.world, &camera, &scene.layout, x, y, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
-            if let Some(input) = &stream.input {
-                input.touch(if ended { "end" } else { "move" }, u, v);
-            }
+            let (u, v) = point(stream, true).map_or((u, v), |(u, v)| (f64::from(u), f64::from(v)));
+            send(stream, if ended { "end" } else { "move" }, u, v);
             Some(Grab::Touch(u, v))
         }
         (Some(Grab::Orbit(px, py)), _) => {
@@ -817,10 +836,11 @@ fn grab_3d(s: &mut App, d: &rune::Drag, size: (f32, f32), tx: &mut Tx) {
     };
     if ended {
         match grab {
-            Some(Grab::Orbit(..)) => stream.motion.drag_active(false, now, &motion::phone_view),
-            Some(Grab::Touch(..)) => stream.motion.hold(false, now, &motion::phone_view),
+            Some(Grab::Orbit(..)) => stream.motion.drag_active(false, now, &choose),
+            Some(Grab::Touch(..)) => stream.motion.hold(false, now, &choose),
             None => {}
         }
+        stream.duo.touch = None;
     }
     stream.grab = if ended { None } else { grab };
     tx.wake_after(Duration::ZERO);
@@ -836,7 +856,8 @@ fn wheel_3d(s: &mut App, e: rune::WheelEvent, size: (f32, f32), tx: &mut Tx) -> 
     }
     if e.momentum || matches!(e.phase, rune::GesturePhase::Ended) {
         if stream.wheel_until.take().is_some() {
-            stream.motion.drag_active(false, now_ms(), &motion::phone_view);
+            let choose = chooser(stream);
+            stream.motion.drag_active(false, now_ms(), &choose);
             tx.wake_after(Duration::ZERO);
         }
         return true;
@@ -858,16 +879,32 @@ fn step_3d(stream: &mut Stream, tx: &mut Tx) -> bool {
     match stream.wheel_until {
         Some(until) if now >= until => {
             stream.wheel_until = None;
-            stream.motion.drag_active(false, now_ms(), &motion::phone_view);
+            let choose = chooser(stream);
+            stream.motion.drag_active(false, now_ms(), &choose);
         }
         Some(until) => tx.wake_after(until - now),
         None => {}
     }
-    let moved = stream.motion.advance(now_ms());
-    if stream.motion.needs_frame() || stream.fold_turn.moving() {
+    let mut moved = false;
+    if let Some(screen) = screen_state(stream).filter(|s| s.supports_hinge) {
+        if let Some((pose, at_once)) = stream.duo.screen(&screen) {
+            stream.motion.set_pose(pose, now_ms(), at_once);
+        }
+        moved |= stream.duo.ease(now_ms());
+    }
+    moved |= stream.motion.advance(now_ms());
+    if stream.motion.needs_frame() || stream.fold_turn.moving() || stream.duo.moving() {
         tx.wake_after(Duration::ZERO);
     }
     moved
+}
+
+/// The views a turned device rests in: the Duo's presentation, else a phone upright and facing
+/// the camera, either turned at most a third of a half turn.
+fn chooser(stream: &Stream) -> impl Fn(motion::Quat) -> motion::Quat + 'static {
+    let duo = stream.phone.as_ref().is_some_and(|(_, m)| m.hinge.is_some());
+    let views = [(if duo { stream.duo.presentation } else { motion::IDENTITY }, std::f32::consts::PI / 3.)];
+    move |q| motion::nearest_view(q, &views).unwrap_or(q)
 }
 
 /// The device web's `deviceKeyboard` attaches the Magic Keyboard to.
@@ -892,11 +929,13 @@ fn toggle_keyboard(app: &mut App) {
 /// to portrait (landscape right with the Magic Keyboard).
 fn restore_3d(app: &mut App) {
     let Some(stream) = app.ui.panel.device.stream.as_mut() else { return };
-    stream.motion.reset(motion::IDENTITY, now_ms());
+    let duo = stream.phone.as_ref().is_some_and(|(_, m)| m.hinge.is_some());
+    stream.motion.reset(if duo { stream.duo.presentation } else { motion::IDENTITY }, now_ms());
     stream.wheel_until = None;
     stream.grab = None;
     let rest = if stream.keyboard { "landscape_right" } else { "portrait" };
     if let Some(input) = &stream.input
+        && !duo
         && screen_state(stream).is_some_and(|s| s.orientation != rest)
     {
         input.orient(rest);
@@ -2078,13 +2117,19 @@ pub fn duo_fixture(app: &mut App) {
         width: 2868.,
         height: 1320.,
         orientation: "landscape_left".into(),
-        screen_id: Some(2),
+        screen_id: Some(3),
         supports_hinge: true,
         hinge_angle: Some(110.),
         hinge_pose: Some("laptop".into()),
     });
     drop(state);
     stream.input = Some(input);
+    if let Some(screen) = screen_state(stream)
+        && let Some((pose, _)) = stream.duo.screen(&screen)
+    {
+        stream.motion.set_pose(pose, now_ms(), true);
+    }
+    sync_phone(app);
 }
 
 #[cfg(test)]
