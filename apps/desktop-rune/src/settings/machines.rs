@@ -41,11 +41,11 @@ struct Grant {
 
 /// Web `ServerUpdateTarget` for Update all.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Target {
-    key: String,
-    label: String,
-    self_update: String,
-    target_version: String,
+pub(crate) struct Target {
+    pub(crate) key: String,
+    pub(crate) label: String,
+    pub(crate) self_update: String,
+    pub(crate) target_version: String,
 }
 
 const PREFERENCES: [(u8, &str); 4] = [(100, "Prefer"), (50, "Normal"), (25, "Less often"), (0, "Manual only")];
@@ -664,7 +664,7 @@ fn client_version(s: &App) -> Option<String> {
     env::source(s, env::LOCAL)?.state().config.as_ref()?["environment"]["serverVersion"].as_str().map(str::to_owned)
 }
 
-fn targets(s: &App) -> Vec<Target> {
+pub(crate) fn targets(s: &App) -> Vec<Target> {
     let Some(client) = client_version(s) else { return Vec::new() };
     s.ui.env
         .saved
@@ -707,7 +707,7 @@ pub(super) fn row_update(s: &App, key: &str) -> bool {
     targets(s).iter().any(|t| t.key == key)
 }
 
-pub(super) fn row_updating(s: &App, key: &str) -> bool {
+pub(crate) fn row_updating(s: &App, key: &str) -> bool {
     let machines = &s.ui.settings.connections.machines;
     machines.updating.iter().any(|(_, t)| t.key == key) || machines.committing.iter().any(|(_, t, _)| t.key == key)
 }
