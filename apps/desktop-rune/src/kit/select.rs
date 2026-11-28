@@ -34,6 +34,7 @@ pub struct Select {
     ghost: bool,
     invalid: bool,
     align_end: bool,
+    hide_indicator: bool,
     toggle: Option<Box<dyn FnOnce(El) -> El>>,
     choose: Option<Choose>,
     close: Option<Box<dyn FnOnce(Menu) -> Menu>>,
@@ -65,6 +66,7 @@ impl Select {
             ghost: false,
             invalid: false,
             align_end: false,
+            hide_indicator: false,
             toggle: None,
             choose: None,
             close: None,
@@ -145,6 +147,11 @@ impl Select {
     /// Web `SelectPopup align="end"`: a popup wider than its trigger grows leftwards.
     pub fn align_end(mut self) -> Self {
         self.align_end = true;
+        self
+    }
+    /// Web `SelectItem hideIndicator`: options without the picked one's check.
+    pub fn hide_indicator(mut self) -> Self {
+        self.hide_indicator = true;
         self
     }
     pub fn invalid(mut self, value: bool) -> Self {
@@ -282,6 +289,9 @@ impl Select {
             let mut item = MenuItem::new(name_of(&self.names, &option))
                 .option(self.current.as_ref() == Some(&option))
                 .disabled(self.disabled_options.contains(&option));
+            if self.hide_indicator {
+                item = item.hide_indicator();
+            }
             if let Some((_, glyph, description)) = self.details.iter().find(|(value, ..)| *value == option) {
                 item = item.icon(*glyph);
                 if !description.is_empty() {
