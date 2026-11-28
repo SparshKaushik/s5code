@@ -213,7 +213,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= pages::pr_detail::anchor_header(s, tx);
     changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
-    changed |= notify::poll(s, tx);
+    changed |= notify::poll(s);
     changed |= shell::slow_requests::poll(s, tx);
     changed |= shell::sidebar::everything::poll(s, tx);
     changed |= shell::toast::poll(s, tx);

@@ -136,39 +136,27 @@ fn sync_badge(s: &mut App) {
     }
 }
 
-thread_local! {
-    /// The main window, raised when a desktop notification is clicked (UI thread only).
-    static WINDOW: std::cell::OnceCell<rune::AppHandle<App>> = const { std::cell::OnceCell::new() };
-}
+/// The main app, available to native notification callbacks while its window is closed.
+static WINDOW: std::sync::Mutex<Option<rune::AppHandle<App>>> = std::sync::Mutex::new(None);
 
 pub fn set_window(handle: rune::AppHandle<App>) {
-    WINDOW.with(|w| {
-        let _ = w.set(handle);
-    });
+    if let Ok(mut window) = WINDOW.lock() {
+        *window = Some(handle);
+    }
 }
 
 /// Electron's `windows.reveal`: show, restore and focus the main window.
 pub fn reveal_window() {
-    WINDOW.with(|w| w.get().map(|h| h.open()));
-}
-
-/// The latest OS notification activated while the UI was asleep.
-static CLICKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn clicked(id: String, wake: Option<&rune::Waker>) {
-    if let Ok(mut pending) = CLICKED.lock() {
-        *pending = Some(id);
-    }
-    if let Some(wake) = wake {
-        wake();
+    if let Some(app) = WINDOW.lock().ok().and_then(|window| window.clone()) {
+        app.open();
     }
 }
 
-fn open_clicked(s: &mut App) -> bool {
-    let Some(id) = CLICKED.lock().ok().and_then(|mut c| c.take()) else { return false };
-    reveal_window();
-    open_target(s, &id);
-    true
+fn clicked(id: String) {
+    if let Some(app) = WINDOW.lock().ok().and_then(|window| window.clone()) {
+        app.activate(String::new());
+        app.update(move |s, _| open_target(s, &id));
+    }
 }
 
 fn open_target(s: &mut App, id: &str) {
@@ -200,16 +188,15 @@ pub fn sound(s: &mut App, kind: Kind) {
 /// A desktop notification for something other than a thread; a click hands `id` back here.
 pub fn desktop(s: &App, title: &str, body: &str, id: &str) {
     if has_desktop(mode(s)) {
-        os::notify(title, body, id, s.ui.panel.waker.clone());
+        os::notify(title, body, id);
     }
 }
 
-pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
-    if let Some(waker) = &s.ui.panel.waker {
-        os::listen(waker.clone());
+pub fn poll(s: &mut App) -> bool {
+    if s.ui.panel.waker.is_some() {
+        os::listen();
     }
-    let _ = tx;
-    open_clicked(s) | observe(s)
+    observe(s)
 }
 
 fn observe(s: &mut App) -> bool {
@@ -287,7 +274,7 @@ fn present(s: &mut App, key: &str, id: &str, description: String, status: Status
         return;
     }
     let id = logic::thread_key(key, id);
-    os::notify(title, &description, &id, s.ui.panel.waker.clone());
+    os::notify(title, &description, &id);
     let pending = &mut s.ui.notify.pending;
     if !pending.contains(&id) {
         pending.push(id);
@@ -353,12 +340,12 @@ fn toast(s: &mut App, id: String, title: &'static str, description: String, kind
 /// Linux uses `notify-send` and the launcher entry's count; Windows shows a PowerShell toast.
 mod os {
     /// macOS hands a clicked notification's thread back from any thread.
-    pub fn listen(wake: rune::Waker) {
+    pub fn listen() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            rune_mac::notify::on_click(move |click| {
+            rune_mac::notify::on_click(|click| {
                 if let Some(thread) = click.get("thread") {
-                    super::clicked(thread.to_owned(), Some(&wake));
+                    super::clicked(thread.to_owned());
                 }
             })
         });
@@ -440,7 +427,7 @@ mod os {
     /// On Linux, `notify-send --wait --print-id` prints the notification's id, then the action
     /// the user clicked; older libnotify without `--action` fails, and the plain notification
     /// shows instead.
-    pub fn notify(title: &str, body: &str, thread: &str, wake: Option<rune::Waker>) {
+    pub fn notify(title: &str, body: &str, thread: &str) {
         if cfg!(target_os = "linux") {
             use std::io::BufRead;
             let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
@@ -475,7 +462,7 @@ mod os {
                     return;
                 }
                 if clicked {
-                    super::clicked(thread, wake.as_ref());
+                    super::clicked(thread);
                 } else if !ok && id.is_none() {
                     let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", "--", &title, &body]).status();
                 }
