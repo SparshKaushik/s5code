@@ -116,22 +116,31 @@ impl App {
     }
 
     pub fn navigate(&mut self, route: Route) {
+        self.navigate_in(route, None);
+    }
+
+    pub(crate) fn navigate_in(&mut self, route: Route, environment: Option<&str>) {
+        let changed = route != self.route || environment.is_some_and(|key| key != self.ui.env.active);
         if route.is_modal() && !self.route.is_modal() {
             self.ui.settings.return_route = Some(self.route.clone());
         }
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
-        if route != self.route {
+        if changed {
             panel::flush_file(self);
         }
-        env::follow(self, &route);
+        if let Some(key) = environment {
+            env::switch(self, key);
+        } else {
+            env::follow(self, &route);
+        }
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
         {
             net.watch_thread(id);
         }
-        if matches!(route, Route::Home { .. } | Route::Thread(_)) && route != self.route {
+        if matches!(route, Route::Home { .. } | Route::Thread(_)) && changed {
             chat::composer::focus(self, &route);
         }
         self.route = route;
@@ -237,7 +246,8 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         return shell::sidebar::on_modifier(s, e, tx) | settings::snapshots::on_modifier(s, e) || pages::on_modifier(s, e);
     }
     panel::preview::note_focus(s, tx);
-    shell::quit::on_key(s, e, tx)
+    desktop::developer_tools_key(s, e, tx)
+        || shell::quit::on_key(s, e, tx)
         || search::on_key(s, e, tx)
         || settings::on_key(s, e, tx)
         || pages::on_key(s, e, tx)
@@ -257,13 +267,13 @@ pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t: T = settings::apply_theme(s, theme::theme(is_dark(s, cx)));
     let app = shell::view(s, cx, &t);
-    desktop::frame(s, cx, app)
+    desktop::frame(s, cx, app, &t)
 }
 
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::updates::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::SCENES, desktop::updates::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 

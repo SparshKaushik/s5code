@@ -30,6 +30,7 @@ pub mod updates;
 mod url_handler;
 
 use std::cell::Cell;
+use std::fmt::Write;
 
 use rune::{App as RuneApp, Cx, El, Key, KeyEvent, Tx, el};
 
@@ -62,6 +63,8 @@ pub const NO_UPDATE_FEED: &str = "Automatic updates are not available because no
 const ZOOM_STEP: f32 = 0.5;
 const ZOOM_LEVELS: (f32, f32) = (-7.5, 8.5);
 const SAVE_DEBOUNCE_MS: i64 = 500;
+#[cfg(target_os = "macos")]
+const DEVELOPER_TOOLS: &str = "Toggle Developer Tools";
 
 #[derive(Default)]
 pub struct Ui {
@@ -93,6 +96,8 @@ pub struct Ui {
     prefs_loaded: bool,
     /// The appearance last handed to the native chrome.
     appearance: Option<crate::Appearance>,
+    inspect_frame: Cell<bool>,
+    element_tree: Option<String>,
 }
 
 /// What a launch restores: the size in points, off macOS and Wayland the outer position in
@@ -214,7 +219,14 @@ fn restore_size(saved: Option<[f32; 2]>) -> (f32, f32) {
 pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
     rune::set_app_id(APP_ID);
     // Electron's `trafficLightPosition` under its 52 pt topbar; the titlebar band drags.
-    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 19.0)), drag_regions: false });
+    let handle = app.handle();
+    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 19.0)), drag_regions: false })
+        .on_frame_drawn(move |runtime| {
+            if runtime.state.ui.desktop.inspect_frame.replace(false) {
+                let tree = element_tree(&runtime.elements());
+                handle.update(move |s, _| s.ui.desktop.element_tree = Some(tree));
+            }
+        });
     if let Some([x, y]) = saved_position(&prefs()) {
         app.handle().set_position((x, y));
     }
@@ -256,11 +268,59 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
         .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
         .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
+        .menu_item(MenuItem::new(DEVELOPER_TOOLS, toggle_developer_tools).id("developer-tools").menu("View").key_equivalent(key("cmd+alt+i")).keys_first())
         .menu_item(MenuItem::separator().menu("View"))
         .menu_item(MenuItem::new("Actual Size", |s: &mut App, tx: &mut Tx| zoom(s, tx, None)).id("zoom-reset").menu("View").key_equivalent(key("cmd+0")).keys_first())
         .menu_item(MenuItem::new("Zoom In", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(ZOOM_STEP))).id("zoom-in").menu("View").key_equivalent(key("cmd+=")).keys_first())
         .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first())
 }
+
+fn toggle_developer_tools(s: &mut App, tx: &mut Tx) {
+    if !tx.key_repeat() && s.ui.desktop.element_tree.take().is_none() {
+        s.ui.desktop.inspect_frame.set(true);
+        tx.wake_after(std::time::Duration::ZERO);
+    }
+}
+
+fn element_tree(elements: &[rune::ElementInfo]) -> String {
+    let mut tree = String::new();
+    let mut depths = Vec::with_capacity(elements.len());
+    for element in elements {
+        let depth = element.parent.and_then(|parent| depths.get(parent).copied()).map_or(0, |depth: usize| depth + 1);
+        depths.push(depth);
+        let [x, y, w, h] = element.rect;
+        let focus = if element.focused { " (focused)" } else { "" };
+        let indent = 2 * depth;
+        let _ = writeln!(tree, "{:indent$}{}{focus} [{x:.0}, {y:.0}, {w:.0} × {h:.0}]", "", element.role);
+    }
+    tree
+}
+
+fn developer_tools(s: &App, t: &crate::theme::T) -> Vec<El> {
+    let Some(tree) = &s.ui.desktop.element_tree else { return Vec::new() };
+    let mut overlays = Vec::new();
+    let copy = crate::kit::Button::new("Copy element tree").variant("outline").size("sm").build(t)
+        .on_press_tx(|s: &mut App, tx: &mut Tx| {
+            if let Some(tree) = &s.ui.desktop.element_tree {
+                tx.copy(tree.clone());
+            }
+        });
+    crate::kit::Dialog::new("developer-tools", "Developer Tools")
+        .open(true)
+        .width(720.0)
+        .description("Rune element tree at the time of inspection.")
+        .child(rune::col().key("developer-element-tree").w_full().shrink().min_h(0.0).max_h(420.0).scroll_xy()
+            .child(rune::text(tree.clone()).font(crate::theme::mono(crate::theme::TEXT_SM)).color(t.c.foreground).selectable(true)))
+        .child(rune::row().w_full().justify_end().child(copy))
+        .on_close(|s: &mut App| s.ui.desktop.element_tree = None)
+        .build(t, &mut overlays);
+    overlays
+}
+
+pub const SCENES: &[(&str, fn(&mut App))] = &[("desktop-developer-tools", |s| {
+    crate::scene_clock(s);
+    s.ui.desktop.element_tree = Some("window [0, 0, 1100 × 780]\n  navigation [0, 0, 264 × 780]\n    tree [0, 52, 264 × 728]\n  main [264, 0, 836 × 780]\n    textbox (focused) [412, 640, 540 × 90]\n".into());
+})];
 
 /// Check for Updates (App and Help menus, About, the command palette): the outcome shows as
 /// Electron's menu check shows it.
@@ -381,6 +441,22 @@ fn accelerator(e: &KeyEvent, mac: bool) -> Option<Accelerator> {
     })
 }
 
+pub fn developer_tools_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if !developer_chord(e, cfg!(target_os = "macos")) {
+        return false;
+    }
+    toggle_developer_tools(s, tx);
+    true
+}
+
+fn developer_chord(e: &KeyEvent, mac: bool) -> bool {
+    matches!(e.key, Key::Command('i' | 'I')) && if mac {
+        e.mods.cmd && e.mods.alt && !e.mods.ctrl && !e.mods.shift
+    } else {
+        e.mods.ctrl && e.mods.shift && !e.mods.logo && !e.mods.alt
+    }
+}
+
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
 /// reload and zoom first).
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
@@ -495,7 +571,7 @@ fn save_bounds(ui: &mut Ui, now: i64, tx: &mut Tx) {
 
 /// The window's content: the app at its zoom. Zoom draws the app
 /// `k` times larger over a window `1/k` the size, as Chromium's zoom factor lays a page out.
-pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
+pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El, t: &crate::theme::T) -> El {
     let size = cx.layout_size(FRAME);
     s.ui.desktop.window.set(size);
     let k = s.ui.desktop.zoom_factor() * crate::settings::fonts::interface_scale(&s.client_settings.values);
@@ -504,7 +580,7 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
     {
         app = app.absolute(0.0, 0.0).size(w / k, h / k).scale(k).origin(0.0, 0.0);
     }
-    let frame = el().key(FRAME).w_full().h_full().child(app);
+    let frame = el().key(FRAME).w_full().h_full().child(app).children(developer_tools(s, t));
     if cfg!(target_os = "macos") {
         return frame;
     }
@@ -569,6 +645,12 @@ mod tests {
         ] {
             assert_eq!(accelerator(&e, mac), want, "FAILED: {:?} shift={} mac={mac}", e.key, e.mods.shift);
         }
+        let mut linux = KeyEvent::from(Key::Command('i'));
+        (linux.mods.cmd, linux.mods.ctrl, linux.mods.shift) = (true, true, true);
+        assert!(developer_chord(&linux, false));
+        assert!(!developer_chord(&linux, true));
+        assert!(developer_chord(&key(Key::Command('i'), false, true), true));
+        assert!(!developer_chord(&c('i', true), true));
     }
 
     #[test]
