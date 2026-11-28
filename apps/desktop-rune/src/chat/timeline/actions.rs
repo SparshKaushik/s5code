@@ -2,6 +2,7 @@
 //! timestamp, "Edit from here" and copy; a reply's copy, "Fork from this response" and timestamp.
 
 use super::rows;
+use crate::chat::composer::attachments;
 use crate::data::{Zone, iso_ms, s};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route, icons};
@@ -16,8 +17,6 @@ const TIMEOUT_MS: i64 = 120_000;
 /// waitForThreadShell's default before a fork reports that it never arrived.
 const FORK_SHELL_MS: i64 = 5_000;
 const FORK_LOST: &str = "The fork was created, but its thread data did not reach this client. Reconnect and try opening it from the sidebar.";
-/// PROVIDER_SEND_TURN_MAX_ATTACHMENTS.
-const MAX_ATTACHMENTS: usize = 100;
 const BOOTSTRAP_PROMPT: &str =
     "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
@@ -512,11 +511,11 @@ fn rewind(app: &mut App, thread: &str, restore_files: bool) {
 }
 
 fn start(app: &mut App, rewind: Rewind, restore_files: bool, resend: bool) -> Result<Pending, String> {
-    if rewind.attachments.iter().any(|a| s(a, "type") != "image" || image_ext(s(a, "mimeType")).is_none()) {
+    if rewind.attachments.iter().any(|a| restore_file(a).is_none()) {
         return Err("This message has an attachment that cannot be restored.".into());
     }
     let key = crate::chat::composer::draft_key(app, &Route::Thread(rewind.thread.clone()));
-    if crate::chat::composer::draft_attachment_count(app, &key) + rewind.attachments.len() > MAX_ATTACHMENTS {
+    if crate::chat::composer::draft_attachment_count(app, &key) + rewind.attachments.len() > attachments::MAX_ATTACHMENTS {
         return Err("Make room for this message's attachments in the composer before rewinding.".into());
     }
     let step = if rewind.attachments.is_empty() {
@@ -639,16 +638,39 @@ fn image_ext(mime: &str) -> Option<&'static str> {
     }
 }
 
-/// Downloads `(url, name, mime)` into temporary files, all or none, waking the app when done.
-fn download(jobs: Vec<(String, String, String)>, waker: Option<rune::Waker>) -> Receiver<Result<Vec<String>, String>> {
+fn restore_file(attachment: &Value) -> Option<(String, u64)> {
+    let name = s(attachment, "name").rsplit(['/', '\\']).next().filter(|n| !matches!(*n, "" | "." | "..")).unwrap_or("attachment");
+    match s(attachment, "type") {
+        "file" => Some((name.to_owned(), attachments::MAX_FILE_BYTES)),
+        "image" => {
+            let mime = s(attachment, "mimeType");
+            let ext = image_ext(mime)?;
+            let name = if attachments::mime_type(name).eq_ignore_ascii_case(mime) {
+                name.to_owned()
+            } else {
+                format!("{name}.{ext}")
+            };
+            Some((name, attachments::MAX_IMAGE_BYTES))
+        }
+        _ => None,
+    }
+}
+
+fn download(jobs: Vec<(String, Value)>, waker: Option<rune::Waker>) -> Receiver<Result<Vec<String>, String>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let dir = std::env::temp_dir().join(format!("s5-rewind-{}", s5_net::uuid()));
-        let result = jobs
+        let result: Result<Vec<_>, _> = jobs
             .iter()
             .enumerate()
-            .map(|(i, (url, name, mime))| fetch(&dir.join(i.to_string()), url, name, mime).ok_or_else(|| format!("Could not restore attachment: {name}")))
+            .map(|(i, (url, attachment))| {
+                let file = restore_file(attachment).and_then(|(name, limit)| fetch(&dir.join(i.to_string()), url, &name, limit));
+                file.ok_or_else(|| format!("Could not restore attachment: {}", s(attachment, "name")))
+            })
             .collect();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         let _ = tx.send(result);
         if let Some(wake) = waker {
             wake();
@@ -657,17 +679,16 @@ fn download(jobs: Vec<(String, String, String)>, waker: Option<rune::Waker>) -> 
     rx
 }
 
-fn fetch(dir: &std::path::Path, url: &str, name: &str, mime: &str) -> Option<String> {
+fn fetch(dir: &std::path::Path, url: &str, name: &str, limit: u64) -> Option<String> {
     use std::io::Read;
     let response = ureq::get(url).timeout(std::time::Duration::from_secs(30)).call().ok()?;
     let mut bytes = Vec::new();
-    response.into_reader().take(20 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
-    let base = std::path::Path::new(name).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("attachment");
-    let ext = image_ext(mime)?;
-    let known = base.rsplit_once('.').is_some_and(|(_, e)| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"));
-    let file = if known { base.to_owned() } else { format!("{base}.{ext}") };
+    response.into_reader().take(limit + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > limit {
+        return None;
+    }
     std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join(file);
+    let path = dir.join(name);
     std::fs::write(&path, bytes).ok()?;
     Some(path.display().to_string())
 }
@@ -694,7 +715,7 @@ fn step(app: &mut App, p: &mut Pending) -> Outcome {
             let jobs = urls
                 .iter()
                 .zip(&p.rewind.attachments)
-                .map(|((_, url), a)| (url.clone().unwrap_or_default(), s(a, "name").to_owned(), s(a, "mimeType").to_owned()))
+                .map(|((_, url), a)| (url.clone().unwrap_or_default(), a.clone()))
                 .collect();
             Step::Download(download(jobs, app.ui.panel.waker.clone()))
         }
@@ -1012,6 +1033,18 @@ pub fn proactive_changes(projection: &Value, run_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewind_restores_files_and_validates_image_types() {
+        let restore = |kind, name, mime| restore_file(&json!({"type": kind, "name": name, "mimeType": mime}));
+        assert_eq!(restore("file", "report.pdf", "application/pdf"), Some(("report.pdf".into(), attachments::MAX_FILE_BYTES)));
+        assert_eq!(restore("image", "image", "image/png"), Some(("image.png".into(), attachments::MAX_IMAGE_BYTES)));
+        assert_eq!(restore("image", "image.JPG", "image/jpeg"), Some(("image.JPG".into(), attachments::MAX_IMAGE_BYTES)));
+        assert_eq!(restore("image", "image.gif", "image/png"), Some(("image.gif.png".into(), attachments::MAX_IMAGE_BYTES)));
+        assert_eq!(restore("file", r"..\report.txt", "text/plain").unwrap().0, "report.txt");
+        assert_eq!(restore("image", "image.bmp", "image/bmp"), None);
+        assert_eq!(restore("unknown", "report.txt", "text/plain"), None);
+    }
 
     #[test]
     fn context_copies_round_trip_through_clipboard_html() {

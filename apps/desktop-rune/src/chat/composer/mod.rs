@@ -488,7 +488,7 @@ fn recall(s: &mut App, backward: bool) -> bool {
     let caret = draft(s).map(|d| d.edit.range());
     // Only from the caret's edge, so arrows still move through a multi-line prompt.
     let at_edge = caret.is_none_or(|(start, end)| {
-        if backward { !current[..start].contains('\n') } else { !current[end..].contains('\n') }
+        start == end && if backward { !current[..start].contains('\n') } else { !current[end..].contains('\n') }
     });
     if !at_edge {
         return false;

@@ -11,7 +11,7 @@ use super::Outgoing;
 /// Image types the server stores (PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES), by extension.
 const IMAGE_TYPES: [(&str, &str); 5] =
     [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
-pub(super) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// PROVIDER_SEND_TURN_MAX_FILE_BYTES.
 pub const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 255;
