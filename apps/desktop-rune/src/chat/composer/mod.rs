@@ -983,7 +983,7 @@ fn resume(s: &mut App) {
 }
 
 /// The send in flight for the open draft: its files uploading, or its thread launching.
-fn send_busy(s: &App) -> bool {
+pub(crate) fn send_busy(s: &App) -> bool {
     let key = active_key(s);
     let c = &s.ui.chat.composer;
     c.uploads.iter().any(|u| u.outgoing.key == key) || c.sends.iter().any(|(r, o)| o.key == key && c.launches.iter().any(|(l, _)| l == r))
@@ -1099,12 +1099,18 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         crate::shell::palette::toast(s, "Still compressing a pasted image.", Some("Send again once its thumbnail appears."));
         return;
     }
-    if rewinding(s)
-        || send_busy(s)
-        || send_block(s).is_some()
-        || disconnected(s)
-        || no_provider(s)
-        || project_required(s)
+    if rewinding(s) || send_busy(s) || send_block(s).is_some() {
+        return;
+    }
+    if disconnected(s) {
+        let description = "Reconnecting to the environment. Try again once it is connected.";
+        return crate::shell::palette::toast_warning(s, "Not connected: message not sent", Some(description), Vec::new(), false);
+    }
+    if project_required(s) {
+        let description = "This draft no longer points to an available project.";
+        return crate::shell::palette::toast_warning(s, "Choose a project first", Some(description), Vec::new(), false);
+    }
+    if no_provider(s)
         || attachment_block(s).is_some()
         || crate::add_to_machine::send_block(s).is_some()
     {
@@ -2324,11 +2330,15 @@ fn chip_suffix(s: &App, t: &T) -> Vec<El> {
         };
         out.extend(effort.or_else(switch));
     }
-    let fast = speed_descriptor(s).is_some_and(|d| {
-        if data::s(&d, "type") == "boolean" { option_value(s, &d) == true } else { option_label(s, &d).is_some_and(|l| l == "Fast" || l == "Ultrafast") }
+    let speed = speed_descriptor(s).and_then(|d| {
+        if data::s(&d, "type") == "boolean" {
+            (option_value(s, &d) == true).then_some("Fast mode on")
+        } else {
+            option_label(s, &d).and_then(|l| if l == "Ultrafast" { Some("Ultrafast mode on") } else if l == "Fast" { Some("Fast mode on") } else { None })
+        }
     });
-    if fast {
-        out.push(icon(&icons::ZAP, 14.0).color(t.c.muted_foreground));
+    if let Some(speed) = speed {
+        out.push(icon(&icons::ZAP, 14.0).color(t.c.muted_foreground).label(speed));
     }
     if let Some(window) = descriptors(s).iter().find(|d| data::s(d, "id") == "contextWindow").and_then(|d| option_label(s, d)) {
         out.push(text(window).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate().max_w(96.0));
@@ -3579,7 +3589,7 @@ mod tests {
         // Overlays follow the composer used last, while its side chat is open beside the route.
         assert_eq!(s.ui.chat.composer.owner.as_deref(), Some(side.as_str()));
         assert_eq!(side_owner(&s), None);
-        s.ui.chat.side.open.insert(main.clone(), side.clone());
+        crate::panel::open_side_chat(&mut s, &main, &side);
         assert_eq!(side_owner(&s), Some(side.as_str()));
         acting(&mut s, None, |_| ());
         assert_eq!(side_owner(&s), None, "using the chat's composer takes them back");
@@ -3820,6 +3830,20 @@ mod tests {
         assert_eq!(attachment_block(&s), Some("Attach the interrupted file again or remove it"));
         send(&mut s, false);
         assert_eq!(draft(&s).unwrap().edit.text, "see attached", "nothing was sent");
+    }
+
+    #[test]
+    fn a_send_while_disconnected_says_it_was_not_sent() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id));
+        set_text(&mut s, "hello");
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.conn = s5_net::Conn::Closed(String::new());
+        }
+        send(&mut s, false);
+        assert_eq!(crate::shell::palette::toast_title(&s), Some("Not connected: message not sent"));
+        assert_eq!(draft(&s).unwrap().edit.text, "hello", "the draft stays");
     }
 
     #[test]

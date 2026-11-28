@@ -423,7 +423,7 @@ fn finish(s: &mut App, pending: Pending, reply: Result<Value, Value>) {
                 e.composer.summary.clear();
             }
             super::pr_code::review_submitted(s);
-            crate::shell::palette::toast(s, &verdict_sent(verdict, word), None);
+            crate::shell::palette::toast_success(s, &verdict_sent(verdict, word), None);
         }
         Pending::Reaction { .. } => {}
     }

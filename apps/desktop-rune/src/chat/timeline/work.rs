@@ -533,7 +533,7 @@ pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
             _ => None,
         };
         let viewport = list.scroll(ScrollSpec { stick_bottom: live });
-        out = out.child(crate::kit::scroll_area(&format!("group-scroll-{id}"), viewport, t).max_h(cap.unwrap_or(288.0) + grown));
+        out = out.child(crate::kit::scroll_area(&format!("group-scroll-{id}"), viewport, t).max_h(cap.unwrap_or(288.0) + grown).role("region").label("Tool calls"));
     }
     out
 }

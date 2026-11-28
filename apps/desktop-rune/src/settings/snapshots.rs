@@ -698,7 +698,14 @@ pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
         return;
     }
     if s.ui.settings.snapshots.sound_open {
-        let _ = sound_select(s)
+        let mut select = sound_select(s);
+        // Web's play button beside each sound previews it without choosing it.
+        for &(id, value) in &SOUNDS[1..] {
+            let name = value.trim_end_matches(" (Default)");
+            let play = kit::Button::new(format!("Play {name}")).variant("ghost").size("icon-xs").icon(&icons::PLAY).on_press(move |_: &mut App| capture::play_sound(id)).build(t);
+            select = select.option_trailing(value, play);
+        }
+        let _ = select
             .align_end()
             .open(true)
             .on_choose(|s: &mut App, label: &str, _: &mut rune::Tx| choose_sound(s, label))

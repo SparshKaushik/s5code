@@ -208,6 +208,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-secret-request", secret_request),
     ("timeline-link-request", link_request),
     ("timeline-changed-expand-all", changed_expand_all),
+    ("timeline-changed-sticky", changed_sticky),
     ("timeline-provider-banner", provider_banner),
     ("timeline-usage-limit-banner", usage_limit_banner),
     ("timeline-child-approval", child_approval),
@@ -278,6 +279,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-run-in-terminal", run_in_terminal),
     ("timeline-video-fallback", video_fallback),
     ("timeline-video-playable", video_playable),
+    ("timeline-video-high-profile", video_high_profile),
     ("timeline-stopped-replies", stopped_replies),
     ("timeline-html-render", html_render),
     ("timeline-mcp-app", mcp_app),
@@ -340,7 +342,19 @@ fn inline_image(app: &mut App) {
     let src = format!("{}/docs/latency.png", root.trim_end_matches('/'));
     let text = format!("The latency jump ![Latency]({src}) lines up with the deploy at 14:02, so see [the deploy log](https://example.com/log) before rolling back.");
     push_visible(app, vec![serde_json::json!({"id": "scene-inline-image", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
-    super::media::scene_entry(app, "Latency", &src, false);
+    // A light chart with flat edges, so the frame's faint border shows against it.
+    if let Some(key) = super::media::scene_entry(app, "Latency", &src, false) {
+        let (w, h) = (640u32, 360u32);
+        let curve = |x: u32| -> u32 { if x < 400 { 250 } else { 110 } };
+        let rgba = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let line = x > 40 && x < 600 && y.abs_diff(curve(x)) < 3;
+                if line { [37, 99, 235, 255] } else { [244, 244, 245, 255] }
+            })
+            .collect();
+        super::media::scene_repaint(app, &key, w, h, rgba);
+    }
 }
 
 /// The same formulas typeset by KaTeX in real Chrome (`S5_CHROME`); the inline paragraph is
@@ -546,6 +560,14 @@ fn video_playable(app: &mut App) {
     super::media::scene_entry(app, "Demo recording", src, false);
 }
 
+fn video_high_profile(app: &mut App) {
+    showcase(app);
+    let (alt, src) = (super::media::SCENE_HIGH_PROFILE, "https://example.com/media/high-bframes-fragmented.mp4");
+    push_visible(app, vec![serde_json::json!({"id": "scene-video-reply", "type": "assistant_message", "status": "completed",
+        "text": format!("A High-profile clip with B-frames, fragmented:\n\n![{alt}]({src})"), "createdAt": "2026-01-01T00:00:01Z"})]);
+    super::media::scene_entry(app, alt, src, false);
+}
+
 /// A turn item of `run` that ended at `end` seconds past `at(0)`, with `fields` merged in.
 fn scene_item(run: &str, at: &dyn Fn(u32) -> String, id: &str, kind: &str, end: u32, fields: serde_json::Value) -> serde_json::Value {
     let mut item = serde_json::json!({"id": id, "type": kind, "runId": run, "status": "completed", "createdAt": at(end.saturating_sub(1)),
@@ -698,6 +720,17 @@ fn link_request(app: &mut App) {
         serde_json::json!({"position": 101, "item": pending.clone()}),
     ]);
     super::link::open(app, &pending);
+}
+/// A changed-files card taller than the timeline, scrolled to its end: its header holds at the top.
+fn changed_sticky(app: &mut App) {
+    showcase(app);
+    let reply = serde_json::json!({"id": "scene-sticky-reply", "type": "assistant_message", "runId": "scene-sticky-run",
+        "text": "Done. Every handler now returns typed errors.", "createdAt": "2026-01-01T00:00:00Z"});
+    push_items(app, "turnItems", vec![reply.clone()]);
+    push_items(app, "visibleTurnItems", vec![serde_json::json!({"position": 100, "item": reply})]);
+    let files: Vec<_> = (1..=36).map(|n| serde_json::json!({"path": format!("src/handlers/route_{n:02}.rs"), "additions": n * 3, "deletions": n % 5})).collect();
+    push_items(app, "checkpoints", vec![serde_json::json!({"runId": "scene-sticky-run", "appRunOrdinal": 99, "status": "ready", "files": files})]);
+    app.ui.chat.timeline.expanded.insert("changed-all:scene-sticky-run".into());
 }
 fn changed_expand_all(app: &mut App) {
     showcase(app);
@@ -1261,7 +1294,7 @@ fn side_pane(app: &mut App) {
             state.thread_views.insert("scene-side".into(), s5_net::ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
         }
     }
-    app.ui.chat.side.open.insert(parent, "scene-side".into());
+    crate::panel::open_side_chat(app, &parent, "scene-side");
 }
 /// The side chat's composer with a typed follow-up and a file queued, the caret in it.
 fn side_pane_composer(app: &mut App) {
@@ -1289,7 +1322,7 @@ fn side_pane_stop(app: &mut App) {
 /// A closed side chat opened again from its parent (openSideChatTab), the caret in its composer.
 fn side_reopen(app: &mut App) {
     side_pane(app);
-    app.ui.chat.side.open.clear();
+    crate::panel::close_side_chat(app, "scene-side", false);
     crate::chat::side::open_tab(app, "scene-side");
 }
 /// The details card's "Side chats": eight of the showcase's side chats in each state, one

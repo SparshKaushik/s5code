@@ -66,7 +66,7 @@ pub struct Ui {
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
-    responding: HashMap<String, u64>,
+    responding: HashMap<String, (u64, &'static str)>,
     response_errors: HashMap<String, String>,
     pub expanded: HashSet<String>,
     pub question_index: HashMap<String, usize>,
@@ -797,13 +797,24 @@ fn send(app: &mut App, request: &str, command: Value) {
         return;
     }
     if let Some(net) = app.src.net() {
+        let fallback = failure_fallback(&command);
         let rpc = net.dispatch(command);
         app.ui
             .chat
             .timeline
             .responding
-            .insert(request.to_owned(), rpc);
+            .insert(request.to_owned(), (rpc, fallback));
         app.ui.chat.timeline.response_errors.remove(request);
+    }
+}
+
+/// What a failed answer says when its error has no message (usePendingThreadRequests).
+fn failure_fallback(command: &Value) -> &'static str {
+    match (s(command, "type"), command.get("answers").is_some()) {
+        ("thread.user-input.dismiss", _) => "Failed to dismiss the question.",
+        ("runtime-request.respond", true) => "Failed to submit user input.",
+        ("runtime-request.respond", false) => "Failed to submit approval decision.",
+        _ => "An error occurred.",
     }
 }
 
@@ -821,13 +832,13 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
         return changed;
     };
     let ui = &mut app.ui.chat.timeline;
-    ui.responding.retain(|id, rpc| {
+    ui.responding.retain(|id, (rpc, fallback)| {
         let Some(reply) = net.take_reply(*rpc) else {
             return true;
         };
         changed = true;
         if let Err(error) = reply {
-            ui.response_errors.insert(id.clone(), error.to_string());
+            ui.response_errors.insert(id.clone(), crate::shell::palette::error_message(&error, fallback));
         }
         false
     });
@@ -835,13 +846,14 @@ pub fn poll(app: &mut App, tx: &mut rune::Tx) -> bool {
 }
 
 /// An approval's icon and name by request kind (TimelinePendingApprovalRow APPROVAL_PRESENTATION).
-fn approval_presentation(kind: &str) -> (&'static rune::Icon, &'static str) {
+/// Its glyph, its row's name and its detail's name (APPROVAL_PRESENTATION).
+fn approval_presentation(kind: &str) -> (&'static rune::Icon, &'static str, &'static str) {
     match kind {
-        "file-change" => (&icons::SQUARE_PEN, "File change approval"),
-        "file-read" => (&icons::EYE, "File read approval"),
-        "permission" => (&icons::WRENCH, "App permission approval"),
-        "mcp-elicitation" => (&icons::HAMMER, "App access approval"),
-        _ => (&icons::TERMINAL, "Command approval"),
+        "file-change" => (&icons::SQUARE_PEN, "File change approval", "File change"),
+        "file-read" => (&icons::EYE, "File read approval", "File to read"),
+        "permission" => (&icons::WRENCH, "App permission approval", "Permission request"),
+        "mcp-elicitation" => (&icons::HAMMER, "App access approval", "App access request"),
+        _ => (&icons::TERMINAL, "Command approval", "Command"),
     }
 }
 
@@ -863,7 +875,7 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
     let request_id = s(request, "id");
     let live = s(&request["responseCapability"], "type") == "live";
     let kind = [s(item, "requestKind"), s(request, "kind")].into_iter().find(|k| !k.is_empty()).unwrap_or("command");
-    let (glyph, name) = approval_presentation(kind);
+    let (glyph, name, detail_name) = approval_presentation(kind);
     let detail = ["prompt", "detail", "command", "input"]
         .iter()
         .find_map(|k| item[*k].as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned).or_else(|| (!item[*k].is_null() && !item[*k].is_string()).then(|| item[*k].to_string())))
@@ -874,7 +886,7 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
             .w_full()
             .gap(12.0)
             .child(icon(glyph, 16.0).color(t.c.icon_muted))
-            .child(text(detail).font(theme::MONO_XS.lh(20.0)).color(t.c.foreground).selectable(true).grow(1.0).shrink().min_w(0.0)),
+            .child(text(detail).font(theme::MONO_XS.lh(20.0)).color(t.c.foreground).selectable(true).label(detail_name).grow(1.0).shrink().min_w(0.0)),
     );
     let mut notes = col().pl(28.0).pb(4.0).gap(4.0);
     for key in ["appName", "reason"] {
@@ -1366,11 +1378,20 @@ mod tests {
         let mut app = crate::App::new();
         app.route = crate::Route::Thread("parent".into());
         assert!(!super::in_side_pane(&app, "side"));
-        app.ui.chat.side.open.insert("parent".into(), "side".into());
+        crate::panel::open_side_chat(&mut app, "parent", "side");
         assert!(super::in_side_pane(&app, "side"));
         assert!(!super::in_side_pane(&app, "parent"), "the chat keeps its own follow state");
         app.route = crate::Route::Thread("other".into());
         assert!(!super::in_side_pane(&app, "side"));
+    }
+
+    #[test]
+    fn a_failed_answer_names_what_failed() {
+        use super::{failure_fallback, requests::command};
+        use serde_json::json;
+        assert_eq!(failure_fallback(&command("t", "r", json!({"decision": "accept"}))), "Failed to submit approval decision.");
+        assert_eq!(failure_fallback(&command("t", "r", json!({"answers": {}}))), "Failed to submit user input.");
+        assert_eq!(failure_fallback(&json!({"type": "thread.user-input.dismiss"})), "Failed to dismiss the question.");
     }
 
     #[test]

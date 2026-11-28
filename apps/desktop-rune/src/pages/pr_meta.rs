@@ -44,6 +44,8 @@ pub enum Write {
     Stack(&'static str),
     /// A thread linked to this pull request.
     Link,
+    /// The panel's own thread unlinked from it.
+    Unlink,
 }
 
 /// MaintainerEditsChoice: the saved value, shown until the host's next reading.
@@ -115,7 +117,7 @@ fn submit(s: &mut App, method: &str, payload: Value, write: Write) {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) || s.ui.pages.detail.entry.is_none() {
+    if (!matches!(s.frame_route(), Route::PullRequests) && crate::panel::active_pull_request(s).is_none()) || s.ui.pages.detail.entry.is_none() {
         return false;
     }
     let mut changed = keep_choice(s) | want_linked(s) | want_refs(s);
@@ -175,7 +177,8 @@ pub fn linked_input(entry: &Value) -> Value {
 fn want_linked(s: &mut App) -> bool {
     let u = &s.ui.pages.detail;
     let Some(entry) = u.entry.clone() else { return false };
-    if u.detail.is_none() || u.meta.linked.asked {
+    // Only the page counts the threads it is linked from (PullRequestThreadLinks' "count").
+    if u.detail.is_none() || u.meta.linked.asked || thread_context(s) {
         return false;
     }
     meta(s).linked.asked = true;
@@ -236,6 +239,7 @@ pub fn failure(write: &Write, term: &str) -> (String, String) {
         ),
         Write::Stack(_) => ("Could not rebase the stack".into(), "The host refused the rebase. A rebase stops at the first commit that does not apply cleanly.".into()),
         Write::Link => (format!("Could not link the {term}"), "Try again.".into()),
+        Write::Unlink => (format!("Could not unlink the {term}"), "Try again.".into()),
     }
 }
 
@@ -270,14 +274,14 @@ fn finish(s: &mut App, write: Write, reply: Result<Value, Value>) {
         }
         Ok(_) => {
             if let Some((title, description)) = success(&write, super::pr_row::provider_name(field(&entry, "provider"))) {
-                crate::shell::palette::toast(s, &title, description.as_deref());
+                crate::shell::palette::toast_success(s, &title, description.as_deref());
             }
             match write {
                 Write::Label { .. } => load_candidates(s, "labels"),
                 Write::Reviewer { .. } => load_candidates(s, "reviewers"),
                 Write::Stack(_) => s.ui.pages.pull_requests.requested = None,
                 // The linked threads read again; the pull request itself is unchanged.
-                Write::Link => {
+                Write::Link | Write::Unlink => {
                     let u = meta(s);
                     u.link_picker = false;
                     u.linked_open = false;
@@ -627,27 +631,92 @@ pub fn link_command(entry: &Value, thread: &str) -> Value {
     json!({"type": "thread.pull-request.link", "threadId": thread, "host": key["host"], "repository": key["repository"], "number": key["number"], "url": field(entry, "url"), "source": "manual"})
 }
 
+pub fn unlink_command(entry: &Value, thread: &str) -> Value {
+    let key = linked_input(entry);
+    json!({"type": "thread.pull-request.unlink", "threadId": thread, "host": key["host"], "repository": key["repository"], "number": key["number"]})
+}
+
+/// The thread whose panel shows this pull request, and whether the pull request is one of its
+/// visible links (PullRequestThreadLinks' `currentThreadRef` and `linkedHere`).
+pub fn panel_thread(s: &App) -> Option<(String, bool)> {
+    crate::panel::active_pull_request(s)?;
+    let Route::Thread(id) = s.frame_route() else { return None };
+    let thread = s.state().threads.iter().find(|t| t["id"] == id.as_str())?;
+    let entry = s.ui.pages.detail.entry.as_ref()?;
+    Some((id.clone(), linked_to(thread, entry)))
+}
+
+/// threadPullRequestKeysEqual over the thread's visible links.
+fn linked_to(thread: &Value, entry: &Value) -> bool {
+    let key = linked_input(entry);
+    crate::panel::pull_requests::visible(thread).iter().any(|l| {
+        Some(field(l, "host").trim().to_lowercase().as_str()) == key["host"].as_str() && json!(field(l, "repository").trim().to_lowercase()) == key["repository"] && l["number"] == key["number"]
+    })
+}
+
+/// pullRequestPanelContext: "thread" when the panel's pull request is its own thread's, which
+/// drops the page's checkout menu and linked-thread count.
+pub fn thread_context(s: &App) -> bool {
+    let Some((id, linked)) = panel_thread(s) else { return false };
+    let (Some(thread), Some(entry)) = (s.state().threads.iter().find(|t| t["id"] == id.as_str()), s.ui.pages.detail.entry.as_ref()) else { return false };
+    in_thread(thread, entry, linked)
+}
+
+/// ChatView's `onBack`: in a thread's panel with more than one visible link, the crumbs lead
+/// back to the thread's pull requests.
+pub fn back_to_list(s: &App) -> bool {
+    crate::panel::active_pull_request(s).is_some()
+        && crate::panel::pull_requests::available(s)
+        && matches!(s.frame_route(), Route::Thread(id) if s.state().threads.iter().any(|t| t["id"] == id.as_str() && crate::panel::pull_requests::visible(t).len() > 1))
+}
+
+fn in_thread(thread: &Value, entry: &Value, linked: bool) -> bool {
+    if thread["projectId"] != entry["projectId"] {
+        return false;
+    }
+    if !crate::panel::pull_requests::visible(thread).is_empty() {
+        return linked;
+    }
+    let legacy = [&thread["linkedPullRequest"], &thread["branchPullRequest"]].into_iter().find(|v| v.is_object());
+    legacy.is_some_and(|l| l["repository"] == entry["repository"] && l["number"] == entry["number"])
+}
+
 fn link(s: &mut App, thread: &str) {
+    change_link(s, thread, Write::Link);
+}
+
+fn change_link(s: &mut App, thread: &str, write: Write) {
     let Some(entry) = s.ui.pages.detail.entry.clone() else { return };
-    if writing(&s.ui.pages.detail.meta, |w| *w == Write::Link) {
+    if writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link | Write::Unlink)) {
         return;
     }
     let env = entry[crate::env::TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_string);
-    let write = Write::Link;
-    match super::pull_requests::net_for(s, &entry).map(|net| net.dispatch(link_command(&entry, thread))) {
+    let command = if write == Write::Unlink { unlink_command(&entry, thread) } else { link_command(&entry, thread) };
+    match super::pull_requests::net_for(s, &entry).map(|net| net.dispatch(command)) {
         Some(id) => meta(s).writes.push((env, id, write)),
         None => fail(s, &write, "Actions need a connected environment."),
     }
 }
 
-/// PullRequestThreadLinks' menu item on this page, which has no thread of its own to link: it
-/// opens the thread picker.
+/// PullRequestThreadLinks' menu item: in a thread's panel it links or unlinks that thread; the
+/// page has no thread of its own, so it opens the thread picker.
 pub fn link_entries(s: &App) -> Vec<MenuEntry> {
     if s.ui.pages.detail.entry.as_ref().is_none_or(|e| field(e, "url").is_empty()) {
         return Vec::new();
     }
-    let pending = writing(&s.ui.pages.detail.meta, |w| *w == Write::Link);
-    vec![MenuEntry::item(MenuItem::new("Link to thread").icon(&i::LINK_2).disabled(pending).on_select(open_link_picker))]
+    let pending = writing(&s.ui.pages.detail.meta, |w| matches!(w, Write::Link | Write::Unlink));
+    let item = match panel_thread(s) {
+        Some((thread, true)) => MenuItem::new("Unlink from this thread").icon(&i::UNLINK_2).on_select(move |s: &mut App| {
+            s.ui.pages.detail.menu = false;
+            change_link(s, &thread, Write::Unlink);
+        }),
+        Some((thread, false)) => MenuItem::new("Link to this thread").icon(&i::LINK_2).on_select(move |s: &mut App| {
+            s.ui.pages.detail.menu = false;
+            link(s, &thread);
+        }),
+        None => MenuItem::new("Link to thread").icon(&i::LINK_2).on_select(open_link_picker),
+    };
+    vec![MenuEntry::item(item.disabled(pending))]
 }
 
 fn open_link_picker(s: &mut App) {
@@ -728,6 +797,9 @@ fn link_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
 /// menu, or "?" when they couldn't be read. Also mounts the thread picker.
 pub fn linked_threads(s: &App, t: &T, overlays: &mut Vec<El>) -> Option<El> {
     link_dialog(s, t, overlays);
+    if thread_context(s) {
+        return None;
+    }
     let u = &s.ui.pages.detail.meta;
     let threads = u.linked.data.as_ref().and_then(|v| v["threads"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
     if threads.is_empty() && u.linked.error.is_none() {
@@ -1329,6 +1401,25 @@ mod tests {
             json!({"type": "thread.pull-request.link", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479, "url": "https://GitHub.com/S5Labs/S5Code/pull/2479", "source": "manual"})
         );
         assert_eq!(failure(&Write::Link, "merge request").0, "Could not link the merge request");
+        assert_eq!(unlink_command(&entry(), "t1"), json!({"type": "thread.pull-request.unlink", "threadId": "t1", "host": "github.com", "repository": "s5labs/s5code", "number": 2479}));
+        assert_eq!(failure(&Write::Unlink, "pull request").0, "Could not unlink the pull request");
+    }
+
+    #[test]
+    fn a_panel_pull_request_is_its_threads_when_linked_there_or_its_legacy_link() {
+        let mut e = entry();
+        e["projectId"] = json!("p1");
+        let link = json!({"host": "GitHub.com", "repository": "S5Labs/S5Code", "number": 2479, "source": "manual"});
+        let thread = json!({"projectId": "p1", "pullRequests": [link]});
+        assert!(linked_to(&thread, &e), "FAILED: links match on the lowercased key");
+        assert!(in_thread(&thread, &e, true));
+        assert!(!in_thread(&json!({"projectId": "p2", "pullRequests": [link]}), &e, true), "FAILED: another project's thread shows it as the page does");
+        let dismissed = json!({"projectId": "p1", "pullRequests": [{"host": "github.com", "repository": "s5labs/s5code", "number": 2479, "source": "stack-dismissed"}]});
+        assert!(!linked_to(&dismissed, &e), "FAILED: a dismissed stack link isn't a link here");
+        let other = json!({"projectId": "p1", "pullRequests": [{"host": "github.com", "repository": "s5labs/s5code", "number": 7}]});
+        assert!(!in_thread(&other, &e, linked_to(&other, &e)), "FAILED: with links, only its own counts");
+        let legacy = json!({"projectId": "p1", "branchPullRequest": {"repository": e["repository"], "number": 2479}});
+        assert!(in_thread(&legacy, &e, false), "FAILED: without links, the legacy branch pull request counts");
     }
 
     #[test]

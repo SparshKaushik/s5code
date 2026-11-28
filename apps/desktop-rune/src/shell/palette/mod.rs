@@ -502,6 +502,10 @@ pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
 }
 /// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
 /// be read.
+/// A toast web raises as `success` whose title varies, so `kind_of` can't know it.
+pub(crate) fn toast_success(s: &mut App, title: &str, description: Option<&str>) {
+    raise(s, title, description, Kind::Success, Vec::new(), None);
+}
 pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
     raise(s, title, description, Kind::Error, Vec::new(), None);
 }
@@ -1072,7 +1076,7 @@ fn items_on(s: &App, page: &str) -> Vec<Item> {
     out
 }
 /// `formatRelativeTimeLabel`: "just now" under a minute, then "5m ago", "3h ago", "2d ago".
-fn relative_time(now: i64, at: i64) -> String {
+pub(crate) fn relative_time(now: i64, at: i64) -> String {
     let seconds = (now - at).max(0) / 1000;
     let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
     if seconds < 60 {

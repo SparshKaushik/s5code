@@ -5,7 +5,7 @@
 //! Bring back merges its latest reply into the parent's next message.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rune::{Color, Cursor, Cx, El, KeyEvent, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
@@ -19,7 +19,6 @@ use crate::{App, Route};
 
 /// The right panel's default width.
 const WIDTH: f32 = 540.0;
-const MIN_WIDTH: f32 = 320.0;
 /// waitForThreadShell's timeout.
 const SHELL_WAIT_MS: i64 = 5_000;
 /// ThreadLineageGroup's first rows, and how many each "Show N more" adds.
@@ -28,8 +27,6 @@ const LIST_PAGE: usize = 12;
 
 #[derive(Default)]
 pub struct State {
-    /// Each parent thread's open side chat (rightPanelStore's `side-chat:` surface).
-    pub open: HashMap<String, String>,
     pending: Option<Pending>,
     requests: Vec<(u64, Request)>,
     /// The thread whose details card lists more side chats than the first page, and how many.
@@ -82,10 +79,7 @@ fn route_thread(s: &App) -> Option<&Value> {
 
 /// The side chat open beside the routed thread.
 pub fn open_beside(s: &App) -> Option<&str> {
-    match s.frame_route() {
-        Route::Thread(parent) => s.ui.chat.side.open.get(parent).map(String::as_str),
-        _ => None,
-    }
+    crate::panel::active_side_chat(s)
 }
 
 /// Why this route offers no side chats (ChatView's `sideChatsOffered` and `isServerThread`).
@@ -234,11 +228,7 @@ fn opened(s: &mut App, p: Pending) {
 
 /// Opens `side` beside `parent` (rightPanelStore's openSideChat) with the caret in its composer.
 fn show(s: &mut App, parent: &str, side: &str) {
-    if let Some(net) = s.src.net() {
-        net.watch_thread(side);
-    }
-    s.ui.chat.side.open.insert(parent.to_owned(), side.to_owned());
-    focus(s, side, true);
+    crate::panel::open_side_chat(s, parent, side);
 }
 
 /// `view.reopenClosed` bringing back side chat `side` beside `parent`, which is open by now.
@@ -258,7 +248,7 @@ pub fn open_tab(s: &mut App, id: &str) -> bool {
 }
 
 /// Moves the caret into the side chat's composer, or back to the chat's (`to_side` false).
-fn focus(s: &mut App, side: &str, to_side: bool) {
+pub(crate) fn focus(s: &mut App, side: &str, to_side: bool) {
     let main = crate::chat::composer::draft_key(s, &s.frame_route().clone());
     for (key, on) in [(main, !to_side), (side.to_owned(), to_side)] {
         s.ui.chat.composer.drafts.entry(key).or_default().edit.focused = on;
@@ -282,7 +272,7 @@ fn poll_requests(s: &mut App) -> bool {
         let detail = reply.as_ref().err().map(|cause| message(cause, "")).filter(|m| !m.is_empty());
         match (request, reply) {
             (Request::Delete(_), Err(_)) => crate::shell::palette::toast_error(s, "Could not delete the side chat", detail.as_deref()),
-            (Request::Delete(side), Ok(_)) => s.ui.chat.side.open.retain(|_, open| open != side),
+            (Request::Delete(side), Ok(_)) => crate::panel::close_side_chat(s, side, false),
             (Request::BringBack(_), Err(_)) => crate::shell::palette::toast_error(s, "Could not bring back the side chat", detail.as_deref()),
             (Request::BringBack(_), Ok(_)) => {
                 crate::shell::palette::toast(s, "Brought back", Some("The main thread gets this side chat with your next message there."))
@@ -295,11 +285,10 @@ fn poll_requests(s: &mut App) -> bool {
 /// Closes the pane (useRightPanelSurfaceClose): reopenable through `view.reopenClosed`, and a side
 /// chat that never ran is deleted (the server keeps one with a run or message).
 fn close(s: &mut App, side: &str) {
-    let parent = s.ui.chat.side.open.iter().find(|(_, open)| *open == side).map(|(parent, _)| parent.clone());
-    s.ui.chat.side.open.retain(|_, open| open != side);
-    if let Some(parent) = &parent {
-        crate::panel::record_closed_side_chat(s, parent, side);
-    }
+    crate::panel::close_side_chat(s, side, true);
+}
+
+pub(crate) fn close_tab(s: &mut App, side: &str) {
     // A loaded shell without the side chat means it is already deleted.
     let gone = s.state().shell_ready && thread(s, side).is_none();
     if !gone
@@ -308,7 +297,7 @@ fn close(s: &mut App, side: &str) {
     {
         net.dispatch(json!({"type": "thread.delete", "commandId": s5_net::uuid(), "threadId": side, "onlyIfUnused": true}));
     }
-    focus(s, side, false);
+    if open_beside(s) == Some(side) { focus(s, side, false); }
 }
 
 use super::can_operate;
@@ -376,11 +365,9 @@ fn bring_back(s: &mut App, parent: &str, side: &str) {
     s.ui.chat.side.requests.push((rpc, Request::BringBack(side.to_owned())));
 }
 
-/// `chat` with the open thread's side chat pane beside it, when one is open.
-pub fn beside(s: &App, cx: &mut Cx<App>, t: &T, chat: El) -> El {
-    let Route::Thread(parent) = s.frame_route() else { return chat };
-    let Some(side) = s.ui.chat.side.open.get(parent) else { return chat };
-    row().key("chat-split").grow(1.0).min_h(0.0).w_full().child(chat.min_w(0.0)).child(pane(s, cx, t, parent, side))
+pub(crate) fn panel(s: &App, cx: &mut Cx<App>, t: &T, side: &str) -> El {
+    let Route::Thread(parent) = s.frame_route() else { return col() };
+    pane(s, cx, t, parent, side)
 }
 
 /// SideChatPane: the side chat's title, Bring back, Delete and Close over its timeline and the
@@ -432,9 +419,8 @@ fn pane(s: &App, cx: &mut Cx<App>, t: &T, parent: &str, side: &str) -> El {
     };
     row()
         .key("side-chat-pane")
-        .w_frac(0.45)
-        .max_w(WIDTH)
-        .min_w(MIN_WIDTH)
+        .w_full()
+        .min_w(0.0)
         .h_full()
         .fill(t.c.background)
         // Composer chords pressed in the pane are its composer's (useChatShortcuts' embedded mode),
@@ -708,7 +694,7 @@ mod tests {
     fn a_side_chats_question_is_answered_from_its_own_composer() {
         use crate::chat::{composer, timeline::question};
         let (mut s, parent) = with_side_chats();
-        s.ui.chat.side.open.insert(parent.clone(), "side-1".into());
+        reopen(&mut s, &parent, "side-1");
         let ask = |id: &str| json!({"id": id, "header": "Pick", "question": "Which?", "options": [{"label": "A"}, {"label": "B"}]});
         let projection = json!({
             "runtimeRequests": [{"id": "ask", "kind": "user_input", "status": "pending", "responseCapability": {"type": "live"}}],

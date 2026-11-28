@@ -641,7 +641,7 @@ fn schedule_section(s: &App, t: &T, e: &Editor, denial: Option<&str>, live: Opti
     if denial.is_some() && draft.mode != Mode::Webhook {
         group = group.item_state(modes.len() - 1, rune_kit::State::Disabled);
     }
-    block = block.child(row().w_full().gap(8.0).center_y().flex_wrap().child(label(t, "Schedule").grow(1.0)).child(group.build(&kit::theme(t))));
+    block = block.child(row().w_full().gap(8.0).center_y().flex_wrap().child(label(t, "Schedule").grow(1.0)).child(group.build(&kit::theme(t)).label("Schedule type")));
     if let Some(denial) = denial {
         let notice = if draft.mode == Mode::Webhook {
             format!("{denial} Switch this task to a time or an interval, or turn it off, to save it.")
@@ -699,7 +699,7 @@ fn schedule_section(s: &App, t: &T, e: &Editor, denial: Option<&str>, live: Opti
                             .child(input(t, &draft.time_of_day, "09:00", e.saving, |d| &mut d.time_of_day).w(128.0))
                             .child(text("on").font(theme::TEXT_XS).color(t.c.muted_foreground)),
                     )
-                    .child(weekdays.build(&kit::theme(t))),
+                    .child(weekdays.build(&kit::theme(t)).label("Days to run")),
             )
         }
         Mode::Interval => Some(
@@ -764,6 +764,25 @@ fn endpoint_field(s: &App, t: &T, e: &Editor, live: Option<&Value>) -> El {
     let mut out = col().w_full().gap(6.0).child(line);
     if let Some(note) = note {
         out = out.child(hint(t, note));
+    }
+    const LINK: &str = "Change in Sharing & access";
+    let hold = super::super::connect::holds_webhooks(s).filter(|_| e.env == crate::env::LOCAL && !task["webhook"]["url"].is_null());
+    if let Some(hold) = hold {
+        let mode = if hold { "Held for up to 24 hours while this environment is offline. " } else { "Forwarded live. Requests fail while this environment is offline. " };
+        out = out.child(
+            row()
+                .w_full()
+                .flex_wrap()
+                .child(text(mode).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(
+                    rune::rich(LINK, vec![rune::Span::new(0, LINK.len()).underline(t.c.muted_foreground)])
+                        .font(theme::TEXT_XS)
+                        .color(t.c.muted_foreground)
+                        .role("link")
+                        .cursor(rune::Cursor::Pointer)
+                        .on_press(|s: &mut App| s.navigate(crate::Route::Settings("access".into()))),
+                ),
+        );
     }
     out
 }

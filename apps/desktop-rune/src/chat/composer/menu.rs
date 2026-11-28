@@ -801,7 +801,13 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
             .child(text(item.description).font(theme::TEXT_XS).color(t.c.secondary_label).truncate().grow(1.0).shrink().min_w(0.0));
         rows = rows.child(r);
     }
-    let rows = col().w_full().max_h(280.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows);
+    let label = match m.kind {
+        Kind::Path => "Files and folders",
+        Kind::PullRequest => "Pull requests",
+        Kind::Slash => "Commands",
+        Kind::Skill => "Skills",
+    };
+    let rows = col().w_full().max_h(280.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows.role("listbox").label(label));
     Some(surface(t).px(8.0).pt(8.0).pb(8.0 + 17.0).child(rows).child(el()))
 }
 

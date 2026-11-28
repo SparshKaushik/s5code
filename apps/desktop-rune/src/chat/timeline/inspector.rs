@@ -223,7 +223,7 @@ fn poll_fetches(app: &mut App) -> bool {
         changed = true;
         let result = match reply {
             Ok(v) if v["item"].is_object() => Ok(v["item"].clone()),
-            Ok(_) => Err("the item is no longer available".to_owned()),
+            Ok(_) => Err("Output is no longer available.".to_owned()),
             Err(e) => Err(Some(s(super::link::failure(&e), "message")).filter(|m| !m.is_empty()).map_or_else(|| e.to_string(), str::to_owned)),
         };
         state.loaded.insert(std::mem::take(id), (std::mem::take(revision), result));
@@ -553,11 +553,11 @@ pub fn view(app: &App, item: &Value, t: &T) -> Option<El> {
         if omitted {
             let stale = loaded.is_some_and(|(r, _)| *r != revision(item));
             let note = match loaded {
-                _ if pending => Some("Loading output…".to_owned()),
-                Some((_, Err(e))) => Some(format!("Couldn't load output: {e}")),
+                _ if pending => Some(("Loading output…".to_owned(), t.c.muted_foreground)),
+                Some((_, Err(e))) => Some((format!("Couldn't load output: {e}"), t.c.destructive)),
                 _ => None,
             };
-            out = out.children(note.map(|n| text(n).font(theme::TEXT_XS).color(t.c.muted_foreground)));
+            out = out.children(note.map(|(n, color)| text(n).font(theme::TEXT_XS).color(color)));
             if !pending && (fetched.is_none() || stale)
                 && let Some(ask) = ask(app, item)
             {

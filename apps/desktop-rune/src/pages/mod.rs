@@ -49,7 +49,7 @@ pub fn poll(s: &mut App) -> bool {
 
 /// Starts the avatars the pull requests page shows, the open detail's first.
 fn want_avatars(s: &mut App) {
-    if !matches!(s.frame_route(), Route::PullRequests) {
+    if !matches!(s.frame_route(), Route::PullRequests) && crate::panel::active_pull_request(s).is_none() {
         return;
     }
     let waker = s.ui.panel.waker.as_ref();
@@ -137,6 +137,26 @@ fn open_detail(s: &mut App, tab: usize, then: impl Fn(&mut pr_detail::Ui)) {
     s.ui.pages.detail.tab = tab;
     pr_detail::poll(s);
     then(&mut s.ui.pages.detail);
+}
+
+/// A thread's panel showing a pull request linked to it, among two links: the crumbs lead back
+/// to the thread's pull requests, and the menu unlinks it from this thread.
+fn panel_thread_scene(s: &mut App) {
+    (crate::shell::SCENES[1].1)(s);
+    let Some(entry) = fixture("pull-request-detail.json").map(|r| r["detail"].clone()).filter(|e| e["url"].is_string()) else { return };
+    let Route::Thread(id) = s.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut s.src {
+        state.config.get_or_insert_with(|| json!({}));
+        if let Some(thread) = state.threads.iter_mut().find(|v| v["id"] == id.as_str()) {
+            thread["projectId"] = entry["projectId"].clone();
+            let own = json!({"host": "github.com", "repository": entry["repository"], "number": entry["number"], "url": entry["url"], "source": "manual"});
+            let other = json!({"host": "github.com", "repository": "acme/app", "number": 20, "url": "https://github.com/acme/app/pull/20", "source": "agent"});
+            thread["pullRequests"] = json!([own, other]);
+        }
+    }
+    crate::panel::open_pull_request(s, entry);
+    pr_detail::poll(s);
+    s.ui.pages.detail.menu = true;
 }
 
 /// A description holding an upload, pictures on a line of their own and one inline.
@@ -376,6 +396,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
     ("pull-requests-detail-guide-empty", |s| pr_guide::scene(s, "empty")),
     ("pull-requests-detail-guide-ready", |s| pr_guide::scene(s, "ready")),
+    ("pull-requests-detail-long", |s| {
+        let body: String = (1..=8).map(|n| format!("## Part {n}\n\nThis part walks through one step of the change, with enough prose that the description runs past the panel and its heading has to stay pinned while it scrolls.\n\n- The first point of part {n}\n- The second point of part {n}\n\n")).collect();
+        open_detail(s, 0, |u| if let Some(d) = &mut u.detail { d["body"] = json!(body); });
+    }),
+    ("pull-requests-panel-thread", panel_thread_scene),
+    ("pull-requests-detail-guide-wide", |s| {
+        pr_guide::scene(s, "ready");
+        s.ui.pages.pull_requests.maximized = true;
+    }),
     ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
     ("pull-requests-detail-guide-finish", |s| pr_guide::scene(s, "finish")),
     ("pull-requests-detail-guide-excerpt-comment", |s| pr_guide::scene(s, "comment")),
