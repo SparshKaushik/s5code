@@ -1285,7 +1285,7 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         let title = text(title.clone()).font(theme::XS_MEDIUM).color(fade(t.c.foreground, condensed)).motion(kit::motion::COLOR).truncate().shrink().min_w(0.0).help(title);
         layer("pr-crumbs-condensed", condensed).child(number("pr-detail-number-condensed", condensed)).child(title)
     });
-    let cell = el().relative().shrink().min_w(0.0).child(full).children(short);
+    let cell = el().shrink().min_w(0.0).child(full).children(short);
     let crumbs = row().gap(6.0).center_y().shrink().min_w(0.0).children(back).child(cell);
     // The @container/pr-header breakpoints: below 30rem the controls drop their labels, below
     // 35rem the checkout does too. The crumbs give way first; the controls never shrink.
