@@ -15,7 +15,6 @@ use serde_json::{Map, Value, json};
 pub const DEFAULT_HEIGHT: f32 = 280.;
 const MIN_HEIGHT: f32 = 180.;
 pub const MAX_PER_GROUP: usize = 4;
-const DEFAULT_ID: &str = "term-1";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
@@ -409,7 +408,7 @@ fn start(app: &mut App, thread: &str, id: &str, focus: bool) {
     }
 }
 
-/// `terminal.toggle`: opening a drawer with no terminals starts `term-1`.
+/// `terminal.toggle`: opening an empty drawer prefers an existing server terminal.
 pub fn toggle(app: &mut App) {
     let Some(thread) = current_or_draft(app) else {
         return;
@@ -420,16 +419,21 @@ pub fn toggle(app: &mut App) {
     {
         return;
     }
-    let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
-    if state.open {
-        state.open = false;
+    if app.ui.panel.drawer.is_open(&thread) {
+        app.ui.panel.drawer.threads.get_mut(&thread).unwrap().open = false;
     } else {
+        reconcile(app);
+        let operate = can_operate(app);
+        let default = allocate(app, &thread);
+        let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
         state.open = true;
-        if state.groups.is_empty() {
-            state.groups.add(DEFAULT_ID);
+        if state.groups.is_empty() && operate {
+            state.groups.add(&default);
         }
         let active = state.groups.active.clone();
-        start(app, &thread, &active, true);
+        if !active.is_empty() {
+            start(app, &thread, &active, true);
+        }
     }
     sync_topbar(app);
 }
@@ -564,6 +568,9 @@ pub fn open_panel(app: &mut App) {
         .groups(Owner::Panel, &thread)
         .is_none_or(Groups::is_empty);
     if empty {
+        if !can_operate(app) {
+            return;
+        }
         let id = allocate(app, &thread);
         app.ui.panel.drawer.groups_mut(Owner::Panel, &thread).add(&id);
     }
@@ -978,20 +985,20 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
             let operable = can_operate(app);
             let close = if operable {
                 row()
-                .size(16., 16.)
-                .center()
-                .role("button")
-                .label(close_label.clone())
-                .help(close_label)
-                .focusable(true)
-                .children(close_layers().into_iter().map(|layer| match layer {
-                    CloseLayer::Backdrop => el().size(16., 16.).pin(Some(0.), Some(0.), None, None).radius(2.).hover(t.c.muted),
-                    CloseLayer::Glyph { glyph, rest, hovered } => {
-                        let color = if std::ptr::eq(glyph, &icons::X) { t.c.foreground } else { fg };
-                        icon(glyph, 12.).size(12., 12.).color(color).group_opacity(rest, hovered).pin(Some(2.), Some(2.), None, None)
-                    }
-                }))
-                .on_press(move |s: &mut App| request_close(s, owner, &close_id))
+                    .size(16., 16.)
+                    .center()
+                    .role("button")
+                    .label(close_label.clone())
+                    .help(close_label)
+                    .focusable(true)
+                    .children(close_layers().into_iter().map(|layer| match layer {
+                        CloseLayer::Backdrop => el().size(16., 16.).pin(Some(0.), Some(0.), None, None).radius(2.).hover(t.c.muted),
+                        CloseLayer::Glyph { glyph, rest, hovered } => {
+                            let color = if std::ptr::eq(glyph, &icons::X) { t.c.foreground } else { fg };
+                            icon(glyph, 12.).size(12., 12.).color(color).group_opacity(rest, hovered).pin(Some(2.), Some(2.), None, None)
+                        }
+                    }))
+                    .on_press(move |s: &mut App| request_close(s, owner, &close_id))
             } else {
                 icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg)
             };
@@ -1432,15 +1439,18 @@ mod tests {
         app.navigate(Route::Thread("t".into()));
         crate::chat::details::set_session(&mut app, Some(Ok(json!({"authenticated": true, "scopes": ["terminal:read"]}))));
         toggle(&mut app);
+        assert!(app.ui.panel.drawer.groups(Owner::Drawer, "t").unwrap().is_empty());
+        terminal::known_fixture(&mut app, "t", &["term-1", "term-2"]);
+        reconcile(&mut app);
         new_terminal(&mut app, Owner::Drawer);
         split(&mut app, Owner::Drawer, false);
-        request_close(&mut app, Owner::Drawer, DEFAULT_ID);
+        request_close(&mut app, Owner::Drawer, "term-1");
         let drawer = &app.ui.panel.drawer;
         assert!(drawer.is_open("t"));
-        assert_eq!(drawer.groups(Owner::Drawer, "t").unwrap().ids().count(), 1);
+        assert_eq!(drawer.groups(Owner::Drawer, "t").unwrap().ids().count(), 2);
         assert!(drawer.confirm.is_none());
-        terminal::known_fixture(&mut app, "t", &["term-2"]);
-        assert_eq!(allocate(&app, "t"), "term-3");
+        terminal::known_fixture(&mut app, "t", &["term-3"]);
+        assert_eq!(allocate(&app, "t"), "term-4");
     }
 
     #[test]

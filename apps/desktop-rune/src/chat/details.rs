@@ -922,6 +922,9 @@ fn note_mismatch(s: &mut App) -> bool {
 }
 
 fn restore_branch(s: &mut App, confirmed: bool) {
+    if !grants(s, "source-control:write") {
+        return;
+    }
     let Some((_, branch, _)) = mismatch(s) else { return };
     if switching(s) {
         return;

@@ -376,38 +376,40 @@ fn shell_items_bump_the_revision_merged_lists_watch() {
 
 #[test]
 fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
-    let (mut net, incoming, _commands) = offline();
-    let payload = json!({"threadId":"t","terminalId":"term-1"});
-    net.watch_resource("terminal.attach", payload.clone());
-    let route = Route::Resource("terminal.attach".into(), payload.to_string());
-    let events = vec![
-        json!({"type":"snapshot","snapshot":{"history":"$ "}}),
-        json!({"type":"output","sequence":1,"data":"first"}),
-        json!({"type":"output","sequence":2,"data":"second"}),
-    ];
-    for event in &events {
+    for method in ["terminal.attach", "terminal.observe"] {
+        let (mut net, incoming, _commands) = offline();
+        let payload = json!({"threadId":"t","terminalId":"term-1"});
+        net.watch_resource(method, payload.clone());
+        let route = Route::Resource(method.into(), payload.to_string());
+        let events = vec![
+            json!({"type":"snapshot","snapshot":{"history":"$ "}}),
+            json!({"type":"output","sequence":1,"data":"first"}),
+            json!({"type":"output","sequence":2,"data":"second"}),
+        ];
+        for event in &events {
+            incoming
+                .send(Incoming::Item(route.clone(), event.clone()))
+                .unwrap();
+        }
+        assert!(net.drain());
+        assert_eq!(
+            net.take_resource_events(method, payload.clone()),
+            events
+        );
+        assert!(
+            net.take_resource_events(method, payload.clone())
+                .is_empty()
+        );
         incoming
-            .send(Incoming::Item(route.clone(), event.clone()))
+            .send(Incoming::Item(route, events[1].clone()))
             .unwrap();
+        net.drain();
+        net.unwatch_resource(method, payload.clone());
+        assert!(
+            net.take_resource_events(method, payload)
+                .is_empty()
+        );
     }
-    assert!(net.drain());
-    assert_eq!(
-        net.take_resource_events("terminal.attach", payload.clone()),
-        events
-    );
-    assert!(
-        net.take_resource_events("terminal.attach", payload.clone())
-            .is_empty()
-    );
-    incoming
-        .send(Incoming::Item(route, events[1].clone()))
-        .unwrap();
-    net.drain();
-    net.unwatch_resource("terminal.attach", payload.clone());
-    assert!(
-        net.take_resource_events("terminal.attach", payload)
-            .is_empty()
-    );
 }
 
 #[test]

@@ -382,10 +382,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .on_press(move |s: &mut App| crate::chat::details::toggle(s, fits)),
         );
     }
-    // `PanelLayoutControls`: both need a project; the terminal also the terminal grant.
     let has_project = composer::ctx(s).project.is_some();
     let terminal = toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open);
-    let terminal = if has_project && crate::chat::details::grants(s, "terminal:operate") {
+    let terminal = if has_project {
         terminal.help(with_shortcut(s, "Toggle terminal drawer", "terminal.toggle")).on_press(|s: &mut App| {
             crate::panel::toggle_terminal(s);
         })

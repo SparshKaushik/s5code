@@ -30,11 +30,38 @@ const MULTI_CLICK_MENU: Duration = Duration::from_millis(500);
 /// Middle-click pastes the terminal's own selection on X11-style desktops (`isMiddleClickPastePlatform`).
 const MIDDLE_PASTE: bool = cfg!(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"));
 
+#[derive(Clone, Copy, PartialEq)]
+enum Stream {
+    Attach,
+    Observe,
+}
+
+impl Stream {
+    fn for_terminal(app: &App, thread: &str, id: &str) -> Self {
+        if can_write(app, thread, id) { Self::Attach } else { Self::Observe }
+    }
+
+    fn method(self) -> &'static str {
+        match self {
+            Self::Attach => "terminal.attach",
+            Self::Observe => "terminal.observe",
+        }
+    }
+
+    fn input(self, payload: &Value) -> Value {
+        match self {
+            Self::Attach => payload.clone(),
+            Self::Observe => json!({"threadId": payload["threadId"], "terminalId": payload["terminalId"]}),
+        }
+    }
+}
+
 pub struct Session {
     pub thread: String,
     pub id: String,
     pub vt: Vt,
     payload: Option<Value>,
+    stream: Stream,
     sequence: Option<u64>,
     pub status: String,
     pub label: String,
@@ -75,6 +102,7 @@ impl Session {
             id: id.into(),
             vt: Vt::new(80, 24),
             payload: None,
+            stream: Stream::Attach,
             sequence: None,
             status: String::new(),
             label: String::new(),
@@ -316,7 +344,8 @@ pub fn attach(app: &mut App, thread: &str, id: &str, payload: Value) {
     app.ui.panel.terminal.gone.retain(|(t, i)| !(t == thread && i == id));
     let mut session = Session::new(thread, id);
     if let Some(net) = app.src.net() {
-        net.watch_resource("terminal.attach", payload.clone());
+        session.stream = Stream::for_terminal(app, thread, id);
+        net.watch_resource(session.stream.method(), session.stream.input(&payload));
         session.payload = Some(payload);
     }
     app.ui.panel.terminal.sessions.push(session);
@@ -402,6 +431,7 @@ pub fn title(app: &App, thread: &str, id: &str) -> String {
 
 /// Stops the process and deletes its history; a failed close falls back to typing `exit`.
 pub fn close(app: &mut App, thread: &str, id: &str) {
+    let writable = can_write(app, thread, id);
     let ui = &mut app.ui.panel.terminal;
     let Some(index) = ui
         .sessions
@@ -414,7 +444,10 @@ pub fn close(app: &mut App, thread: &str, id: &str) {
     ui.gone.push((thread.to_string(), id.to_string()));
     if let Some(net) = app.src.net() {
         if let Some(payload) = session.payload {
-            net.unwatch_resource("terminal.attach", payload);
+            net.unwatch_resource(session.stream.method(), session.stream.input(&payload));
+        }
+        if !writable {
+            return;
         }
         let request = net.request(
             "terminal.close",
@@ -432,7 +465,7 @@ pub fn focus(app: &mut App, thread: &str, id: &str) {
 }
 
 fn can_write(app: &App, thread: &str, id: &str) -> bool {
-    app.ui.panel.drawer.owner_of(thread, id).is_none() || super::drawer::can_operate(app)
+    super::drawer::can_operate(app) || app.ui.panel.drawer.owner_of(thread, id).is_none()
 }
 
 fn send(app: &mut App, thread: &str, id: &str, data: String) {
@@ -554,12 +587,25 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut writes = vec![];
     let mut ended = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
-        let payload = app.ui.panel.terminal.sessions[index].payload.clone();
-        let events = match (payload, app.src.net()) {
-            (Some(payload), Some(net)) => net.take_resource_events("terminal.attach", payload),
+        let session = &app.ui.panel.terminal.sessions[index];
+        let stream = Stream::for_terminal(app, &session.thread, &session.id);
+        let switched = stream != session.stream;
+        let events = match (&session.payload, app.src.net()) {
+            (Some(payload), Some(net)) => {
+                if switched {
+                    net.unwatch_resource(session.stream.method(), session.stream.input(payload));
+                    net.watch_resource(stream.method(), stream.input(payload));
+                }
+                net.take_resource_events(stream.method(), stream.input(payload))
+            }
             _ => vec![],
         };
         let session = &mut app.ui.panel.terminal.sessions[index];
+        if switched {
+            session.stream = stream;
+            session.attached = false;
+            session.queued = None;
+        }
         for event in &events {
             apply(session, event);
             changed = true;
@@ -583,7 +629,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             session.input.focused = focused;
             writes.push((session.thread.clone(), session.id.clone(), text));
         }
-        if session.exit_noted && !session.ended {
+        if stream == Stream::Attach && session.exit_noted && !session.ended {
             session.ended = true;
             ended.push((session.thread.clone(), session.id.clone()));
         }
@@ -1522,6 +1568,14 @@ pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observe_uses_only_the_existing_session_identity() {
+        let attach = json!({"threadId": "t", "terminalId": "term-1", "cwd": "/repo", "cols": 100});
+        assert_eq!(Stream::Attach.input(&attach), attach);
+        assert_eq!(Stream::Observe.method(), "terminal.observe");
+        assert_eq!(Stream::Observe.input(&attach), json!({"threadId": "t", "terminalId": "term-1"}));
+    }
 
     #[test]
     fn links_and_fonts_follow_the_settings() {

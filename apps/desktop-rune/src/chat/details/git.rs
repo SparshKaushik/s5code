@@ -596,7 +596,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
         let busy = s.ui.chat.details.git.init.is_some();
         let label = if busy { "Initializing..." } else { "Initialize Git" };
         let row = super::action(t, "details-git-init", icon(&icons::GIT_BRANCH_PLUS, 14.0).color(fg), label, fg).w_full().gap(12.0);
-        return Some(if busy { row.opacity(0.64) } else { row.on_press(init) });
+        return Some(if busy || !writable(s) { row.opacity(0.64).disabled(true) } else { row.on_press(init) });
     }
     let status = status(s);
     let q = quick_action(s, status.as_ref());
@@ -607,7 +607,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
     if quiet(s, draft) && running.is_none() && q.disabled && changes_totals(local) == (0, 0) && status_error(s).is_none() {
         return None;
     }
-    let group = row().key("details-git").w_full().radius(theme::layout::CONTROL_RADIUS);
+    let group = row().key("details-git").w_full().radius(theme::layout::CONTROL_RADIUS).role("group").label("Git actions");
     if let Some(r) = running {
         let status = r.label.as_deref().filter(|l| *l != "Running source control action").unwrap_or(if r.pull { "Pulling latest changes..." } else { "Starting source control action..." });
         let output = if r.pull { None } else { r.output.as_deref() };
@@ -637,7 +637,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
             }
         }
     };
-    Some(super::split(t, "details-git-menu", main.grow(1.0).shrink().min_w(0.0), "Git action options", super::Menu::Git))
+    Some(super::split(t, "details-git-menu", main.grow(1.0).shrink().min_w(0.0), "Git action options", super::Menu::Git).role("group").label("Git actions"))
 }
 
 fn quiet(s: &App, draft: bool) -> bool {
@@ -660,7 +660,7 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
         let id = item.id;
         rows.push(super::menu_row(t, Some(glyph), &item.label, (!item.disabled && writable(s)).then_some(move |s: &mut App| pick(s, id)), reason));
     }
-    if status.as_ref().is_some_and(|v| v["isRepo"] == true && v["hasPrimaryRemote"] != true) {
+    if writable(s) && status.as_ref().is_some_and(|v| v["isRepo"] == true && v["hasPrimaryRemote"] != true) {
         let glyph = icon(&icons::CLOUD_UPLOAD, 16.0).color(t.c.muted_foreground);
         rows.push(super::menu_row(t, Some(glyph), "Publish repository...", (!busy).then_some(|s: &mut App| pick(s, "publish")), None));
     }

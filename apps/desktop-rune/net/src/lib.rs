@@ -252,7 +252,7 @@ impl Net {
                         // that open and close between two polls, and server lifecycle.
                         if matches!(
                             method.as_str(),
-                            "terminal.attach" | "subscribeTerminalMetadata" | "subscribePreviewEvents" | "orchestration.subscribeCommandOutput" | "subscribeServerLifecycle"
+                            "terminal.attach" | "terminal.observe" | "subscribeTerminalMetadata" | "subscribePreviewEvents" | "orchestration.subscribeCommandOutput" | "subscribeServerLifecycle"
                         ) {
                             self.resource_events.entry(route.clone()).or_default().push(item.clone());
                         }
