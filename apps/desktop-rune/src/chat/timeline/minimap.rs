@@ -217,12 +217,11 @@ pub(super) fn seen(app: &mut App, thread: &str, rows: Range<usize>) -> bool {
     true
 }
 
-fn jump(app: &mut App, tx: &mut Tx, list: &str, items: &[Item]) {
+fn jump(app: &mut App, tx: &mut Tx, list: &str, items: &[Item], fallback: Option<usize>) {
     let state = &mut app.ui.chat.timeline.minimap;
-    if let Some(item) = state.active.and_then(|i| items.get(i)) {
+    if let Some(item) = state.active.take().or(fallback).and_then(|i| items.get(i)) {
         tx.scroll_center_in(list.to_owned(), item.key.clone());
     }
-    state.active = None;
 }
 
 /// The minimap over the routed thread's timeline, in the gutter left of the chat lane.
@@ -265,8 +264,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
     let shown = active.and_then(|i| items.get(i));
     let label = format!("Jump to message: {}", shown.and_then(|i| i.user.as_deref()).unwrap_or("User message"));
     let (press_items, press_list) = (items.clone(), list.clone());
-    let rail = strips
+    let rail = el()
         .key("timeline-minimap")
+        .w(hit)
+        .h(rail_h)
+        .child(strips)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.c.ring)
         .role("button")
@@ -281,18 +283,27 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
                 state.active = index;
             }
         })
-        .on_press_tx(move |app: &mut App, tx| jump(app, tx, &press_list, &press_items))
-        .on_key(move |app: &mut App, e: &KeyEvent, _: &mut Tx| {
-            let state = &mut app.ui.chat.timeline.minimap;
-            let base = state.active.or(current).unwrap_or(0);
-            state.active = Some(match e.key {
-                Key::Down => (base + 1).min(n - 1),
-                Key::Up => base.saturating_sub(1),
-                Key::Home => 0,
-                Key::End => n - 1,
-                _ => return false,
-            });
-            true
+        .on_press_tx(move |app: &mut App, tx| jump(app, tx, &press_list, &press_items, None))
+        .on_key({
+            let (items, list) = (items.clone(), list.clone());
+            move |app: &mut App, e: &KeyEvent, tx: &mut Tx| {
+                if e.key == Key::Enter || matches!(&e.key, Key::Text(text) if text == " ") {
+                    if !tx.key_repeat() {
+                        jump(app, tx, &list, &items, Some(current.unwrap_or(0)));
+                    }
+                    return true;
+                }
+                let state = &mut app.ui.chat.timeline.minimap;
+                let base = state.active.or(current).unwrap_or(0);
+                state.active = Some(match e.key {
+                    Key::Down => (base + 1).min(n - 1),
+                    Key::Up => base.saturating_sub(1),
+                    Key::Home => 0,
+                    Key::End => n - 1,
+                    _ => return false,
+                });
+                true
+            }
         });
 
     let mut root = el()
