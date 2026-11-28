@@ -46,8 +46,11 @@ fn dot4(a: Quat, b: Quat) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 }
 
+/// The angle between two orientations; `atan2` keeps small angles exact in f32, where `acos` near
+/// 1 can't resolve below about a milliradian.
 pub fn angle_to(a: Quat, b: Quat) -> f32 {
-    2. * dot4(a, b).clamp(-1., 1.).abs().acos()
+    let r = mul(invert(normalize(a)), normalize(b));
+    2. * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt().atan2(r[3].abs())
 }
 
 pub fn axis_angle(axis: Vec3, angle: f32) -> Quat {
@@ -494,6 +497,7 @@ mod tests {
         m.reset(IDENTITY, 2000.);
         settle(&mut m, 2000.);
         assert_eq!(m.rotation, IDENTITY);
+        assert!((angle_to(axis_angle([0., 1., 0.], 2e-4), IDENTITY) - 2e-4).abs() < 1e-6, "small angles stay exact, so the rest checks can pass");
         let q = axis_angle([0., 1., 0.], 0.3);
         let v = rotate([0., 0., 1.], q);
         assert!((v[0] - 0.3f32.sin()).abs() < 1e-5 && (matrix(q)[8] - v[0]).abs() < 1e-5, "a yaw turns the face toward +x");
