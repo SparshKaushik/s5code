@@ -402,7 +402,7 @@ fn poll_dialog(s: &mut App) -> bool {
             Some(Err(e)) => {
                 if let Some(d) = &mut s.ui.add_to_machine.dialog {
                     d.submit = None;
-                    d.error = Some(message(&e));
+                    d.error = Some(crate::shell::palette::error_message(&e, "Could not start the clone."));
                 }
                 true
             }
@@ -870,7 +870,11 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(p) = project(s, &d.project) else { return };
     let k = kit::theme(t);
     let targets = targets(s, &d.project);
-    let target_label = targets.iter().find(|(key, _)| *key == d.target).map_or_else(|| env::label(s, &d.target), |t| t.1.clone());
+    let target_label = match targets.iter().find(|(key, _)| *key == d.target) {
+        Some((_, label)) => label.clone(),
+        None if d.target.is_empty() => "No machine available".into(),
+        None => env::label(s, &d.target),
+    };
     let url = source_url(p);
     let remote_url = d.protocol.and_then(|proto| clone_url_for_protocol(&url, proto)).unwrap_or_else(|| url.clone());
     let chosen = selected(d);

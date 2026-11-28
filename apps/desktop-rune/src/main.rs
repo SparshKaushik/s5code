@@ -296,7 +296,7 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
+    let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url).compositor(panel::DeviceViewport::default());
     panel::popout::register(&mut app);
     desktop::capture::register(&mut app);
     notify::set_window(app.handle());
