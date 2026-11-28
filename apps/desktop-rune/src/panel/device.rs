@@ -2162,9 +2162,11 @@ pub fn float_fixture(app: &mut App) {
     app.ui.shell.panel_open = false;
 }
 
-/// Recorded device states for the panel's scenes.
+/// Recorded device states for the panel's scenes, showing the first session.
 pub fn fixture(app: &mut App, sessions: Value) {
     let thread = super::context(app).map(|(id, _)| id).unwrap_or_default();
+    // Activating the Device surface browses the list; a scene shows its session.
+    app.ui.panel.device.browsing = false;
     let sessions: Vec<Value> = sessions.as_array().into_iter().flatten().map(|s| json!({"threadId": thread, "hostId": s["hostId"], "deviceId": s["deviceId"], "platform": s["platform"], "openedAt": "2026-11-16T10:00:00.000Z"})).collect();
     app.ui.panel.device.fixture = Some(json!({
         "hostStatus": "ready", "hostStatuses": {}, "onboardingCompleted": true, "agentAccessEnabled": true, "hubBasePath": "/api/device-hub", "revision": 1,
@@ -2246,6 +2248,17 @@ pub fn duo_fixture(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_device_scenes_show_their_device() {
+        for name in ["panel-device-stream", "panel-device-3d-model", "panel-device-fold", "panel-device-keyboard", "panel-device-duo"] {
+            let mut s = App::new();
+            (super::super::SCENES.iter().find(|(n, _)| *n == name).unwrap().1)(&mut s);
+            let thread = super::super::context(&s).map(|(id, _)| id).unwrap_or_default();
+            let ui = &s.ui.panel.device;
+            assert!(!ui.browsing && state(&s).is_some_and(|state| session(state, &thread, ui.selected.as_deref()).is_some()), "{name} shows the list");
+        }
+    }
 
     #[test]
     fn mjpeg_parts_split_by_length_or_boundary() {
