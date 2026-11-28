@@ -36,6 +36,7 @@ pub struct NewThread {
 /// A thread deep link: the thread, and the prompt it carries for its composer.
 #[derive(Debug, PartialEq)]
 struct ThreadLink {
+    environment: String,
     thread: String,
     prompt: Option<Result<(String, usize), String>>,
 }
@@ -310,7 +311,8 @@ fn thread_link(url: &str) -> Option<ThreadLink> {
         Some(Ok(Some(found))) => Some(Ok(found)),
         Some(Err(e)) => Some(Err(e)),
     };
-    Some(ThreadLink { thread: crate::chat::timeline::md_links::percent_decode(thread), prompt })
+    let decode = crate::chat::timeline::md_links::percent_decode;
+    Some(ThreadLink { environment: decode(env), thread: decode(thread), prompt })
 }
 
 /// `resolvePromptLinkModelSelection`: the first ready (else warning) enabled instance of the
@@ -911,20 +913,39 @@ fn apply_link_model(s: &mut App, provider: &str, model: Option<&str>) -> Option<
     }
 }
 
+fn poll_thread(s: &mut App) -> bool {
+    let Some(link) = s.ui.links.pending_thread.as_ref() else { return false };
+    let local = crate::env::local_id(s);
+    let key = if local.as_deref() == Some(link.environment.as_str()) { crate::env::LOCAL } else { link.environment.as_str() };
+    let source = crate::env::source(s, key);
+    if source.is_some_and(|src| !src.state().shell_ready) {
+        return false;
+    }
+    if source.is_none() {
+        if crate::env::keys(s).iter().any(|known| known == key)
+            || (local.is_none() && !s.ui.desktop.local_off)
+        {
+            return false;
+        }
+        s.ui.links.pending_thread = None;
+        crate::shell::palette::toast_error(s, "Could not open the linked thread", Some("This environment is unavailable."));
+        return true;
+    }
+    let key = key.to_owned();
+    let Some(link) = s.ui.links.pending_thread.take() else { return false };
+    crate::shell::sidebar::open_thread_in(s, &link.thread, Some(&key));
+    match link.prompt {
+        Some(Err(message)) => crate::shell::palette::toast_error(s, "Could not open the linked prompt", Some(&message)),
+        Some(Ok((prompt, hidden))) => place_prompt(s, &prompt, hidden, None),
+        None => {}
+    }
+    true
+}
+
 pub fn poll(s: &mut App) -> bool {
-    let paired = poll_pairing(s) | poll_web(s) | poll_landing(s);
+    let paired = poll_pairing(s) | poll_web(s) | poll_landing(s) | poll_thread(s);
     if !s.state().shell_ready {
         return paired;
-    }
-    // `ThreadLinkPrompt`: the thread opens, and its prompt lands in the composer.
-    if let Some(link) = s.ui.links.pending_thread.take() {
-        crate::shell::sidebar::open_thread(s, &link.thread);
-        match link.prompt {
-            Some(Err(message)) => crate::shell::palette::toast_error(s, "Could not open the linked prompt", Some(&message)),
-            Some(Ok((prompt, hidden))) => place_prompt(s, &prompt, hidden, None),
-            None => {}
-        }
-        return true;
     }
     if s.ui.links.pending.is_none() {
         return paired;
@@ -1124,11 +1145,11 @@ mod tests {
     fn thread_links_open_the_thread_and_place_the_prompt_like_web() {
         use serde_json::json;
         let link = |url: &str| thread_link(url);
-        let thread = |id: &str, prompt: Option<Result<(String, usize), String>>| Some(ThreadLink { thread: id.into(), prompt });
-        assert_eq!(link("s5code://threads/env-1/t-1"), thread("t-1", None));
-        assert_eq!(link("t3code-dev://threads/env-1/t-1/?prompt=hi"), thread("t-1", Some(Ok(("hi".into(), 0)))));
-        assert_eq!(link("https://app.s5code.touchtech.club/threads/env%201/t%3A1"), thread("t:1", None), "FAILED: Copy thread's hosted link does not open in Rune");
-        assert_eq!(link("https://app.s5code.touchtech.club/env-1/t-1?prompt=a%E2%80%8Bb"), thread("t-1", Some(Ok(("ab".into(), 1)))));
+        let thread = |environment: &str, id: &str, prompt| Some(ThreadLink { environment: environment.into(), thread: id.into(), prompt });
+        assert_eq!(link("s5code://threads/env-1/t-1"), thread("env-1", "t-1", None));
+        assert_eq!(link("t3code-dev://threads/env-1/t-1/?prompt=hi"), thread("env-1", "t-1", Some(Ok(("hi".into(), 0)))));
+        assert_eq!(link("https://app.s5code.touchtech.club/threads/env%201/t%3A1"), thread("env 1", "t:1", None), "FAILED: Copy thread's hosted link does not open in Rune");
+        assert_eq!(link("https://app.s5code.touchtech.club/env-1/t-1?prompt=a%E2%80%8Bb"), thread("env-1", "t-1", Some(Ok(("ab".into(), 1)))));
         assert_eq!(link("https://app.s5code.touchtech.club/env-1/t-1"), None, "a hosted thread route is a link only with a prompt");
         assert!(matches!(link("s5code://threads/env-1/t-1?prompt=%E2%80%8B"), Some(ThreadLink { prompt: Some(Err(_)), .. })));
         for other in ["s5code://threads/env-1", "s5code://threads/a/b/c", "https://example.com/threads/a/b", "s5code://other/a/b"] {
@@ -1137,6 +1158,8 @@ mod tests {
         assert!(is_app_link("s5code://threads/env-1/t-1"));
 
         let mut s = ready(vec![json!({"id": "p1"})], vec![json!({"id": "t1", "projectId": "p1"})]);
+        let crate::data::Source::Fixture(state) = &mut s.src else { panic!() };
+        state.config = Some(json!({"environment": {"environmentId": "env"}}));
         let text = |s: &App| s.ui.chat.composer.drafts.get("t1").map(|d| d.edit.text.clone()).unwrap_or_default();
         assert!(open(&mut s, "s5code://threads/env/t1?prompt=Fix%20it"));
         assert_eq!((s.route.clone(), text(&s)), (Route::Thread("t1".into()), "Fix it".into()));
@@ -1152,6 +1175,21 @@ mod tests {
         assert!(titles.contains(&"Prompt added from a link".to_owned()) && !titles.contains(&"Linked prompt ready".to_owned()), "{titles:?}");
         assert!(open(&mut s, "s5code://threads/env/t1?prompt=%E2%80%8B"));
         assert_eq!(crate::shell::palette::toast_title(&s), Some("Could not open the linked prompt"));
+    }
+
+    #[test]
+    fn a_thread_link_waits_for_its_own_environment() {
+        use serde_json::json;
+        let mut s = ready(vec![], vec![json!({"id": "t1"})]);
+        crate::env::park(&mut s, "box", data::Source::Fixture(data::empty_state()));
+        assert!(open(&mut s, "t3code://threads/box/t1"));
+        assert_ne!(s.route, Route::Thread("t1".into()));
+        let Some(data::Source::Fixture(remote)) = crate::env::source_mut(&mut s, "box") else { panic!() };
+        remote.shell_ready = true;
+        remote.threads.push(json!({"id": "t1"}));
+        assert!(poll(&mut s));
+        assert_eq!(s.route, Route::Thread("t1".into()));
+        assert_eq!(s.ui.env.active, "box");
     }
 
     #[test]

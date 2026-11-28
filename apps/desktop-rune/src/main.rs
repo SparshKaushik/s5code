@@ -116,22 +116,31 @@ impl App {
     }
 
     pub fn navigate(&mut self, route: Route) {
+        self.navigate_in(route, None);
+    }
+
+    pub(crate) fn navigate_in(&mut self, route: Route, environment: Option<&str>) {
+        let changed = route != self.route || environment.is_some_and(|key| self.ui.env.active != key);
         if route.is_modal() && !self.route.is_modal() {
             self.ui.settings.return_route = Some(self.route.clone());
         }
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
-        if route != self.route {
+        if changed {
             panel::flush_file(self);
         }
-        env::follow(self, &route);
+        if let Some(key) = environment {
+            env::switch(self, key);
+        } else {
+            env::follow(self, &route);
+        }
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
         {
             net.watch_thread(id);
         }
-        if matches!(route, Route::Home { .. } | Route::Thread(_)) && route != self.route {
+        if matches!(route, Route::Home { .. } | Route::Thread(_)) && changed {
             chat::composer::focus(self, &route);
         }
         self.route = route;
@@ -308,6 +317,7 @@ fn main() {
     #[cfg(unix)]
     desktop::signals::install(app.handle());
     app.run();
+    notify::shutdown();
     panel::browser::shutdown();
     host::shutdown();
     env::ssh::shutdown();

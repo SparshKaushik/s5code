@@ -1267,13 +1267,18 @@ fn run_plan(s: &mut App, id: &str, plan: Plan) {
 // --- Navigation -------------------------------------------------------------------------------
 
 pub fn go(s: &mut App, route: Route) {
-    if s.route == route {
+    go_in(s, route, None);
+}
+
+fn go_in(s: &mut App, route: Route, environment: Option<&str>) {
+    if s.route != route {
+        let ui = &mut s.ui.shell.sidebar;
+        ui.back.push(s.route.clone());
+        ui.forward.clear();
+    } else if environment.is_none_or(|key| key == s.ui.env.active) {
         return;
     }
-    let ui = &mut s.ui.shell.sidebar;
-    ui.back.push(s.route.clone());
-    ui.forward.clear();
-    s.navigate(route);
+    s.navigate_in(route, environment);
 }
 
 pub fn go_back(s: &mut App) {
@@ -1291,14 +1296,18 @@ pub fn go_forward(s: &mut App) {
 }
 
 pub fn open_thread(s: &mut App, id: &str) {
+    open_thread_in(s, id, None);
+}
+
+pub(crate) fn open_thread_in(s: &mut App, id: &str, environment: Option<&str>) {
     // A side chat of the open thread opens beside it (onOpenRelatedThread's openSideChatTab).
-    if crate::chat::side::open_tab(s, id) {
+    if environment.is_none_or(|key| key == s.ui.env.active) && crate::chat::side::open_tab(s, id) {
         return;
     }
     let ui = &mut s.ui.shell.sidebar;
     ui.selected.clear();
     ui.anchor = Some(id.to_string());
-    go(s, Route::Thread(id.to_string()));
+    go_in(s, Route::Thread(id.to_string()), environment);
 }
 
 /// `chat.new`: with several open projects, pick one in the palette; otherwise `chat.newLocal`.

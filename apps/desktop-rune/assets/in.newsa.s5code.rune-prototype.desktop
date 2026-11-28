@@ -6,4 +6,4 @@ Exec=s5code-rune %U
 Terminal=false
 Categories=Development;
 StartupWMClass=in.newsa.s5code.rune-prototype
-MimeType=x-scheme-handler/s5code;
+MimeType=x-scheme-handler/s5code;x-scheme-handler/t3code;

@@ -152,19 +152,42 @@ pub fn reveal_window() {
     WINDOW.with(|w| w.get().map(|h| h.open()));
 }
 
-/// Threads whose desktop notification was clicked, from the helper processes' threads.
-static CLICKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// The latest OS notification activated while the UI was asleep.
+static CLICKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// A clicked notification brings the window forward on its thread, as Electron's does.
-fn open_clicked(s: &mut App) -> bool {
-    let Some(id) = CLICKED.lock().map(|mut c| c.pop()).ok().flatten() else { return false };
-    CLICKED.lock().map(|mut c| c.clear()).ok();
-    reveal_window();
-    match id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
-        Some(url) => crate::pages::pr_guide::open_guide(s, url),
-        None => crate::shell::sidebar::open_thread(s, &id),
+fn clicked(id: String, wake: Option<&rune::Waker>) {
+    if let Ok(mut pending) = CLICKED.lock() {
+        *pending = Some(id);
     }
+    if let Some(wake) = wake {
+        wake();
+    }
+}
+
+fn open_clicked(s: &mut App) -> bool {
+    let Some(id) = CLICKED.lock().ok().and_then(|mut c| c.take()) else { return false };
+    reveal_window();
+    open_target(s, &id);
     true
+}
+
+fn open_target(s: &mut App, id: &str) {
+    if let Some(url) = id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
+        crate::pages::pr_guide::open_guide(s, url);
+    } else if let Some((key, thread)) = id.split_once('\u{1f}') {
+        if crate::env::source(s, key).is_some() {
+            crate::shell::sidebar::open_thread_in(s, thread, Some(key));
+        }
+    } else {
+        // Existing macOS notifications may still carry an unqualified thread id.
+        crate::shell::sidebar::open_thread(s, id);
+    }
+}
+
+pub fn shutdown() {
+    if !rune::is_headless() {
+        os::shutdown();
+    }
 }
 
 /// The notification sound for something other than a thread (a review guide run settling).
@@ -221,7 +244,7 @@ fn observe(s: &mut App) -> bool {
                 }
                 let quiet = row["latestRunStopRequested"] == true;
                 if let Some(kind) = watched.gate.observe(&thread.id, watched.previous.get(&thread.id), &observation, thread.archived, quiet) {
-                    presented.push((thread.id.clone(), thread.title.clone(), status, kind));
+                    presented.push((key.clone(), thread.id.clone(), thread.title.clone(), status, kind));
                 }
                 next.insert(thread.id, observation);
             }
@@ -231,8 +254,8 @@ fn observe(s: &mut App) -> bool {
         s.ui.notify.watched.insert(key, watched);
     }
     let changed = !presented.is_empty();
-    for (id, title, status, kind) in presented {
-        present(s, &id, title, status, kind);
+    for (key, id, title, status, kind) in presented {
+        present(s, &key, &id, title, status, kind);
     }
     changed
 }
@@ -248,25 +271,27 @@ fn title_for(kind: Kind, status: Status) -> &'static str {
     }
 }
 
-fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kind) {
+fn present(s: &mut App, key: &str, id: &str, description: String, status: Status, kind: Kind) {
     let title = title_for(kind, status);
     let mode = mode(s).to_string();
     if has_sound(&mode) {
         play_sound(s, kind);
     }
-    let active = matches!(&s.route, Route::Thread(open) if open == id);
+    let active = s.ui.env.active == key && matches!(&s.route, Route::Thread(open) if open == id);
     let focused = !s.ui.notify.background;
     if in_app(s) && focused && !active {
-        toast(s, id, title, description, kind, status);
+        toast(s, logic::thread_key(key, id), title, description, kind, status);
         return;
     }
     if !has_desktop(&mode) || focused {
         return;
     }
-    os::notify(title, &description, id, s.ui.panel.waker.clone());
-    let ui = &mut s.ui.notify;
-    ui.pending.retain(|p| p != id);
-    ui.pending.push(id.to_string());
+    let id = logic::thread_key(key, id);
+    os::notify(title, &description, &id, s.ui.panel.waker.clone());
+    let pending = &mut s.ui.notify.pending;
+    if !pending.contains(&id) {
+        pending.push(id);
+    }
     sync_badge(s);
 }
 
@@ -294,7 +319,7 @@ fn play_sound(s: &mut App, kind: Kind) {
 }
 
 /// The in-app notification, a toast in the app's stack as web's coordinator raises it.
-fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: Kind, status: Status) {
+fn toast(s: &mut App, id: String, title: &'static str, description: String, kind: Kind, status: Status) {
     use crate::shell::toast::{self as stack, Tone};
     let (glyph, tone): (&'static rune::Icon, Tone) = match (kind, status) {
         (Kind::Completion, _) => (&icons::CIRCLE_CHECK, Tone::Success),
@@ -311,13 +336,13 @@ fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: 
     let mut toast = stack::Toast::new(title, Some(&description), level);
     toast.lead = Some((glyph, tone));
     toast.hide_copy = true;
-    let (thread, at) = (id.to_owned(), stack::next_id(s));
+    let at = stack::next_id(s);
     toast.actions = vec![(
         "Open thread".into(),
         true,
         std::rc::Rc::new(move |s: &mut App, _: &mut Tx| {
             stack::close(s, at);
-            crate::shell::sidebar::open_thread(s, &thread);
+            open_target(s, &id);
         }),
     )];
     stack::add(s, toast, Some(stack::TIMEOUT_MS));
@@ -333,8 +358,7 @@ mod os {
         ONCE.call_once(|| {
             rune_mac::notify::on_click(move |click| {
                 if let Some(thread) = click.get("thread") {
-                    super::CLICKED.lock().map(|mut c| c.push(thread.to_owned())).ok();
-                    wake();
+                    super::clicked(thread.to_owned(), Some(&wake));
                 }
             })
         });
@@ -343,36 +367,46 @@ mod os {
     /// Linux notifications on screen, by the thread they're for: a newer one for the same thread
     /// replaces it, as web's notification `tag` does, and focusing the window closes them all.
     #[derive(Default)]
-    pub struct Shown(Vec<(String, u32)>);
+    pub struct Shown {
+        next: u64,
+        by_thread: super::HashMap<String, (u64, Option<u32>)>,
+    }
 
     impl Shown {
-        pub fn id(&self, thread: &str) -> Option<u32> {
-            self.0.iter().find(|(t, _)| t == thread).map(|&(_, id)| id)
+        pub fn begin(&mut self, thread: &str) -> (u64, Option<u32>) {
+            self.next += 1;
+            let replace = self.by_thread.get(thread).and_then(|&(_, id)| id);
+            self.by_thread.insert(thread.to_owned(), (self.next, replace));
+            (self.next, replace)
         }
 
-        pub fn record(&mut self, thread: &str, id: u32) {
-            self.0.retain(|(t, _)| t != thread);
-            self.0.push((thread.to_owned(), id));
+        pub fn record(&mut self, thread: &str, attempt: u64, id: u32) -> bool {
+            if let Some((current, shown)) = self.by_thread.get_mut(thread)
+                && *current == attempt
+            {
+                *shown = Some(id);
+                return true;
+            }
+            false
         }
 
-        /// The notification closed (its helper exited); a replacement keeps its id.
-        pub fn forget(&mut self, thread: &str, id: u32) {
-            self.0.retain(|(t, i)| !(t == thread && *i == id));
+        pub fn finish(&mut self, thread: &str, attempt: u64) -> bool {
+            let current = self.by_thread.get(thread).is_some_and(|&(current, _)| current == attempt);
+            current && self.by_thread.remove(thread).is_some()
         }
 
         pub fn take(&mut self, threads: &[String]) -> Vec<u32> {
-            let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|(t, _)| threads.contains(t));
-            self.0 = kept;
-            gone.into_iter().map(|(_, id)| id).collect()
+            threads.iter().filter_map(|thread| self.by_thread.remove(thread).and_then(|(_, id)| id)).collect()
         }
     }
 
-    static SHOWN: std::sync::Mutex<Shown> = std::sync::Mutex::new(Shown(Vec::new()));
+    static SHOWN: std::sync::LazyLock<std::sync::Mutex<Shown>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Shown::default()));
 
     pub fn notify_send_args(title: &str, body: &str, replace: Option<u32>) -> Vec<String> {
         let mut args = vec!["--app-name".to_owned(), "S5 Code".to_owned(), "--action=default=Open".to_owned(), "--wait".to_owned(), "--print-id".to_owned()];
         args.extend(replace.map(|id| format!("--replace-id={id}")));
-        args.extend([title.to_owned(), body.to_owned()]);
+        args.extend(["--".to_owned(), title.to_owned(), body.to_owned()]);
         args
     }
 
@@ -385,18 +419,22 @@ mod os {
             }
             std::thread::spawn(move || {
                 for id in ids {
-                    let _ = std::process::Command::new("gdbus")
-                        .args(["call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.CloseNotification", &id.to_string()])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
+                    close_linux(id);
                 }
             });
             return;
         }
         let ids: Vec<&str> = threads.iter().map(String::as_str).collect();
         rune_mac::notify::remove(&ids);
+    }
+
+    fn close_linux(id: u32) {
+        let _ = std::process::Command::new("gdbus")
+            .args(["call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.CloseNotification", &id.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 
     /// On Linux, `notify-send --wait --print-id` prints the notification's id, then the action
@@ -406,7 +444,7 @@ mod os {
         if cfg!(target_os = "linux") {
             use std::io::BufRead;
             let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
-            let replace = SHOWN.lock().ok().and_then(|s| s.id(&thread));
+            let Ok((attempt, replace)) = SHOWN.lock().map(|mut s| s.begin(&thread)) else { return };
             std::thread::spawn(move || {
                 let child = std::process::Command::new("notify-send")
                     .args(notify_send_args(&title, &body, replace))
@@ -414,30 +452,32 @@ mod os {
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
                     .spawn();
-                let Ok(mut child) = child else { return };
+                let Ok(mut child) = child else {
+                    SHOWN.lock().map(|mut s| s.finish(&thread, attempt)).ok();
+                    return;
+                };
                 let (mut id, mut clicked) = (None, false);
                 if let Some(out) = child.stdout.take() {
                     for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
                         match (id, line.trim().parse::<u32>()) {
                             (None, Ok(n)) => {
                                 id = Some(n);
-                                SHOWN.lock().map(|mut s| s.record(&thread, n)).ok();
+                                if !SHOWN.lock().is_ok_and(|mut s| s.record(&thread, attempt, n)) {
+                                    close_linux(n);
+                                }
                             }
                             _ => clicked |= line.trim() == "default",
                         }
                     }
                 }
                 let ok = child.wait().is_ok_and(|s| s.success());
-                if let Some(n) = id {
-                    SHOWN.lock().map(|mut s| s.forget(&thread, n)).ok();
+                if !SHOWN.lock().is_ok_and(|mut s| s.finish(&thread, attempt)) {
+                    return;
                 }
                 if clicked {
-                    super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
-                    if let Some(wake) = wake {
-                        wake();
-                    }
+                    super::clicked(thread, wake.as_ref());
                 } else if !ok && id.is_none() {
-                    let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
+                    let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", "--", &title, &body]).status();
                 }
             });
             return;
@@ -530,12 +570,44 @@ mod os {
     }
 
     #[cfg(target_os = "linux")]
+    type BadgeUpdate = (usize, Option<std::sync::mpsc::Sender<()>>);
+
+    #[cfg(target_os = "linux")]
+    fn badge_queue() -> &'static std::sync::mpsc::Sender<BadgeUpdate> {
+        static QUEUE: std::sync::OnceLock<std::sync::mpsc::Sender<BadgeUpdate>> = std::sync::OnceLock::new();
+        QUEUE.get_or_init(|| {
+            let (send, updates) = std::sync::mpsc::channel::<BadgeUpdate>();
+            std::thread::spawn(move || {
+                for (count, done) in updates {
+                    let _ = std::process::Command::new("gdbus").args(launcher_entry(count))
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                }
+            });
+            send
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn set_badge(count: usize) {
-        let mut command = std::process::Command::new("gdbus");
-        command.args(launcher_entry(count)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        std::thread::spawn(move || {
-            let _ = command.status();
-        });
+        let _ = badge_queue().send((count, None));
+    }
+
+    pub fn shutdown() {
+        #[cfg(target_os = "linux")]
+        {
+            let (send, done) = std::sync::mpsc::channel();
+            if badge_queue().send((0, Some(send))).is_ok() {
+                let _ = done.recv_timeout(std::time::Duration::from_secs(2));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        set_badge(0);
     }
 
     /// Windows would need a taskbar overlay icon.
@@ -570,21 +642,39 @@ mod tests {
     #[test]
     fn a_threads_linux_notification_replaces_its_last_until_focus_closes_them() {
         let mut shown = os::Shown::default();
-        assert!(!os::notify_send_args("Thread completed", "Fix tests", None).iter().any(|a| a.starts_with("--replace-id")));
-        shown.record("t1", 7);
-        shown.record("t2", 9);
-        let args = os::notify_send_args("Input needed", "Fix tests", shown.id("t1"));
+        let (first, replace) = shown.begin("t1");
+        assert_eq!(replace, None);
+        assert!(shown.record("t1", first, 7));
+        let (other, _) = shown.begin("t2");
+        assert!(shown.record("t2", other, 9));
+        let (replacement, replace) = shown.begin("t1");
+        let args = os::notify_send_args("Input needed", "Fix tests", replace);
         assert!(args.contains(&"--replace-id=7".to_owned()) && args.contains(&"--print-id".to_owned()), "{args:?}");
-        assert_eq!(args[args.len() - 2..], ["Input needed".to_owned(), "Fix tests".to_owned()]);
-
-        // The replaced helper exits with the id the replacement now holds: the newer one stays.
-        shown.record("t1", 7);
-        shown.forget("t1", 6);
-        assert_eq!(shown.id("t1"), Some(7));
+        assert_eq!(args[args.len() - 3..], ["--", "Input needed", "Fix tests"]);
+        assert!(shown.record("t1", replacement, 7));
+        assert!(!shown.finish("t1", first), "the old helper cannot click or clear the replacement");
         assert_eq!(shown.take(&["t1".to_owned()]), vec![7]);
-        assert_eq!((shown.id("t1"), shown.id("t2")), (None, Some(9)));
-        shown.forget("t2", 9);
-        assert_eq!(shown.take(&["t2".to_owned()]), Vec::<u32>::new());
+        assert!(shown.finish("t2", other));
+        let (late, _) = shown.begin("t3");
+        assert!(shown.take(&["t3".to_owned()]).is_empty());
+        assert!(!shown.record("t3", late, 13), "an ID received after focus must be closed");
+    }
+
+    #[test]
+    fn an_os_click_opens_the_right_environment_even_when_thread_ids_match() {
+        let mut s = App::new();
+        let mut local = data::empty_state();
+        local.threads.push(json!({"id": "t", "title": "Local thread"}));
+        s.src = data::Source::Fixture(local);
+        let mut remote = data::empty_state();
+        remote.threads.push(json!({"id": "t", "title": "Remote thread"}));
+        crate::env::park(&mut s, "box", data::Source::Fixture(remote));
+        s.route = Route::Thread("t".into());
+        open_target(&mut s, &logic::thread_key("box", "t"));
+        assert_eq!(s.ui.env.active, "box");
+        open_target(&mut s, &logic::thread_key(crate::env::LOCAL, "t"));
+        assert_eq!(s.ui.env.active, crate::env::LOCAL);
+        assert_eq!(s.route, Route::Thread("t".into()));
     }
 
     fn obs(attention: Option<&str>, completed_at: Option<i64>) -> Observation {

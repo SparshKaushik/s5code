@@ -2,7 +2,7 @@ name: Rune desktop prototype (macOS)
 
 on:
   push:
-    branches: [feat/rune-desktop-prototype]
+    branches: [feat/rune-desktop-prototype, feat/rune-p3-codex-office]
     paths:
       - apps/desktop-rune/**
       - scripts/build-server-binary.ts
@@ -64,6 +64,11 @@ jobs:
         run: cargo test --release --locked --bin s5code-rune kit::menu
 
       # The app starts this bundled server on launch, as the Electron app starts its own.
+      - name: Test native desktop notifications and links
+        run: |
+          cargo test --release --locked --bin s5code-rune notify::tests
+          cargo test --release --locked --bin s5code-rune links::tests
+
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
