@@ -6,6 +6,7 @@ mod brand;
 mod chrome;
 mod drafts;
 pub mod everything;
+pub mod release_notes;
 pub mod favicon;
 pub(crate) mod folders;
 pub mod logic;
