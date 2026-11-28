@@ -71,6 +71,7 @@ pub struct Ui {
     pub expanded: HashSet<String>,
     pub question_index: HashMap<String, usize>,
     pub wrapped: HashSet<String>,
+    pub expanded_diagram: Option<String>,
     /// Typed answers to pending questions, by `request/question`.
     pub custom_answers: HashMap<String, rune::TextEdit>,
     pub answers: HashMap<String, HashMap<String, Vec<String>>>,

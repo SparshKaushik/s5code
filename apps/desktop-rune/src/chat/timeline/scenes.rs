@@ -186,6 +186,10 @@ fn light(app: &mut App) {
     app.appearance = Appearance::Light;
 }
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("timeline-diagram-expanded", |app| {
+        showcase(app);
+        app.ui.chat.timeline.expanded_diagram = Some("flowchart LR\n  Draft --> Review\n  Review --> Publish".into());
+    }),
     ("timeline-pending-approval", pending),
     ("timeline-question", question),
     ("timeline-error", error),

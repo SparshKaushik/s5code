@@ -244,6 +244,18 @@ pub(crate) fn diagram(source: &str, t: &T) -> Option<El> {
     rune_kit::mermaid::render(source, &style(t, t.c.foreground))
 }
 
+pub(crate) fn diagram_overlay(app: &App, t: &T, overlays: &mut Vec<El>) {
+    let Some(card) = app.ui.chat.timeline.expanded_diagram.as_deref().and_then(|source| diagram(source, t)) else { return };
+    crate::kit::Dialog::new("expanded-diagram", "Diagram")
+        .open(true)
+        .width(960.0)
+        .child(col().key("expanded-diagram-scroll").w_full().shrink().min_h(0.0).max_h(520.0)
+            .scroll(rune::ScrollSpec { stick_bottom: false })
+            .child(card))
+        .on_close(|s: &mut App| s.ui.chat.timeline.expanded_diagram = None)
+        .build(t, overlays);
+}
+
 pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
     memoized(app, source, id, t, ink(t), false)
 }
@@ -437,11 +449,25 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
         .pt(7.0)
         .child(row().grow(1.0).child(language_icons::language(language, t)))
         .child(tools);
-    let fenced = format!("```{language}\n{code}\n```");
-    let code_view = Markdown::new(fenced.clone())
+    let fenced = if language == "mermaid" && !closed {
+        format!("```{language}\n{code}")
+    } else {
+        format!("```{language}\n{code}\n```")
+    };
+    let theme = *t;
+    let code_view = Markdown::new(fenced.as_str())
         .selectable(true)
         .highlights(marks_for(cx.marks, &fenced))
         .scroll_wide(!wrap)
+        .streaming(language == "mermaid" && !closed)
+        .diagram_frame(move |card, frame| {
+            let source = frame.source.to_owned();
+            col().w_full().child(card).child(row().w_full().justify_end().px(6.0).pb(6.0).child(
+                crate::kit::Button::new("Expand diagram").variant("ghost").size("icon-sm").icon(&icons::MAXIMIZE_2)
+                    .on_press(move |s: &mut App| s.ui.chat.timeline.expanded_diagram = Some(source.clone()))
+                    .build(&theme),
+            ))
+        })
         .render(
             &style(t, cx.ink)
                 .code_block(rune::Color::TRANSPARENT, rune::Color::TRANSPARENT)

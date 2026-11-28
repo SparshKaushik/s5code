@@ -33,6 +33,12 @@ impl Custom {
         time.focused = true;
         Custom { targets, duration: false, date, time, amount: TextEdit::new("2"), unit: 1, unit_open: false, calendar_open: false, month: (y, m), error: None }
     }
+
+    fn step_amount(&mut self, by: f64) {
+        let amount = self.amount.text.trim().parse::<f64>().ok().filter(|n| n.is_finite()).unwrap_or(0.0);
+        self.amount.replace_text((amount + by).max(0.0).to_string());
+        self.error = None;
+    }
 }
 
 /// Days since the epoch for a proleptic Gregorian date (Howard Hinnant).
@@ -171,7 +177,31 @@ pub fn dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
             .placeholder("2")
             .on_edit(|s: &mut App| edit(s, |c| &mut c.amount))
             .on_submit(|s: &mut App, _| submit(s))
-            .build(t);
+            .build(t)
+            .label("Snooze for")
+            .grow(1.0)
+            .min_w(0.0)
+            .on_key(|s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+                if e.mods.cmd || e.mods.ctrl || e.mods.alt || e.mods.shift {
+                    return false;
+                }
+                let by = match e.key {
+                    rune::Key::Up => 1.0,
+                    rune::Key::Down => -1.0,
+                    _ => return false,
+                };
+                with_custom(s, |c| c.step_amount(by));
+                true
+            });
+        let step = |label, glyph: &'static rune::Icon, by| {
+            kit::Button::new(label).variant("outline").size("icon").icon(glyph)
+                .on_press(move |s: &mut App| with_custom(s, |c| c.step_amount(by)))
+                .build(t)
+        };
+        let amount = row().w_full().center_y().gap(4.0)
+            .child(step("Decrease duration", &icons::MINUS, -1.0))
+            .child(amount)
+            .child(step("Increase duration", &icons::PLUS, 1.0));
         let unit = kit::Select::new("sb-snooze-unit", &UNITS.map(|u| u.0))
             .current(Some(UNITS[c.unit].0))
             .label("Unit")
@@ -386,6 +416,12 @@ mod tests {
         assert_eq!(resolve(&c, 1000, Zone::Fixed(0)), None);
         c.amount = TextEdit::new("abc");
         assert_eq!(resolve(&c, 1000, Zone::Fixed(0)), None);
+        for (amount, by, expected) in [("1.5", 1.0, "2.5"), ("0.5", -1.0, "0"), ("", 1.0, "1"), ("abc", -1.0, "0")] {
+            c.amount.replace_text(amount);
+            c.error = Some("Enter a positive duration.");
+            c.step_amount(by);
+            assert_eq!((c.amount.text.as_str(), c.error), (expected, None));
+        }
     }
 
     #[test]

@@ -1628,6 +1628,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         files::edit_fixture(s, Some("  // Reuse the running session first.\n"), true);
     }),
     ("panel-terminal", |s| panel_terminal(s, TERMINAL_DEV)),
+    ("panel-terminal-read-only-menu", |s| {
+        panel_terminal(s, TERMINAL_DEV);
+        terminal::read_only_menu_fixture(s);
+    }),
     ("panel-terminal-vim", |s| panel_terminal(s, TERMINAL_VIM)),
     ("panel-terminal-htop", |s| panel_terminal(s, TERMINAL_HTOP)),
     ("terminal-drawer", |s| {

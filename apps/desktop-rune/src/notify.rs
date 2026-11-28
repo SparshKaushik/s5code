@@ -160,9 +160,12 @@ fn open_clicked(s: &mut App) -> bool {
     let Some(id) = CLICKED.lock().map(|mut c| c.pop()).ok().flatten() else { return false };
     CLICKED.lock().map(|mut c| c.clear()).ok();
     reveal_window();
-    match id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
-        Some(url) => crate::pages::pr_guide::open_guide(s, url),
-        None => crate::shell::sidebar::open_thread(s, &id),
+    if let Some(url) = id.strip_prefix(crate::pages::pr_guide::NOTIFICATION) {
+        crate::pages::pr_guide::open_guide(s, url);
+    } else if let Some((environment, thread)) = id.split_once('\u{1f}') {
+        crate::shell::sidebar::open_notified_thread(s, environment, thread);
+    } else {
+        crate::shell::sidebar::open_thread(s, &id);
     }
     true
 }
@@ -200,6 +203,11 @@ fn observe(s: &mut App) -> bool {
         s.ui.notify.watched.clear();
         return false;
     }
+    let (hidden, hiding) = crate::shell::sidebar::tag_hidden(s);
+    let live = hiding.then(|| s.state().threads.iter().map(|row| {
+        logic::thread_key(&crate::env::of(s, row), crate::data::s(row, "id"))
+    }).collect::<HashSet<_>>());
+    let changed = close_hidden(s, &hidden, live.as_ref());
     let keys = crate::env::keys(s);
     s.ui.notify.watched.retain(|k, _| keys.contains(k));
     let mut presented = vec![];
@@ -220,8 +228,10 @@ fn observe(s: &mut App) -> bool {
                     continue;
                 }
                 let quiet = row["latestRunStopRequested"] == true;
-                if let Some(kind) = watched.gate.observe(&thread.id, watched.previous.get(&thread.id), &observation, thread.archived, quiet) {
-                    presented.push((thread.id.clone(), thread.title.clone(), status, kind));
+                if let Some(kind) = watched.gate.observe(&thread.id, watched.previous.get(&thread.id), &observation, thread.archived, quiet)
+                    && !hidden.contains(&logic::thread_key(&key, &thread.id))
+                {
+                    presented.push((key.clone(), thread.id.clone(), thread.title.clone(), status, kind));
                 }
                 next.insert(thread.id, observation);
             }
@@ -230,11 +240,31 @@ fn observe(s: &mut App) -> bool {
         }
         s.ui.notify.watched.insert(key, watched);
     }
-    let changed = !presented.is_empty();
-    for (id, title, status, kind) in presented {
-        present(s, &id, title, status, kind);
+    let changed = changed || !presented.is_empty();
+    for (environment, id, title, status, kind) in presented {
+        present(s, &environment, &id, title, status, kind);
     }
     changed
+}
+
+fn close_hidden(s: &mut App, hidden: &HashSet<String>, live: Option<&HashSet<String>>) -> bool {
+    let hide = |key: &str| hidden.contains(key) || live.is_some_and(|live| !live.contains(key));
+    let changed = crate::shell::toast::close_notifications(s, hide);
+    let ui = &mut s.ui.notify;
+    let mut closed = Vec::new();
+    ui.pending.retain(|key| {
+        if hide(key) {
+            closed.push(key.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if !closed.is_empty() {
+        os::withdraw(&closed);
+        sync_badge(s);
+    }
+    changed || !closed.is_empty()
 }
 
 fn title_for(kind: Kind, status: Status) -> &'static str {
@@ -248,25 +278,26 @@ fn title_for(kind: Kind, status: Status) -> &'static str {
     }
 }
 
-fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kind) {
+fn present(s: &mut App, environment: &str, id: &str, description: String, status: Status, kind: Kind) {
     let title = title_for(kind, status);
     let mode = mode(s).to_string();
     if has_sound(&mode) {
         play_sound(s, kind);
     }
-    let active = matches!(&s.route, Route::Thread(open) if open == id);
+    let active = s.ui.env.active == environment && matches!(&s.route, Route::Thread(open) if open == id);
     let focused = !s.ui.notify.background;
     if in_app(s) && focused && !active {
-        toast(s, id, title, description, kind, status);
+        toast(s, environment, id, title, description, kind, status);
         return;
     }
     if !has_desktop(&mode) || focused {
         return;
     }
-    os::notify(title, &description, id, s.ui.panel.waker.clone());
+    let key = logic::thread_key(environment, id);
+    os::notify(title, &description, &key, s.ui.panel.waker.clone());
     let ui = &mut s.ui.notify;
-    ui.pending.retain(|p| p != id);
-    ui.pending.push(id.to_string());
+    ui.pending.retain(|p| p != &key);
+    ui.pending.push(key);
     sync_badge(s);
 }
 
@@ -294,7 +325,7 @@ fn play_sound(s: &mut App, kind: Kind) {
 }
 
 /// The in-app notification, a toast in the app's stack as web's coordinator raises it.
-fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: Kind, status: Status) {
+fn toast(s: &mut App, environment: &str, id: &str, title: &'static str, description: String, kind: Kind, status: Status) {
     use crate::shell::toast::{self as stack, Tone};
     let (glyph, tone): (&'static rune::Icon, Tone) = match (kind, status) {
         (Kind::Completion, _) => (&icons::CIRCLE_CHECK, Tone::Success),
@@ -311,13 +342,14 @@ fn toast(s: &mut App, id: &str, title: &'static str, description: String, kind: 
     let mut toast = stack::Toast::new(title, Some(&description), level);
     toast.lead = Some((glyph, tone));
     toast.hide_copy = true;
-    let (thread, at) = (id.to_owned(), stack::next_id(s));
+    toast.notification_key = Some(logic::thread_key(environment, id));
+    let (environment, thread, at) = (environment.to_owned(), id.to_owned(), stack::next_id(s));
     toast.actions = vec![(
         "Open thread".into(),
         true,
         std::rc::Rc::new(move |s: &mut App, _: &mut Tx| {
             stack::close(s, at);
-            crate::shell::sidebar::open_thread(s, &thread);
+            crate::shell::sidebar::open_notified_thread(s, &environment, &thread);
         }),
     )];
     stack::add(s, toast, Some(stack::TIMEOUT_MS));
@@ -548,6 +580,38 @@ mod tests {
     use super::*;
     use crate::data;
     use serde_json::json;
+
+    #[test]
+    fn notifications_with_the_same_thread_id_keep_their_environment() {
+        let mut app = App::new();
+        let local = app.ui.env.active.clone();
+        crate::env::park(&mut app, "remote", data::Source::Fixture(data::empty_state()));
+        app.route = Route::Thread("t".into());
+        app.client_settings.values.insert("inAppNotificationsEnabled".into(), json!(true));
+        app.client_settings.values.insert("notificationMode".into(), json!("off"));
+        present(&mut app, &local, "t", "Local".into(), Status::Ready, Kind::Completion);
+        assert!(crate::shell::toast::newest(&app).is_none());
+        present(&mut app, "remote", "t", "Remote".into(), Status::Ready, Kind::Completion);
+        let toast = crate::shell::toast::newest(&app).unwrap();
+        assert_eq!(toast.notification_key, Some(logic::thread_key("remote", "t")));
+        let open = toast.actions[0].2.clone();
+        open(&mut app, &mut Tx::default());
+        assert_eq!(app.ui.env.active, "remote");
+        assert_eq!(app.route, Route::Thread("t".into()));
+    }
+
+    #[test]
+    fn tag_filter_dismisses_hidden_and_no_longer_live_thread_toasts() {
+        let mut app = App::new();
+        let local = app.ui.env.active.clone();
+        for (environment, id) in [(&local[..], "t"), ("remote", "t"), (&local[..], "gone")] {
+            toast(&mut app, environment, id, "Thread completed", format!("{environment}/{id}"), Kind::Completion, Status::Ready);
+        }
+        let hidden = HashSet::from([logic::thread_key(&local, "t")]);
+        let live = HashSet::from([logic::thread_key(&local, "t"), logic::thread_key("remote", "t")]);
+        assert!(close_hidden(&mut app, &hidden, Some(&live)));
+        assert_eq!(crate::shell::toast::titles(&app), vec![("Thread completed".into(), Some("remote/t".into()))]);
+    }
 
     /// Rune opens them on this platform: AVFoundation on macOS, its own decoder on Linux.
     #[test]

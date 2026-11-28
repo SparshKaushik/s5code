@@ -430,8 +430,12 @@ pub fn focus(app: &mut App, thread: &str, id: &str) {
     }
 }
 
+fn can_write(app: &App) -> bool {
+    crate::settings::permissions::can_on(app, &app.ui.env.active, "terminal:operate")
+}
+
 fn send(app: &mut App, thread: &str, id: &str, data: String) {
-    if data.is_empty() {
+    if data.is_empty() || !can_write(app) {
         return;
     }
     let data = match app.ui.panel.terminal.get_mut(thread, id) {
@@ -853,7 +857,9 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
             return true;
         }
         Some(Clip::Paste) => {
-            paste_clipboard(tx, thread, id);
+            if can_write(app) {
+                paste_clipboard(tx, thread, id);
+            }
             return true;
         }
         Some(Clip::SelectAll) => {
@@ -1467,7 +1473,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     let entries = if menu.selection {
         entries
     } else {
-        entries.into_iter().chain(right_click_entries(item)).collect()
+        entries.into_iter().chain(right_click_entries(item, can_write(app))).collect()
     };
     kit::Menu::new("terminal-menu")
         .native(true)
@@ -1479,9 +1485,9 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .overlay(&kit::theme(t), out);
 }
 
-fn right_click_entries(item: impl Fn(&str, fn(&mut App, &mut Tx, &str, &str)) -> kit::MenuItem) -> Vec<kit::MenuEntry> {
+fn right_click_entries(item: impl Fn(&str, fn(&mut App, &mut Tx, &str, &str)) -> kit::MenuItem, writable: bool) -> Vec<kit::MenuEntry> {
     vec![
-        kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
+        kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id)).disabled(!writable)),
         kit::MenuEntry::item(item("Select all", |s, _, th, id| {
             if let Some(session) = s.ui.panel.terminal.get_mut(th, id) {
                 session.vt.select_all();
@@ -1505,6 +1511,13 @@ pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
     apply(session, &event);
 }
 
+pub(super) fn read_only_menu_fixture(app: &mut App) {
+    let crate::Route::Thread(thread) = app.route.clone() else { return };
+    let environment = app.ui.env.active.clone();
+    crate::settings::permissions::set_session(app, &environment, json!({"authenticated": true, "permissions": ["terminal:read"]}));
+    app.ui.panel.terminal.menu = Some(Menu { thread, id: "term-1".into(), at: (850.0, 260.0), selection: false });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1520,6 +1533,21 @@ mod tests {
         assert_eq!(font_size(&settings(json!({}))), 13.);
         assert_eq!(font_size(&settings(json!({"fontSizeCode": 15, "fontSizeTerminal": 10}))), 15.);
         assert_eq!(font_size(&settings(json!({"typographyAdvanced": true, "fontSizeCode": 15, "fontSizeTerminal": 10}))), 10.);
+    }
+
+    #[test]
+    fn read_only_input_does_not_queue_while_attach_is_pending() {
+        let mut app = App::new();
+        let environment = app.ui.env.active.clone();
+        let mut session = Session::new("t", "term-1");
+        session.payload = Some(json!({"threadId":"t","terminalId":"term-1","cwd":"/repo"}));
+        app.ui.panel.terminal.sessions.push(session);
+        for (permission, queued) in [("terminal:read", None), ("terminal:operate", Some("text"))] {
+            crate::settings::permissions::set_session(&mut app, &environment, json!({"authenticated": true, "permissions": [permission]}));
+            send(&mut app, "t", "term-1", "text".into());
+            let session = app.ui.panel.terminal.get_mut("t", "term-1").unwrap();
+            assert_eq!(session.queued.take().as_deref(), queued);
+        }
     }
 
     #[test]

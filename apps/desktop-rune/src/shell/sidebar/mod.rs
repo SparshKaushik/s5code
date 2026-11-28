@@ -177,6 +177,14 @@ impl Ui {
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("sidebar-home", scene_home),
+    ("sidebar-snooze-duration", |s| {
+        scene_home(s);
+        s.ui.shell.sidebar.custom_snooze = Some(snooze::Custom::new(vec![], s.now_ms, crate::data::Zone::Fixed(0)));
+        if let Some(custom) = &mut s.ui.shell.sidebar.custom_snooze {
+            custom.duration = true;
+            custom.amount.replace_text("1.5");
+        }
+    }),
     ("sidebar-stage-nightly", |s| {
         scene_home(s);
         s.client_settings.values.insert("environmentIdentificationMode".into(), json!("nightly-artwork"));
@@ -1299,6 +1307,21 @@ pub fn open_thread(s: &mut App, id: &str) {
     ui.selected.clear();
     ui.anchor = Some(id.to_string());
     go(s, Route::Thread(id.to_string()));
+}
+
+pub(crate) fn open_notified_thread(s: &mut App, environment: &str, id: &str) {
+    if crate::env::source(s, environment).is_none() {
+        return;
+    }
+    let route = Route::Thread(id.to_owned());
+    let ui = &mut s.ui.shell.sidebar;
+    ui.selected.clear();
+    ui.anchor = Some(id.to_owned());
+    if s.route != route || s.ui.env.active != environment {
+        ui.back.push(s.route.clone());
+        ui.forward.clear();
+        s.navigate_in(route, Some(environment));
+    }
 }
 
 /// `chat.new`: with several open projects, pick one in the palette; otherwise `chat.newLocal`.

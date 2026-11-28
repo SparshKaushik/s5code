@@ -129,6 +129,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         _ => chat::view(s, cx, t),
     };
     overlays.extend(chat::details::overlays(s, t));
+    chat::timeline::markdown::diagram_overlay(s, t, &mut overlays);
     // Everything under the frame is content: switching or loading a thread lands at once.
     // A maximized right panel takes the chat column's room (`w-0` and inert on the web).
     let maximized = panel::maximized(s, cx.layout_with("shell", |r| r[2]));
