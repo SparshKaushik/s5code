@@ -399,7 +399,7 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                 ),
         );
     }
-    c::section("Actions", rows, t)
+    super::pulsed(s, t, "Actions", c::section("Actions", rows, t))
 }
 
 /// Web `planProjectRemoval`'s confirmation for a whole single-checkout project: the question,

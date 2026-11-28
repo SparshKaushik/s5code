@@ -543,7 +543,7 @@ pub fn textarea(s: &App, t: &T, key: &str, label: &str, placeholder: &str) -> El
 pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_size: bool) -> El {
     let current = value(s, key);
     let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| rune::TextEdit::new(super::input_text(&current)));
-    let (k1, k2) = (key.to_owned(), key.to_owned());
+    let (k1, k2, k3) = (key.to_owned(), key.to_owned(), key.to_owned());
     let (height, pad) = if default_size { (32.0, 11.0) } else { (28.0, 9.0) };
     rune::text_input(&edit, theme::TEXT_SM)
         .key(format!("setting-{key}"))
@@ -564,6 +564,15 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
                 .edits
                 .entry(k1.clone())
                 .or_insert_with(|| edit.clone())
+        })
+        .on_input_key(move |s: &mut App, e, _| {
+            if e.key != rune::Key::Escape || !k3.starts_with("fontFamily") {
+                return false;
+            }
+            let mut restored = rune::TextEdit::new(super::input_text(&value(s, &k3)));
+            restored.focused = true;
+            s.ui.settings.edits.insert(k3.clone(), restored);
+            true
         })
         .on_submit(move |s: &mut App, _| {
             if let Some(text) = s.ui.settings.edits.get(&k2).map(|e| e.text.clone()) {

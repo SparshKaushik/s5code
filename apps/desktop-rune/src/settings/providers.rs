@@ -1696,6 +1696,13 @@ fn add_custom_model(s: &mut App, id: &str) {
     ui.adding = false;
 }
 
+fn cancel_custom_model(s: &mut App) {
+    let ui = &mut s.ui.settings.providers_ui;
+    ui.custom = TextEdit::new("");
+    ui.error = None;
+    ui.adding = false;
+}
+
 fn remove_custom_model(s: &mut App, id: &str, slug: &str) {
     let driver = driver_of(s, id);
     let mut next = instance_of(s, id, &driver);
@@ -1763,7 +1770,11 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
             .variant("ghost-muted")
             .size("xs")
             .icon(&icons::PLUS)
-            .on_press(|s: &mut App| s.ui.settings.providers_ui.adding = true)
+            .on_press(|s: &mut App| {
+                let ui = &mut s.ui.settings.providers_ui;
+                ui.adding = true;
+                ui.custom.focused = true;
+            })
             .build(t)
             .mr(-8.0)
     });
@@ -1958,12 +1969,6 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
             _ => "model-slug",
         };
         let (submit, press) = (id.to_owned(), id.to_owned());
-        let cancel = |s: &mut App| {
-            let ui = &mut s.ui.settings.providers_ui;
-            ui.custom.clear();
-            ui.error = None;
-            ui.adding = false;
-        };
         body = body.child(
             row()
                 .w_full()
@@ -1978,10 +1983,18 @@ fn models_section(s: &App, t: &T, id: &str, driver: &str, live: Option<&Value>, 
                             s.ui.settings.providers_ui.error = None;
                             &mut s.ui.settings.providers_ui.custom
                         })
+                        .on_input_key(|s: &mut App, e, tx| {
+                            if e.key != rune::Key::Escape {
+                                return false;
+                            }
+                            cancel_custom_model(s);
+                            tx.blur();
+                            true
+                        })
                         .on_submit(move |s: &mut App, _| add_custom_model(s, &submit)),
                 )
                 .child(kit::Button::new("Add").variant("outline").size("sm").on_press(move |s: &mut App| add_custom_model(s, &press)).build(t))
-                .child(kit::Button::new("Cancel").variant("ghost").size("sm").on_press(cancel).build(t)),
+                .child(kit::Button::new("Cancel").variant("ghost").size("sm").on_press(cancel_custom_model).build(t)),
         );
     }
     if let Some(error) = ui.error.as_ref().filter(|_| !antigravity) {

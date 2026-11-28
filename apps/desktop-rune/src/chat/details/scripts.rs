@@ -322,7 +322,7 @@ pub fn project_targets<'a>(s: &'a App, project: &'a Value) -> Vec<(String, &'a V
     for candidate in std::iter::once(project).chain(s.state().projects.iter()) {
         let environment = crate::env::of(s, candidate);
         if (s.ui.settings.machine.is_some() && environment != owner)
-            || targets.iter().any(|(key, _, _)| *key == environment)
+            || targets.iter().any(|(key, member, _)| *key == environment && member["id"] == candidate["id"])
             || grouping.key(candidate) != logical
         {
             continue;
@@ -358,11 +358,11 @@ fn scoped_write(
     let Some(project) = project(s) else { return };
     let targets = project_targets(s, &project);
     if s.ui.chat.details.scripts.pending.is_some() || targets.is_empty() {
-        palette::toast(s, "Actions not saved", Some("No available machine, or another action change is saving."));
+        palette::toast_error_brief(s, "Actions not saved", Some("No available machine, or another action change is saving."));
         return;
     }
     if targets.iter().any(|(key, _, _)| !crate::settings::permissions::can_on(s, key, "settings:write")) {
-        palette::toast(s, "Failed to save project actions", Some("This connection cannot change environment settings."));
+        palette::toast_error_brief(s, "Failed to save project actions", Some("This connection cannot change environment settings."));
         return;
     }
 
@@ -395,7 +395,7 @@ fn scoped_write(
     }
     let (environment, method, payload) = queue.remove(0);
     let Some(net) = crate::env::net_of(s, &environment) else {
-        palette::toast(s, "Actions not saved", Some("No available machine, or another action change is saving."));
+        palette::toast_error_brief(s, "Actions not saved", Some("No available machine, or another action change is saving."));
         return;
     };
     let waiting = net.request(method, payload);
@@ -684,6 +684,7 @@ fn delete(s: &mut App) {
     if ui.target.is_some() {
         let Some(id) = ui.editor.as_ref().and_then(|e| e.id.clone()) else { return };
         scoped_write(s, |current| Some(current.iter().filter(|script| script["id"] != id.as_str()).cloned().collect()), Some((&id, None)), None);
+        close_editor(s);
         return;
     }
     let Some(id) = ui.editor.take().and_then(|e| e.id) else { return };
@@ -719,7 +720,7 @@ fn poll_save(s: &mut App) -> bool {
     if let Err(e) = reply {
         let message = palette::error_message(&e, "Failed to save action.");
         if pending.scoped {
-            palette::toast(s, "Failed to save project actions", Some(&message));
+            palette::toast_error_brief(s, "Failed to save project actions", Some(&message));
         }
         if pending.deleted.is_some() {
             palette::toast(s, "Could not delete action", Some(&message));
@@ -745,7 +746,7 @@ fn poll_save(s: &mut App) -> bool {
             pending.waiting = net.request(method, payload);
             s.ui.chat.details.scripts.pending = Some(pending);
         } else {
-            palette::toast(s, "Failed to save project actions", Some("An environment became unavailable."));
+            palette::toast_error_brief(s, "Failed to save project actions", Some("An environment became unavailable."));
         }
         return true;
     }
@@ -1070,11 +1071,16 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
     }
 }
 
-fn close(s: &mut App) {
+fn close_editor(s: &mut App) {
     let ui = &mut s.ui.chat.details.scripts;
-    if ui.pending.is_none() {
-        ui.editor = None;
-        ui.target = None;
+    ui.editor = None;
+    ui.target = None;
+    ui.confirm_delete = false;
+}
+
+fn close(s: &mut App) {
+    if s.ui.chat.details.scripts.pending.is_none() {
+        close_editor(s);
     }
 }
 
@@ -1123,6 +1129,55 @@ mod tests {
         let setup = json!({"id": "setup", "runOnWorktreeCreate": true});
         assert_eq!(apply_script(&left, &setup, true), vec![json!({"id": "dev", "runOnWorktreeCreate": false}), setup.clone()]);
         assert_eq!(apply_script(&right, &setup, true), vec![json!({"id": "build", "runOnWorktreeCreate": false}), setup]);
+    }
+
+    #[test]
+    fn scoped_write_targets_each_environment_with_its_own_actions() {
+        use crate::{Route, data::Source, env, settings::permissions};
+
+        let checkout = |id: &str, script: &str, environment: Option<&str>| {
+            let mut project = json!({
+                "id": id,
+                "workspaceRoot": "/workspace/repo",
+                "repositoryIdentity": {"canonicalKey": "github.com/team/repo"},
+                "scripts": [{"id": script}]
+            });
+            if let Some(environment) = environment {
+                project[env::TAG] = json!(environment);
+            }
+            project
+        };
+        let mut app = App::new();
+        let (mut local, local_sent) = s5_net::Net::in_memory_sent("http://local.test");
+        let (mut remote, remote_sent) = s5_net::Net::in_memory_sent("http://remote.test");
+        local.state_mut().config = Some(json!({"settings": {}}));
+        remote.state_mut().config = Some(json!({"settings": {}}));
+        local.state_mut().projects = vec![checkout("local-project", "dev", None), checkout("remote-project", "build", Some("remote"))];
+        app.src = Source::Live(local);
+        app.route = Route::Settings("projects".into());
+        app.ui.settings.project = Some("local-project".into());
+        app.ui.chat.details.scripts.target = app.ui.settings.project.clone();
+        env::park(&mut app, "remote", Source::Live(remote));
+        let active = app.ui.env.active.clone();
+        for key in [active.as_str(), "remote"] {
+            permissions::set_session(&mut app, key, json!({"authenticated": true, "permissions": ["settings:write"]}));
+        }
+
+        let added = json!({"id": "lint"});
+        scoped_write(&mut app, |current| Some(apply_script(current, &added, true)), Some(("lint", None)), None);
+        let (id, method, request) = local_sent.requests().pop().unwrap();
+        assert_eq!(method, "server.updateSettings");
+        assert_eq!(request["patch"]["projectSettingsOverrides"]["local-project"]["defaultProjectScripts"], json!([{"id": "dev"}, {"id": "lint"}]));
+        assert!(remote_sent.requests().is_empty());
+
+        app.src.net().unwrap().put_reply(id, Ok(Value::Null));
+        assert!(poll_save(&mut app));
+        let (id, method, request) = remote_sent.requests().pop().unwrap();
+        assert_eq!(method, "server.updateSettings");
+        assert_eq!(request["patch"]["projectSettingsOverrides"]["remote-project"]["defaultProjectScripts"], json!([{"id": "build"}, {"id": "lint"}]));
+        app.src.net().unwrap().put_reply(id, Ok(Value::Null));
+        assert!(poll_save(&mut app));
+        assert!(app.ui.chat.details.scripts.pending.is_none());
     }
 
     #[test]

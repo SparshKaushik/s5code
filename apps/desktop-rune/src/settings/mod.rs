@@ -1585,6 +1585,22 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "projects");
         s.ui.settings.project = s.state().projects.first().map(|p| crate::data::s(p, "id").to_owned());
     }),
+    ("settings-projects-mixed-actions", |s| {
+        scene(s, "projects");
+        let crate::data::Source::Fixture(local) = &mut s.src else { return };
+        let Some(project) = local.projects.first_mut() else { return };
+        project["repositoryIdentity"] = json!({"canonicalKey": "github.com/team/app"});
+        project["scripts"] = json!([{"id": "dev", "name": "Dev", "command": "bun dev", "icon": "play"}]);
+        s.ui.settings.project = project["id"].as_str().map(str::to_owned);
+        let mut other = project.clone();
+        other["id"] = json!("mixed-actions-remote");
+        other["scripts"] = json!([{"id": "build", "name": "Build", "command": "bun build", "icon": "build"}]);
+        let mut remote = crate::data::empty_state();
+        remote.config = Some(json!({"settings": {}}));
+        remote.projects.push(other);
+        crate::env::park(s, "mixed-actions-remote", crate::data::Source::Fixture(remote));
+        crate::env::drain(s);
+    }),
     ("settings-storage", |s| scene(s, "storage")),
     ("settings-diagnostics", |s| {
         scene(s, "diagnostics");
@@ -1956,6 +1972,10 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         {
             return true;
         }
+        if let Some(picker) = s.ui.settings.font_pickers.values_mut().find(|picker| picker.open) {
+            picker.close();
+            return true;
+        }
         if s.ui.settings.open_select.take().is_some() || background::escape(s) {
             return true;
         }
@@ -1987,9 +2007,6 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             return true;
         }
         if tasks::escape(s) || secrets::escape(s) || licenses::escape(s) {
-            return true;
-        }
-        if s.ui.settings.open_select.take().is_some() {
             return true;
         }
         if keybindings::escape(s) {
