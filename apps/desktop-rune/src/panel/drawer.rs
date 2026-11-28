@@ -1137,13 +1137,26 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
     out
 }
 
+fn max_height(column: f32, header: f32, composer: f32) -> f32 {
+    let window_cap = (column * 0.75).floor().max(MIN_HEIGHT);
+    window_cap.min((column - header - composer).max(0.0))
+}
+
+fn clamp_height(height: f32, max: f32) -> f32 {
+    let height = if height.is_finite() { height } else { DEFAULT_HEIGHT };
+    height.round().max(MIN_HEIGHT).min(max)
+}
+
 /// The drawer, docked under the chat body when open for the thread on screen.
 pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
     let thread = current_thread(app)?;
     let state = app.ui.panel.drawer.threads.get(&thread).filter(|s| s.open)?;
     let column = cx.layout_with("main", |r| r[3]).unwrap_or(900.);
-    let max = (column * 0.75).floor().max(MIN_HEIGHT);
-    let height = state.height.clamp(MIN_HEIGHT, max);
+    let header = cx.layout_with("topbar", |r| r[3]).unwrap_or(theme::layout::TOPBAR_H);
+    let composer = cx.layout_with("composer-lane", |r| r[3]).unwrap_or(112.);
+    let reserved = composer + crate::chat::composer::BOTTOM;
+    let max = max_height(column, header, reserved);
+    let height = clamp_height(state.height, max);
     let width = cx.layout_with("terminal-drawer", |r| r[2]).unwrap_or(1000.);
     Some(
         col()
@@ -1170,7 +1183,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
                             d.data = height;
                         }
                         if !d.cancelled() {
-                            state.height = (d.data - d.dy).clamp(MIN_HEIGHT, max);
+                            state.height = clamp_height(d.data - d.dy, max);
                         }
                         s.ui.panel.drawer.resizing = d.phase != Phase::Up && !d.cancelled();
                     }),
@@ -1451,6 +1464,15 @@ mod tests {
         assert!(drawer.confirm.is_none());
         terminal::known_fixture(&mut app, "t", &["term-3"]);
         assert_eq!(allocate(&app, "t"), "term-4");
+    }
+
+    #[test]
+    fn drawer_height_reserves_the_composer_when_space_is_tight() {
+        assert_eq!(max_height(900., 52., 112.), 675.);
+        assert_eq!(max_height(500., 52., 160.), 288.);
+        assert_eq!(clamp_height(280., max_height(270., 52., 120.)), 98.);
+        assert_eq!(clamp_height(249.6, 300.), 250.);
+        assert_eq!(clamp_height(f32::NAN, 300.), DEFAULT_HEIGHT);
     }
 
     #[test]
