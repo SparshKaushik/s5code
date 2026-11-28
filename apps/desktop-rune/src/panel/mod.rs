@@ -1456,6 +1456,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-picker", |s| scene(s, None)),
     ("browser-annotation", |s| browser_scene(s, "annotation")),
     ("browser-rails", |s| browser_scene(s, "rails")),
+    ("browser-device-narrow", |s| {
+        browser_scene(s, "rails");
+        s.ui.panel.width = 320.;
+    }),
     ("browser-stream-dialog", |s| browser_scene(s, "stream-dialog")),
     ("browser-host-setup", |s| browser_scene(s, "host-setup")),
     ("browser-more-menu", |s| browser_scene(s, "more")),
@@ -1594,6 +1598,11 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Device));
         device::fixture(s, json!([{"hostId": "local", "deviceId": "fold", "platform": "android"}]));
         device::fold_fixture(s);
+    }),
+    ("panel-device-keyboard", |s| {
+        scene(s, Some(Surface::Device));
+        device::fixture(s, json!([{"hostId": "local", "deviceId": "ipad-pro", "platform": "ios"}]));
+        device::keyboard_fixture(s);
     }),
     ("panel-device-duo", |s| {
         scene(s, Some(Surface::Device));
