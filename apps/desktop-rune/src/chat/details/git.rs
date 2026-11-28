@@ -545,7 +545,7 @@ fn finish(s: &mut App, reply: s5_net::Reply) {
 pub(super) fn sync_branch(s: &mut App, target: Option<&BranchTarget>, result: &Value) {
     let Some(branch) = result["branch"]["name"].as_str().filter(|_| result["branch"]["status"] == "created") else { return };
     match target {
-        Some(target @ BranchTarget::Thread { id, worktree }) => {
+        Some(target @ BranchTarget::Thread { id, worktree, .. }) => {
             if s.state().threads.iter().any(|thread| thread["id"] == id.as_str() && thread["branch"] != branch) {
                 target.set(s, branch, worktree.clone());
             }

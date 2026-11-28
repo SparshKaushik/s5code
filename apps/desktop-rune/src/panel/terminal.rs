@@ -61,6 +61,7 @@ pub struct Session {
     pub id: String,
     pub vt: Vt,
     payload: Option<Value>,
+    env: Option<String>,
     stream: Stream,
     sequence: Option<u64>,
     pub status: String,
@@ -102,6 +103,7 @@ impl Session {
             id: id.into(),
             vt: Vt::new(80, 24),
             payload: None,
+            env: None,
             stream: Stream::Attach,
             sequence: None,
             status: String::new(),
@@ -347,6 +349,7 @@ pub fn attach(app: &mut App, thread: &str, id: &str, payload: Value) {
     if let Some(net) = app.src.net() {
         net.watch_resource(session.stream.method(), session.stream.input(&payload));
         session.payload = Some(payload);
+        session.env = Some(app.ui.env.active.clone());
     }
     app.ui.panel.terminal.sessions.push(session);
 }
@@ -465,7 +468,9 @@ pub fn focus(app: &mut App, thread: &str, id: &str) {
 }
 
 fn can_write(app: &App, thread: &str, id: &str) -> bool {
-    super::drawer::can_operate(app) || app.ui.panel.drawer.owner_of(thread, id).is_none()
+    let local = app.ui.panel.terminal.get(thread, id).and_then(|s| s.env.as_deref())
+        .is_none_or(|env| env == app.ui.env.active.as_str());
+    local && (super::drawer::can_operate(app) || app.ui.panel.drawer.owner_of(thread, id).is_none())
 }
 
 fn send(app: &mut App, thread: &str, id: &str, data: String) {
@@ -588,6 +593,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut ended = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
         let session = &app.ui.panel.terminal.sessions[index];
+        if session.env.as_deref().is_some_and(|env| env != app.ui.env.active.as_str()) {
+            continue;
+        }
         let stream = Stream::for_terminal(app, &session.thread, &session.id);
         let switched = stream != session.stream;
         let events = match (&session.payload, app.src.net()) {

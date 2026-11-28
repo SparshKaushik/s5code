@@ -193,7 +193,7 @@ enum Pending {
 }
 
 pub(super) enum BranchTarget {
-    Thread { id: String, worktree: Option<String> },
+    Thread { id: String, env: String, worktree: Option<String> },
     Draft { project: String, run: DraftRun },
 }
 
@@ -203,6 +203,7 @@ impl BranchTarget {
         if let Some(thread) = ctx.thread {
             return Some(Self::Thread {
                 id: data::s(thread, "id").to_string(),
+                env: crate::env::of(s, thread),
                 worktree: thread["worktreePath"].as_str().map(str::to_string),
             });
         }
@@ -220,8 +221,8 @@ impl BranchTarget {
 
     fn set(&self, s: &mut App, branch: &str, worktree: Option<String>) {
         match self {
-            Self::Thread { id, .. } => {
-                if let Some(net) = s.src.net() {
+            Self::Thread { id, env, .. } => {
+                if let Some(net) = crate::env::net_of(s, env) {
                     net.dispatch(json!({"type": "thread.metadata.update", "threadId": id, "branch": branch, "worktreePath": worktree}));
                 }
             }
