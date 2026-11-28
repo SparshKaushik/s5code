@@ -23,6 +23,7 @@ pub struct Select {
     /// What an option reads as when its value is an id (web `SelectItem` children).
     names: Vec<(String, String)>,
     trailing: Vec<(String, El)>,
+    leadings: Vec<(String, El, f32)>,
     disabled_options: Vec<String>,
     placeholder: String,
     label: Option<String>,
@@ -53,6 +54,7 @@ impl Select {
             details: vec![],
             names: vec![],
             trailing: vec![],
+            leadings: vec![],
             disabled_options: vec![],
             placeholder: "Select".into(),
             label: None,
@@ -108,6 +110,11 @@ impl Select {
     /// Content at the end of an option's row, such as a badge.
     pub fn option_trailing(mut self, value: impl Into<String>, content: El) -> Self {
         self.trailing.push((value.into(), content));
+        self
+    }
+    /// Content before an option's label, `width` wide, such as a multi-colour mark an icon can't carry.
+    pub fn option_leading(mut self, value: impl Into<String>, content: El, width: f32) -> Self {
+        self.leadings.push((value.into(), content, width));
         self
     }
     pub fn placeholder(mut self, value: impl Into<String>) -> Self {
@@ -251,7 +258,7 @@ impl Select {
         let fit = if self.open && !disabled {
             self.options
                 .iter()
-                .map(|o| text_width(name_of(&self.names, o), theme::TEXT_SM) + MENU_CHROME)
+                .map(|o| text_width(name_of(&self.names, o), theme::TEXT_SM) + MENU_CHROME + self.leadings.iter().find(|(v, ..)| v == o).map_or(0., |(.., w)| w + 8.))
                 .fold(width, f32::max)
                 .max(if self.details.iter().all(|(.., d)| d.is_empty()) { 0. } else { 256. })
                 // The popup sizes to unwrapped text, so a description must fit on one line.
@@ -270,6 +277,7 @@ impl Select {
             })
             .open(self.open && !disabled);
         let mut trailing = std::mem::take(&mut self.trailing);
+        let mut leadings = std::mem::take(&mut self.leadings);
         for (index, option) in std::mem::take(&mut self.options).into_iter().enumerate() {
             let mut item = MenuItem::new(name_of(&self.names, &option))
                 .option(self.current.as_ref() == Some(&option))
@@ -279,6 +287,9 @@ impl Select {
                 if !description.is_empty() {
                     item = item.description(description.clone());
                 }
+            }
+            if let Some(at) = leadings.iter().position(|(value, ..)| *value == option) {
+                item = item.leading(leadings.swap_remove(at).1);
             }
             if let Some(at) = trailing.iter().position(|(value, _)| *value == option) {
                 item = item.trailing(trailing.swap_remove(at).1);

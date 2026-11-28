@@ -2319,8 +2319,12 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T, layers: &mut Vec<El>)
                 .on_toggle(|s: &mut App| s.ui.shell.palette.add.host_open ^= true)
                 .on_close(|s: &mut App| s.ui.shell.palette.add.host_open = false)
                 .on_choose(|s: &mut App, kind: &str, _: &mut Tx| add_project::pick_host(s, kind));
+            // Web `NewProjectPublishHostPicker`: each host's mark before its name, no check.
             for i in targets {
                 select = select.option_name(providers[*i].kind, providers[*i].name);
+                if let Some(mark) = add_project::brand(*i, 14., t.c.contrast_icon_muted) {
+                    select = select.option_leading(providers[*i].kind, mark, 14.);
+                }
             }
             let k = kit::theme(t);
             entry = entry.child(row().gap(8.).center_y().child(select.build(&k, layers)).child(kit::Checkbox::new(*on).hide_label().build(&k)));
