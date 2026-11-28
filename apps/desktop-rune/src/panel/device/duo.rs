@@ -86,7 +86,7 @@ fn add(a: Vec3, b: Vec3) -> Vec3 {
 /// turn that shows a leaf edge on.
 pub fn snaps(frames: &[(RestFace, Vec3, Vec3)], panel: u8) -> Vec<Snap> {
     let leaf = |face: RestFace| matches!(face, RestFace::Left | RestFace::Right);
-    let facing = |q: Quat| frames.iter().filter(|f| leaf(f.0)).all(|f| motion::rotate(q, f.1)[2] >= 0.04);
+    let facing = |q: Quat| frames.iter().filter(|f| leaf(f.0)).all(|f| motion::rotate(f.1, q)[2] >= 0.04);
     let mut snaps = vec![];
     for &(face, normal, up) in frames {
         let normal = unit(normal);
@@ -383,7 +383,7 @@ mod tests {
         let inner = snaps(&frames, 3);
         assert!(inner.iter().filter(|s| s.face == RestFace::Right).all(|s| s.orientation == "portrait"));
         for snap in &inner {
-            assert!(frames[1..].iter().all(|f| motion::rotate(snap.rotation, f.1)[2] >= 0.04) && snap.yaw_limit <= PI / 3., "{snap:?}");
+            assert!(frames[1..].iter().all(|f| motion::rotate(f.1, snap.rotation)[2] >= 0.04) && snap.yaw_limit <= PI / 3., "{snap:?}");
         }
         let landscape = inner.iter().find(|s| s.face == RestFace::Inside && s.orientation == "landscape_left").unwrap();
         assert!((landscape.yaw_limit - 52f32.to_radians()).abs() < 1e-4, "turning across the leaves stops before one shows edge on: {landscape:?}");

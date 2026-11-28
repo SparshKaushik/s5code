@@ -109,7 +109,7 @@ fn dot3(a: Vec3, b: Vec3) -> f32 {
 }
 
 /// `v.applyQuaternion(q)`.
-fn rotate(v: Vec3, q: Quat) -> Vec3 {
+pub fn rotate(v: Vec3, q: Quat) -> Vec3 {
     let t = [2. * (q[1] * v[2] - q[2] * v[1]), 2. * (q[2] * v[0] - q[0] * v[2]), 2. * (q[0] * v[1] - q[1] * v[0])];
     [
         v[0] + q[3] * t[0] + q[1] * t[2] - q[2] * t[1],
@@ -159,12 +159,6 @@ pub fn matrix(q: Quat) -> [f32; 16] {
         0.,
         1.,
     ]
-}
-
-/// `v.applyQuaternion(q)`.
-pub fn rotate(q: Quat, v: Vec3) -> Vec3 {
-    let p = mul(mul(q, [v[0], v[1], v[2], 0.]), invert(q));
-    [p[0], p[1], p[2]]
 }
 
 /// `setFromRotationMatrix(makeBasis(x, y, z))`.
