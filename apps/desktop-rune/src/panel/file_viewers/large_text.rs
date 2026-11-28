@@ -130,20 +130,18 @@ impl LargeText {
             format!("{} lines · {bytes}", super::grouped(count as u64))
         };
         let theme = *t;
-        let has_heading = table.is_some() && count > 0;
+        // Rune virtualizes only a list that is the viewport's direct child, so the heading is row 0.
         let list = col().w_full().growth(GrowthSpec::default()).selection_group(true)
-            .virtual_rows(count - usize::from(has_heading), LINE_HEIGHT, row_key, move |app: &App, i| {
+            .virtual_rows(count, LINE_HEIGHT, row_key, move |app: &App, i| {
                 let Some(super::Content::Large(file)) = super::active(app) else { return el().h(LINE_HEIGHT) };
                 match file.display_table(rendered) {
-                    Some((separator, index)) => file.table_row(separator, index, i + 1, &theme),
+                    Some((separator, index)) => file.table_row(separator, index, i, &theme),
                     None => file.source_row(app, wrap, i, &theme),
                 }
             }).virtual_rows_version(rendered);
         let content = match table {
-            Some((separator, index)) if has_heading => col().min_w(56.0 + index.columns as f32 * 160.0)
-                .child(self.table_row(separator, index, 0, t).sticky_top(0.0))
-                .child(list),
-            _ => list,
+            Some((_, index)) => list.min_w(56.0 + index.columns as f32 * 160.0),
+            None => list,
         };
         let viewport = el().key(SCROLL).grow(1.0).min_h(0.0).min_w(0.0);
         let viewport = if wrap && table.is_none() { viewport.scroll(ScrollSpec { stick_bottom: false }) } else { viewport.scroll_xy() };
