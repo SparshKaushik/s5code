@@ -189,7 +189,52 @@ fn poll_session(s: &mut App) -> bool {
 enum Pending {
     /// A switch or create; its reply moves the thread onto the branch, in that worktree. The
     /// title is the toast for a failure.
-    Branch(String, Option<String>, &'static str),
+    Branch(String, Option<String>, &'static str, Option<BranchTarget>),
+}
+
+pub(super) enum BranchTarget {
+    Thread { id: String, worktree: Option<String> },
+    Draft { project: String, run: DraftRun },
+}
+
+impl BranchTarget {
+    fn current(s: &App) -> Option<Self> {
+        let ctx = composer::ctx(s);
+        if let Some(thread) = ctx.thread {
+            return Some(Self::Thread {
+                id: data::s(thread, "id").to_string(),
+                worktree: thread["worktreePath"].as_str().map(str::to_string),
+            });
+        }
+        let project = data::s(ctx.project?, "id").to_string();
+        Some(Self::Draft { project, run: draft_default(s) })
+    }
+
+    fn is_current(&self, s: &App) -> bool {
+        let ctx = composer::ctx(s);
+        match self {
+            Self::Thread { id, .. } => ctx.thread.is_some_and(|t| data::s(t, "id") == id.as_str()),
+            Self::Draft { project, .. } => ctx.thread.is_none() && ctx.project.is_some_and(|p| data::s(p, "id") == project.as_str()),
+        }
+    }
+
+    fn set(&self, s: &mut App, branch: &str, worktree: Option<String>) {
+        match self {
+            Self::Thread { id, .. } => {
+                if let Some(net) = s.src.net() {
+                    net.dispatch(json!({"type": "thread.metadata.update", "threadId": id, "branch": branch, "worktreePath": worktree}));
+                }
+            }
+            Self::Draft { project, .. } if worktree.is_some() => {
+                let mut strategy = json!({"type": "existing_worktree", "worktreePath": worktree});
+                if !branch.is_empty() {
+                    strategy["branch"] = json!(branch);
+                }
+                s.ui.chat.home.workspace = Some((project.clone(), strategy));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A row of `vcs.listRefs` (VcsRef).
@@ -848,7 +893,7 @@ fn select_ref(s: &mut App, r: &Ref) {
     let name = if r.remote { local_name(&r.name) } else { r.name.clone() };
     if let Some(net) = s.src.net() {
         let id = net.request("vcs.switchRef", json!({"cwd": checkout, "refName": r.name}));
-        s.ui.chat.details.pending = Some((id, Pending::Branch(name, next, "Failed to switch ref.")));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name, next, "Failed to switch ref.", BranchTarget::current(s))));
     }
 }
 
@@ -865,29 +910,13 @@ fn create_ref(s: &mut App, name: &str) {
     let worktree = worktree_here(s);
     if let Some(net) = s.src.net() {
         let id = net.request("vcs.createRef", json!({"cwd": cwd, "refName": name, "switchRef": true}));
-        s.ui.chat.details.pending = Some((id, Pending::Branch(name.to_string(), worktree, "Failed to create and switch ref.")));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name.to_string(), worktree, "Failed to create and switch ref.", BranchTarget::current(s))));
     }
 }
 
 fn set_thread_branch(s: &mut App, branch: &str, worktree: Option<String>) {
-    let c = composer::ctx(s);
-    let (thread, project) = (c.thread.map(|t| data::s(t, "id").to_string()), c.project.map(|p| data::s(p, "id").to_string()));
-    match (thread, project) {
-        (Some(thread), _) => {
-            if let Some(net) = s.src.net() {
-                net.dispatch(json!({"type": "thread.metadata.update", "threadId": thread, "branch": branch, "worktreePath": worktree}));
-            }
-        }
-        // A draft moves into the ref's worktree, or follows the switch in the one it is in.
-        (None, Some(project)) if worktree.is_some() => {
-            let path = worktree.unwrap_or_default();
-            let mut strategy = json!({"type": "existing_worktree", "worktreePath": path});
-            if !branch.is_empty() {
-                strategy["branch"] = json!(branch);
-            }
-            s.ui.chat.home.workspace = Some((project, strategy));
-        }
-        _ => {}
+    if let Some(target) = BranchTarget::current(s) {
+        target.set(s, branch, worktree);
     }
 }
 
@@ -936,7 +965,7 @@ fn restore_branch(s: &mut App, confirmed: bool) {
     s.ui.chat.details.restore_confirm = None;
     if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
         let id = net.request("vcs.switchRef", json!({"cwd": cwd, "refName": branch}));
-        s.ui.chat.details.pending = Some((id, Pending::Branch(branch, None, "Failed to switch checkout")));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(branch, None, "Failed to switch checkout", BranchTarget::current(s))));
     }
 }
 
@@ -1089,14 +1118,17 @@ fn poll_branch(s: &mut App) -> bool {
     let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
     let Some((_, pending)) = s.ui.chat.details.pending.take() else { return false };
     match (pending, reply) {
-        (Pending::Branch(name, worktree, _), Ok(v)) => {
-            let branch = v["refName"].as_str().unwrap_or(&name).to_string();
-            set_thread_branch(s, &branch, worktree);
-            git::refresh(s);
-            let route = s.frame_route().clone();
-            composer::focus(s, &route);
+        (Pending::Branch(name, worktree, _, target), Ok(v)) => {
+            if let Some(target) = target {
+                target.set(s, v["refName"].as_str().unwrap_or(&name), worktree);
+                if target.is_current(s) {
+                    git::refresh(s);
+                    let route = s.frame_route().clone();
+                    composer::focus(s, &route);
+                }
+            }
         }
-        (Pending::Branch(_, _, title), Err(e)) => palette::toast_error_brief(s, title, Some(&palette::error_message(&e, "An error occurred."))),
+        (Pending::Branch(_, _, title, _), Err(e)) => palette::toast_error_brief(s, title, Some(&palette::error_message(&e, "An error occurred."))),
     }
     true
 }
@@ -1901,7 +1933,7 @@ mod tests {
     fn a_pick_waits_for_the_switch_under_way() {
         let mut s = App::new();
         assert!(!switching(&s));
-        s.ui.chat.details.pending = Some((2, Pending::Branch("feature".into(), None, "Failed to switch ref.")));
+        s.ui.chat.details.pending = Some((2, Pending::Branch("feature".into(), None, "Failed to switch ref.", None)));
         assert!(switching(&s));
         super::create_ref(&mut s, "other");
         assert!(matches!(&s.ui.chat.details.pending, Some((2, Pending::Branch(name, ..))) if name == "feature"));
@@ -2062,11 +2094,15 @@ mod tests {
     fn a_branch_made_by_commit_on_new_branch_becomes_the_drafts() {
         let mut s = App::new();
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
-        s.navigate(Route::Home { project_id: Some(project) });
+        s.navigate(Route::Home { project_id: Some(project.clone()) });
         *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true, ..DraftRun::default() };
-        git::sync_branch(&mut s, &json!({"branch": {"status": "skipped_not_requested"}}));
+        let target = super::BranchTarget::current(&s);
+        git::sync_branch(&mut s, target.as_ref(), &json!({"branch": {"status": "skipped_not_requested"}}));
         assert_eq!(draft_run(&s).unwrap().base.as_deref(), Some("main"));
-        git::sync_branch(&mut s, &json!({"branch": {"status": "created", "name": "feature/fix"}}));
+        let other_thread = data::s(s.state().threads.iter().next().unwrap(), "id").to_string();
+        s.navigate(Route::Thread(other_thread));
+        git::sync_branch(&mut s, target.as_ref(), &json!({"branch": {"status": "created", "name": "feature/fix"}}));
+        s.navigate(Route::Home { project_id: Some(project) });
         let run = draft_run(&s).unwrap();
         assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));

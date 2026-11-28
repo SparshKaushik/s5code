@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use rune::{Color, Cursor, El, Icon, ScrollSpec, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
-use super::{ROW, cwd};
+use super::{BranchTarget, ROW, cwd};
 use crate::chat::composer;
 use crate::shell::palette::{self, add_project};
 use crate::theme::{self, AlphaMul, T, radius};
@@ -31,6 +31,7 @@ struct Running {
     id: u64,
     cwd: String,
     pull: bool,
+    target: Option<BranchTarget>,
     label: Option<String>,
     phase_label: Option<String>,
     output: Option<String>,
@@ -361,9 +362,10 @@ fn run(s: &mut App, action: &'static str, message: Option<String>, files: Option
 }
 
 fn start(s: &mut App, id: u64, cwd: String, pull: bool) {
+    let target = BranchTarget::current(s);
     let git = &mut s.ui.chat.details.git;
     git.success = None;
-    git.running = Some(Running { id, cwd, pull, label: None, phase_label: None, output: None, phase_at: data::now_ms(), hook_at: None, result: None, failure: None });
+    git.running = Some(Running { id, cwd, pull, target, label: None, phase_label: None, output: None, phase_at: data::now_ms(), hook_at: None, result: None, failure: None });
 }
 
 fn run_quick(s: &mut App) {
@@ -531,7 +533,7 @@ fn finish(s: &mut App, reply: s5_net::Reply) {
             return palette::toast_error(s, "Action failed", Some(&message));
         }
     };
-    sync_branch(s, &result);
+    sync_branch(s, r.target.as_ref(), &result);
     let created = result["pr"]["status"] == "created";
     let title = if created { format!("Created {}", terms(status(s).as_ref()).short) } else { data::s(&result["toast"], "title").to_string() };
     let description = if created { None } else { result["toast"]["description"].as_str().map(str::to_string) };
@@ -540,19 +542,20 @@ fn finish(s: &mut App, reply: s5_net::Reply) {
 
 /// `syncThreadBranchAfterGitAction`: a feature branch the action made becomes the thread's, or
 /// the draft's, so a new worktree then starts from the commit.
-pub(super) fn sync_branch(s: &mut App, result: &Value) {
+pub(super) fn sync_branch(s: &mut App, target: Option<&BranchTarget>, result: &Value) {
     let Some(branch) = result["branch"]["name"].as_str().filter(|_| result["branch"]["status"] == "created") else { return };
-    let Some(thread) = composer::ctx(s).thread else {
-        let run = super::draft_run_mut(s);
-        (run.base, run.from_origin) = (Some(branch.to_string()), false);
-        return;
-    };
-    if thread["branch"] == branch {
-        return;
-    }
-    let (id, worktree) = (data::s(thread, "id").to_string(), thread["worktreePath"].clone());
-    if let Some(net) = s.src.net() {
-        net.dispatch(json!({"type": "thread.metadata.update", "threadId": id, "branch": branch, "worktreePath": worktree}));
+    match target {
+        Some(target @ BranchTarget::Thread { id, worktree }) => {
+            if s.state().threads.iter().any(|thread| thread["id"] == id.as_str() && thread["branch"] != branch) {
+                target.set(s, branch, worktree.clone());
+            }
+        }
+        Some(BranchTarget::Draft { project, run }) => {
+            let key = composer::home_key(project);
+            let draft = s.ui.chat.details.drafts.entry(key).or_insert_with(|| run.clone());
+            (draft.base, draft.from_origin) = (Some(branch.to_string()), false);
+        }
+        None => {}
     }
 }
 
@@ -1342,7 +1345,7 @@ mod tests {
         assert_eq!(default_branch_copy("create_pr", "main", false, &t).0, "Push & create PR from default ref?");
         assert_eq!(elapsed(0, 59_900), "59s");
         assert_eq!(elapsed(0, 61_000), "1m 1s");
-        let mut r = Running { id: 1, cwd: String::new(), pull: false, label: None, phase_label: None, output: None, phase_at: 0, hook_at: None, result: None, failure: None };
+        let mut r = Running { id: 1, cwd: String::new(), pull: false, target: None, label: None, phase_label: None, output: None, phase_at: 0, hook_at: None, result: None, failure: None };
         apply(&mut r, &json!({"kind": "phase_started", "label": "Committing..."}), 10);
         apply(&mut r, &json!({"kind": "hook_started", "hookName": "pre-commit"}), 20);
         apply(&mut r, &json!({"kind": "hook_output", "text": "lint ok"}), 30);
