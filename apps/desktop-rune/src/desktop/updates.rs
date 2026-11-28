@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rune::{Cursor, El, Tx, el, icon, row, text};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::theme::{self, T, radius};
 use crate::{App, icons as i, kit};
@@ -33,6 +33,11 @@ fn stamped() -> Option<&'static str> {
 /// The GitHub release page of a Rune `version`.
 pub fn release_page(version: &str) -> String {
     format!("https://github.com/{REPO}/releases/tag/{TAG_PREFIX}{version}")
+}
+
+/// `getDesktopUpdateReleaseHistoryUrl`.
+pub fn releases_page() -> String {
+    format!("https://github.com/{REPO}/releases")
 }
 
 pub fn version() -> &'static str {
@@ -82,6 +87,7 @@ pub struct Release {
 
 enum Event {
     Checked(Result<Option<Release>, String>),
+    History(Vec<Value>),
     Progress(f32),
     Downloaded(Result<PathBuf, String>),
     Prepared(Result<PathBuf, String>),
@@ -91,6 +97,9 @@ enum Event {
 pub struct Ui {
     pub status: Status,
     pub release: Option<Release>,
+    /// The releases after this build up to the offered one, newest first: version, body and
+    /// publish time, for the release notes (Electron's `fullChangelog`).
+    pub history: Vec<Value>,
     staged: Option<PathBuf>,
     events: Arc<Mutex<Vec<Event>>>,
     next_check: Option<i64>,
@@ -225,13 +234,33 @@ fn get_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
-fn fetch(channel: &str) -> Result<Option<Release>, String> {
+/// The releases on `channel` after `current` up to `latest`, newest first, as the release notes read them.
+pub fn history(releases: &Value, channel: &str, current: &str, latest: &str) -> Vec<Value> {
+    let mut found: Vec<Value> = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["draft"] != true && (channel == "nightly" || r["prerelease"] != true))
+        .filter_map(|r| {
+            let version = r["tag_name"].as_str()?.strip_prefix(TAG_PREFIX)?;
+            (newer(version, current) && !newer(version, latest)).then(|| json!({"version": version, "note": r["body"], "publishedAt": r["published_at"]}))
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        let (a, b) = (a["version"].as_str().unwrap_or_default(), b["version"].as_str().unwrap_or_default());
+        if newer(a, b) { std::cmp::Ordering::Less } else if newer(b, a) { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal }
+    });
+    found
+}
+
+fn fetch(channel: &str, notes: &dyn Fn(Vec<Value>)) -> Result<Option<Release>, String> {
     let platform = platform().ok_or("No builds for this platform.")?;
     let releases = get_json(&format!("https://api.github.com/repos/{REPO}/releases?per_page=50"))?;
     let Some((latest, manifest)) = pick(&releases, channel) else { return Ok(None) };
     if !newer(&latest, version()) {
         return Ok(None);
     }
+    notes(history(&releases, channel, version(), &latest));
     release_from(&get_json(&manifest)?, &latest, platform).map(Some)
 }
 
@@ -456,7 +485,7 @@ pub fn check(s: &mut App, announce: bool) {
     }
     ui.status = Status::Checking;
     let channel = channel();
-    spawn(s, move |send| send(Event::Checked(fetch(&channel))));
+    spawn(s, move |send| send(Event::Checked(fetch(&channel, &|notes| send(Event::History(notes))))));
 }
 
 pub fn download_update(s: &mut App) {
@@ -529,6 +558,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                     Ok(None) => {
                         // The track no longer offers what was found or downloaded before.
                         ui.release = None;
+                        ui.history.clear();
                         ui.staged = None;
                         ui.status = Status::UpToDate;
                         if announce {
@@ -543,6 +573,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
                     }
                 }
             }
+            Event::History(notes) => ui.history = notes,
             Event::Progress(percent) => ui.status = Status::Downloading(percent),
             Event::Downloaded(Ok(path)) => {
                 ui.staged = Some(path);
@@ -622,8 +653,11 @@ pub fn pill(s: &App, t: &T, providers_waiting: bool) -> Option<El> {
         .center()
         .role("button")
         .label(summary(s))
-        .help(summary(s))
         .child(glyph_el);
+    // The release notes popover takes the tooltip's place (`<Tooltip disabled>` on web).
+    if !crate::shell::sidebar::everything::notes_apply(s) {
+        button = button.help(summary(s));
+    }
     if shown {
         button = button.fill(t.sb.sidebar_control_surface);
     }
