@@ -31,6 +31,8 @@ pub struct Screen {
     /// and stand (`closed`, `book`, `open`, `laptop` or `tent`).
     pub screen_id: Option<u32>,
     pub supports_hinge: bool,
+    /// Whether the device can be asked which display faces up (`physical` commands).
+    pub supports_physical: bool,
     pub hinge_angle: Option<f64>,
     pub hinge_pose: Option<String>,
 }
@@ -221,6 +223,14 @@ impl Input {
         self.send(Message::Binary(tagged(TOUCH, &json!({"type": phase, "x": x, "y": y}))));
     }
 
+    /// Web's `sendRawTouch`: a touch at the display's own raw point, as the iPhone Duo's 3D view
+    /// works it out per display.
+    pub fn touch_raw(&self, phase: &str, x: f64, y: f64) {
+        if !self.android {
+            self.send(Message::Binary(tagged(TOUCH, &json!({"type": phase, "x": x.clamp(0., 1.), "y": y.clamp(0., 1.)}))));
+        }
+    }
+
     /// Web's `pressButton`: `home`, `back`, `recents` or `power`.
     pub fn button(&self, button: &str) {
         if self.android {
@@ -333,6 +343,7 @@ fn inbound(bytes: &[u8], state: &mut State) -> bool {
                 orientation: config["orientation"].as_str().unwrap_or("portrait").to_owned(),
                 screen_id: config["screenId"].as_u64().map(|id| id as u32),
                 supports_hinge: config["supportsHingeAngle"] == true,
+                supports_physical: config["supportsPhysicalOrientation"] == true,
                 hinge_angle: config["hingeAngle"].as_f64().filter(|a| (0. ..=180.).contains(a)),
                 hinge_pose: config["hingePose"].as_str().map(str::to_owned),
             });
