@@ -207,27 +207,10 @@ fn discard(s: &mut App) {
 #[allow(dead_code)]
 pub(crate) fn view(s: &App, t: &T) -> El {
     // Web `SettingsScopeNotice`: exports belong to one environment.
-    if !s.ui.settings.environment_only && s.ui.env.saved.len() > 1 {
-        let environment = s.state().config.as_ref().and_then(|c| c["environment"]["label"].as_str()).unwrap_or("Environment").to_owned();
-        let notice = row()
-            .w_full()
-            .px(16.0)
-            .py(12.0)
-            .gap(12.0)
-            .center_y()
-            .child(text("Choose one environment to configure its telemetry exports.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().grow(1.0).min_w(0.0))
-            .child(
-                crate::kit::Button::new(environment)
-                    .variant("outline")
-                    .size("xs")
-                    .icon(&crate::icons::SERVER)
-                    .on_press(|s: &mut App| {
-                        super::commit_edits(s, true);
-                        s.ui.settings.environment_only = true;
-                    })
-                    .build(t),
-            );
-        return c::section("OpenTelemetry export", vec![notice], t);
+    if s.ui.settings.machine.is_none() && s.ui.env.saved.len() > 1 {
+        let notice = super::scope::notice(s, t, "Choose one environment to configure its telemetry exports.", super::scope::Target::Environment(None));
+        let title = text("OpenTelemetry export").key(super::title_key("OpenTelemetry export")).font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD)).color(t.c.foreground);
+        return col().w_full().gap(10.0).child(row().w_full().h(28.0).px(16.0).center_y().child(title)).child(notice);
     }
     let ui = &s.ui.settings.telemetry;
     let can_edit = super::permissions::allowed(s, "server.checkOtlpEndpoint");

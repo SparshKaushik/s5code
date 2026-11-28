@@ -277,6 +277,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("composer-citation-comment", crate::chat::composer::chips::comment_scene),
     ("timeline-media-actions", media_actions),
     ("timeline-run-in-terminal", run_in_terminal),
+    ("timeline-table-copy", table_copy),
+    ("timeline-mermaid", mermaid),
+    ("timeline-mermaid-expanded", mermaid_expanded),
     ("timeline-video-fallback", video_fallback),
     ("timeline-video-playable", video_playable),
     ("timeline-video-high-profile", video_high_profile),
@@ -525,6 +528,32 @@ fn run_in_terminal(app: &mut App) {
     showcase(app);
     let text = "Run the suite:\n\n```bash\nvp test run src/billing\n```\n\nThen rebuild:\n\n```bash\nvp i\nvp run build\n```\n";
     push_visible(app, vec![serde_json::json!({"id": "scene-run", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+}
+const TABLE: &str = "| Step | Tool | Result |\n| --- | --- | --- |\n| Read | `read` | 1 file |\n| Edit | `edit` | +4 lines, \"safe\" |\n| Test | `execute` | 12 passed |";
+const FLOWCHART: &str = "graph LR\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Serve]\n  B -->|no| D[Fetch]\n  D --> C";
+/// A reply's table with its copy menu open (MarkdownTable).
+fn table_copy(app: &mut App) {
+    showcase(app);
+    let text = format!("{TABLE}\n\nEvery step finished.");
+    push_visible(app, vec![serde_json::json!({"id": "scene-table", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    app.ui.chat.timeline.table_menu = Some((super::markdown::table_anchor("scene-table-0", 0), TABLE.to_owned()));
+}
+/// Mermaid fences: a diagram with its toggle and copy, a type Rune can't draw with its error, and
+/// a diagram toggled to its code.
+fn mermaid(app: &mut App) {
+    showcase(app);
+    let text = format!(
+        "The cache path:\n\n```mermaid\n{FLOWCHART}\n```\n\nThe services:\n\n```mermaid\narchitecture-beta\n  service db(database)[Database]\n```\n\nAs source:\n\n```mermaid\nsequenceDiagram\n  Client->>Server: GET /cache\n  Server-->>Client: 200\n```"
+    );
+    push_visible(app, vec![serde_json::json!({"id": "scene-mermaid", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    app.ui.chat.timeline.expanded.insert("scene-mermaid-fence-2:code".into());
+}
+/// A diagram expanded over the chat (MermaidDiagram's onExpand).
+fn mermaid_expanded(app: &mut App) {
+    showcase(app);
+    let text = format!("The cache path:\n\n```mermaid\n{FLOWCHART}\n```");
+    push_visible(app, vec![serde_json::json!({"id": "scene-mermaid", "type": "assistant_message", "status": "completed", "text": text, "createdAt": "2026-01-01T00:00:00Z"})]);
+    app.ui.chat.timeline.diagram = Some(FLOWCHART.to_owned());
 }
 /// A reply with a workspace screenshot, its media actions menu open.
 fn media_actions(app: &mut App) {

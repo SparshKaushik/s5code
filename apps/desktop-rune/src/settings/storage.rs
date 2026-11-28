@@ -44,7 +44,30 @@ pub struct Maintenance {
 }
 
 fn capability(s: &App, name: &str) -> bool {
-    s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"][name] == true)
+    // Web's cleanup rows need every selected environment to support cleanup.
+    let scoped = s.ui.settings.machine.is_some() || project_scope(s);
+    let mut keys = vec![s.ui.env.active.clone()];
+    if !scoped && name == "storageCleanup" {
+        keys.extend(env::keys(s).into_iter().filter(|k| env::connected(s, k)));
+    }
+    keys.iter().all(|k| has_capability(s, k, name))
+}
+
+/// Web `supportsStorageCleanup` for one environment.
+fn has_capability(s: &App, key: &str, name: &str) -> bool {
+    env::source(s, key).and_then(|src| src.state().config.as_ref()).is_some_and(|c| c["environment"]["capabilities"][name] == true)
+}
+
+/// Web `StorageCleanupScopeNotice`: narrows the selection to machines that support cleanup.
+fn cleanup_notice(s: &App, title: &str, t: &T) -> El {
+    let eligible = env::keys(s).into_iter().filter(|k| env::connected(s, k) && has_capability(s, k, "storageCleanup")).collect();
+    notice(
+        s,
+        title,
+        "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
+        super::scope::Target::Environment(Some(eligible)),
+        t,
+    )
 }
 
 fn environment_label(s: &App) -> String {
@@ -200,8 +223,13 @@ pub fn set(s: &mut App, key: &str, next: Value) {
         custom[key] = next;
         return update(s, "worktreeCleanup", json!({"mode": "custom", "rules": custom}));
     }
-    let patch = worktree_patch(&nested_object(s, "storageCleanup"), &super::value(s, "worktreeCleanup"), key, next);
+    let patch = worktree_patch(&nested_object(s, "storageCleanup"), &super::value(s, "worktreeCleanup"), key, next.clone());
     super::request(s, "server.updateSettings", json!({"patch": patch}));
+    // Web's `forDestination`: each environment's rules come from its own settings.
+    super::scope::fan_out(s, |theirs| {
+        let storage = super::complete_object("storageCleanup", theirs["storageCleanup"].clone());
+        worktree_patch(&storage, &theirs["worktreeCleanup"], key, next.clone())
+    });
 }
 
 /// The last-run subscription the Maintenance page watches.
@@ -212,7 +240,7 @@ pub fn report_resource(s: &App) -> Vec<(String, Value)> {
 /// Web `DatabaseStorageNotice`'s `connectedEnvironments`: the environment in scope, or every
 /// connected one, that reports its database storage.
 fn database_environments(s: &App) -> Vec<String> {
-    let keys = if s.ui.settings.environment_only { vec![s.ui.env.active.clone()] } else { env::keys(s) };
+    let keys = if s.ui.settings.machine.is_some() { vec![s.ui.env.active.clone()] } else { env::keys(s) };
     keys.into_iter()
         .filter(|key| {
             env::connected(s, key)
@@ -578,7 +606,7 @@ fn switch(s: &App, t: &T, field: &str, label: &str) -> El {
 }
 
 /// A section that only explains why its settings are unavailable (`variant="plain"`).
-fn notice(title: &str, copy: &str, t: &T) -> El {
+fn notice(s: &App, title: &str, copy: &str, target: super::scope::Target, t: &T) -> El {
     col()
         .w_full()
         .gap(10.0)
@@ -590,7 +618,7 @@ fn notice(title: &str, copy: &str, t: &T) -> El {
                 .center_y()
                 .child(text(title.to_owned()).font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD)).color(t.c.foreground)),
         )
-        .child(text(copy.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().px(16.0))
+        .child(super::scope::notice(s, t, copy, target))
 }
 
 /// Maintenance's "Artifacts and logs" and "Cleanup"; environment-wide, so hidden for a project.
@@ -602,11 +630,7 @@ pub fn maintenance(s: &App, cx: &Cx<App>, t: &T) -> Vec<El> {
     if !capability(s, "storageCleanup") {
         return database
             .into_iter()
-            .chain([notice(
-                "Artifacts and logs",
-                "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
-                t,
-            )])
+            .chain([cleanup_notice(s, "Artifacts and logs", t)])
             .collect();
     }
     let artifacts = setting(
@@ -744,14 +768,10 @@ fn entry_row(t: &T, entry: &Value, environment: &str) -> El {
 pub fn worktree_cleanup(s: &App, cx: &Cx<App>, t: &T) -> El {
     let project = project_scope(s);
     if project && !capability(s, "projectWorktreeCleanup") {
-        return notice("Cleanup", "Update the selected machines to configure project worktree cleanup.", t);
+        return notice(s, "Cleanup", "Update the selected machines to configure project worktree cleanup.", super::scope::Target::All, t);
     }
     if !capability(s, "storageCleanup") {
-        return notice(
-            "Cleanup",
-            "Update the selected environments to use storage cleanup, or choose a machine that supports it.",
-            t,
-        );
+        return cleanup_notice(s, "Cleanup", t);
     }
     let mut rows = Vec::new();
     let mode = mode(s);

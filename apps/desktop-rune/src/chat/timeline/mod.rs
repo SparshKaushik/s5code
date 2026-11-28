@@ -65,6 +65,10 @@ pub struct Ui {
     quote: Option<citation::Quote>,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
+    /// The table whose copy menu is open: its button's key and its Markdown.
+    table_menu: Option<(String, String)>,
+    /// The Mermaid source drawn expanded over the chat.
+    diagram: Option<String>,
     pub diff_target: Option<Value>,
     responding: HashMap<String, (u64, &'static str)>,
     response_errors: HashMap<String, String>,

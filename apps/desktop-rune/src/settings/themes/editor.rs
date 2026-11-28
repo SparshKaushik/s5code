@@ -170,10 +170,14 @@ pub fn scene(s: &mut App, state: &str) {
         }
         _ => {}
     }
+    if state == "picker" {
+        open_picker(s, "accent", "Accent");
+    }
 }
 
 fn close(s: &mut App) {
     s.ui.settings.theme_editor = None;
+    s.ui.settings.theme_picker = None;
 }
 
 /// The modes of the theme being edited, or `None` while creating one.
@@ -569,7 +573,9 @@ pub fn escape(s: &mut App) -> bool {
 
 /// Escape cancels inspecting before it closes the editor.
 fn dismiss(s: &mut App) {
-    if session(s)["inspecting"] == true {
+    if s.ui.settings.theme_picker.is_some() {
+        cancel_pick(s);
+    } else if session(s)["inspecting"] == true {
         inspect(s, false);
     } else {
         close(s);
@@ -634,10 +640,234 @@ fn field(s: &App, t: &T, role: &'static str, label: &str) -> El {
         .gap(10.0)
         .center_y()
         .radius(6.0)
-        .child(el().size(20.0, 20.0).radius(6.0).border(1.0, t.c.border).fill(color(css).unwrap_or(rune::Color::TRANSPARENT)))
         .child(text(label.to_owned()).font(theme::TEXT_SM).color(t.c.foreground).grow(1.0).min_w(0.0).truncate())
+        .child(swatch(s, t, role, label, css))
         .child(input);
     if selected { out.outline(2.0, 2.0, t.c.ring) } else { out }
+}
+
+/// Web `ThemeColorPicker`'s open popover: the role it edits, its colour as HSV, the text drafts,
+/// the alpha the swatch keeps, and the colours Escape restores.
+pub struct Picker {
+    role: &'static str,
+    label: String,
+    hsv: (f32, f32, f32),
+    hex: TextEdit,
+    rgb: TextEdit,
+    alpha: String,
+    before: Value,
+}
+
+/// `normalizeThemePickerColor` and `themePickerAlphaSuffix`: the opaque `#rrggbb`, and a
+/// non-opaque alpha byte to keep on every pick.
+fn picker_color(css: &str) -> (String, String) {
+    let alpha = css.trim().strip_prefix('#').filter(|d| d.len() == 8 && d.chars().all(|c| c.is_ascii_hexdigit())).map(|d| d[6..].to_lowercase()).filter(|a| a != "ff");
+    (vivid::hex(css).unwrap_or_else(|| "#000000".into()), alpha.unwrap_or_default())
+}
+
+fn rgb_of(hex: &str) -> String {
+    let n = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+    format!("{}, {}, {}", n >> 16, (n >> 8) & 255, n & 255)
+}
+
+/// `themeRgbToHex`: three whole channels from 0 to 255, bare or inside `rgb()`.
+fn rgb_to_hex(value: &str) -> Option<String> {
+    let mut v = value.trim();
+    if v.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("rgb(")) {
+        v = v[4..].trim_start();
+    }
+    if let Some(inner) = v.strip_suffix(')') {
+        v = inner.trim_end();
+    }
+    let channels: Vec<u8> = v.split(|c: char| c == ',' || c.is_whitespace()).filter(|c| !c.is_empty()).map(|c| c.parse().ok()).collect::<Option<_>>()?;
+    let [r, g, b] = channels[..] else { return None };
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// The swatch beside a role's hex field, which opens its picker.
+fn swatch(s: &App, t: &T, role: &'static str, label: &str, css: &str) -> El {
+    let open = s.ui.settings.theme_picker.as_ref().is_some_and(|p| p.role == role);
+    let name = format!("Choose {label} color");
+    let label = label.to_owned();
+    row().key(format!("theme-picker-{role}-trigger")).child(
+        el().size(24.0, 24.0)
+            .radius(12.0)
+            .border(1.0, t.c.foreground.alpha_mul(0.3))
+            .fill(color(css).unwrap_or(rune::Color::BLACK))
+            .focusable(true)
+            .focus_ring(2.0, -2.0, t.c.ring)
+            .role("button")
+            .label(name.clone())
+            .help(name)
+            .expanded(open)
+            .on_press(move |s: &mut App| {
+                if !s.ui.settings.theme_picker.take().is_some_and(|p| p.role == role) {
+                    open_picker(s, role, &label);
+                }
+            }),
+    )
+}
+
+fn open_picker(s: &mut App, role: &'static str, label: &str) {
+    let colors = session(s)["colors"][mode(s.ui.settings.theme_edit_dark)].clone();
+    let (hex, alpha) = picker_color(colors[role].as_str().unwrap_or(""));
+    s.ui.settings.theme_picker = Some(Picker {
+        role,
+        label: label.to_owned(),
+        hsv: crate::settings::accent::hex_to_hsv(&hex),
+        rgb: TextEdit::new(rgb_of(&hex)),
+        hex: TextEdit::new(hex),
+        alpha,
+        before: colors,
+    });
+}
+
+/// A pick from the plane, the hue slider, or a text field (`edited`, whose draft keeps its keys).
+fn pick(s: &mut App, hsv: (f32, f32, f32), edited: Option<&str>) {
+    let Some(p) = s.ui.settings.theme_picker.as_mut() else { return };
+    p.hsv = hsv;
+    let hex = crate::settings::accent::hsv_to_hex(hsv.0, hsv.1, hsv.2);
+    if edited != Some("hex") {
+        p.hex = TextEdit::new(hex.clone());
+    }
+    if edited != Some("rgb") {
+        p.rgb = TextEdit::new(rgb_of(&hex));
+    }
+    let (role, value) = (p.role, format!("{hex}{}", p.alpha));
+    update_color(s, role, &value);
+    s.ui.settings.theme_colors.insert(role.to_owned(), TextEdit::new(value));
+}
+
+/// Escape reverts the role to its colours before the picker opened (web's `onEditCancel`).
+fn cancel_pick(s: &mut App) {
+    let Some(p) = s.ui.settings.theme_picker.take() else { return };
+    let m = mode(s.ui.settings.theme_edit_dark);
+    session_mut(s)["colors"][m] = p.before;
+    sync_fields(s, None);
+}
+
+const PICKER_W: f32 = 264.0;
+
+fn picker_panel(t: &T, p: &Picker) -> El {
+    let (h, sat, v) = p.hsv;
+    let current = crate::settings::accent::hsv_to_hex(h, sat, v);
+    let swatch_color = color(&current).unwrap_or(rune::Color::BLACK);
+    let (white, black) = (rune::Color::WHITE, rune::Color::BLACK);
+    let thumb = |size: f32| el().size(size, size).radius(size / 2.0).border(2.0, white).shadow(0.0, 1.0, black.alpha(0.4));
+    let header = row()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(12.0)
+        .center_y()
+        .child(
+            col().grow(1.0).min_w(0.0)
+                .child(text(p.label.clone()).font(theme::weight(theme::TEXT_XS, theme::SEMIBOLD)).color(t.c.foreground).truncate())
+                .child(text("Choose a color").font(theme::TEXT_2XS).color(t.c.muted_foreground)),
+        )
+        .child(el().size(28.0, 28.0).radius(14.0).fill(swatch_color).shadow(0.0, 1.0, black.alpha(0.2)));
+    let plane = el()
+        .key("theme-picker-plane")
+        .role("slider")
+        .label(p.label.clone())
+        .size(PICKER_W, 144.0)
+        .radius(8.0)
+        .clip_rounded(8.0)
+        .cursor(rune::Cursor::Crosshair)
+        .fill(color(&crate::settings::accent::hsv_to_hex(h, 1.0, 1.0)).unwrap_or(black))
+        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).linear_gradient(std::f32::consts::FRAC_PI_2, [(0.0, white), (1.0, white.alpha(0.0))]))
+        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).gradient(black.alpha(0.0), black))
+        .child(thumb(12.0).absolute(sat * PICKER_W - 6.0, (1.0 - v) * 144.0 - 6.0))
+        .on_drag(|s: &mut App, d: &mut rune::Drag, _| {
+            if d.cancelled() {
+                return;
+            }
+            let hue = s.ui.settings.theme_picker.as_ref().map_or(0.0, |p| p.hsv.0);
+            pick(s, (hue, (d.x / d.w).clamp(0.0, 1.0), 1.0 - (d.y / d.h).clamp(0.0, 1.0)), None);
+        });
+    let stops: Vec<(f32, rune::Color)> = (0..=6).map(|i| (i as f32 / 6.0, color(&crate::settings::accent::hsv_to_hex(i as f32 * 60.0, 1.0, 1.0)).unwrap_or(black))).collect();
+    let hue = row()
+        .key("theme-picker-hue")
+        .role("slider")
+        .label(format!("{} hue", p.label))
+        .range_value(h as f64, 0.0, 360.0)
+        .w_full()
+        .h(24.0)
+        .center_y()
+        .cursor(rune::Cursor::Pointer)
+        .child(el().w_full().h(10.0).radius(5.0).linear_gradient(std::f32::consts::FRAC_PI_2, stops).border(1.0, black.alpha(0.12)))
+        .child(thumb(16.0).absolute(h / 360.0 * PICKER_W - 8.0, 4.0))
+        .on_drag(|s: &mut App, d: &mut rune::Drag, _| {
+            if d.cancelled() {
+                return;
+            }
+            let Some((_, sat, v)) = s.ui.settings.theme_picker.as_ref().map(|p| p.hsv) else { return };
+            pick(s, ((d.x / d.w).clamp(0.0, 1.0) * 360.0, sat, v), None);
+        });
+    let caption = |name: &str| text(name.to_owned()).font(theme::weight(theme::TEXT_3XS, theme::SEMIBOLD)).color(t.c.muted_foreground).px(4.0);
+    let hex = kit::Input::new(&p.hex)
+        .size("compact")
+        .font("mono")
+        .on_edit(|s: &mut App| &mut s.ui.settings.theme_picker.get_or_insert_with(Picker::blank).hex)
+        .on_change(|s: &mut App, _: &mut rune::Tx| {
+            let Some(text) = s.ui.settings.theme_picker.as_ref().map(|p| p.hex.text.clone()) else { return };
+            if text.len() == 7 && crate::settings::accent::normalize(&text).is_some() {
+                pick(s, crate::settings::accent::hex_to_hsv(&text.to_lowercase()), Some("hex"));
+            }
+        })
+        .build(t)
+        .label(format!("{} picker hex value", p.label))
+        .single_line()
+        .grow(1.0)
+        .min_w(0.0);
+    let rgb = kit::Input::new(&p.rgb)
+        .size("compact")
+        .font("mono")
+        .on_edit(|s: &mut App| &mut s.ui.settings.theme_picker.get_or_insert_with(Picker::blank).rgb)
+        .on_change(|s: &mut App, _: &mut rune::Tx| {
+            let Some(text) = s.ui.settings.theme_picker.as_ref().map(|p| p.rgb.text.clone()) else { return };
+            if let Some(hex) = rgb_to_hex(&text) {
+                pick(s, crate::settings::accent::hex_to_hsv(&hex), Some("rgb"));
+            }
+        })
+        .build(t)
+        .label(format!("{} picker RGB value", p.label))
+        .single_line()
+        .w_full();
+    let texts = row()
+        .w_full()
+        .gap(8.0)
+        .child(
+            col().grow(1.0).min_w(0.0).gap(4.0).child(caption("HEX")).child(
+                row().w_full().gap(6.0).center_y().child(el().size(14.0, 14.0).radius(7.0).fill(swatch_color)).child(hex),
+            ),
+        )
+        .child(col().grow(1.2).min_w(0.0).gap(4.0).child(caption("RGB")).child(rgb));
+    col()
+        .w(PICKER_W + 24.0)
+        .child(header)
+        .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.7)))
+        .child(col().w_full().px(12.0).py(12.0).gap(12.0).child(plane).child(hue).child(texts))
+}
+
+impl Picker {
+    fn blank() -> Self {
+        Picker { role: "", label: String::new(), hsv: (0.0, 0.0, 0.0), hex: TextEdit::new(""), rgb: TextEdit::new(""), alpha: String::new(), before: Value::Null }
+    }
+}
+
+/// The open picker under its swatch. A press outside keeps the colour; Escape reverts it.
+fn picker(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some(p) = &s.ui.settings.theme_picker else { return };
+    layers.push(rune_kit::scrim("theme-picker-scrim".to_owned(), |s: &mut App| s.ui.settings.theme_picker = None));
+    let _trigger = kit::Popover::new(format!("theme-picker-{}", p.role))
+        .open(true)
+        .padding(0.0)
+        .gutter(10.0)
+        .placement(kit::Placement::BottomEnd)
+        .label(format!("Choose {} color", p.label))
+        .child(picker_panel(t, p).modal(true, cancel_pick))
+        .build(&kit::theme(t), layers);
 }
 
 fn fields(s: &App, t: &T, advanced: bool) -> El {
@@ -841,6 +1071,7 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
         layers.push(inspector(s));
     }
     layers.push(panel);
+    picker(s, t, layers);
 }
 
 #[cfg(test)]
@@ -864,6 +1095,32 @@ mod tests {
         assert_eq!(merged(&night, Some(&["dark"]), "dark", true, colors).unwrap_err(), "\u{201c}Night\u{201d} already has a dark palette. Pick another name.");
         let (theme, _) = merged(&night, Some(&["light"]), "light", true, colors).unwrap();
         assert!(theme.get("managed").is_none(), "an advanced edit leaves the theme unmanaged");
+    }
+
+    #[test]
+    fn the_color_picker_reads_rgb_like_web_and_escape_reverts_its_edit() {
+        assert_eq!(rgb_to_hex("12, 34, 255").as_deref(), Some("#0c22ff"));
+        assert_eq!(rgb_to_hex("rgb( 1 2 3 )").as_deref(), Some("#010203"));
+        assert_eq!(rgb_to_hex("RGB(1,2,3)").as_deref(), Some("#010203"));
+        for bad in ["256, 0, 0", "1.5, 0, 0", "1, 2", "-1, 0, 0", ""] {
+            assert_eq!(rgb_to_hex(bad), None, "{bad}");
+        }
+        assert_eq!(rgb_of("#0c22ff"), "12, 34, 255");
+        assert_eq!(picker_color("#11223380").1, "80", "a translucent role keeps its alpha");
+        assert_eq!(picker_color("#112233ff").1, "", "an opaque one has none to keep");
+
+        let mut s = App::new();
+        create(&mut s, true);
+        let before = session(&s)["colors"]["dark"].clone();
+        open_picker(&mut s, "accent", "Accent color");
+        pick(&mut s, (0.0, 1.0, 1.0), None);
+        assert_eq!(s.ui.settings.theme_colors["accent"].text, "#ff0000", "the role's hex field follows the picker");
+        assert_eq!(s.ui.settings.theme_picker.as_ref().map(|p| p.rgb.text.as_str()), Some("255, 0, 0"));
+        assert_ne!(session(&s)["colors"]["dark"], before);
+        dismiss(&mut s);
+        assert!(s.ui.settings.theme_picker.is_none());
+        assert!(s.ui.settings.theme_editor.is_some(), "FAILED: Escape closes the picker before the editor");
+        assert_eq!(session(&s)["colors"]["dark"], before, "FAILED: Escape restores the colors from before the picker opened");
     }
 
     #[test]
