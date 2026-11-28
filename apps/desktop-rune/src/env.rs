@@ -389,6 +389,7 @@ pub fn follow(s: &mut App, route: &Route) {
     let key = match route {
         Route::Thread(id) | Route::Home { project_id: Some(id) } => owner(s, id),
         Route::Home { project_id: None } => crate::chat::home::default_project(s).map_or_else(|| LOCAL.to_owned(), |p| of(s, p)),
+        Route::Settings(_) => crate::settings::scoped_environment(s),
         _ => LOCAL.to_owned(),
     };
     switch(s, &key);

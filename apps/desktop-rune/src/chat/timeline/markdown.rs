@@ -2,8 +2,9 @@ use super::find::Marks;
 use std::borrow::Cow;
 use super::{copy_button, language_icons, md_links, media};
 use crate::theme::{self, AlphaMul, T};
+use crate::kit::{Menu, MenuItem, Placement};
 use crate::{App, icons};
-use rune::{El, col, el, icon, row, text};
+use rune::{El, Tx, col, el, icon, row, text};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 
 /// Reply text: foreground at 90%.
@@ -90,7 +91,7 @@ fn prose(app: &App, source: &str, key: &str, t: &T, marks: Option<&Marks>, ink: 
         } else if let Some(chips) = chips {
             chips
         } else if is_table {
-            table(app, block, t, marks, ink)
+            table(app, block, t, marks, ink, table_anchor(key, index))
         } else {
             let content = Markdown::new(block)
                 .selectable(true)
@@ -147,9 +148,130 @@ fn display_math(app: &App, tex: &str, ink: rune::Color) -> Option<El> {
     super::katex::picture(app, tex, true, theme::TEXT_SM.size, ink).map(|picture| row().w_full().center().child(picture))
 }
 
-fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
+/// The key a prose block's `index`th block anchors its table's copy menu to.
+pub(super) fn table_anchor(prose: &str, index: usize) -> String {
+    format!("md-table-{prose}-t{index}")
+}
+
+/// A table with its copy control under it, at the end (MarkdownTable).
+fn with_copy(app: &App, table: El, source: &str, anchor: String, t: &T) -> El {
+    col().w_full().child(table).child(row().w_full().justify_end().pt(2.0).child(table_copy(app, source, anchor, t)))
+}
+
+/// MarkdownTable's copy button: it opens Copy as Markdown and Copy as CSV, and reads Copied once
+/// either copies.
+fn table_copy(app: &App, source: &str, anchor: String, t: &T) -> El {
+    let done = super::copied(app, source);
+    let label = if done { "Copied" } else { "Copy table" };
+    let source = source.to_owned();
+    row()
+        .key(anchor.clone())
+        .size(24.0, 24.0)
+        .center()
+        .child(if done { icon(&icons::CHECK, 12.0).color(t.c.primary) } else { icon(&icons::COPY, 12.0).color(t.c.muted_foreground) })
+        .radius(4.0)
+        .hover(t.c.muted)
+        .focusable(true)
+        .role("button")
+        .label(label)
+        .help(label)
+        .on_press(move |app: &mut App| app.ui.chat.timeline.table_menu = Some((anchor.clone(), source.clone())))
+}
+
+fn copy_table(app: &mut App, tx: &mut Tx, source: &str, text: String) {
+    let ui = &mut app.ui.chat.timeline;
+    ui.table_menu = None;
+    tx.copy(text);
+    // The table's source marks it copied, whichever format went to the clipboard.
+    ui.copied = Some((source.to_owned(), crate::data::now_ms()));
+    tx.wake_after(std::time::Duration::from_millis(super::COPIED_MS as u64));
+}
+
+/// serializeTableElementToCsv over a Markdown table: each cell's text, whitespace collapsed,
+/// quoted when it holds a quote or a comma.
+pub(crate) fn table_csv(source: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    let cell = |text: &str| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.contains(['"', ',', '\n']) { format!("\"{}\"", text.replace('"', "\"\"")) } else { text }
+    };
+    let (mut lines, mut row, mut current): (Vec<String>, Vec<String>, Option<String>) = (Vec::new(), Vec::new(), None);
+    for event in Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
+        match event {
+            Event::Start(Tag::TableCell) => current = Some(String::new()),
+            Event::End(TagEnd::TableCell) => row.extend(current.take().map(|c| cell(&c))),
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) if !row.is_empty() => lines.push(std::mem::take(&mut row).join(",")),
+            Event::Text(s) | Event::Code(s) => current.iter_mut().for_each(|c| c.push_str(&s)),
+            Event::SoftBreak | Event::HardBreak => current.iter_mut().for_each(|c| c.push(' ')),
+            _ => {}
+        }
+    }
+    lines.join("\n")
+}
+
+/// The open table copy menu and the expanded diagram, over the chat.
+pub fn overlays(app: &App, t: &T) -> Vec<El> {
+    let mut layers = Vec::new();
+    if let Some((anchor, source)) = app.ui.chat.timeline.table_menu.clone() {
+        let csv = source.clone();
+        Menu::new("md-table-copy-menu")
+            .anchor(anchor)
+            .placement(Placement::BottomEnd)
+            .open(true)
+            .on_close(|app: &mut App| app.ui.chat.timeline.table_menu = None)
+            .item(MenuItem::new("Copy as Markdown").on_select_tx(move |app: &mut App, tx: &mut Tx| copy_table(app, tx, &source, source.clone())))
+            .item(MenuItem::new("Copy as CSV").on_select_tx(move |app: &mut App, tx: &mut Tx| copy_table(app, tx, &csv, table_csv(&csv))))
+            .overlay(&crate::kit::theme(t), &mut layers);
+    }
+    layers.extend(expanded_diagram(app, t));
+    layers
+}
+
+const DIAGRAM_STAGE: &str = "diagram-lightbox-stage";
+
+fn close_diagram(app: &mut App) {
+    app.ui.chat.timeline.diagram = None;
+}
+
+/// An expanded diagram (MermaidDiagram's onExpand into ExpandedImageDialog): drawn to fit the
+/// window's width over the dark backdrop, scrolling when it is taller.
+fn expanded_diagram(app: &App, t: &T) -> Option<El> {
+    let source = app.ui.chat.timeline.diagram.as_ref()?;
+    let [w, h] = rune::memo::layout_size(DIAGRAM_STAGE).filter(|s| s[0] >= 1.0 && s[1] >= 1.0).unwrap_or([960.0, 640.0]);
+    let card = rune_kit::mermaid::render(source, &style(t, t.c.foreground).diagram_max_width(w).diagram_min_scale(0.0))?;
+    let close = el()
+        .key("diagram-lightbox-close")
+        .size(32.0, 32.0)
+        .center()
+        .radius(theme::radius::FULL)
+        .fill(rune::Color::BLACK.alpha(0.5))
+        .hover(rune::Color::BLACK.alpha(0.7))
+        .cursor(rune::Cursor::Pointer)
+        .role("button")
+        .label("Close")
+        .help("Close")
+        .child(icon(&icons::X, 16.0).color(rune::Color::WHITE))
+        .on_press(close_diagram);
+    let stage = el()
+        .key(DIAGRAM_STAGE)
+        .w_full()
+        .h_full()
+        .scroll(rune::ScrollSpec { stick_bottom: false })
+        .child(col().w_full().min_h(h).center().child(card));
+    let dialog = el()
+        .w_full()
+        .h_full()
+        .role("dialog")
+        .label("Diagram preview")
+        .modal(true, close_diagram)
+        .child(stage)
+        .child(row().pin(None, Some(0.0), Some(0.0), None).child(close));
+    Some(el().key("diagram-lightbox").absolute(0.0, 0.0).w_full().h_full().padding(48.0).fill(rune::Color::BLACK.alpha(0.8)).child(dialog))
+}
+
+fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color, anchor: String) -> El {
     if source.contains("\\|") || source.lines().nth(1).is_some_and(|line| line.contains(':')) {
-        return Markdown::new(source)
+        let table = Markdown::new(source)
             .selectable(true)
             .highlights(marks_for(marks, source))
             .on_link_tx(md_links::open)
@@ -157,6 +279,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
             .link_style(md_links::look(t))
             .link_help(md_links::help)
             .render(&style(t, ink));
+        return with_copy(app, table, source, anchor, t);
     }
     let lines: Vec<Vec<&str>> = source
         .lines()
@@ -230,13 +353,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color
             .child(line)
             .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6)));
     }
-    col().w_full().child(table).child(
-        row()
-            .w_full()
-            .justify_end()
-            .pt(2.0)
-            .child(copy_button(app, source, t, "Copy table")),
-    )
+    with_copy(app, table, source, anchor, t)
 }
 
 /// Parsing and highlighting a message is the costliest part of a timeline build, and the view
@@ -254,7 +371,8 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
 fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color, run: bool) -> El {
     let ui = &app.ui.chat.timeline;
     let fence = format!("{id}-fence-");
-    let mut unwrapped: Vec<&String> = ui.wrapped.iter().filter(|k| k.starts_with(&fence)).collect();
+    // Wrap toggles, and diagrams toggled to their code (`{fence}:code` in `expanded`).
+    let mut unwrapped: Vec<&String> = ui.wrapped.iter().chain(&ui.expanded).filter(|k| k.starts_with(&fence)).collect();
     unwrapped.sort();
     let details = format!("{id}-details-");
     let mut toggled: Vec<&String> = ui.expanded.iter().filter(|k| k.starts_with(&details)).collect();
@@ -386,6 +504,13 @@ fn render(cx: &Cx, source: &str, scope: &str) -> El {
 
 fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
     let (app, t) = (cx.app, cx.t);
+    // MarkdownMermaidCodeBlock: a finished diagram fence draws, unless toggled to its code; one
+    // still arriving shows its code with no toggle.
+    let code_key = format!("{key}:code");
+    let toggles = language == "mermaid" && closed && !code.trim().is_empty();
+    if toggles && !app.ui.chat.timeline.expanded.contains(&code_key) {
+        return mermaid(cx, code, key, code_key);
+    }
     // `wrapped` holds the blocks toggled away from the wordWrap setting.
     let wrap = (crate::settings::value(app, "wordWrap").as_bool() != Some(false)) != app.ui.chat.timeline.wrapped.contains(&key);
     let wrap_key = key.clone();
@@ -431,6 +556,7 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
                 .help("Run in terminal")
                 .on_press(move |app: &mut App| crate::chat::details::scripts::run_command(app, &command))
         }))
+        .children(toggles.then(|| view_toggle(t, code_key, true)))
         .child(copy_button(app, code, t, "Copy code"));
     let head = row()
         .w_full()
@@ -440,7 +566,8 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
         .pt(7.0)
         .child(row().grow(1.0).child(language_icons::language(language, t)))
         .child(tools);
-    let fenced = format!("```{language}\n{code}\n```");
+    // Its code shows as code: a `mermaid` fence would draw.
+    let fenced = format!("```{}\n{code}\n```", if language == "mermaid" { "text" } else { language });
     let code_view = Markdown::new(fenced.clone())
         .selectable(true)
         .highlights(marks_for(cx.marks, &fenced))
@@ -467,6 +594,66 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
         .child(head)
         .child(code_view)
 }
+
+/// The diagram/code switch of a Mermaid fence; `key` in `expanded` shows its code.
+fn view_toggle(t: &T, key: String, showing_code: bool) -> El {
+    let label = if showing_code { "Show diagram" } else { "Show code" };
+    row()
+        .size(24.0, 24.0)
+        .center()
+        .child(icon(if showing_code { &icons::WORKFLOW } else { &icons::CODE }, 12.0).color(t.c.muted_foreground))
+        .radius(6.0)
+        .hover(t.c.muted)
+        .focusable(true)
+        .role("button")
+        .label(label)
+        .help(label)
+        .on_press(move |app: &mut App| {
+            let expanded = &mut app.ui.chat.timeline.expanded;
+            if !expanded.remove(&key) {
+                expanded.insert(key.clone());
+            }
+        })
+}
+
+/// A Mermaid fence as its diagram (MarkdownCodeBlock `diagram`): unframed, the view toggle and
+/// copy button over it, a click expanding it. A source Rune can't draw shows MermaidDiagram's
+/// error over its source.
+fn mermaid(cx: &Cx, code: &str, key: String, code_key: String) -> El {
+    let (app, t) = (cx.app, cx.t);
+    let tools = row()
+        .w_full()
+        .justify_end()
+        .gap(2.0)
+        .pt(6.0)
+        .pr(6.0)
+        .child(view_toggle(t, code_key, false))
+        .child(copy_button(app, code, t, "Copy code"));
+    let body = match diagram(code, t) {
+        Some(card) => {
+            let source = code.to_owned();
+            row()
+                .w_full()
+                .justify_center()
+                .radius(6.0)
+                .cursor(rune::Cursor::Pointer)
+                .focusable(true)
+                .role("button")
+                .label("Expand diagram")
+                .on_press(move |app: &mut App| app.ui.chat.timeline.diagram = Some(source.clone()))
+                .child(card)
+        }
+        None => col()
+            .w_full()
+            .gap(8.0)
+            .child(text(format!("Unable to render diagram: {DIAGRAM_ERROR}")).font(theme::TEXT_XS).color(t.c.destructive).wrap().w_full())
+            .child(text(code.trim().to_owned()).font(theme::MONO_XS).color(cx.ink).wrap().w_full()),
+    };
+    col().key(key).w_full().child(tools).child(body)
+}
+
+/// MermaidDiagram's message when a render fails without one of its own.
+const DIAGRAM_ERROR: &str = "The diagram could not be rendered.";
 
 /// A GitHub alert (`> [!NOTE]`), GITHUB_ALERT_PRESENTATIONS.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1111,8 +1298,14 @@ pub fn for_copy(text: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Alert, Part, Template, citation_markdown, directives, for_copy, parts, runnable, user_source};
+    use super::{Alert, Part, Template, citation_markdown, directives, for_copy, parts, runnable, table_csv, user_source};
     use crate::chat::timeline::md_links::{Target, classify};
+
+    #[test]
+    fn a_table_copies_as_csv_from_its_cells_text() {
+        let table = "| Name | Note |\n| --- | --- |\n| **a** | `x, y` |\n| [b](https://e.com) | say \"hi\" |\n| c \\| d |  spaced   out |";
+        assert_eq!(table_csv(table), "Name,Note\na,\"x, y\"\nb,\"say \"\"hi\"\"\"\nc | d,spaced out");
+    }
 
     #[test]
     fn only_a_closed_one_line_shell_fence_runs() {

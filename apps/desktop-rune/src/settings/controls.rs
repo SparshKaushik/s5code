@@ -83,6 +83,9 @@ pub fn select_width(key: &str) -> f32 {
 }
 
 fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
+    if key == "sourceControlWritingStyle.mode" && super::scope::mixed(s, key) {
+        return "Mixed".to_owned();
+    }
     // `WorktreeSubmodulesRow` with no environment to resolve against.
     if key == "worktreeSubmodules" && s.state().config.is_none() {
         return "Unavailable".to_owned();
@@ -410,6 +413,9 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     };
     // A field that belongs under the control, like web's custom instructions under the mode.
     let area = &spec["textarea"];
+    // Web's mixed writing style trades the instructions field for one draft sent to every environment.
+    let mixed_style = key == "sourceControlWritingStyle.mode" && super::scope::mixed(s, "sourceControlWritingStyle");
+    let children = if mixed_style { Some(super::scope::all_instructions(s, t)) } else { children };
     let children = children.or_else(|| {
         (area["key"].is_string() && visible(s, area)).then(|| {
             textarea(
