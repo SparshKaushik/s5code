@@ -219,19 +219,22 @@ pub fn poll(s: &mut App) -> bool {
 
 pub fn escape(s: &mut App) -> bool {
     let ui = &mut s.ui.settings.connections;
-    ui.env_icon_menu = false;
-    let closed = ui.env_menu.take().is_some()
+    let icon_was_open = std::mem::take(&mut ui.env_icon_menu);
+    let closed = icon_was_open || ui.env_menu.take().is_some()
         || ui.remove.take().is_some()
         || ui.route_remove.take().is_some()
         || ui.forget.take().is_some()
         || std::mem::take(&mut ui.local_confirm)
         || std::mem::take(&mut ui.ssh_suggest)
-        || ui.adding.take().is_some()
         || std::mem::take(&mut ui.link_machine_open)
         || ui.machines.select.take().is_some()
         || ui.machines.confirm.take().is_some()
         || ui.machines.confirm_row.take().is_some();
     if closed {
+        return true;
+    }
+    if ui.adding.is_some() {
+        close_add(s);
         return true;
     }
     if ui.linking {
@@ -1001,6 +1004,13 @@ fn close_add(s: &mut App) {
     ui.route_target = None;
     ui.ssh = false;
     ui.ssh_suggest = false;
+    s.ui.env.host = TextEdit::new("");
+    s.ui.env.code = TextEdit::new("");
+    s.ui.env.error = None;
+    s.ui.env.ssh.host = TextEdit::new("");
+    s.ui.env.ssh.username = TextEdit::new("");
+    s.ui.env.ssh.port = TextEdit::new("");
+    s.ui.env.ssh.error = None;
 }
 
 /// Web's "Could not add backend" toast when a remote pairing fails; the error also stays inline.
@@ -1874,6 +1884,29 @@ mod tests {
 
     fn link(status: &str, expires_at: &str, error: Option<&str>) -> Value {
         json!({"status": status, "expiresAt": expires_at, "lastError": error})
+    }
+
+    #[test]
+    fn escape_dismisses_ssh_suggestions_then_clears_the_connection_form() {
+        let mut app = App::new();
+        let ui = &mut app.ui.settings.connections;
+        ui.adding = Some(Vec::new());
+        ui.route_target = Some("box".into());
+        ui.ssh = true;
+        ui.ssh_suggest = true;
+        app.ui.env.host = TextEdit::new("backend.example.com");
+        app.ui.env.ssh.host = TextEdit::new("box");
+        app.ui.env.ssh.error = Some("Could not connect".into());
+
+        assert!(escape(&mut app));
+        assert!(app.ui.settings.connections.adding.is_some());
+        assert_eq!(app.ui.env.ssh.host.text, "box");
+        assert!(escape(&mut app));
+        assert!(app.ui.settings.connections.adding.is_none());
+        assert!(app.ui.settings.connections.route_target.is_none());
+        assert!(app.ui.env.host.text.is_empty());
+        assert!(app.ui.env.ssh.host.text.is_empty());
+        assert!(app.ui.env.ssh.error.is_none());
     }
 
     #[test]

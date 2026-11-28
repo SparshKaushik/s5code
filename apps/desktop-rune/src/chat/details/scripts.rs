@@ -1148,6 +1148,7 @@ mod tests {
             project
         };
         let mut app = App::new();
+        app.client_settings = crate::settings::client::ClientSettings::default();
         let (mut local, local_sent) = s5_net::Net::in_memory_sent("http://local.test");
         let (mut remote, remote_sent) = s5_net::Net::in_memory_sent("http://remote.test");
         local.state_mut().config = Some(json!({"settings": {}}));

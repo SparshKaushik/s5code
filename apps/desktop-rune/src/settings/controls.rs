@@ -574,7 +574,10 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
             s.ui.settings.edits.insert(k3.clone(), restored);
             true
         })
-        .on_submit(move |s: &mut App, _| {
+        .on_submit(move |s: &mut App, tx| {
+            if k2.starts_with("project::") && k2.ends_with("::title") {
+                tx.blur();
+            }
             if let Some(text) = s.ui.settings.edits.get(&k2).map(|e| e.text.clone()) {
                 super::commit_text(s, &k2, &text);
             }
