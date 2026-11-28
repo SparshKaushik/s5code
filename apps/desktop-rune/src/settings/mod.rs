@@ -38,7 +38,7 @@ pub(crate) mod telemetry;
 pub(crate) mod project_icon;
 mod projects;
 pub(crate) mod providers;
-mod scope;
+pub(crate) mod scope;
 pub mod search;
 pub(crate) mod snapshots;
 mod snooze;

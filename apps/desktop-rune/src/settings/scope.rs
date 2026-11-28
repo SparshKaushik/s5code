@@ -149,6 +149,18 @@ pub fn retarget(s: &mut App) {
 /// Web's `selectScope`: commits pending edits to the old scope, then moves to the new one.
 pub fn select(s: &mut App, project: Option<String>, machine: Option<String>) {
     super::commit_edits(s, true);
+    let project = match (&project, &machine, &s.route) {
+        (Some(id), Some(environment), crate::Route::Settings(page)) if page == "projects" => {
+            project_row(s, id).and_then(|selected| {
+                let grouping = crate::shell::sidebar::folders::Grouping::read(s);
+                let logical = grouping.key(selected);
+                s.state().projects.iter()
+                    .find(|p| env::of(s, p) == *environment && grouping.key(p) == logical)
+                    .map(|p| crate::data::s(p, "id").to_owned())
+            }).or(project)
+        }
+        _ => project,
+    };
     s.ui.settings.project = project;
     s.ui.settings.machine = machine;
     s.ui.settings.scope_open = false;

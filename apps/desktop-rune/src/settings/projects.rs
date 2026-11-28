@@ -260,6 +260,9 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
     let id = crate::data::s(project, "id").to_owned();
     let add = id.clone();
     let imports = scripts::project_imports(s, project);
+    let targets = scripts::project_targets(s, project);
+    let mixed = scripts::actions_differ(targets.iter().map(|(_, project, settings)| scripts::resolve(settings, project)));
+    let locked = scripts::project_controls_locked(s, project);
     let mut controls = row().gap(6.0).center_y();
     if imports.as_ref().is_some_and(|list| !list.is_empty()) {
         let (open, toggle) = (scripts::imports_open(s, &id), id.clone());
@@ -268,17 +271,28 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                 crate::kit::Button::new("Import scripts")
                     .variant("ghost")
                     .size("xs")
+                    .disabled(locked)
                     .on_press(move |s: &mut App| scripts::toggle_imports(s, &toggle))
                     .build(t)
                     .expanded(open),
             ),
         );
     }
+    if targets.iter().any(|(_, project, settings)| settings["projectSettingsOverrides"][crate::data::s(project, "id")].get("defaultProjectScripts").is_some()) {
+        let reset = id.clone();
+        controls = controls.child(crate::kit::Button::new("Reset override")
+            .variant("ghost")
+            .size("xs")
+            .disabled(locked)
+            .on_press(move |s: &mut App| scripts::reset_for_project(s, &reset))
+            .build(t));
+    }
     controls = controls.child(
         crate::kit::Button::new("Add action")
             .variant("outline")
             .size("xs")
             .icon(&crate::icons::PLUS)
+            .disabled(locked)
             .on_press(move |s: &mut App| scripts::open_for_project(s, &add, None))
             .build(t)
             .key("project-add-action"),
@@ -290,7 +304,14 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
         controls,
     )];
     let scripts = scripts::resolve(super::server_settings(s), project);
-    if scripts.is_empty() {
+    if mixed {
+        rows.push(super::about::about_row(
+            t,
+            "Different actions across environments",
+            "Choose one environment to edit its list. Adding an action here adds it on every selected environment.",
+            row(),
+        ));
+    } else if scripts.is_empty() {
         rows.push(
             text("No actions configured.")
                 .font(theme::TEXT_SM)
@@ -299,7 +320,7 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                 .py(8.0),
         );
     }
-    for script in scripts {
+    for script in scripts.into_iter().filter(|_| !mixed) {
         let name = crate::data::s(&script, "name").to_owned();
         let mut heading = row()
             .gap(8.0)
@@ -335,6 +356,7 @@ fn actions(s: &App, t: &T, project: &Value) -> El {
                 .variant("ghost-muted")
                 .size("icon-xs")
                 .icon(&crate::icons::SETTINGS)
+                .disabled(locked)
                 .on_press(move |s: &mut App| scripts::open_for_project(s, &project, Some(&edit)))
                 .build(t),
         );

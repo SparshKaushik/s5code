@@ -22,8 +22,8 @@ pub struct State {
     last: HashMap<String, String>,
     pending: Option<Pending>,
     /// `t3.json` scripts by checkout (`useT3ProjectFileState`): empty when missing, None when invalid.
-    files: HashMap<String, Option<Vec<Value>>>,
-    reading: Option<(u64, String)>,
+    files: HashMap<(String, String), Option<Vec<Value>>>,
+    reading: Option<(u64, (String, String))>,
     /// The project Settings opened the editor for, in place of the open thread's.
     target: Option<String>,
     /// Settings > Projects > Actions' "Import scripts" menu, open for this project.
@@ -51,7 +51,8 @@ struct Editor {
 struct Pending {
     waiting: u64,
     /// Keybinding writes that follow the settings write, one at a time.
-    queue: Vec<(&'static str, Value)>,
+    queue: Vec<(String, &'static str, Value)>,
+    scoped: bool,
     /// A delete's script name, for its toast.
     deleted: Option<String>,
     /// A Settings import's script, reopened in the editor when the save fails.
@@ -259,17 +260,18 @@ fn imported(id: &str, f: &Value) -> Value {
 /// Reads the checkout's `t3.json` once (`force` rereads it, as opening the menu does).
 pub fn load_file(s: &mut App, force: bool) {
     let Some(cwd) = super::cwd(s) else { return };
+    let key = (s.ui.env.active.clone(), cwd.clone());
     let ui = &s.ui.chat.details.scripts;
-    if ui.reading.is_some() || (!force && ui.files.contains_key(&cwd)) {
+    if ui.reading.is_some() || (!force && ui.files.contains_key(&key)) {
         return;
     }
     let Some(net) = s.src.net() else { return };
     let id = net.request("projects.readFile", json!({"cwd": cwd, "relativePath": "t3.json", "allowMissing": true}));
-    s.ui.chat.details.scripts.reading = Some((id, cwd));
+    s.ui.chat.details.scripts.reading = Some((id, key));
 }
 
 fn file_scripts(s: &App) -> Vec<Value> {
-    super::cwd(s).and_then(|cwd| s.ui.chat.details.scripts.files.get(&cwd).cloned().flatten()).unwrap_or_default()
+    super::cwd(s).and_then(|cwd| s.ui.chat.details.scripts.files.get(&(s.ui.env.active.clone(), cwd)).cloned().flatten()).unwrap_or_default()
 }
 
 /// Settings > Projects reads the picked project's `t3.json` from its root while the page is open.
@@ -281,20 +283,22 @@ fn load_settings_file(s: &mut App) {
     let Some(id) = s.ui.settings.project.clone() else { return };
     let root = s.state().projects.iter().find(|p| p["id"] == id.as_str()).map(|p| data::s(p, "workspaceRoot").to_string());
     let Some(root) = root.filter(|r| !r.is_empty()) else { return };
+    let key = (crate::env::owner(s, &id), root.clone());
     let ui = &s.ui.chat.details.scripts;
-    if ui.reading.is_some() || ui.files.contains_key(&root) {
+    if ui.reading.is_some() || ui.files.contains_key(&key) {
         return;
     }
     // Parked environments hand their replies to `App::src`, where `poll_file` takes them.
     let Some(net) = crate::env::net_for(s, &id) else { return };
     let request = net.request("projects.readFile", json!({"cwd": root, "relativePath": "t3.json", "allowMissing": true}));
-    s.ui.chat.details.scripts.reading = Some((request, root));
+    s.ui.chat.details.scripts.reading = Some((request, key));
 }
 
 /// Settings > Projects > Actions: the picked project's `t3.json` scripts it doesn't have yet, or
 /// None while that file is invalid.
 pub fn project_imports(s: &App, project: &Value) -> Option<Vec<Value>> {
-    match s.ui.chat.details.scripts.files.get(data::s(project, "workspaceRoot")) {
+    let key = (crate::env::of(s, project), data::s(project, "workspaceRoot").to_owned());
+    match s.ui.chat.details.scripts.files.get(&key) {
         Some(None) => None,
         Some(Some(file)) => Some(importable(&resolve(crate::settings::server_settings(s), project), file)),
         None => Some(vec![]),
@@ -310,6 +314,137 @@ pub fn toggle_imports(s: &mut App, project: &str) {
     *menu = if menu.as_deref() == Some(project) { None } else { Some(project.to_string()) };
 }
 
+pub fn project_targets<'a>(s: &'a App, project: &'a Value) -> Vec<(String, &'a Value, &'a Value)> {
+    let owner = crate::env::of(s, project);
+    let grouping = crate::shell::sidebar::folders::Grouping::read(s);
+    let logical = grouping.key(project);
+    let mut targets: Vec<(String, &'a Value, &'a Value)> = Vec::new();
+    for candidate in std::iter::once(project).chain(s.state().projects.iter()) {
+        let environment = crate::env::of(s, candidate);
+        if (s.ui.settings.machine.is_some() && environment != owner)
+            || targets.iter().any(|(key, _, _)| *key == environment)
+            || grouping.key(candidate) != logical
+        {
+            continue;
+        }
+        if let Some(settings) = crate::env::source(s, &environment)
+            .and_then(|src| src.state().config.as_ref())
+            .and_then(|config| config.get("settings"))
+        {
+            targets.push((environment, candidate, settings));
+        }
+    }
+    targets
+}
+
+pub fn project_controls_locked(s: &App, project: &Value) -> bool {
+    let targets = project_targets(s, project);
+    s.ui.chat.details.scripts.pending.is_some()
+        || targets.is_empty()
+        || targets.iter().any(|(key, _, _)| !crate::settings::permissions::can_on(s, key, "settings:write"))
+}
+
+pub fn actions_differ(lists: impl IntoIterator<Item = Vec<Value>>) -> bool {
+    let mut lists = lists.into_iter();
+    lists.next().is_some_and(|first| lists.any(|list| list != first))
+}
+
+fn scoped_write(
+    s: &mut App,
+    transform: impl Fn(&[Value]) -> Option<Vec<Value>>,
+    binding: Option<(&str, Option<&str>)>,
+    imported: Option<Value>,
+) {
+    let Some(project) = project(s) else { return };
+    let targets = project_targets(s, &project);
+    if s.ui.chat.details.scripts.pending.is_some() || targets.is_empty() {
+        palette::toast(s, "Actions not saved", Some("No available machine, or another action change is saving."));
+        return;
+    }
+    if targets.iter().any(|(key, _, _)| !crate::settings::permissions::can_on(s, key, "settings:write")) {
+        palette::toast(s, "Failed to save project actions", Some("This connection cannot change environment settings."));
+        return;
+    }
+
+    let mut queue = Vec::new();
+    for (environment, project, settings) in targets {
+        let current = resolve(settings, project);
+        let next = transform(&current);
+        let project_id = data::s(project, "id");
+        let patch = crate::settings::scope::override_patch(settings, project_id, "defaultProjectScripts", next.clone().map(Value::Array));
+        queue.push((environment.clone(), "server.updateSettings", json!({"patch": patch})));
+        let keybindings = crate::env::source(s, &environment)
+            .and_then(|src| src.state().config.as_ref())
+            .and_then(|config| config["keybindings"].as_array())
+            .map_or(&[][..], Vec::as_slice);
+        let effective = next.as_deref().or_else(|| settings["defaultProjectScripts"].as_array().map(Vec::as_slice)).unwrap_or_default();
+        let removed = current.iter()
+            .map(|script| data::s(script, "id"))
+            .filter(|id| !effective.iter().any(|script| script["id"] == *id));
+        let changes = binding.map_or_else(|| removed.map(|id| (id, None)).collect::<Vec<_>>(), |binding| vec![binding]);
+        for (id, shortcut) in changes {
+            let retained = !effective.iter().any(|script| script["id"] == id)
+                && (settings["defaultProjectScripts"].as_array().is_some_and(|list| list.iter().any(|script| script["id"] == id))
+                    || s.state().projects.iter().any(|other| {
+                        crate::env::of(s, other) == environment && other["id"] != project_id
+                            && resolve(settings, other).iter().any(|script| script["id"] == id)
+                    }));
+            queue.extend(keybinding_ops(keybindings, &command_for(id), shortcut, retained)
+                .into_iter().map(|(method, payload)| (environment.clone(), method, payload)));
+        }
+    }
+    let (environment, method, payload) = queue.remove(0);
+    let Some(net) = crate::env::net_of(s, &environment) else {
+        palette::toast(s, "Actions not saved", Some("No available machine, or another action change is saving."));
+        return;
+    };
+    let waiting = net.request(method, payload);
+    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted: None, imported, scoped: true });
+}
+
+pub fn reset_for_project(s: &mut App, project: &str) {
+    s.ui.chat.details.scripts.target = Some(project.to_owned());
+    scoped_write(s, |_| None, None, None);
+    if s.ui.chat.details.scripts.pending.is_none() {
+        s.ui.chat.details.scripts.target = None;
+    }
+}
+
+fn apply_script(current: &[Value], saved: &Value, adding: bool) -> Vec<Value> {
+    let mut next: Vec<_> = current.iter().map(|script| {
+        if script["id"] == saved["id"] {
+            saved.clone()
+        } else {
+            release(script.clone(), saved["runOnWorktreeCreate"] == true, saved["runOnSettle"] == true)
+        }
+    }).collect();
+    if adding {
+        next.push(saved.clone());
+    }
+    next
+}
+
+fn available_ids(s: &App, scripts: &[Value]) -> Vec<String> {
+    let mut ids: Vec<_> = scripts.iter().map(|script| data::s(script, "id").to_owned()).collect();
+    if s.ui.chat.details.scripts.target.is_some() && let Some(project) = project(s) {
+        for (_, candidate, settings) in project_targets(s, &project) {
+            for list in [settings["defaultProjectScripts"].as_array(), candidate["scripts"].as_array()]
+                .into_iter().chain(settings["projectSettingsOverrides"].as_object().into_iter()
+                    .flat_map(|entries| entries.values().map(|entry| entry["defaultProjectScripts"].as_array())))
+                .flatten()
+            {
+                ids.extend(list.iter().map(|script| data::s(script, "id").to_owned()));
+            }
+        }
+        for project in &s.state().projects {
+            if let Some(list) = project["scripts"].as_array() {
+                ids.extend(list.iter().map(|script| data::s(script, "id").to_owned()));
+            }
+        }
+    }
+    ids
+}
+
 fn import(s: &mut App, file: &Value) {
     s.ui.chat.details.menu = None;
     s.ui.chat.details.scripts.import_menu = None;
@@ -317,18 +452,12 @@ fn import(s: &mut App, file: &Value) {
         return;
     }
     let scripts = scripts(s);
-    let ids: Vec<String> = scripts.iter().map(|v| data::s(v, "id").to_string()).collect();
-    let id = next_id(data::s(file, "name"), &ids);
+    let id = next_id(data::s(file, "name"), &available_ids(s, &scripts));
     let saved = imported(&id, file);
-    let (setup, settle) = (saved["runOnWorktreeCreate"] == true, saved["runOnSettle"] == true);
-    let mut next: Vec<Value> = scripts.into_iter().map(|v| release(v, setup, settle)).collect();
-    next.push(saved.clone());
-    persist(s, next, command_for(&id), None, None);
-    let ui = &mut s.ui.chat.details.scripts;
-    if ui.target.is_some()
-        && let Some(pending) = ui.pending.as_mut()
-    {
-        pending.imported = Some(saved);
+    if s.ui.chat.details.scripts.target.is_some() {
+        scoped_write(s, |current| Some(apply_script(current, &saved, true)), Some((&id, None)), Some(saved.clone()));
+    } else {
+        persist(s, apply_script(&scripts, &saved, true), command_for(&id), None, None);
     }
 }
 
@@ -374,6 +503,10 @@ pub fn escape(s: &mut App) -> bool {
         ui.confirm_delete = false;
         return true;
     }
+    if let Some(editor) = ui.editor.as_mut().filter(|editor| editor.icons_open) {
+        editor.icons_open = false;
+        return true;
+    }
     if ui.editor.is_none() {
         return false;
     }
@@ -399,6 +532,10 @@ fn can_run(s: &App) -> bool {
 
 /// Why this connection can't save the editor's change, as the editor's validation error.
 fn edit_denied(s: &App, changes_keybinding: bool) -> Option<&'static str> {
+    if s.ui.chat.details.scripts.target.is_some() {
+        return project(s).filter(|project| !project_controls_locked(s, project)).is_none()
+            .then_some("This connection cannot change environment settings.");
+    }
     if !super::grants(s, "orchestration:operate") {
         Some("This connection cannot change project actions.")
     } else if changes_keybinding && !super::grants(s, "settings:write") {
@@ -495,13 +632,16 @@ fn persist(s: &mut App, next: Vec<Value>, command: String, keybinding: Option<Op
         }
         None => vec![],
     };
+    let environment = s.ui.env.active.clone();
+    let queue = queue.into_iter().map(|(method, payload)| (environment.clone(), method, payload)).collect();
     let Some(net) = s.src.net() else { return };
     let waiting = net.request("server.updateSettings", json!({"patch": patch}));
-    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted, imported: None });
+    s.ui.chat.details.scripts.pending = Some(Pending { waiting, queue, deleted, imported: None, scoped: false });
 }
 
 fn save(s: &mut App) {
     let scripts = scripts(s);
+    let ids = available_ids(s, &scripts);
     let changes_keybinding = s.ui.chat.details.scripts.editor.as_ref().is_some_and(|e| Some(e.keybinding.trim()).filter(|k| !k.is_empty()) != e.initial_keybinding.as_deref());
     let denied = edit_denied(s, changes_keybinding);
     let ui = &mut s.ui.chat.details.scripts;
@@ -521,18 +661,16 @@ fn save(s: &mut App) {
     if e.error.is_some() {
         return;
     }
-    let ids: Vec<String> = scripts.iter().map(|v| data::s(v, "id").to_string()).collect();
     let editing = e.id.clone();
     let id = editing.clone().unwrap_or_else(|| next_id(e.name.text.trim(), &ids));
     let saved = build(&id, e);
-    let (setup, settle) = (e.setup, e.settle);
     let key = Some(e.keybinding.trim().to_string()).filter(|k| !k.is_empty());
-    let keybinding = (editing.is_none() || key != e.initial_keybinding).then_some(key);
-    let mut next: Vec<Value> = scripts.into_iter().map(|v| if editing.as_deref() == Some(data::s(&v, "id")) { saved.clone() } else { release(v, setup, settle) }).collect();
-    if editing.is_none() {
-        next.push(saved);
+    if ui.target.is_some() {
+        scoped_write(s, |current| Some(apply_script(current, &saved, editing.is_none())), Some((&id, key.as_deref())), None);
+    } else {
+        let keybinding = (editing.is_none() || key != e.initial_keybinding).then_some(key);
+        persist(s, apply_script(&scripts, &saved, editing.is_none()), command_for(&id), keybinding, None);
     }
-    persist(s, next, command_for(&id), keybinding, None);
 }
 
 fn delete(s: &mut App) {
@@ -541,6 +679,11 @@ fn delete(s: &mut App) {
     ui.confirm_delete = false;
     if let (Some(denied), Some(e)) = (denied, ui.editor.as_mut()) {
         e.error = Some(denied.into());
+        return;
+    }
+    if ui.target.is_some() {
+        let Some(id) = ui.editor.as_ref().and_then(|e| e.id.clone()) else { return };
+        scoped_write(s, |current| Some(current.iter().filter(|script| script["id"] != id.as_str()).cloned().collect()), Some((&id, None)), None);
         return;
     }
     let Some(id) = ui.editor.take().and_then(|e| e.id) else { return };
@@ -575,6 +718,9 @@ fn poll_save(s: &mut App) -> bool {
     let Some(mut pending) = s.ui.chat.details.scripts.pending.take() else { return false };
     if let Err(e) = reply {
         let message = palette::error_message(&e, "Failed to save action.");
+        if pending.scoped {
+            palette::toast(s, "Failed to save project actions", Some(&message));
+        }
         if pending.deleted.is_some() {
             palette::toast(s, "Could not delete action", Some(&message));
         } else if let Some(editor) = s.ui.chat.details.scripts.editor.as_mut() {
@@ -586,16 +732,20 @@ fn poll_save(s: &mut App) -> bool {
                 (e.id, e.initial_keybinding, e.error) = (None, None, Some(message));
                 e.keybinding.clear();
             }
-        } else {
+        } else if !pending.scoped {
             palette::toast(s, "Failed to import action.", Some(&message));
+        } else {
+            s.ui.chat.details.scripts.target = None;
         }
         return true;
     }
     if !pending.queue.is_empty() {
-        let (method, payload) = pending.queue.remove(0);
-        if let Some(net) = s.src.net() {
+        let (environment, method, payload) = pending.queue.remove(0);
+        if let Some(net) = crate::env::net_of(s, &environment) {
             pending.waiting = net.request(method, payload);
             s.ui.chat.details.scripts.pending = Some(pending);
+        } else {
+            palette::toast(s, "Failed to save project actions", Some("An environment became unavailable."));
         }
         return true;
     }
@@ -786,8 +936,8 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
     let k = kit::theme(t);
     let saving = ui.pending.is_some();
     // Web's fieldset: everything but Cancel waits on orchestration access, the shortcut on settings.
-    let locked = saving || !super::grants(s, "orchestration:operate");
-    let shortcuts = !locked && super::grants(s, "settings:write");
+    let locked = saving || edit_denied(s, false).is_some();
+    let shortcuts = !locked && edit_denied(s, true).is_none();
     let field_label = |v: &str| text(v.to_string()).font(theme::SM_MEDIUM).color(t.c.foreground);
     let help = |v: &str| text(v.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
     let picker = kit::Button::new("Choose icon")
@@ -873,7 +1023,7 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
                 .w_full()
                 .gap(6.0)
                 .child(field_label("Preview URL (optional)"))
-                .child(kit::Input::new(&e.preview).placeholder("http://localhost:5173").disabled(locked).on_edit(|s: &mut App| &mut editor_mut(s).preview).build(t).single_line())
+                .child(kit::Input::new(&e.preview).placeholder("http://localhost:5173").disabled(locked).on_edit(|s: &mut App| &mut editor_mut(s).preview).on_submit(|s: &mut App, _| save(s)).build(t).single_line())
                 .child(help("Open this URL in the in-app preview when this action runs.")),
         )
         .child(switch_row(t, "Run automatically on worktree creation", e.setup, locked, |e| e.setup = !e.setup))
@@ -962,6 +1112,17 @@ mod tests {
         assert_eq!(keybinding_ops(&bindings, "script.dev.run", None, false), vec![("server.removeKeybinding", json!({"key": "mod+shift+d", "command": "script.dev.run"}))]);
         assert!(keybinding_ops(&bindings, "script.dev.run", None, true).is_empty());
         assert_eq!(keybinding_ops(&[], "script.x.run", Some("mod+x"), false), vec![("server.upsertKeybinding", json!({"key": "mod+x", "command": "script.x.run"}))]);
+    }
+
+    #[test]
+    fn adding_to_mixed_actions_preserves_each_checkout_list() {
+        let left = vec![json!({"id": "dev", "runOnWorktreeCreate": true})];
+        let right = vec![json!({"id": "build", "runOnWorktreeCreate": true})];
+        assert!(actions_differ([left.clone(), right.clone()]));
+        assert!(!actions_differ([left.clone(), left.clone()]));
+        let setup = json!({"id": "setup", "runOnWorktreeCreate": true});
+        assert_eq!(apply_script(&left, &setup, true), vec![json!({"id": "dev", "runOnWorktreeCreate": false}), setup.clone()]);
+        assert_eq!(apply_script(&right, &setup, true), vec![json!({"id": "build", "runOnWorktreeCreate": false}), setup]);
     }
 
     #[test]
