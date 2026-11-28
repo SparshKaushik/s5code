@@ -169,7 +169,9 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
     }
     // ChangedFilesTree's header sticks 8 points under the timeline's top while the card shows,
     // on an opaque fill so rows scroll under it.
-    let fill = if t.dark { crate::theme::mix_srgb(t.c.input, t.c.background, 0.2) } else { t.c.secondary };
+    // Opaque, as web's bg-background under input/20: rows scroll beneath the pinned header.
+    let opaque_input = rune::Color { a: 1.0, ..t.c.input };
+    let fill = if t.dark { crate::theme::mix_srgb(opaque_input, t.c.background, 0.2 * t.c.input.a) } else { t.c.secondary };
     let head = head.fill(fill).corners([8.0, 8.0, 0.0, 0.0]).sticky_top(8.0).child(
         Button::new("Open diff").variant("ghost-muted").size("xs").icon(&icons::FILE_DIFF).on_press(open_diff.clone()).build(t).help("Open the full diff"),
     );

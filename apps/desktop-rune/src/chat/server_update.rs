@@ -50,8 +50,9 @@ enum Step {
     Resume { result: Value, deadline: i64, disconnected: bool, nudged: i64 },
 }
 
+/// One server's update.
 #[derive(Default)]
-struct Operation {
+pub struct State {
     status: Status,
     step: Step,
     /// `capabilities.serverSelfUpdate` when the update started.
@@ -61,22 +62,24 @@ struct Operation {
     commits: u8,
     /// The failure the user dismissed (isServerUpdateFailureDismissed).
     dismissed: bool,
+    /// The machine label whose outcome toasts, for an update started from another machine's row.
     announce: Option<String>,
 }
 
+/// Each environment's update, by environment key.
 #[derive(Default)]
-pub struct State(HashMap<String, Operation>);
+pub struct Updates(HashMap<String, State>);
 
 pub fn status(app: &App) -> &Status {
     status_on(app, &app.ui.env.active)
 }
 
 pub fn status_on<'a>(app: &'a App, key: &str) -> &'a Status {
-    app.ui.chat.server_update.0.get(key).map_or(&Status::Idle, |operation| &operation.status)
+    app.ui.chat.server_update.0.get(key).map_or(&Status::Idle, State::status)
 }
 
 pub fn dismissed(app: &App, key: &str) -> bool {
-    app.ui.chat.server_update.0.get(key).is_some_and(|operation| operation.dismissed)
+    app.ui.chat.server_update.0.get(key).is_some_and(|update| update.dismissed)
 }
 
 /// Sets the status as-is, for scenes.
@@ -85,39 +88,59 @@ pub fn show(app: &mut App, status: Status) {
 }
 
 pub fn show_on(app: &mut App, key: &str, status: Status) {
-    app.ui.chat.server_update.0.insert(key.to_owned(), Operation { status, ..Operation::default() });
+    app.ui.chat.server_update.0.insert(key.to_owned(), State::at(status));
 }
 
 pub fn dismiss(app: &mut App, key: &str) {
-    if let Some(operation) = app.ui.chat.server_update.0.get_mut(key)
-        && matches!(operation.status, Status::Failed { .. })
+    if let Some(update) = app.ui.chat.server_update.0.get_mut(key)
+        && matches!(update.status, Status::Failed { .. })
     {
-        operation.dismissed = true;
+        update.dismissed = true;
     }
 }
 
+/// Updates this window's server to `target` (an exact npm version), unless one is running.
 pub fn start(app: &mut App, target: &str) {
     start_on(app, &app.ui.env.active.clone(), target, None);
 }
 
+/// Updates environment `key`'s server; `announce` toasts its outcome under that label.
 pub fn start_on(app: &mut App, key: &str, target: &str, announce: Option<String>) {
     if matches!(status_on(app, key), Status::Running { .. }) {
         return;
     }
     let Some(net) = env::net_of(app, key) else { return };
-    let environment = net.state().config.as_ref().map_or(&Value::Null, |c| &c["environment"]);
-    let from = environment["serverVersion"].as_str().unwrap_or(target).to_owned();
+    let environment = net.state().config.as_ref().map_or(Value::Null, |c| c["environment"].clone());
+    let update = State { announce, ..begin(&environment, net, target) };
+    app.ui.chat.server_update.0.insert(key.to_owned(), update);
+}
+
+/// Starts updating the server behind `net`, whose config `environment` is, to `target`.
+pub fn begin(environment: &Value, net: &mut s5_net::Net, target: &str) -> State {
+    let from = Some(s(environment, "serverVersion")).filter(|v| !v.is_empty()).unwrap_or(target).to_owned();
     let streaming = environment["capabilities"]["serverSelfUpdateProgress"] == true;
     let method = s(&environment["capabilities"], "serverSelfUpdate").to_owned();
     let input = json!({"targetVersion": target});
     let id = net.request(if streaming { "server.updateServerWithProgress" } else { "server.updateServer" }, input);
-    app.ui.chat.server_update.0.insert(key.to_owned(), Operation {
-        status: Status::Running { stage: Stage::Downloading, from, target: target.to_owned() },
-        step: Step::Request(id, streaming),
-        method,
-        announce,
-        ..Operation::default()
-    });
+    State { status: Status::Running { stage: Stage::Downloading, from, target: target.to_owned() }, step: Step::Request(id, streaming), method, ..State::default() }
+}
+
+impl State {
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
+    /// An update standing at `status`, for scenes.
+    pub fn at(status: Status) -> State {
+        State { status, ..State::default() }
+    }
+    /// What the request in flight relayed: a parked server's results reach the active client.
+    pub fn relayed(&self, active: Option<&mut s5_net::Net>) -> (Vec<Value>, Option<s5_net::Reply>) {
+        let id = match self.step {
+            Step::Request(id, _) | Step::Commit(id, _) => id,
+            _ => return Default::default(),
+        };
+        active.map(|net| (net.take_chunks(id), net.take_reply(id))).unwrap_or_default()
+    }
 }
 
 /// The transport dropped mid-request, as a restarting server does (isLegacyUpdateHandoffLoss).
@@ -204,13 +227,13 @@ fn ready(result: &Value, event: &Value, disconnected: bool) -> Ready {
     Ready::Failed(if reason.is_empty() { "The service launcher resumed without committing the requested server version.".to_owned() } else { reason.to_owned() })
 }
 
-fn set_stage(state: &mut Operation, next: Stage) {
+fn set_stage(state: &mut State, next: Stage) {
     if let Status::Running { stage, .. } = &mut state.status {
         *stage = next;
     }
 }
 
-fn fail(state: &mut Operation, message: String) {
+fn fail(state: &mut State, message: String) {
     if let Status::Running { stage, from, target } = std::mem::take(&mut state.status) {
         state.status = Status::Failed { stage, from, target, message };
     }
@@ -218,44 +241,31 @@ fn fail(state: &mut Operation, message: String) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    if app.ui.chat.server_update.0.values().all(|operation| matches!(operation.step, Step::None)) {
+    if app.ui.chat.server_update.0.values().all(|update| matches!(update.step, Step::None)) {
         return false;
     }
     let mut updates = std::mem::take(&mut app.ui.chat.server_update.0);
     let mut lifecycle = std::mem::take(&mut app.ui.shell.lifecycle);
     let mut changed = false;
-    updates.retain(|key, operation| {
-        if matches!(operation.step, Step::None) {
+    updates.retain(|key, update| {
+        if matches!(update.step, Step::None) {
             return true;
         }
         let now = app.now_ms;
-        let (method, announce) = (operation.method.clone(), operation.announce.clone());
-        let target = match &operation.status {
+        let (method, announce) = (update.method.clone(), update.announce.clone());
+        let target = match &update.status {
             Status::Running { target, .. } => target.clone(),
             _ => return true,
         };
-        let request = match operation.step {
-            Step::Request(id, _) | Step::Commit(id, _) => Some(id),
-            _ => None,
-        };
-        // Parked clients hand their request results to the active client. Their lifecycle
-        // subscriptions stay with the original environment.
-        let (mut chunks, mut reply) = request.and_then(|id| app.src.net().map(|net| (net.take_chunks(id), net.take_reply(id)))).unwrap_or_default();
+        let relayed = update.relayed(app.src.net());
         let updated = if let Some(net) = env::net_of(app, key) {
-            if let Some(id) = request {
-                let mut direct = net.take_chunks(id);
-                if !direct.is_empty() {
-                    chunks.append(&mut direct);
-                }
-                reply = reply.or_else(|| net.take_reply(id));
-            }
-            poll_one(operation, net, &mut lifecycle, key, now, chunks, reply)
+            advance(update, net, &mut lifecycle, key, now, relayed)
         } else {
-            fail(operation, format!("Could not confirm that the server resumed on t3@{target}. Reconnect to check the update outcome."));
+            fail(update, format!("Could not confirm that the server resumed on t3@{target}. Reconnect to check the update outcome."));
             true
         };
         if updated && let Some(label) = announce {
-            match &operation.status {
+            match &update.status {
                 Status::Idle => {
                     let description = if method == "desktop-managed" {
                         format!("Desktop app relaunched on {target}.")
@@ -269,23 +279,29 @@ pub fn poll(app: &mut App) -> bool {
             }
         }
         changed |= updated;
-        operation.status != Status::Idle
+        update.status != Status::Idle
     });
     app.ui.shell.lifecycle = lifecycle;
     app.ui.chat.server_update.0 = updates;
     changed
 }
 
-fn poll_one(
-    state: &mut Operation,
+/// Moves the update of environment `key`'s server along with what `net` received, after what
+/// [`State::relayed`] took from the active client.
+pub fn advance(
+    state: &mut State,
     net: &mut s5_net::Net,
     lifecycle: &mut crate::shell::lifecycle::Ui,
     key: &str,
     now: i64,
-    chunks: Vec<Value>,
-    reply: Option<s5_net::Reply>,
+    relayed: (Vec<Value>, Option<s5_net::Reply>),
 ) -> bool {
     let primary = key == env::LOCAL;
+    let (mut chunks, mut reply) = relayed;
+    if let Step::Request(id, _) | Step::Commit(id, _) = state.step {
+        chunks.extend(net.take_chunks(id));
+        reply = reply.or_else(|| net.take_reply(id));
+    }
     let (from, target) = match &state.status {
         Status::Running { from, target, .. } => (from.clone(), target.clone()),
         _ => return false,
@@ -355,7 +371,7 @@ fn poll_one(
                     Ready::Skip => {}
                     Ready::Done => {
                         release(net, primary);
-                        *state = Operation::default();
+                        *state = State::default();
                         return true;
                     }
                     Ready::Failed(message) => {
@@ -390,11 +406,11 @@ fn release(net: &mut s5_net::Net, primary: bool) {
 }
 
 /// The update was accepted: wait for the server to come back on it.
-fn resume(state: &mut Operation, net: &mut s5_net::Net, lifecycle: &mut crate::shell::lifecycle::Ui, key: &str, result: Value, from: &str, now: i64) {
+fn resume(state: &mut State, net: &mut s5_net::Net, lifecycle: &mut crate::shell::lifecycle::Ui, key: &str, result: Value, from: &str, now: i64) {
     let target = s(&result, "targetVersion").to_owned();
     // A track switch's desktop host already on its newest build only saved the track.
     if s(&result, "method") == "desktop-app" && s(&result, "desktopUpdateToken").is_empty() && target == from {
-        *state = Operation::default();
+        *state = State::default();
         return;
     }
     if let Status::Running { target: running, stage, .. } = &mut state.status {
@@ -428,10 +444,10 @@ mod tests {
             let net = env::net_of(&mut app, key).unwrap();
             net.watch_resource(LIFECYCLE, json!({}));
             let status = Status::Running { stage: Stage::Resuming, from: "1.0.0".into(), target: "2.0.0".into() };
-            app.ui.chat.server_update.0.insert(key.into(), Operation {
+            app.ui.chat.server_update.0.insert(key.into(), State {
                 status,
                 step: Step::Resume { result: json!({"targetVersion": "2.0.0"}), deadline: app.now_ms - 1, disconnected: false, nudged: 0 },
-                ..Operation::default()
+                ..State::default()
             });
         }
         assert!(poll(&mut app));

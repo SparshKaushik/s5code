@@ -1232,30 +1232,42 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         }),
         None => repo.help(repository),
     };
-    let crumbs = row()
-        .gap(6.0)
+    let back = super::pr_meta::back_to_list(s).then(|| {
+        kit::Button::new("")
+            .variant("ghost-muted")
+            .size("icon-micro")
+            .icon(&i::ARROW_LEFT)
+            .on_press(|s: &mut App| crate::panel::show_pull_requests(s))
+            .build(t)
+            .label("Back to this thread's pull requests")
+            .help("Back to pull requests")
+            .ml(-6.0)
+    });
+    let number = row()
+        .key("pr-detail-number")
+        .gap(4.0)
         .center_y()
-        .shrink()
-        .min_w(0.0)
-        .child(repo)
-        .child(
-            row()
-                .key("pr-detail-number")
-                .gap(4.0)
-                .center_y()
-                .cursor(Cursor::Pointer)
-                .role("link")
-                .label(format!("Open {singular} #{} on host", d["number"]))
-                .help(on_host)
-                .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
-                .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
-                // onAuxClick: a middle click opens it too.
-                .pointer_buttons([rune::PointerButton::Middle])
-                .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                    let _ = tx.open_url(&open_url);
-                })
-                .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| ui(s).number_menu = Some((at.x, at.y))),
-        );
+        .cursor(Cursor::Pointer)
+        .role("link")
+        .label(format!("Open {singular} #{} on host", d["number"]))
+        .help(on_host)
+        .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
+        .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
+        // onAuxClick: a middle click opens it too.
+        .pointer_buttons([rune::PointerButton::Middle])
+        .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&open_url);
+        })
+        .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| ui(s).number_menu = Some((at.x, at.y)));
+    let crumbs = row().gap(6.0).center_y().shrink().min_w(0.0).children(back);
+    // Once the title has scrolled away, the number leads and the title follows it.
+    let u = &s.ui.pages.detail;
+    let crumbs = if loaded && u.condense.on(u.tab) {
+        let title = field(d, "title").to_string();
+        crumbs.child(number).child(text(title.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0).help(title))
+    } else {
+        crumbs.child(repo).child(number)
+    };
     // The @container/pr-header breakpoints: below 30rem the controls drop their labels, below
     // 35rem the checkout does too. The crumbs give way first; the controls never shrink.
     let narrow = rune::memo::layout_with(TOP, |r| r[2] < 480.0).unwrap_or(false);
@@ -1274,7 +1286,9 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         for control in primary_action(s, t, d, p, gate, narrow) {
             actions = actions.child(control);
         }
-        actions = actions.child(checkout_menu(s, t, d, compact, overlays)).child(actions_menu(s, t, d, p, gate, overlays));
+        // A thread's own pull request is already where its thread works: no checkout there.
+        let thread = super::pr_meta::thread_context(s);
+        actions = actions.children((!thread).then(|| checkout_menu(s, t, d, compact, overlays))).child(actions_menu(s, t, d, p, gate, overlays));
         if s.ui.pages.detail.delete_confirm {
             delete_branch_dialog(t, d, overlays);
         }
@@ -1285,7 +1299,7 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         if field(d, "state") == "open" && field(d, "mergeability") == "conflicting" {
             actions = actions.child(resolve_button(s, t, d, narrow));
         }
-        actions = actions.child(checkout_menu(s, t, d, compact, overlays)).child(loading);
+        actions = actions.children((!super::pr_meta::thread_context(s)).then(|| checkout_menu(s, t, d, compact, overlays))).child(loading);
     }
     row().key(TOP).w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
 }

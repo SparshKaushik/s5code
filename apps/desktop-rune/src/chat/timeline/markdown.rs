@@ -386,13 +386,11 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
     // `wrapped` holds the blocks toggled away from the wordWrap setting.
     let wrap = (crate::settings::value(app, "wordWrap").as_bool() != Some(false)) != app.ui.chat.timeline.wrapped.contains(&key);
     let wrap_key = key.clone();
-    let head = row()
-        .w_full()
-        .gap(8.0)
-        .pl(12.0)
-        .pr(6.0)
-        .pt(7.0)
-        .child(row().grow(1.0).child(language_icons::language(language, t)))
+    let tools = row()
+        .gap(2.0)
+        .center_y()
+        .role("toolbar")
+        .label("Code block actions")
         .child(
             row()
                 .size(24.0, 24.0)
@@ -431,6 +429,14 @@ fn fence(cx: &Cx, language: &str, code: &str, closed: bool, key: String) -> El {
                 .on_press(move |app: &mut App| crate::chat::details::scripts::run_command(app, &command))
         }))
         .child(copy_button(app, code, t, "Copy code"));
+    let head = row()
+        .w_full()
+        .gap(8.0)
+        .pl(12.0)
+        .pr(6.0)
+        .pt(7.0)
+        .child(row().grow(1.0).child(language_icons::language(language, t)))
+        .child(tools);
     let fenced = format!("```{language}\n{code}\n```");
     let code_view = Markdown::new(fenced.clone())
         .selectable(true)

@@ -177,7 +177,7 @@ pub fn card(t: &T, record: &Value, screenshot: Option<El>) -> El {
         "terminal" => {
             let (a, b) = (record["lineStart"].as_u64().unwrap_or(0), record["lineEnd"].as_u64().unwrap_or(0));
             let lines = if a == b { format!("Line {a}") } else { format!("Lines {a}–{b}") };
-            body = body.child(head(&icons::TERMINAL, s(record, "terminalLabel").to_owned(), lines)).child(code(s(record, "text"), 320.0));
+            body = body.child(head(&icons::TERMINAL, s(record, "terminalLabel").to_owned(), lines)).child(code(s(record, "text"), 320.0).label("Captured terminal output"));
         }
         "element" => {
             body = body.child(page_head(t, record)).children(selector(t, record)).child(code(s(record, "htmlPreview"), 160.0));

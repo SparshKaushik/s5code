@@ -27,7 +27,7 @@ pub struct Ui {
     pub home: home::Ui,
     pub details: details::Ui,
     pub topbar: topbar::Ui,
-    pub server_update: server_update::State,
+    pub server_update: server_update::Updates,
     pub side: side::State,
     /// The composer's notice stack (ComposerBannerStack).
     pub banners: composer::banners::State,

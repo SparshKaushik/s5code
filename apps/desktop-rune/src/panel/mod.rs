@@ -1515,6 +1515,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Diff));
         diff::tree_fixture(s);
     }),
+    ("panel-diff-long", |s| {
+        scene(s, Some(Surface::Diff));
+        diff::long_fixture(s);
+    }),
     ("panel-diff-maximized", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
