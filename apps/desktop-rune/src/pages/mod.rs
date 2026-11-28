@@ -405,6 +405,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         pr_guide::scene(s, "ready");
         s.ui.pages.pull_requests.maximized = true;
     }),
+    ("pull-requests-detail-guide-long", |s| {
+        pr_guide::scene(s, "ready");
+        s.ui.pages.pull_requests.maximized = true;
+        let summary: String = (1..=6).map(|n| format!("Step {n} of the change reads the period start, converts it to wall time in the chosen zone and formats it, with enough prose that the stop runs past the window while its notes stay beside it.\n\n")).collect();
+        let questions: Vec<String> = (1..=8).map(|n| format!("Does case {n} of the tooltip agree with the axis?")).collect();
+        if let Some(stop) = s.ui.pages.guide.data.as_mut().and_then(|d| d["guide"]["stops"].get_mut(0)) {
+            stop["summary"] = json!(summary);
+            stop["questions"] = json!(questions);
+        }
+    }),
     ("pull-requests-detail-guide-generating", |s| pr_guide::scene(s, "generating")),
     ("pull-requests-detail-guide-finish", |s| pr_guide::scene(s, "finish")),
     ("pull-requests-detail-guide-excerpt-comment", |s| pr_guide::scene(s, "comment")),
@@ -412,6 +422,21 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-code", |s| {
         open_detail(s, 2, |_| {});
         pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
+    }),
+    ("pull-requests-detail-code-long", |s| {
+        open_detail(s, 2, |_| {});
+        let mut patch = String::new();
+        for (name, lines) in [("apps/desktop-rune/src/pages/usage.rs", 60), ("apps/desktop-rune/src/pages/mod.rs", 12)] {
+            patch += &format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1,{lines} +1,{lines} @@\n");
+            for n in 1..=lines {
+                patch += &format!("-    let period_{n} = m.periods[{n}];\n+    let period_{n} = m.zone.wall(m.periods[{n}]);\n");
+            }
+        }
+        s.ui.pages.detail.files = Some(rune_kit::diff::parse(&patch));
+        s.ui.pages.code.fresh = true;
+        pr_detail::poll(s);
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/usage.rs");
+        pr_code::unfold(s, "apps/desktop-rune/src/pages/mod.rs");
     }),
     ("pull-requests-detail-code-tree", |s| {
         open_detail(s, 2, |_| {});

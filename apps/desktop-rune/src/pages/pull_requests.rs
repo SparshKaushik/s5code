@@ -1174,12 +1174,16 @@ pub(super) fn scene_condensed(u: &mut Ui) {
 }
 
 /// IntersectionObserver over the toolbar's marker, rooted at the list: condensed once the marker
-/// has scrolled above the view. The marker's offset is read unscrolled from the last layout.
-fn on_scroll(scrolled: &Scrolled, waker: Option<&rune::Waker>, y: f32) {
+/// has scrolled above the view. The marker's offset is read unscrolled while the view builds,
+/// since layout reads return nothing from a scroll callback.
+fn marker_top() -> Option<f32> {
+    rune::memo::layout(CONDENSE_MARKER).zip(rune::memo::layout("pr-scroll")).map(|(m, v)| m[1] - v[1])
+}
+
+fn on_scroll(scrolled: &Scrolled, waker: Option<&rune::Waker>, marker: Option<f32>, y: f32) {
     if scrolled.offset.swap(y.to_bits(), Ordering::Relaxed) != y.to_bits() {
         scrolled.moved_at.store(crate::data::now_ms(), Ordering::Relaxed);
     }
-    let marker = rune::memo::layout(CONDENSE_MARKER).zip(rune::memo::layout("pr-scroll")).map(|(m, v)| m[1] - v[1]);
     let condensed = marker.is_some_and(|top| y > top + 1.0);
     if scrolled.condensed.swap(condensed, Ordering::Relaxed) != condensed
         && let Some(waker) = waker.cloned()
@@ -1934,8 +1938,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
             .items_center()
             .scroll(ScrollSpec { stick_bottom: u.scene_scrolled })
             .on_scroll_offset({
-                let (scrolled, waker) = (u.scrolled.clone(), s.ui.panel.waker.clone());
-                move |at: rune::ScrollPos| on_scroll(&scrolled, waker.as_ref(), at.offset[1])
+                let (scrolled, waker, marker) = (u.scrolled.clone(), s.ui.panel.waker.clone(), marker_top());
+                move |at: rune::ScrollPos| on_scroll(&scrolled, waker.as_ref(), marker, at.offset[1])
             })
             .child(content),
         t,
@@ -2959,6 +2963,18 @@ mod tests {
         assert!(!settle_sweep(&mut u) && sweeping(&u));
         u.sent_query = "crash".into();
         assert!(settle_sweep(&mut u) && !sweeping(&u), "a new search ends the sweep");
+    }
+
+    #[test]
+    fn scrolling_the_toolbar_away_condenses_the_list_header() {
+        let mut app = App::new();
+        let scene = super::super::SCENES.iter().find(|(name, _)| *name == "pull-requests").unwrap().1;
+        scene(&mut app);
+        let mut rt = rune::Runtime::new(app, crate::view, (1000., 420.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        rt.wheel(500., 300., -300.);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.pages.pull_requests.scrolled.condensed.load(Ordering::Relaxed), "the marker measured at build time reaches the scroll callback");
     }
 
     #[test]

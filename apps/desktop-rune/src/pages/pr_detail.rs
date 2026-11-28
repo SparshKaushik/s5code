@@ -101,6 +101,8 @@ pub struct Ui {
 #[derive(Default)]
 pub(super) struct Condense {
     tabs: AtomicU8,
+    /// The bits the view last built with, so a flip either way commits without the waker.
+    shown: AtomicU8,
     anchor: Mutex<Option<(usize, f32)>>,
 }
 
@@ -134,12 +136,13 @@ pub(super) fn next_condensed(condensed: bool, top: f32, fold: f32) -> (bool, Opt
     (false, None)
 }
 
-/// A tab scroller's offsets drive its header; a change wakes the window.
+/// A tab scroller's offsets drive its header; a change wakes the window. The fold is measured
+/// while the view builds, since layout reads return nothing from a scroll callback.
 pub(super) fn condense_reporter(s: &App, tab: usize) -> impl Fn(rune::ScrollPos) + 'static {
     let (condense, waker) = (s.ui.pages.detail.condense.clone(), s.ui.panel.waker.clone());
+    let fold = rune::memo::layout_with(FOLD, |r| r[3]).unwrap_or(0.0);
     move |at: rune::ScrollPos| {
         let was = condense.on(tab);
-        let fold = rune::memo::layout_with(FOLD, |r| r[3]).unwrap_or(0.0);
         let (now, anchor) = next_condensed(was, at.offset[1], fold);
         if now == was {
             return;
@@ -159,10 +162,12 @@ pub(super) fn scroller(tab: usize) -> String {
     if tab == 2 { super::pr_code::SCROLLER.to_string() } else { format!("pr-detail-scroll-{tab}") }
 }
 
-/// Restores the condensed tab's scroll offset before the next paint.
+/// Restores the condensed tab's scroll offset before the next paint; true when the header flipped.
 pub fn anchor_header(s: &mut App, tx: &mut Tx) -> bool {
     let u = &s.ui.pages.detail;
-    let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return false };
+    let tabs = u.condense.tabs.load(Ordering::Relaxed);
+    let flipped = u.condense.shown.swap(tabs, Ordering::Relaxed) != tabs;
+    let Some((tab, y)) = u.condense.anchor.lock().ok().and_then(|mut a| a.take()) else { return flipped };
     if tab == u.tab && u.condense.on(tab) {
         tx.scroll_to_y(scroller(tab), y);
     }
@@ -3084,6 +3089,22 @@ mod tests {
         assert!(anchor_header(&mut s, &mut tx), "the Code tab's condensing restores its offset");
         assert!(s.ui.pages.detail.condense.anchor.lock().unwrap().is_none(), "once");
         assert!(!anchor_header(&mut s, &mut tx));
+        s.ui.pages.detail.condense.set(2, false);
+        assert!(anchor_header(&mut s, &mut tx), "opening again commits too");
+        assert!(!anchor_header(&mut s, &mut tx));
+    }
+
+    #[test]
+    fn scrolling_a_long_summary_past_its_fold_condenses_the_header() {
+        let mut app = App::new();
+        let scene = super::super::SCENES.iter().find(|(name, _)| *name == "pull-requests-detail-long").unwrap().1;
+        scene(&mut app);
+        let mut rt = rune::Runtime::new(app, crate::view, (1440., 900.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        assert!(!rt.state.ui.pages.detail.condense.on(0));
+        rt.wheel(1100., 600., -1200.);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.pages.detail.condense.on(0), "the fold measured at build time reaches the scroll callback");
     }
 
     #[test]
