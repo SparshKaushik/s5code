@@ -80,7 +80,7 @@ fn environments(s: &App) -> Vec<String> {
     if let Some(project) = &s.ui.settings.project {
         return vec![env::owner(s, project)];
     }
-    if s.ui.settings.environment_only {
+    if s.ui.settings.machine.is_some() {
         return vec![s.ui.env.active.clone()];
     }
     env::keys(s)
@@ -440,6 +440,10 @@ pub fn view(s: &App, t: &T) -> El {
         })
         .build(t);
     let page = col().w_full().gap(10.0).child(header(t, new_task));
+    if let Some(message) = super::scope::unavailable(s) {
+        let row = text(message.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).wrap().w_full().px(16.0).py(12.0);
+        return page.child(super::controls::section("Unavailable selection", vec![row], t));
+    }
     if envs.is_empty() {
         return page.child(
             col()
