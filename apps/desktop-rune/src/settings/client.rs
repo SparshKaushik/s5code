@@ -29,9 +29,9 @@ impl Default for ClientSettings {
 
 /// Keys only Rune reads. Electron's settings struct drops unknown keys when it saves the
 /// shared file, so these live beside it.
-const RUNE_ONLY: [&str; 6] = [
+const RUNE_ONLY: [&str; 8] = [
     "appearance", "customThemes", "themeDark", "themeLight", "typographyAdvanced",
-    crate::panel::diff::HIDE_TESTS_KEY,
+    crate::panel::diff::HIDE_TESTS_KEY, "t3code:version-mismatch-dismissals:v1", "renderBrowserFile",
 ];
 const RUNE_FILE: &str = "desktop-rune-client-settings.json";
 

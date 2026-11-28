@@ -30,6 +30,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 qrcodegen = "1.8"
 # Open VSX theme packages: reading deflated VSIX entries only, on the flate2 already in the tree.
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+roxmltree = "0.20"
 # The device panel's 3D view draws through Rune's compositor hook, on Rune's own wgpu.
 wgpu = { version = "30", default-features = false, features = ["wgsl"] }
 

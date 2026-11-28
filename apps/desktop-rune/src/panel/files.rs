@@ -5,6 +5,7 @@ use crate::{
 use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
 use super::file_preview::{self as fp, Kind};
+use super::file_viewers::{self as viewers, Viewer};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -44,7 +45,7 @@ pub struct Ui {
     found: Option<(String, Vec<Value>, bool)>,
     /// A row's right-click menu: the path and where it opened.
     menu: Option<(String, (f32, f32))>,
-    selected: String,
+    pub(super) selected: String,
     environment: String,
     cwd: String,
     reading: Option<u64>,
@@ -69,8 +70,9 @@ pub struct Ui {
     /// Why the open file could not be read; the tree's own failures stay in `error`.
     read_failure: Option<ReadFailure>,
     /// The search match to mark and centre in the open file.
-    line: Option<usize>,
+    pub(super) line: Option<usize>,
     reveal: bool,
+    pub(super) viewer: Option<Viewer>,
     image: Option<Image>,
     /// Decodes previews off the UI thread, as the sidebar's favicons do.
     images: Option<rune::ImageCache>,
@@ -103,6 +105,7 @@ struct Image {
     url: Option<String>,
     download: Download,
     decoded: Option<rune::Image>,
+    zoom: Option<f32>,
     /// SVGs rasterize at twice their own size, so they draw at half their pixel size.
     svg: bool,
     failed: bool,
@@ -183,6 +186,7 @@ impl Default for Ui {
             read_failure: None,
             line: None,
             reveal: false,
+            viewer: None,
             image: None,
             images: None,
             rendered: None,
@@ -338,32 +342,45 @@ fn search(app: &mut App) {
 }
 
 fn read(app: &mut App, path: String) {
+    read_at(app, path, None);
+}
+
+fn read_at(app: &mut App, path: String, line: Option<usize>) {
     flush(app);
+    viewers::close(app);
     let Some(cwd) = super::workspace(app) else {
         return;
     };
     let kind = fp::kind(&path);
+    let html_rendered = kind == Kind::Html && line.is_none() && crate::settings::value(app, "renderBrowserFile") != false;
+    let viewer = viewers::Mode::for_file(kind, &path, html_rendered).and_then(|mode| Viewer::start(app, mode, &cwd, &path));
     let image = is_image(&path).then(|| Image {
         request: asset_request(app, &cwd, &path),
         url: None,
         download: Download::default(),
         decoded: None,
+        zoom: None,
         svg: false,
         failed: false,
     });
-    let request = if kind.reads_text() {
+    let request = if kind.reads_text() && viewer.is_none() {
         app.src.net().map(|n| n.request("projects.readFile", json!({"cwd":cwd,"relativePath":path})))
     } else {
         None
     };
     let ui = &mut app.ui.panel.files;
     ui.binary = image.is_none() && !kind.reads_text();
-    ui.rendered = None;
+    ui.rendered = match kind {
+        Kind::Html => Some(html_rendered),
+        Kind::Table(_) | Kind::Markdown | Kind::Mermaid if line.is_some() => Some(false),
+        _ => None,
+    };
+    ui.viewer = viewer;
     ui.asset = None;
     ui.image = image;
     ui.selected = path;
     ui.environment = app.ui.env.active.clone();
-    ui.line = None;
+    ui.line = line;
     ui.reveal = false;
     ui.read_failure = None;
     ui.cwd = cwd;
@@ -383,7 +400,7 @@ fn asset_request(app: &mut App, cwd: &str, path: &str) -> Option<u64> {
     app.src.net().map(|n| n.request("assets.createUrl", json!({"resource":resource})))
 }
 
-fn asset_url(src: &data::Source, reply: &Value) -> String {
+pub(super) fn asset_url(src: &data::Source, reply: &Value) -> String {
     format!("{}{}", src.net_ref().map(|n| n.base_url().trim_end_matches('/').to_owned()).unwrap_or_default(), data::s(reply, "relativeUrl"))
 }
 
@@ -397,7 +414,7 @@ fn use_asset(app: &mut App, purpose: AssetUse) {
 }
 
 /// "Save file": a copy of the file wherever the user picks, as web's download does.
-fn save_as(app: &mut App, tx: &mut Tx) {
+pub(super) fn save_as(app: &mut App, tx: &mut Tx) {
     let name = fp::file_name(&app.ui.panel.files.selected).to_owned();
     let options = rune::FileDialogOptions { title: "Save file".into(), file_name: Some(name), ..Default::default() };
     tx.save_file(options, |app: &mut App, picked: rune::FileDialogResult, _| {
@@ -407,8 +424,9 @@ fn save_as(app: &mut App, tx: &mut Tx) {
     });
 }
 
-fn copy_contents(app: &mut App, tx: &mut Tx) {
-    tx.copy(app.ui.panel.files.editor.text.clone());
+pub(super) fn copy_contents(app: &mut App, tx: &mut Tx) {
+    let contents = viewers::full_text(app).unwrap_or(&app.ui.panel.files.editor.text).to_owned();
+    tx.copy(contents);
     app.ui.panel.files.copied = Some(Instant::now());
     tx.wake_after(COPIED_FOR);
 }
@@ -421,17 +439,25 @@ fn rendered_on(ui: &Ui) -> bool {
 
 fn toggle_rendered(app: &mut App) {
     flush(app);
+    let ui = &app.ui.panel.files;
+    if fp::kind(&ui.selected) == Kind::Html {
+        let (path, turn_on) = (ui.selected.clone(), !rendered_on(ui));
+        app.client_settings.values.insert("renderBrowserFile".into(), json!(turn_on));
+        app.client_settings.save();
+        read(app, path);
+        return;
+    }
     let ui = &mut app.ui.panel.files;
     ui.rendered = Some(!rendered_on(ui));
     prepare(ui);
 }
 
-fn wrap_on(app: &App) -> bool {
+pub(super) fn wrap_on(app: &App) -> bool {
     app.ui.panel.files.wrap.unwrap_or_else(|| crate::settings::value(app, "wordWrap").as_bool() != Some(false))
 }
 
 /// `toLocaleString` for a byte count.
-fn grouped(n: u64) -> String {
+pub(super) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -470,8 +496,7 @@ pub fn open(app: &mut App, path: String, line: Option<usize>) {
             load(app, folder);
         }
     }
-    read(app, path);
-    app.ui.panel.files.line = line;
+    read_at(app, path, line);
 }
 
 /// The bytes of 1-based `line` in `text`, without its newline.
@@ -487,15 +512,25 @@ fn line_range(text: &str, line: usize) -> Option<std::ops::Range<usize>> {
 }
 
 pub(super) fn reveal_line(app: &mut App, path: &str, line: usize) {
-    let ui = &mut app.ui.panel.files;
-    if ui.selected == path {
-        ui.line = Some(line);
-        ui.reveal = true;
+    if app.ui.panel.files.selected != path {
+        return;
     }
+    let kind = fp::kind(path);
+    if kind == Kind::Html && app.ui.panel.files.viewer.is_some() {
+        read_at(app, path.to_owned(), Some(line));
+    }
+    let ui = &mut app.ui.panel.files;
+    if matches!(kind, Kind::Table(_) | Kind::Markdown | Kind::Mermaid) {
+        ui.rendered = Some(false);
+        prepare(ui);
+    }
+    ui.line = Some(line);
+    ui.reveal = true;
 }
 
 pub(super) fn back_to_tree(app: &mut App) {
     flush(app);
+    viewers::close(app);
     let ui = &mut app.ui.panel.files;
     ui.selected.clear();
     ui.line = None;
@@ -587,6 +622,7 @@ fn queue(app: &mut App, mut write: Write) {
 /// Leaves the current thread's files, still finishing their writes.
 pub fn reset(app: &mut App) {
     flush(app);
+    viewers::close(app);
     let old = std::mem::take(&mut app.ui.panel.files);
     app.ui.panel.files.writes = old.writes;
     app.ui.panel.files.unsaved = old.unsaved;
@@ -607,11 +643,11 @@ pub(super) fn pending_path(app: &App, path: &str) -> bool {
 }
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
-    let mut changed = false;
+    let mut changed = viewers::poll(app, tx);
     let ui = &mut app.ui.panel.files;
-    if ui.reveal && ui.reading.is_none() {
+    if ui.reveal && ui.reading.is_none() && !ui.viewer.as_ref().is_some_and(viewers::Viewer::loading_full_text) {
         ui.reveal = false;
-        tx.scroll_center("file-line");
+        viewers::reveal(app, tx);
         changed = true;
     }
     for (id, dir) in app.ui.panel.files.listings.clone() {
@@ -682,6 +718,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         crate::shell::palette::toast(app, "Could not save file", Some(&e));
         changed = true;
     }
+    let mut load_full = None;
+    let is_thread = matches!(app.frame_route(), crate::Route::Thread(_));
     let ui = &mut app.ui.panel.files;
     if let Some(id) = ui.reading
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
@@ -691,6 +729,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             Ok(v) => {
                 ui.byte_length = v["byteLength"].as_u64().unwrap_or(0);
                 show(ui, data::s(&v, "contents").into(), v["truncated"] == true);
+                if ui.truncated && is_thread {
+                    let kind = fp::kind(&ui.selected);
+                    let delimiter = match kind { Kind::Table(d) => Some(d), _ => None };
+                    if matches!(kind, Kind::Text | Kind::Table(_)) {
+                        load_full = Some((viewers::Mode::Large(delimiter), ui.cwd.clone(), ui.selected.clone()));
+                    }
+                }
                 if ui.line.is_some() {
                     tx.instant();
                     tx.scroll_center("file-line");
@@ -780,6 +825,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                 && !ui.writes.iter().any(|o| o.id.is_some() && o.environment == w.environment && o.cwd == w.cwd && o.path == w.path)
         })
         .collect();
+    if let Some((mode, cwd, path)) = load_full {
+        app.ui.panel.files.viewer = Viewer::start(app, mode, &cwd, &path);
+    }
     for i in next.into_iter().rev() {
         let w = app.ui.panel.files.writes.remove(i);
         queue(app, w);
@@ -793,7 +841,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
 
 /// Relists the loaded folders, searches again and re-reads the open file
 /// (`onRefreshSelectedFile`), keeping a draft.
-fn refresh(s: &mut App) {
+pub(super) fn refresh(s: &mut App) {
     let dirs: Vec<String> = s.ui.panel.files.dirs.keys().cloned().collect();
     for dir in if dirs.is_empty() { vec![String::new()] } else { dirs } {
         load(s, dir);
@@ -803,8 +851,8 @@ fn refresh(s: &mut App) {
     }
     let ui = &s.ui.panel.files;
     if !ui.selected.is_empty() && ui.writes.is_empty() && ui.editor.text == ui.saved {
-        let path = ui.selected.clone();
-        read(s, path);
+        let (path, line) = (ui.selected.clone(), ui.line);
+        read_at(s, path, line);
     }
 }
 
@@ -855,7 +903,21 @@ fn read_failure_view(f: &ReadFailure, t: &T) -> El {
     col().grow(1.).min_h(0.).justify_center().child(body)
 }
 
-fn image_view(image: &Image, t: &T) -> El {
+fn fit_image([w, h]: [f32; 2], [width, height]: [f32; 2]) -> f32 {
+    1.0_f32.min((width - 32.0).max(1.0) / w.max(1.0)).min((height - 32.0).max(1.0) / h.max(1.0))
+}
+
+fn image_zoom(scale: f32, factor: f32) -> f32 {
+    (scale * factor).clamp(0.05, 8.0)
+}
+
+fn set_image_zoom(app: &mut App, zoom: Option<f32>) {
+    if let Some(image) = app.ui.panel.files.image.as_mut() {
+        image.zoom = zoom;
+    }
+}
+
+fn image_view(image: &Image, viewport: Option<[f32; 2]>, t: &T) -> El {
     let decoded = image.decoded.as_ref().filter(|d| d.is_ready());
     if image.failed || decoded.is_some_and(|d| d.error().is_some()) {
         let mut notice = col().grow(1.).center().gap(12.).padding(24.).child(text("Unable to load workspace image.").font(theme::TEXT_XS).color(t.c.destructive_foreground));
@@ -873,13 +935,43 @@ fn image_view(image: &Image, t: &T) -> El {
         }
         return notice;
     }
-    let Some(decoded) = decoded else {
-        return col().grow(1.).center().child(kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t)));
+    let size = decoded.map(|image_data| {
+        let (w, h) = image_data.pixels().size();
+        let k = if image.svg { 0.5 } else { 1.0 };
+        [w as f32 * k, h as f32 * k]
+    });
+    let viewport = viewport.unwrap_or([320.0, 560.0]);
+    let scale = image.zoom.or_else(|| size.map(|size| fit_image(size, viewport))).unwrap_or(1.0);
+    let dimensions = size.map_or_else(|| "Loading image…".into(), |[w, h]| format!("{} × {}", grouped(w as u64), grouped(h as u64)));
+    let action = |name, glyph, disabled, active, f: fn(&mut App)| {
+        kit::icon_button(glyph, name).variant(if active { "secondary" } else { "ghost" }).size("icon-xs")
+            .disabled(disabled).on_press(f).build(t).help(name)
     };
-    // `PreviewImageContent` fits the image inside a 16px margin and never scales it up.
-    let (w, h) = decoded.pixels().size();
-    let k = if image.svg { 0.5 } else { 1. };
-    col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
+    let step = |name, glyph, factor, disabled| {
+        kit::icon_button(glyph, name).variant("ghost").size("icon-xs").disabled(disabled)
+            .on_press(move |app: &mut App| set_image_zoom(app, Some(image_zoom(scale, factor))))
+            .build(t).help(name)
+    };
+    let controls = row().w_full().min_h(40.0).px(12.0).py(4.0).gap(8.0).center_y().flex_wrap()
+        .child(text(dimensions).font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.0))
+        .child(row().gap(4.0).center_y()
+            .child(step("Zoom out", &icons::MINUS, 1.0 / 1.25, size.is_none() || scale <= 0.05))
+            .child(row().min_w(40.0).center().child(text(format!("{:.0}%", scale * 100.0)).font(theme::TEXT_XS).color(t.c.muted_foreground)))
+            .child(step("Zoom in", &icons::PLUS, 1.25, size.is_none() || scale >= 8.0))
+            .child(action("Fit image", &icons::SCAN, false, image.zoom.is_none(), |app| set_image_zoom(app, None)))
+            .child(action("Actual image size", &icons::MAXIMIZE, false, image.zoom == Some(1.0), |app| set_image_zoom(app, Some(1.0)))));
+    let picture = match (decoded, size) {
+        (Some(decoded), Some([width, height])) => {
+            let [w, h] = [width * scale, height * scale];
+            row().center().padding(16.0).w((w + 32.0).max(viewport[0])).h((h + 32.0).max(viewport[1]))
+                .child(el().size(w, h).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
+        }
+        _ => col().size(viewport[0], viewport[1]).center().child(kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t))),
+    };
+    col().grow(1.0).min_h(0.0)
+        .child(controls)
+        .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6)))
+        .child(el().key("file-image-viewport").grow(1.0).min_h(0.0).min_w(0.0).scroll_xy().child(picture))
 }
 
 /// `laid_out` is the editor's width from the last frame, for the wrapped gutter.
@@ -1010,7 +1102,7 @@ fn header(ui: &Ui, wrap: bool, t: &T) -> El {
             .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.));
         let text_shown = ui.reading.is_none() && !ui.binary && ui.read_failure.is_none() && kind.reads_text();
         let rendered = rendered_on(ui);
-        if text_shown && let Some(mode) = kind.rendered_mode() {
+        if (text_shown || kind == Kind::Html) && let Some(mode) = kind.rendered_mode() {
             let label = fp::toggle_label(mode, rendered);
             header = header.child(button(label, if rendered { &icons::CODE } else { &icons::EYE }).on_press(toggle_rendered).build(t).help(label));
         }
@@ -1028,7 +1120,7 @@ fn header(ui: &Ui, wrap: bool, t: &T) -> El {
             let path = ui.selected.clone();
             header = header.child(button(label, &icons::GLOBE).on_press(move |s: &mut App| super::preview::open_file(s, &path)).build(t).help(label));
         }
-        if text_shown {
+        if text_shown && ui.viewer.is_none() {
             let copied = ui.copied.is_some_and(|at| at.elapsed() < COPIED_FOR);
             let (label, glyph) = if copied { ("Copied", &icons::CHECK) } else { ("Copy contents", &icons::COPY) };
             header = header.child(button(label, glyph).build(t).on_press_tx(copy_contents).help(label));
@@ -1137,6 +1229,7 @@ fn tree(ui: &Ui, t: &T) -> El {
 
 /// A row's right-click menu: Copy mention, Add to chat.
 pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
+    viewers::overlays(app, t, out);
     let Some((path, (x, y))) = app.ui.panel.files.menu.clone() else {
         return;
     };
@@ -1164,7 +1257,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
 }
 
 /// `editor_width` is the "file-editor" field's width on the last frame.
-pub fn view(app: &App, t: &T, editor_width: Option<f32>) -> El {
+pub fn view(app: &App, t: &T, editor_width: Option<f32>, image_viewport: Option<[f32; 2]>) -> El {
     let ui = &app.ui.panel.files;
     let wrap = wrap_on(app);
     let header = header(ui, wrap, t);
@@ -1184,7 +1277,7 @@ pub fn view(app: &App, t: &T, editor_width: Option<f32>) -> El {
     } else if let Some(failure) = &ui.read_failure {
         read_failure_view(failure, t)
     } else if let Some(image) = &ui.image {
-        image_view(image, t)
+        image_view(image, image_viewport, t)
     } else if !ui.selected.is_empty() {
         file_body(app, ui, wrap, editor_width, t)
     } else {
@@ -1212,7 +1305,7 @@ pub fn view(app: &App, t: &T, editor_width: Option<f32>) -> El {
         );
         surface = surface.child(el().h(1.).w_full().fill(t.c.warning.alpha_mul(0.2)));
     }
-    if ui.truncated && ui.image.is_none() && !ui.binary {
+    if ui.truncated && ui.image.is_none() && !ui.binary && ui.viewer.is_none() {
         let notice = format!("Preview limited to the first 1 MB of a {} byte file.", grouped(ui.byte_length));
         surface = surface
             .child(row().w_full().px(12.).py(6.).fill(t.c.warning_surface).child(text(notice).font(theme::TEXT_2XS).color(t.c.warning_foreground).wrap().grow(1.)))
@@ -1230,11 +1323,22 @@ fn file_body(app: &App, ui: &Ui, wrap: bool, width: Option<f32>, t: &T) -> El {
     let no_preview = |reason: Option<&str>| {
         fp::no_preview(fp::file_name(&ui.selected), reason, t, |s: &mut App| use_asset(s, AssetUse::External), save_as)
     };
+    if let Some(viewer) = &ui.viewer {
+        if viewer.loading_full_text() {
+            let first_screen = match &ui.table {
+                Some(table) if rendered_on(ui) => fp::table(table, t),
+                _ => editor(ui, t, wrap, width),
+            };
+            return col().grow(1.0).min_h(0.0).child(first_screen)
+                .child(row().w_full().padding(8.0).child(text("Loading the rest of the file…").font(theme::TEXT_XS).color(t.c.muted_foreground)));
+        }
+        return viewer.view(app, rendered_on(ui), wrap, t);
+    }
     if ui.binary {
         return no_preview(None);
     }
     match (kind, &ui.table, &ui.notebook) {
-        (Kind::Notebook, _, Some(Ok(notebook))) => fp::notebook_view(app, &ui.selected, notebook, t),
+        (Kind::Notebook, _, Some(Ok(notebook))) => fp::notebook_view(app, &ui.selected, notebook, notebook.cells.len(), t, |_, _, _| el()),
         (Kind::Notebook, _, Some(Err(e))) => no_preview(Some(e.as_str())),
         (Kind::Markdown, ..) if rendered_on(ui) => fp::markdown(app, &ui.selected, &ui.editor.text, t),
         (Kind::Table(_), Some(table), _) if rendered_on(ui) => fp::table(table, t),
@@ -1254,6 +1358,30 @@ fn scroll(content: El) -> El {
             stick_bottom: false,
         })
         .child(content)
+}
+
+pub(super) fn image_fixture(app: &mut App) {
+    use std::io::Cursor;
+    preview_fixture(app, "reports/architecture.png", "", false);
+    let picture = image::RgbaImage::from_fn(1440, 1024, |x, y| {
+        let blue = (110.0 + 80.0 * (x as f32 / 105.0).sin()) as u8;
+        let green = (120.0 + 70.0 * (y as f32 / 60.0).cos()) as u8;
+        image::Rgba([35, green, blue, 255])
+    });
+    let mut png = Cursor::new(Vec::new());
+    if picture.write_to(&mut png, image::ImageFormat::Png).is_err() { return }
+    let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+    let decoded = cache.load(png.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !decoded.is_ready() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let ui = &mut app.ui.panel.files;
+    ui.images = Some(cache);
+    ui.image = Some(Image {
+        request: None, url: None, download: Download::default(), decoded: Some(decoded),
+        zoom: None, svg: false, failed: false,
+    });
 }
 
 pub fn fixture(app: &mut App) {
@@ -1349,6 +1477,15 @@ mod tests {
         show(&mut ui, r#"{"nbformat":4,"cells":[]}"#.into(), false);
         assert!(matches!(ui.notebook, Some(Ok(_))) && ui.table.is_none());
         assert_eq!((grouped(999), grouped(1_048_576), grouped(12_345_678)), ("999".into(), "1,048,576".into(), "12,345,678".into()));
+    }
+
+    #[test]
+    fn image_fit_respects_both_axes_and_never_enlarges_the_image() {
+        assert_eq!(fit_image([200.0, 100.0], [132.0, 132.0]), 0.5);
+        assert_eq!(fit_image([100.0, 200.0], [132.0, 132.0]), 0.5);
+        assert_eq!(fit_image([50.0, 50.0], [132.0, 132.0]), 1.0);
+        assert_eq!(image_zoom(0.05, 0.8), 0.05);
+        assert_eq!(image_zoom(8.0, 1.25), 8.0);
     }
 
     #[test]

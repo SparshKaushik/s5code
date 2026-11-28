@@ -29,7 +29,7 @@ pub struct State {
 }
 
 /// `(environment, project)` for each machine holding the draft's project (shell's `hosts`).
-fn holders(s: &App) -> Vec<(String, String)> {
+pub(crate) fn holders(s: &App) -> Vec<(String, String)> {
     super::hosts(s)
         .into_iter()
         .filter_map(|id| s.state().projects.iter().find(|p| data::s(p, "id") == id).map(|p| (env::of(s, p), id)))

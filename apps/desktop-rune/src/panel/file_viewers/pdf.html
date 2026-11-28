@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#fff;--fg:#18181b;--muted:#71717a;--line:#e4e4e7;--canvas:#f4f4f5}
+    @media(prefers-color-scheme:dark){:root{--bg:#18181b;--fg:#fafafa;--muted:#a1a1aa;--line:#3f3f46;--canvas:#242427}}
+    *{box-sizing:border-box}
+    body{margin:0;height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:12px system-ui,sans-serif}
+    header{min-height:40px;display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:4px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+    #count{margin-right:auto;padding:0 4px}
+    button{background:transparent;color:inherit;border:0;border-radius:6px;height:24px;min-width:24px;cursor:pointer;font:14px system-ui}
+    button:hover:not(:disabled){background:var(--canvas)}
+    button:disabled{opacity:.45;cursor:default}
+    input{height:28px;width:112px;background:transparent;border:1px solid var(--line);border-radius:6px;padding:0 8px;color:inherit;font:inherit}
+    #scale{min-width:56px;text-align:center}
+    #scroll{min-height:0;flex:1;overflow:auto;background:var(--canvas)}
+    #pages{width:max-content;min-width:100%;display:flex;gap:16px;flex-direction:column;align-items:center;padding:16px}
+    .page{background:#fff;box-shadow:0 1px 4px #0002}
+    canvas{display:block;width:100%;height:100%}
+    #status{text-align:center;padding:24px;color:var(--muted)}
+    [hidden]{display:none!important}
+  </style>
+  <script>{pdfjs}</script>
+  <script {worker_attributes} id="worker">{worker}</script>
+  <script type="text/plain" id="fixture">{bytes}</script>
+</head>
+<body>
+  <header>
+    <span id="count" aria-live="polite">PDF</span>
+    <button id="previous" title="Previous page" aria-label="Previous page" disabled>⌃</button>
+    <button id="next" title="Next page" aria-label="Next page" disabled>⌄</button>
+    <button id="out" title="Zoom out" aria-label="Zoom out">−</button>
+    <span id="scale">Fit width</span>
+    <button id="in" title="Zoom in" aria-label="Zoom in">+</button>
+    <button id="fit" title="Fit width" aria-label="Fit width">⛶</button>
+    <input id="find" type="search" aria-label="Find in PDF" placeholder="Find in PDF">
+    <span id="matches" role="status" hidden></span>
+    <button id="match" title="Next matching page" aria-label="Next matching page" hidden disabled>⌄</button>
+  </header>
+  <div id="scroll" role="region" aria-label="{title}" tabindex="0">
+    <div id="status" role="status">Loading PDF…</div>
+    <div id="pages"></div>
+  </div>
+  <script>
+    "use strict";
+    const get = (id) => document.getElementById(id);
+    const scroll = get("scroll");
+    const pages = get("pages");
+    const status = get("status");
+    const find = get("find");
+    const lib = window.pdfjsLib;
+    let pdf, zoom = null, current = 0, queryRun = 0, matchIndex = 0, matching = [], resizeTimer;
+    const rows = [];
+    const text = new Map();
+    const live = new Map();
+    const steps = [.25,.33,.5,.67,.75,1,1.25,1.5,2,2.5,3,4];
+    const normalize = (value) => value.normalize("NFKC").toLocaleLowerCase().trim().replace(/\s+/g," ");
+    const ratio = () => Math.min(window.devicePixelRatio || 1, 2);
+    const scale = () => zoom ?? Math.max(.01, (scroll.clientWidth - 32) / (rows[current]?.natural.width || 612));
+    const describe = () => {
+      get("count").textContent = pdf ? `${current + 1} / ${pdf.numPages} pages` : "PDF";
+      get("previous").disabled = current <= 0;
+      get("next").disabled = !pdf || current + 1 >= pdf.numPages;
+      get("scale").textContent = zoom == null ? "Fit width" : `${Math.round(zoom * 100)}%`;
+      get("out").disabled = scale() <= steps[0];
+      get("in").disabled = scale() >= steps.at(-1);
+    };
+    function showPage(index) {
+      if (!rows[index]) return;
+      current = index;
+      scroll.scrollTop = rows[index].element.offsetTop - pages.offsetTop;
+      describe();
+    }
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const index = Number(entry.target.dataset.page);
+        if (entry.isIntersecting) draw(index);
+        else {
+          live.get(index)?.cancel();
+          live.delete(index);
+          rows[index].version++;
+          rows[index].drawing = false;
+          entry.target.replaceChildren();
+        }
+      }
+    }, { root: scroll, rootMargin:"320px" });
+    function size(row) {
+      const factor = zoom ?? Math.max(.01, (scroll.clientWidth - 32) / row.natural.width);
+      row.element.style.width = `${Math.round(row.natural.width * factor)}px`;
+      row.element.style.height = `${Math.round(row.natural.height * factor)}px`;
+      return factor;
+    }
+    async function draw(index) {
+      const row = rows[index];
+      if (!row || row.drawing || row.element.firstChild) return;
+      row.drawing = true;
+      const version = row.version;
+      try {
+        const page = await pdf.getPage(index + 1);
+        if (version !== row.version) return;
+        row.natural = page.getViewport({scale:1});
+        const factor = size(row);
+        if (row.element.offsetTop > scroll.scrollTop + scroll.clientHeight + 480 ||
+            row.element.offsetTop + row.element.offsetHeight < scroll.scrollTop - 480) return;
+        const target = page.getViewport({scale:Math.min(factor * ratio(), 3072 / Math.max(row.natural.width,row.natural.height))});
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(target.width); canvas.height = Math.ceil(target.height);
+        row.element.appendChild(canvas);
+        const render = page.render({canvasContext:canvas.getContext("2d"),viewport:target});
+        live.set(index, render);
+        try {
+          await render.promise;
+          window.__s5Frame?.("file-preview-ready");
+        }
+        finally { if (live.get(index) === render) live.delete(index); }
+      } catch (error) {
+        if (version === row.version && error?.name !== "RenderingCancelledException") row.element.textContent = "Could not render this page.";
+      } finally { if (version === row.version) row.drawing = false; }
+    }
+    function resized(index = current) {
+      for (const [i, row] of rows.entries()) {
+        live.get(i)?.cancel();
+        row.version++;
+        row.drawing = false;
+        row.element.replaceChildren();
+        size(row);
+      }
+      showPage(index);
+      for (let i = Math.max(0,index-1); i <= Math.min(rows.length-1,index+2); i++) draw(i);
+    }
+    scroll.addEventListener("scroll", () => {
+      let lo = 0, hi = rows.length;
+      const middle = scroll.scrollTop + scroll.clientHeight / 3;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        const el = rows[mid].element;
+        if (el.offsetTop + el.offsetHeight - pages.offsetTop <= middle) lo = mid + 1; else hi = mid;
+      }
+      current = Math.min(lo, Math.max(0,rows.length - 1));
+      describe();
+    }, {passive:true});
+    get("previous").onclick = () => showPage(current - 1);
+    get("next").onclick = () => showPage(current + 1);
+    get("out").onclick = () => { zoom = steps.findLast((n) => n < scale() - .01) ?? steps[0]; resized(); };
+    get("in").onclick = () => { zoom = steps.find((n) => n > scale() + .01) ?? steps.at(-1); resized(); };
+    get("fit").onclick = () => { zoom = null; scroll.scrollLeft = 0; resized(); };
+    window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resized, 80); });
+    function showMatches() {
+      get("matches").textContent = `${matching.length ? matchIndex + 1 : 0}/${matching.length}`;
+      get("match").disabled = matching.length === 0;
+    }
+    find.addEventListener("input", async () => {
+      const id = ++queryRun, query = normalize(find.value);
+      matching = []; matchIndex = 0;
+      get("match").hidden = get("matches").hidden = !query;
+      if (!query || !pdf) return;
+      get("matches").textContent = "Searching…"; get("match").disabled = true;
+      try {
+        for (let i = 0; i < pdf.numPages && id === queryRun; i++) {
+          if (!text.has(i)) {
+            const page = await pdf.getPage(i + 1);
+            const content = await page.getTextContent();
+            text.set(i, normalize(content.items.map((item) => item.str || "").join(" ")));
+          }
+          if (id !== queryRun) return;
+          if (text.get(i).includes(query)) matching.push(i);
+        }
+        if (id === queryRun) {
+          showMatches();
+          if (matching.length) showPage(matching[0]);
+        }
+      } catch (_) {
+        if (id === queryRun) get("matches").textContent = "Could not search this PDF.";
+      }
+    });
+    get("match").onclick = () => {
+      if (!matching.length) return;
+      matchIndex = (matchIndex + 1) % matching.length; showMatches(); showPage(matching[matchIndex]);
+    };
+    find.addEventListener("keydown", (event) => { if (event.key === "Enter") get("match").click(); });
+    (async () => {
+      try {
+        const fixture = get("fixture").textContent;
+        if (!fixture) {
+          const worker = new Blob([get("worker").textContent], {type:"text/javascript"});
+          lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(worker);
+        }
+        const input = fixture ? {data:Uint8Array.from(atob(fixture),(c)=>c.charCodeAt(0))} : {url:location.href};
+        pdf = await lib.getDocument({...input,isEvalSupported:false,maxImageSize:16_000_000}).promise;
+        const first = await pdf.getPage(1);
+        const natural = first.getViewport({scale:1});
+        for (let i = 0; i < pdf.numPages; i++) {
+          const element = document.createElement("div");
+          element.className = "page"; element.dataset.page = i; element.setAttribute("aria-label", `Page ${i + 1}`);
+          const row = {element,natural,drawing:false,version:0};
+          rows.push(row); size(row); pages.appendChild(element);
+        }
+        status.hidden = true;
+        describe();
+        await draw(0);
+        for (const row of rows) observer.observe(row.element);
+      } catch (error) {
+        status.textContent = "Unable to load PDF.";
+        window.__s5Frame?.(JSON.stringify({pdfError: String(error)}));
+      }
+    })();
+  </script>
+</body>
+</html>

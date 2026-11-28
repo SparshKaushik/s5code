@@ -34,8 +34,6 @@ pub struct State {
     saving: HashMap<String, (u64, Action)>,
     /// The active machine's connection since it last dropped.
     outage: Option<Outage>,
-    /// The machine last seen connected.
-    opened: Option<String>,
 }
 
 /// ENVIRONMENT_RECONNECT_WARNING_GRACE_MS: a reconnect this short never shows a banner.
@@ -43,13 +41,11 @@ const RECONNECT_GRACE_MS: i64 = 2_000;
 /// DISCONNECT_DELAY_MS: how long a machine stays unavailable before "Disconnect server" shows.
 const DISCONNECT_DELAY_MS: i64 = 20_000;
 
-/// A machine's connection since it was last open: when it dropped, whether it had connected
-/// before, and the last failure's reason.
 #[derive(Clone, Debug, PartialEq)]
 struct Outage {
     env: String,
     since: i64,
-    dropped: bool,
+    reconnecting_since: Option<i64>,
     reason: String,
 }
 
@@ -57,37 +53,56 @@ struct Outage {
 enum Phase {
     Reconnecting,
     Offline,
+    Error,
 }
 
-/// Follows `env`'s connection: open ends the outage, anything else starts one (or keeps it,
-/// with the newest failure's reason).
-fn track(state: &mut State, env: &str, conn: &s5_net::Conn, now: i64) {
-    if matches!(conn, s5_net::Conn::Open) {
+fn connection<'a>(app: &'a App, key: &str) -> (Option<Phase>, &'a str) {
+    use s5_net::Conn;
+    if app.ui.env.off.iter().any(|id| id == key) {
+        return (Some(Phase::Offline), "");
+    }
+    let Some(source) = env::source(app, key) else { return (Some(Phase::Offline), "") };
+    match &source.state().conn {
+        Conn::Open if source.state().shell_ready => (None, ""),
+        Conn::Open | Conn::Connecting => (Some(Phase::Reconnecting), ""),
+        Conn::Closed(reason) if env::rejected(reason) => (Some(Phase::Error), reason),
+        Conn::Closed(reason) if matches!(source, crate::data::Source::Live(_)) && env::outdated(app, key).is_none() => {
+            (Some(Phase::Reconnecting), reason)
+        }
+        Conn::Closed(reason) => (Some(Phase::Offline), reason),
+    }
+}
+
+fn track(state: &mut State, env: &str, phase: Option<Phase>, reason: &str, now: i64) {
+    let Some(phase) = phase else {
         state.outage = None;
-        state.opened = Some(env.to_owned());
         return;
+    };
+    let outage = state.outage.get_or_insert_with(|| Outage {
+        env: env.to_owned(), since: now, reconnecting_since: None, reason: String::new(),
+    });
+    if outage.env != env {
+        *outage = Outage { env: env.to_owned(), since: now, reconnecting_since: None, reason: String::new() };
     }
-    if state.outage.as_ref().is_none_or(|o| o.env != env) {
-        let dropped = state.opened.as_deref() == Some(env);
-        state.outage = Some(Outage { env: env.to_owned(), since: now, dropped, reason: String::new() });
+    if phase == Phase::Reconnecting {
+        outage.reconnecting_since.get_or_insert(now);
+    } else {
+        outage.reconnecting_since = None;
     }
-    if let (s5_net::Conn::Closed(reason), Some(o)) = (conn, state.outage.as_mut())
-        && !reason.is_empty()
-    {
-        o.reason.clone_from(reason);
+    if !reason.is_empty() && outage.reason != reason {
+        outage.reason = reason.to_owned();
     }
 }
 
-/// The offline banner's phase. A machine that was connected waits out the grace, so a blip
-/// never flashes; one that never connected shows offline at once. A retry under way reads as
-/// reconnecting, between retries as offline.
-fn phase(conn: &s5_net::Conn, dropped: bool, age: i64) -> Option<Phase> {
-    match conn {
-        s5_net::Conn::Open => None,
-        _ if dropped && age < RECONNECT_GRACE_MS => None,
-        s5_net::Conn::Connecting if dropped => Some(Phase::Reconnecting),
-        s5_net::Conn::Connecting => None,
-        s5_net::Conn::Closed(_) => Some(Phase::Offline),
+fn show_unavailable(phase: Phase, reconnecting_for: Option<i64>, updating: bool) -> bool {
+    phase != Phase::Reconnecting || (!updating && reconnecting_for.is_some_and(|age| age >= RECONNECT_GRACE_MS))
+}
+
+fn environment_key(app: &App) -> Option<String> {
+    match composer::route(app) {
+        Route::Thread(id) => Some(env::owner(app, &id)),
+        Route::Home { project_id: Some(id) } => Some(env::owner(app, &id)),
+        _ => None,
     }
 }
 
@@ -393,8 +408,13 @@ fn toggle_recovery(app: &mut App, thread: &str, action: Action) {
 pub fn poll(app: &mut App) -> bool {
     let feedback = composer::banners::poll(app);
     let shown = app.ui.chat.timeline.banners.outage.clone();
-    let active = app.ui.env.active.clone();
-    track(&mut app.ui.chat.timeline.banners, &active, &app.src.state().conn, crate::data::now_ms());
+    if let Some(key) = environment_key(app) {
+        let (phase, reason) = connection(app, &key);
+        let reason = reason.to_owned();
+        track(&mut app.ui.chat.timeline.banners, &key, phase, &reason, crate::data::now_ms());
+    } else {
+        app.ui.chat.timeline.banners.outage = None;
+    }
     let feedback = feedback | (shown != app.ui.chat.timeline.banners.outage);
     let Some(net) = app.src.net() else { return feedback };
     let ui = &mut app.ui.chat.timeline.banners;
@@ -428,78 +448,72 @@ fn diagnosis_headline(label: &str, reason: &str) -> Option<String> {
     crate::settings::connection_diagnosis::present(label, reason.trim(), None, None).map(|d| d.headline)
 }
 
-/// The active machine unavailable: reconnecting or offline, its last failure, Reconnect between
-/// retries, and once it has stayed away a while, "Disconnect server" for a saved one.
-fn offline(app: &App, t: &T) -> Option<Item> {
-    let state = app.state();
-    let key = &app.ui.env.active;
-    let outage = app.ui.chat.timeline.banners.outage.as_ref().filter(|o| o.env == *key);
-    let age = outage.map_or(0, |o| app.now_ms - o.since);
-    let phase = phase(&state.conn, outage.is_some_and(|o| o.dropped), age)?;
-    // A restarting server drops the connection on purpose; the update notice explains it.
-    if matches!(crate::chat::server_update::status(app), crate::chat::server_update::Status::Running { .. }) {
+fn disconnect(app: &App, key: &str, t: &T) -> Option<El> {
+    let outage = app.ui.chat.timeline.banners.outage.as_ref().filter(|o| o.env == key)?;
+    if key == env::LOCAL || connection(app, key).0.is_none() || app.now_ms - outage.since < DISCONNECT_DELAY_MS {
+        return None;
+    }
+    let key = key.to_owned();
+    Some(Button::new("Disconnect server").variant("ghost").size("xs")
+        .on_press(move |app: &mut App| env::set_enabled_for_composer(app, &key, false))
+        .build(t).help("Hide this server's threads. Switch it on again in Environments."))
+}
+
+fn offline(app: &App, key: &str, t: &T) -> Option<Item> {
+    use crate::chat::server_update::{self as update, Status};
+    let (phase, reason) = connection(app, key);
+    let phase = phase?;
+    let outage = app.ui.chat.timeline.banners.outage.as_ref().filter(|o| o.env == key);
+    let elapsed = outage.and_then(|o| o.reconnecting_since).map(|since| app.now_ms - since);
+    if !show_unavailable(phase, elapsed, matches!(update::status_on(app, key), Status::Running { .. })) {
         return None;
     }
     let label = env::label(app, key);
-    let words = if phase == Phase::Reconnecting { "reconnecting" } else { "offline" };
-    let mut item = Item::new(format!("environment-unavailable:{key}"), Variant::Warning, &icons::WIFI_OFF, format!("{label} is {words}"));
-    item.environment = true;
-    let reason = match &state.conn {
-        s5_net::Conn::Closed(reason) => reason.as_str(),
-        _ => outage.map_or("", |o| o.reason.as_str()),
+    let (variant, words) = match phase {
+        Phase::Reconnecting => (Variant::Warning, "reconnecting"),
+        Phase::Offline => (Variant::Warning, "offline"),
+        Phase::Error => (Variant::Error, "offline"),
     };
+    let mut item = Item::new(format!("environment-unavailable:{key}"), variant, &icons::WIFI_OFF, format!("{label} is {words}"));
+    item.environment = true;
+    let reason = if reason.is_empty() { outage.map_or("", |o| o.reason.as_str()) } else { reason };
     item.description = diagnosis_headline(&label, reason);
-    if phase == Phase::Offline {
-        item.actions.push(
-            Button::new("Reconnect")
-                .variant("ghost")
-                .size("xs")
-                .on_press(|app: &mut App| {
-                    if let Some(net) = app.src.net() {
-                        net.reconnect();
-                    }
-                })
-                .build(t),
-        );
+    if phase != Phase::Reconnecting {
+        let key = key.to_owned();
+        item.actions.push(Button::new("Reconnect").variant("ghost").size("xs").on_press(move |app: &mut App| {
+            if app.ui.env.off.contains(&key) {
+                env::set_enabled_for_composer(app, &key, true);
+            } else if let Some(net) = env::net_of(app, &key) {
+                net.reconnect();
+            }
+        }).build(t));
     }
-    // This machine's own server has no switch to turn off.
-    if *key != env::LOCAL && age >= DISCONNECT_DELAY_MS {
-        let id = key.clone();
-        item.actions.push(
-            Button::new("Disconnect server")
-                .variant("ghost")
-                .size("xs")
-                .on_press(move |app: &mut App| env::set_enabled(app, &id, false))
-                .build(t)
-                .help("Hide this server's threads. Switch it on again in Environments."),
-        );
-    }
+    item.actions.extend(disconnect(app, key, t));
     Some(item)
 }
 
-/// The server update notice: only one running or failed, since an available update lives in
-/// Settings › About. Retry shows while the server is still short of the version.
-fn server_update(app: &App, t: &T) -> Option<Item> {
-    use crate::chat::server_update::{self as update, Status};
-    if update::dismissed(app) {
+fn server_update(app: &App, key: &str, t: &T) -> Option<Item> {
+    use crate::chat::{composer::system_banners, server_update::{self as update, Status}};
+    if crate::chat::details::run_on::automatic(app) || update::dismissed(app, key) {
         return None;
     }
-    let (failed, description, target) = match update::status(app) {
+    let (failed, description) = match update::status_on(app, key) {
         Status::Idle => return None,
-        Status::Running { stage, target, .. } => (false, stage.label().to_owned(), target.clone()),
-        Status::Failed { message, target, .. } => (true, message.clone(), target.clone()),
+        Status::Running { stage, .. } => (false, stage.label().to_owned()),
+        Status::Failed { message, .. } => (true, message.clone()),
     };
-    let title = format!("{} server", if failed { "Could not update" } else { "Updating" });
+    let server = if env::keys(app).len() > 1 { format!("{} server", env::label(app, key)) } else { "server".to_owned() };
+    let title = format!("{} {server}", if failed { "Could not update" } else { "Updating" });
     let (variant, glyph) = if failed { (Variant::Error, &icons::CIRCLE_ALERT) } else { (Variant::Default, &icons::DOWNLOAD) };
-    let mut item = Item::new(format!("server-version:{}", app.ui.env.active), variant, glyph, title);
+    let mut item = Item::new(format!("server-version:{key}"), variant, glyph, title);
     item.environment = true;
     item.description = Some(description);
     if failed {
-        let current = app.state().config.as_ref().map(|c| s(&c["environment"], "serverVersion").to_owned()).unwrap_or_default();
-        if current != target {
-            item.actions.push(Button::new("Retry").variant("ghost").size("xs").on_press(move |app: &mut App| update::start(app, &target)).build(t));
-        }
-        item.dismiss = Some(icon_button(&icons::X, "Dismiss update notice").variant("ghost").size("icon-xs").on_press(update::dismiss).build(t));
+        item.actions.extend(system_banners::retry(app, key, &server, t));
+        let key = key.to_owned();
+        item.dismiss = Some(composer::banners::dismiss(t, "Dismiss update notice", move |app: &mut App| update::dismiss(app, &key)));
+    } else {
+        item.actions.extend(disconnect(app, key, t));
     }
     Some(item)
 }
@@ -507,16 +521,18 @@ fn server_update(app: &App, t: &T) -> Option<Item> {
 /// Scenes: the active machine away for `age` ms after it had connected, now on `conn`.
 pub(super) fn scene_outage(app: &mut App, conn: s5_net::Conn, age: i64) {
     let reason = if let s5_net::Conn::Closed(reason) = &conn { reason.clone() } else { "Connection refused (os error 61)".to_owned() };
+    let reconnecting = conn == s5_net::Conn::Connecting;
     if let crate::data::Source::Fixture(state) = &mut app.src {
         state.conn = conn;
     }
     let env = app.ui.env.active.clone();
-    app.ui.chat.timeline.banners.outage = Some(Outage { env, since: app.now_ms - age, dropped: true, reason });
+    app.ui.chat.timeline.banners.outage = Some(Outage { env, since: app.now_ms - age, reconnecting_since: reconnecting.then_some(app.now_ms - age), reason });
 }
 
 /// useSystemComposerBanners: the machine offline, then its server update.
 pub(crate) fn system_items(app: &App, t: &T) -> Vec<Item> {
-    [offline(app, t), server_update(app, t)].into_iter().flatten().collect()
+    let Some(key) = environment_key(app) else { return Vec::new() };
+    [offline(app, &key, t), server_update(app, &key, t)].into_iter().flatten().collect()
 }
 
 /// usageLimitRecoveryBannerItem.
@@ -618,27 +634,25 @@ mod tests {
 
     #[test]
     fn the_offline_banner_waits_out_a_blip_then_says_reconnecting_or_offline() {
-        use s5_net::Conn;
         let mut state = State::default();
-        track(&mut state, "env", &Conn::Connecting, 0);
-        assert!(!state.outage.as_ref().unwrap().dropped, "the first connect never dropped");
-        track(&mut state, "env", &Conn::Open, 500);
-        assert_eq!(state.outage, None);
-        track(&mut state, "env", &Conn::Closed("refused".into()), 1_000);
-        track(&mut state, "env", &Conn::Connecting, 1_500);
-        assert_eq!(state.outage, Some(Outage { env: "env".into(), since: 1_000, dropped: true, reason: "refused".into() }), "one outage keeps its start and reason");
-        track(&mut state, "other", &Conn::Connecting, 4_000);
-        assert_eq!(state.outage.as_ref().map(|o| (o.since, o.dropped)), Some((4_000, false)), "another machine starts its own");
-        track(&mut state, "other", &Conn::Open, 5_000);
+        track(&mut state, "env", Some(Phase::Offline), "refused", 1_000);
+        track(&mut state, "env", Some(Phase::Reconnecting), "", 1_500);
+        let outage = state.outage.as_ref().unwrap();
+        assert_eq!((outage.since, outage.reconnecting_since), (1_000, Some(1_500)));
+        assert_eq!(outage.reason, "refused");
+        track(&mut state, "env", None, "", 5_000);
         assert_eq!(state.outage, None);
 
-        assert_eq!(phase(&Conn::Connecting, true, RECONNECT_GRACE_MS - 1), None, "a blip never flashes");
-        assert_eq!(phase(&Conn::Closed("x".into()), true, 500), None);
-        assert_eq!(phase(&Conn::Connecting, true, RECONNECT_GRACE_MS), Some(Phase::Reconnecting));
-        assert_eq!(phase(&Conn::Closed("x".into()), true, 60_000), Some(Phase::Offline));
-        assert_eq!(phase(&Conn::Connecting, false, 60_000), None, "the first connect is no outage");
-        assert_eq!(phase(&Conn::Closed("x".into()), false, 0), Some(Phase::Offline), "never connected shows at once");
-        assert_eq!(phase(&Conn::Open, true, 60_000), None);
+        for (phase, elapsed, updating, shown) in [
+            (Phase::Reconnecting, None, false, false),
+            (Phase::Reconnecting, Some(RECONNECT_GRACE_MS - 1), false, false),
+            (Phase::Reconnecting, Some(RECONNECT_GRACE_MS), false, true),
+            (Phase::Reconnecting, Some(60_000), true, false),
+            (Phase::Offline, None, true, true),
+            (Phase::Error, None, false, true),
+        ] {
+            assert_eq!(show_unavailable(phase, elapsed, updating), shown);
+        }
 
         assert_eq!(diagnosis_headline("Studio", "Connection refused (os error 61)").as_deref(), Some("T3 Code on Studio did not answer"));
         assert_eq!(diagnosis_headline("Studio", "HTTP error: 401 Unauthorized").as_deref(), Some("T3 Code on Studio did not accept this device"));

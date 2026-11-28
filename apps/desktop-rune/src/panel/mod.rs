@@ -8,6 +8,8 @@ pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
 mod file_preview;
+mod file_viewers;
+pub const FILE_VIEWER_SCENES: &[(&str, fn(&mut App))] = file_viewers::SCENES;
 mod files;
 mod history;
 pub(crate) mod html_frame;
@@ -72,6 +74,8 @@ pub struct Ui {
     pub diff: diff::Ui,
     pub(crate) pull_requests: pull_requests::Ui,
     files: files::Ui,
+    /// The open attachment tab's format-aware viewer.
+    attachment: Option<(String, file_viewers::Viewer)>,
     device: device::Ui,
     terminal: terminal::Ui,
     drawer: drawer::Ui,
@@ -115,6 +119,7 @@ impl Default for Ui {
             diff: Default::default(),
             pull_requests: Default::default(),
             files: Default::default(),
+            attachment: None,
             device: Default::default(),
             terminal: Default::default(),
             drawer: Default::default(),
@@ -576,6 +581,11 @@ pub(crate) fn open_attachment(app: &mut App, id: &str) {
 }
 fn active_target(app: &App) -> Option<&tabs::Target> {
     app.ui.shell.panel_open.then(|| app.ui.panel.active).flatten().and_then(|surface| app.ui.panel.tabs.target(surface))
+}
+
+/// The Files tree or a file's own tab is on screen.
+pub(super) fn files_showing(app: &App) -> bool {
+    app.ui.shell.panel_open && (app.ui.panel.active == Some(Surface::Files) || matches!(active_target(app), Some(tabs::Target::File(_))))
 }
 
 fn sync_terminal_tabs(app: &mut App) {
@@ -1378,7 +1388,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
-        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
+        Some(Surface::Files) => files::view(app, t, cx.layout_with("file-editor", |r| r[2]), cx.layout_with("file-image-viewport", |r| [r[2], r[3]])),
         Some(Surface::Tab(id)) => tabs::view(app, cx, t, id, width, overlays),
         Some(Surface::PullRequests) => pull_requests::view(app, t, overlays),
         Some(Surface::Device) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
@@ -1816,8 +1826,10 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
-        if app.ui.panel.active == Some(Surface::Files) || matches!(active_target(app), Some(tabs::Target::File(_))) {
+        if files_showing(app) {
             files::overlays(app, t, &mut out);
+        } else if matches!(active_target(app), Some(tabs::Target::Attachment(_))) {
+            file_viewers::overlays(app, t, &mut out);
         }
         preview::overlays(app, t, &mut out);
         if app.ui.panel.add_menu {

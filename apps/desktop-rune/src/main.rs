@@ -273,7 +273,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::SCENES, desktop::updates::SCENES].concat();
+        [shell::SCENES, shell::palette::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, panel::FILE_VIEWER_SCENES, settings::SCENES, settings::snapshots::SCENES, pages::SCENES, kit::SCENES, env::SCENES, add_to_machine::SCENES, links::SCENES, not_found::SCENES, desktop::SCENES, desktop::updates::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 

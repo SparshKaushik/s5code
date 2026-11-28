@@ -152,6 +152,7 @@ pub(super) fn closed(app: &mut App, id: usize) {
     match target {
         Target::File(path) if files::selected(app) == path => files::back_to_tree(app),
         Target::SideChat(side) => crate::chat::side::close_tab(app, &side),
+        Target::Attachment(id) if app.ui.panel.attachment.as_ref().is_some_and(|(open, _)| *open == id) => super::file_viewers::close_attachment(app),
         _ => {}
     }
 }
@@ -190,12 +191,12 @@ pub(super) fn glyph(app: &App, surface: Surface) -> &'static rune::Icon {
 
 pub(super) fn view(app: &App, cx: &mut Cx<App>, t: &T, id: usize, width: f32, overlays: &mut Vec<El>) -> El {
     match app.ui.panel.tabs.get(id) {
-        Some(Target::File(_)) => files::view(app, t, cx.layout_with("file-editor", |r| r[2])),
+        Some(Target::File(_)) => files::view(app, t, cx.layout_with("file-editor", |r| r[2]), cx.layout_with("file-image-viewport", |r| [r[2], r[3]])),
         Some(Target::Terminal(_)) => drawer::surface(app, t, drawer::Owner::Panel, width - 1.),
         Some(Target::SideChat(side)) => crate::chat::side::panel(app, cx, t, side),
         Some(Target::Device { .. }) => device::view(app, t, cx.layout_with("device-stage", |r| (r[2], r[3])), overlays),
         Some(Target::PullRequest(_)) => crate::pages::pr_detail::view(app, t, overlays),
-        Some(Target::Attachment(id)) => crate::chat::timeline::attachments::panel_view(app, id, t),
+        Some(Target::Attachment(id)) => crate::chat::timeline::attachments::panel_view(app, id, t, super::file_viewers::attachment_view(app, id, t)),
         None => rune::col(),
     }
 }

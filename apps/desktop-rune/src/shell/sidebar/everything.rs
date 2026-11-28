@@ -291,12 +291,13 @@ fn advance_servers(s: &mut App, run: &mut Run, now: i64) -> bool {
         if matches!(env::source(s, &m.key), Some(crate::data::Source::Fixture(_))) {
             continue;
         }
+        let relayed = update.relayed(s.src.net());
         let Some(net) = env::net_of(s, &m.key) else {
             m.result = Some(vec![format!("{}: Server update interrupted", m.label)]);
             changed = true;
             continue;
         };
-        changed |= server_update::advance(update, net, &mut lifecycle, &m.key, now);
+        changed |= server_update::advance(update, net, &mut lifecycle, &m.key, now, relayed);
         let done = match update.status() {
             ServerStatus::Idle => Some(Ok(())),
             ServerStatus::Failed { message, .. } => Some(Err(message.clone())),
