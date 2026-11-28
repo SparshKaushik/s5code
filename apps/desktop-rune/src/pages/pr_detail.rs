@@ -1230,13 +1230,7 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         number_menu(t, &open_url, on_host.clone(), at, overlays);
     }
     let repository = field(d, "repository").to_string();
-    let repo = text(repository.clone()).font(theme::XS_MEDIUM).color(t.c.muted_foreground).truncate().shrink().min_w(0.0);
-    let repo = match repository_url(&open_url) {
-        Some(url) => repo.key("pr-detail-repository").cursor(Cursor::Pointer).role("link").help(format!("Open {repository} repository")).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&url);
-        }),
-        None => repo.help(repository),
-    };
+    let repo_url = repository_url(&open_url);
     let back = super::pr_meta::back_to_list(s).then(|| {
         kit::Button::new("")
             .variant("ghost-muted")
@@ -1248,31 +1242,51 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
             .help("Back to pull requests")
             .ml(-6.0)
     });
-    let number = row()
-        .key("pr-detail-number")
-        .gap(4.0)
-        .center_y()
-        .cursor(Cursor::Pointer)
-        .role("link")
-        .label(format!("Open {singular} #{} on host", d["number"]))
-        .help(on_host)
-        .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
-        .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
-        // onAuxClick: a middle click opens it too.
-        .pointer_buttons([rune::PointerButton::Middle])
-        .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&open_url);
-        })
-        .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| ui(s).number_menu = Some((at.x, at.y)));
-    let crumbs = row().gap(6.0).center_y().shrink().min_w(0.0).children(back);
-    // Once the title has scrolled away, the number leads and the title follows it.
+    // PullRequestDetailCrumbs: both rows stay in one cell and trade places once the title has
+    // scrolled away. The shell lands opacity and moves at once, so they cross through their
+    // colours' alpha, which settles in 150 ms; the hidden row is inert.
     let u = &s.ui.pages.detail;
-    let crumbs = if loaded && u.condense.on(u.tab) {
-        let title = field(d, "title").to_string();
-        crumbs.child(number).child(text(title.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0).help(title))
-    } else {
-        crumbs.child(repo).child(number)
+    let condensed = loaded && u.condense.on(u.tab);
+    let fade = |c: Color, shown: bool| c.alpha_mul(if shown { 1.0 } else { 0.0 });
+    let number = |key: &'static str, shown: bool| {
+        let open_url = open_url.clone();
+        row()
+            .key(key)
+            .gap(4.0)
+            .center_y()
+            .cursor(Cursor::Pointer)
+            .role("link")
+            .focusable(shown)
+            .label(format!("Open {singular} #{} on host", d["number"]))
+            .help(on_host.clone())
+            .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(fade(tone(t, d), shown)).motion(kit::motion::COLOR))
+            .child(icon(&i::EXTERNAL_LINK, 10.0).color(fade(tone(t, d), shown)).motion(kit::motion::COLOR))
+            // onAuxClick: a middle click opens it too.
+            .pointer_buttons([rune::PointerButton::Middle])
+            .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                let _ = tx.open_url(&open_url);
+            })
+            .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut Tx| ui(s).number_menu = Some((at.x, at.y)))
     };
+    let layer = |key: &'static str, shown: bool| {
+        let layer = row().key(key).gap(6.0).center_y().shrink().min_w(0.0);
+        if shown { layer } else { layer.absolute(0.0, 0.0).w_full().h_full().inert() }
+    };
+    let repo = text(repository.clone()).font(theme::XS_MEDIUM).color(fade(t.c.muted_foreground, !condensed)).motion(kit::motion::COLOR).truncate().shrink().min_w(0.0);
+    let repo = match repo_url {
+        Some(url) => repo.key("pr-detail-repository").cursor(Cursor::Pointer).role("link").focusable(!condensed).help(format!("Open {repository} repository")).on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        }),
+        None => repo.help(repository),
+    };
+    let full = layer("pr-crumbs-full", !condensed).child(repo).child(number("pr-detail-number", !condensed));
+    let short = loaded.then(|| {
+        let title = field(d, "title").to_string();
+        let title = text(title.clone()).font(theme::XS_MEDIUM).color(fade(t.c.foreground, condensed)).motion(kit::motion::COLOR).truncate().shrink().min_w(0.0).help(title);
+        layer("pr-crumbs-condensed", condensed).child(number("pr-detail-number-condensed", condensed)).child(title)
+    });
+    let cell = el().relative().shrink().min_w(0.0).child(full).children(short);
+    let crumbs = row().gap(6.0).center_y().shrink().min_w(0.0).children(back).child(cell);
     // The @container/pr-header breakpoints: below 30rem the controls drop their labels, below
     // 35rem the checkout does too. The crumbs give way first; the controls never shrink.
     let narrow = rune::memo::layout_with(TOP, |r| r[2] < 480.0).unwrap_or(false);

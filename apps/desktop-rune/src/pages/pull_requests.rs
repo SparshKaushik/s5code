@@ -2585,6 +2585,10 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut
         .cursor(Cursor::Pointer)
         .role("button")
         .label(field(e, "title").to_string())
+        // The row's button: Tab reaches it, with focus-visible:ring-1 ring-inset.
+        .focusable(true)
+        .focus_ring(1.0, -1.0, t.c.ring)
+        .radius(radius::MD)
         .px(12.0)
         .py(10.0)
         .gap(8.0)
