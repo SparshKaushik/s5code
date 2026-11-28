@@ -141,6 +141,8 @@ pub struct Ui {
     pub error: Option<String>,
     notes: HashMap<String, String>,
     revived: HashMap<String, Instant>,
+    /// SSH environments from Electron's catalog, paired here one at a time in the background.
+    adopting: Vec<Target>,
 }
 
 fn busy(ui: &Ui, slot: &str) -> bool {
@@ -206,10 +208,35 @@ pub(super) fn start(s: &mut App) {
 
 static EXITED: AtomicBool = AtomicBool::new(false);
 
+/// Each saved SSH environment's id and target, for Electron's catalog.
+pub(super) fn targets(s: &App) -> &[(String, Target)] {
+    &s.ui.env.ssh.targets
+}
+
+/// Queues an SSH environment Electron saved, unless one here reaches the same target.
+pub(super) fn adopt(s: &mut App, target: Target) {
+    let ui = &mut s.ui.env.ssh;
+    let known = ui.targets.iter().map(|(_, t)| t).chain(&ui.adopting).any(|t| t.key() == target.key());
+    if !known {
+        ui.adopting.push(target);
+    }
+}
+
+/// Pairs the next adopted target once the add slot is free, without prompting.
+fn next_adoption(s: &mut App) {
+    if rune::is_headless() || busy(&s.ui.env.ssh, ADD) || s.ui.env.ssh.adopting.is_empty() {
+        return;
+    }
+    let target = s.ui.env.ssh.adopting.remove(0);
+    let job = Job { kind: Kind::Add, target, secret: None, prompts: 0, interactive: false, version: version(s), preferred: None, bearer: None };
+    spawn(s, job);
+}
+
 /// Lands finished SSH jobs and re-ensures tunnels that exited.
 pub(super) fn poll(s: &mut App) -> bool {
     let mut changed = EXITED.swap(false, Ordering::Relaxed) && revive(s);
     changed |= repair(s);
+    next_adoption(s);
     if s.ui.env.ssh.jobs.is_empty() {
         return changed;
     }
@@ -377,6 +404,8 @@ fn fail(s: &mut App, job: &Job, error: String) {
     }
     let ui = &mut s.ui.env.ssh;
     match &job.kind {
+        // An adoption from Electron's catalog fails quietly; Electron still has it.
+        Kind::Add if !job.interactive => {}
         Kind::Add => ui.error = Some(error),
         Kind::Reconnect(id) => {
             ui.notes.insert(id.clone(), error);
@@ -406,9 +435,11 @@ fn land(s: &mut App, Finished { job, result }: Finished) {
                 ui.targets.retain(|(k, _)| *k != id);
                 ui.targets.push((id.clone(), target));
                 ui.notes.remove(&id);
-                ui.host.clear();
-                ui.username.clear();
-                ui.port.clear();
+                if job.interactive {
+                    ui.host.clear();
+                    ui.username.clear();
+                    ui.port.clear();
+                }
                 ui.error = save_targets(&ui.targets).err().map(|e| format!("Could not save SSH environments: {e}"));
             } else {
                 close(&target.key());
@@ -1367,13 +1398,16 @@ fn remember_secret(key: &str, secret: Option<&str>) {
 }
 
 fn askpass() -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
     let path = crate::host::t3_home().join("bin").join("ssh-askpass.sh");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(ASKPASS_SCRIPT) {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
         std::fs::write(&path, ASKPASS_SCRIPT).map_err(|e| e.to_string())?;
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
     Ok(path)
 }
 
@@ -1701,10 +1735,12 @@ const REMOTE_EDITORS: &[RemoteEditor] = &[
 
 /// Editors on this machine that can open a folder on an SSH host.
 pub fn probe_remote_editors(path_env: &str) -> Vec<&'static str> {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |p: PathBuf| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    let dirs: Vec<&str> = path_env.split(':').filter(|d| !d.is_empty()).collect();
-    REMOTE_EDITORS.iter().filter(|e| e.commands.iter().any(|c| dirs.iter().any(|d| executable(Path::new(d).join(c))))).map(|e| e.id).collect()
+    #[cfg(unix)]
+    let executable = |p: PathBuf| std::fs::metadata(p).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0 && m.is_file());
+    #[cfg(not(unix))]
+    let executable = |p: PathBuf| p.with_extension("exe").is_file() || p.with_extension("cmd").is_file();
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(path_env).filter(|d| !d.as_os_str().is_empty()).collect();
+    REMOTE_EDITORS.iter().filter(|e| e.commands.iter().any(|c| dirs.iter().any(|d| executable(d.join(c))))).map(|e| e.id).collect()
 }
 
 /// `remoteOpen.ts`'s SSH host for an environment: its alias, split at a `user@`.

@@ -12,13 +12,15 @@ pub mod cli;
 pub mod capture;
 pub mod capture_config;
 pub mod capture_linux;
+#[cfg(windows)]
+mod capture_windows;
 pub mod exposure;
 pub mod policy;
 #[cfg(unix)]
 pub mod telemetry;
 pub mod locale;
+pub mod permission_helper;
 pub mod recovery;
-#[cfg(unix)]
 pub mod shell_path;
 #[cfg(unix)]
 pub mod activation;
@@ -125,7 +127,7 @@ thread_local! {
     static WINDOW: std::cell::RefCell<Option<rune::WindowHandle>> = const { std::cell::RefCell::new(None) };
 }
 
-fn with_window<R>(f: impl FnOnce(&rune::WindowHandle) -> R) -> Option<R> {
+pub(crate) fn with_window<R>(f: impl FnOnce(&rune::WindowHandle) -> R) -> Option<R> {
     WINDOW.with(|w| w.borrow().as_ref().map(f))
 }
 

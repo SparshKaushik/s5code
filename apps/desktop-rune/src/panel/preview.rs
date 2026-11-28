@@ -86,11 +86,13 @@ struct Tab {
     stream_dialog: Option<(String, String, String)>,
     /// The browser profile the tab opened in; a server tab's own is in its snapshot.
     profile: String,
+    /// The Chrome session a local tab runs in: its profile on its thread's environment.
+    partition: String,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None, profile: browser::DEFAULT_PROFILE.to_owned() }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None, stream: None, snapshot: Value::Null, nav: Default::default(), scheme: "", remote: None, stream_dialog: None, profile: browser::DEFAULT_PROFILE.to_owned(), partition: browser::DEFAULT_PROFILE.to_owned() }
     }
 }
 
@@ -418,6 +420,11 @@ fn open_remote(app: &mut App, tab: TabId, url: Option<String>) {
 }
 
 fn open_tab(app: &mut App, profile: &str) -> TabId {
+    let environment = match app.frame_route() {
+        Route::Thread(thread) => crate::env::owner(app, thread),
+        _ => app.ui.env.active.clone(),
+    };
+    let partition = browser::session(&environment, profile);
     let waker = app.ui.panel.waker.clone();
     let ui = &mut app.ui.panel.browser;
     if let Some(waker) = waker {
@@ -428,8 +435,9 @@ fn open_tab(app: &mut App, profile: &str) -> TabId {
     let pixels = Pixels::new();
     let mut fresh = Tab::new(pixels.clone());
     fresh.profile = profile.to_owned();
+    fresh.partition = partition.clone();
     ui.tabs.insert(tab, fresh);
-    ui.browser.open(tab, pixels, profile);
+    ui.browser.open(tab, pixels, &partition);
     // `browserDefaultZoomFactor`: "Page zoom applied to new browser tabs."
     let zoom = crate::settings::value(app, "browserDefaultZoomFactor").as_f64().unwrap_or(1.) as f32;
     if let Some(&zoom) = ZOOM_LEVELS.iter().find(|z| (**z - zoom).abs() < 0.001).filter(|z| **z != 1.) {
@@ -507,10 +515,12 @@ fn restart(app: &mut App) {
         let pixels = Pixels::new();
         let mut fresh = Tab::new(pixels.clone());
         fresh.session = ui.tabs.get(&tab).and_then(|t| t.session.clone());
-        fresh.profile = ui.tabs.get(&tab).map(|t| t.profile.clone()).unwrap_or_default();
-        let profile = fresh.profile.clone();
+        if let Some(old) = ui.tabs.get(&tab) {
+            (fresh.profile, fresh.partition) = (old.profile.clone(), old.partition.clone());
+        }
+        let partition = fresh.partition.clone();
         ui.tabs.insert(tab, fresh);
-        ui.browser.open(tab, pixels, &profile);
+        ui.browser.open(tab, pixels, &partition);
     }
 }
 
@@ -527,12 +537,12 @@ fn relaunch(app: &mut App, scale: f32) {
     ui.chrome_scale = Some(scale);
     ui.shown = None;
     ui.tracked = None;
-    let mut tabs: Vec<(TabId, Pixels, &'static str, String)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, t)| (*id, t.pixels.clone(), t.scheme, t.profile.clone())).collect();
+    let mut tabs: Vec<(TabId, Pixels, &'static str, String)> = ui.tabs.iter().filter(|(_, t)| t.stream.is_none() && t.remote.is_none()).map(|(id, t)| (*id, t.pixels.clone(), t.scheme, t.partition.clone())).collect();
     tabs.sort_by_key(|(id, ..)| *id);
     // The address bars keep their pages while the new Chrome starts.
     ui.browser.shared.lock().unwrap().tabs = tabs.iter().filter_map(|(id, ..)| Some((*id, Status { loading: true, ..before.get(id)?.clone() }))).collect();
-    for (tab, pixels, scheme, profile) in tabs {
-        ui.browser.open(tab, pixels, &profile);
+    for (tab, pixels, scheme, partition) in tabs {
+        ui.browser.open(tab, pixels, &partition);
         if !scheme.is_empty() {
             ui.browser.send(Cmd::ColorScheme(tab, scheme));
         }
@@ -582,7 +592,7 @@ fn adopt(app: &mut App, target: String, opener: String, url: String) {
     let mut fresh = Tab::new(pixels.clone());
     fresh.adopting = opener_key.clone().map(|key| (key, target.clone()));
     if let Some(opener) = opener_tab.and_then(|id| ui.tabs.get(&id)) {
-        fresh.profile = opener.profile.clone();
+        (fresh.profile, fresh.partition) = (opener.profile.clone(), opener.partition.clone());
     }
     ui.tabs.insert(tab, fresh);
     ui.browser.adopt(tab, pixels, target.clone(), opener_tab);

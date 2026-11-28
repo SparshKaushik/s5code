@@ -515,6 +515,8 @@ mod tests {
         assert_eq!(session_query(&query), "threadId=thread+1&tabId=tab-2");
     }
 
+    /// A Windows file name can't hold the quote this escapes.
+    #[cfg(unix)]
     #[test]
     fn an_upload_sends_each_file_as_a_file_part() {
         let dir = std::env::temp_dir().join(format!("s5-upload-{}", s5_net::uuid()));

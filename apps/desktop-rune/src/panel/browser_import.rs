@@ -1,10 +1,11 @@
-//! Browser import: reads a Chromium-family browser's cookies on this machine and writes them into
-//! Rune's Chrome over CDP, as the Electron app's `BrowserImport` does into its session.
+//! Browser import: reads a browser's cookies on this machine and writes them into Rune's Chrome
+//! over CDP, as the Electron app's `BrowserImport` does into its session.
 //!
-//! The cookie database is read into memory (never opened for writing) and parsed here, since Rune
-//! links no SQLite. Values use OSCrypt's AES-128-CBC: macOS keys come from the browser's Keychain
-//! item (`security`), Linux keys from the fixed "peanuts" passphrase (v10) or libsecret
-//! (`secret-tool`, v11). Safari and Firefox are not read.
+//! Cookie databases are read into memory (never opened for writing) and parsed here, since Rune
+//! links no SQLite; a Firefox database's write-ahead log is applied over it. Chromium values use
+//! OSCrypt's AES-128-CBC: macOS keys come from the browser's Keychain item (`security`), Linux
+//! keys from the fixed "peanuts" passphrase (v10) or libsecret (`secret-tool`, v11). Safari's
+//! `Cookies.binarycookies` sits behind Full Disk Access.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,32 +17,70 @@ use serde_json::{Value, json};
 
 use super::browser::Cmd;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    Chromium,
+    Firefox,
+    Safari,
+}
+
 pub struct Source {
     pub name: &'static str,
+    pub engine: Engine,
     service: &'static str,
     account: &'static str,
+    /// Under `~`; empty where the browser has no macOS build.
     mac: &'static [&'static str],
-    /// Under `~/.config`; empty where the browser has no Linux build.
-    linux: &'static [&'static str],
+    /// Candidate roots under `~`, the first that exists winning; empty without a Linux build.
+    linux: &'static [&'static [&'static str]],
     /// The libsecret `application` attribute holding the v11 key.
     secret: &'static str,
 }
 
+const APP_SUPPORT: [&str; 2] = ["Library", "Application Support"];
+
+macro_rules! chromium {
+    ($name:literal, $service:literal, $account:literal, [$($mac:literal),*], [$($linux:literal),*], $secret:literal) => {
+        Source { name: $name, engine: Engine::Chromium, service: $service, account: $account, mac: &[APP_SUPPORT[0], APP_SUPPORT[1], $($mac),*], linux: chromium!(@linux $($linux),*), secret: $secret }
+    };
+    (@linux) => { &[] };
+    (@linux $($linux:literal),+) => { &[&[".config", $($linux),+]] };
+}
+
+macro_rules! gecko {
+    ($name:literal, $mac:literal, [$([$($linux:literal),+]),+]) => {
+        Source { name: $name, engine: Engine::Firefox, service: "", account: "", mac: &[APP_SUPPORT[0], APP_SUPPORT[1], $mac], linux: &[$(&[$($linux),+]),+], secret: "" }
+    };
+}
+
+/// `BROWSER_IMPORT_SOURCES`, in menu order.
 pub const SOURCES: &[Source] = &[
-    Source { name: "Chrome", service: "Chrome Safe Storage", account: "Chrome", mac: &["Google", "Chrome"], linux: &["google-chrome"], secret: "chrome" },
-    Source { name: "Microsoft Edge", service: "Microsoft Edge Safe Storage", account: "Microsoft Edge", mac: &["Microsoft Edge"], linux: &["microsoft-edge"], secret: "msedge" },
-    Source { name: "Brave", service: "Brave Safe Storage", account: "Brave", mac: &["BraveSoftware", "Brave-Browser"], linux: &["BraveSoftware", "Brave-Browser"], secret: "brave" },
+    chromium!("Chrome", "Chrome Safe Storage", "Chrome", ["Google", "Chrome"], ["google-chrome"], "chrome"),
+    chromium!("Microsoft Edge", "Microsoft Edge Safe Storage", "Microsoft Edge", ["Microsoft Edge"], ["microsoft-edge"], "msedge"),
+    chromium!("Brave", "Brave Safe Storage", "Brave", ["BraveSoftware", "Brave-Browser"], ["BraveSoftware", "Brave-Browser"], "brave"),
     // Vivaldi keeps its Linux key under Chrome's application name, Helium under Chromium's.
-    Source { name: "Vivaldi", service: "Vivaldi Safe Storage", account: "Vivaldi", mac: &["Vivaldi"], linux: &["vivaldi"], secret: "chrome" },
-    Source { name: "Opera", service: "Opera Safe Storage", account: "Opera", mac: &["com.operasoftware.Opera"], linux: &["opera"], secret: "opera" },
-    Source { name: "Arc", service: "Arc Safe Storage", account: "Arc", mac: &["Arc", "User Data"], linux: &[], secret: "" },
-    Source { name: "Helium", service: "Helium Storage Key", account: "Helium", mac: &["net.imput.helium"], linux: &["net.imput.helium"], secret: "chromium" },
+    chromium!("Vivaldi", "Vivaldi Safe Storage", "Vivaldi", ["Vivaldi"], ["vivaldi"], "chrome"),
+    chromium!("Opera", "Opera Safe Storage", "Opera", ["com.operasoftware.Opera"], ["opera"], "opera"),
+    chromium!("Arc", "Arc Safe Storage", "Arc", ["Arc", "User Data"], [], ""),
+    chromium!("Helium", "Helium Storage Key", "Helium", ["net.imput.helium"], ["net.imput.helium"], "chromium"),
+    Source {
+        name: "Safari",
+        engine: Engine::Safari,
+        service: "",
+        account: "",
+        mac: &["Library", "Containers", "com.apple.Safari", "Data", "Library", "Cookies"],
+        linux: &[],
+        secret: "",
+    },
+    gecko!("Firefox", "Firefox", [[".mozilla", "firefox"], ["snap", "firefox", "common", ".mozilla", "firefox"]]),
+    gecko!("Zen", "zen", [[".config", "zen"], [".zen"], [".var", "app", "app.zen_browser.zen", "zen"]]),
 ];
 
 /// `BROWSER_IMPORT_FAILURE_COPY` for the reasons a Chromium import can fail with.
 pub fn failure_copy(reason: &str) -> &'static str {
     match reason {
         "notInstalled" => "Not installed on this machine.",
+        "needsFullDiskAccess" => "Give S5 Code Full Disk Access in System Settings → Privacy & Security, then retry.",
         "needsKeychainApproval" => "Needs Keychain access to read its cookies.",
         "keychainItemMissing" => "No encryption key in your Keychain. Sign in to that browser once, then retry.",
         "browserRunning" => "Quit the browser first so its cookie database can be read.",
@@ -67,14 +106,15 @@ pub struct Profile {
 
 fn root(source: &Source) -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
-    let (base, segments) = if cfg!(target_os = "macos") {
-        (home.join("Library").join("Application Support"), source.mac)
-    } else if cfg!(target_os = "linux") && !source.linux.is_empty() {
-        (home.join(".config"), source.linux)
-    } else {
+    let join = |segments: &[&str]| segments.iter().fold(home.clone(), |p, s| p.join(s));
+    if cfg!(target_os = "macos") {
+        return (!source.mac.is_empty()).then(|| join(source.mac));
+    }
+    if !cfg!(target_os = "linux") {
         return None;
-    };
-    Some(segments.iter().fold(base, |p, s| p.join(s)))
+    }
+    let candidates: Vec<PathBuf> = source.linux.iter().map(|s| join(s)).collect();
+    candidates.iter().find(|p| p.is_dir()).or(candidates.first()).cloned()
 }
 
 /// The browsers installed here, in menu order.
@@ -86,13 +126,164 @@ fn safe(directory: &str) -> bool {
     !directory.is_empty() && directory != "." && directory != ".." && !directory.contains(['/', '\\'])
 }
 
-fn cookie_db(profile: &Path) -> Option<PathBuf> {
-    [profile.join("Network").join("Cookies"), profile.join("Cookies")].into_iter().find(|p| p.is_file())
+/// A profile's directory: under the root, or absolute where Firefox's `IsRelative=0` or a Safari
+/// profile's store put it.
+fn profile_path(root: &Path, directory: &str) -> PathBuf {
+    if Path::new(directory).is_absolute() { PathBuf::from(directory) } else { root.join(directory) }
+}
+
+fn cookie_db(engine: Engine, profile: &Path) -> Option<PathBuf> {
+    let candidates = match engine {
+        // Prefer Chromium 96+'s Network/Cookies; upgrades leave the pre-96 Cookies file behind.
+        Engine::Chromium => vec![profile.join("Network").join("Cookies"), profile.join("Cookies")],
+        Engine::Firefox => vec![profile.join("cookies.sqlite")],
+        Engine::Safari => vec![profile.join("Cookies.binarycookies")],
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// The listed profile `directory` names, so an import reads only a profile the list offered.
+fn listed_db(source: &Source, directory: &str) -> Result<PathBuf, &'static str> {
+    let root = root(source).ok_or("unsupportedPlatform")?;
+    if !profiles(source).iter().any(|p| p.directory == directory) {
+        return Err("unknownSourceProfile");
+    }
+    cookie_db(source.engine, &profile_path(&root, directory)).ok_or("unknownSourceProfile")
+}
+
+/// `parseFirefoxProfiles`: `[ProfileN]` blocks' names and paths; relative paths stay inside the
+/// root, and `IsRelative=0` permits an absolute one elsewhere.
+fn firefox_profiles(ini: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut current: Option<(Option<String>, Option<String>, Option<String>)> = None;
+    let flush = |current: &mut Option<(Option<String>, Option<String>, Option<String>)>, out: &mut Vec<(String, String)>| {
+        let Some((name, Some(path), relative)) = current.take() else { return };
+        let directory = match relative.as_deref() {
+            None | Some("1") => {
+                let p = Path::new(&path);
+                let inside = !p.is_absolute() && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
+                inside.then_some(path)
+            }
+            Some("0") => Path::new(&path).is_absolute().then_some(path),
+            _ => None,
+        };
+        if let Some(directory) = directory.filter(|d| !d.contains('\0')) {
+            let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| directory.clone());
+            out.push((directory, name));
+        }
+    };
+    for line in ini.lines().map(str::trim) {
+        if line.starts_with('[') {
+            flush(&mut current, &mut out);
+            let section = line.trim_start_matches('[').trim_end_matches(']');
+            let numbered = section.len() > 7 && section[..7].eq_ignore_ascii_case("profile") && section[7..].bytes().all(|b| b.is_ascii_digit());
+            current = numbered.then(|| (None, None, None));
+            continue;
+        }
+        let (Some(entry), Some((key, value))) = (current.as_mut(), line.split_once('=')) else { continue };
+        match key.trim() {
+            "Name" => entry.0 = Some(value.to_owned()),
+            "Path" => entry.1 = Some(value.trim().to_owned()),
+            "IsRelative" => entry.2 = Some(value.trim().to_owned()),
+            _ => {}
+        }
+    }
+    flush(&mut current, &mut out);
+    out
+}
+
+/// Firefox's declared profiles that have cookies; if none does, any profile folder that has.
+fn gecko_profiles(root: &Path) -> Vec<(String, String)> {
+    let declared = std::fs::read_to_string(root.join("profiles.ini")).map(|ini| firefox_profiles(&ini)).unwrap_or_default();
+    let found: Vec<_> = declared.into_iter().filter(|(d, _)| cookie_db(Engine::Firefox, &profile_path(root, d)).is_some()).collect();
+    if !found.is_empty() {
+        return found;
+    }
+    let mut scanned = Vec::new();
+    for base in [root.to_path_buf(), root.join("Profiles")] {
+        let mut dirs: Vec<String> = std::fs::read_dir(&base).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        dirs.sort();
+        let prefix = if base == root { String::new() } else { "Profiles/".to_owned() };
+        for d in dirs {
+            let directory = format!("{prefix}{d}");
+            if safe(&d) && cookie_db(Engine::Firefox, &root.join(&directory)).is_some() {
+                scanned.push((directory.clone(), d));
+            }
+        }
+    }
+    scanned
+}
+
+/// `listSafariProfiles`: the default jar, then each named profile from `SafariTabs.db` (or, with
+/// that unreadable, each store on disk that holds a jar).
+fn safari_profiles(root: &Path) -> Vec<(String, String)> {
+    let Some(library) = root.parent() else { return Vec::new() };
+    let uuid = |v: &str| {
+        let parts: Vec<&str> = v.split('-').collect();
+        parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12]) && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    let declared: Vec<(String, String)> = std::fs::read(library.join("Safari").join("SafariTabs.db"))
+        .ok()
+        .and_then(|data| {
+            let db = Db::open(&data)?;
+            let t = db.table("bookmarks")?;
+            let mut rows: Vec<_> = t
+                .rows
+                .iter()
+                .filter(|r| t.get(r, "parent").int() == 0 && t.get(r, "type").int() == 1 && t.get(r, "subtype").int() == 2 && t.get(r, "deleted").int() == 0)
+                .map(|r| (t.get(r, "order_index").int(), t.get(r, "title").text(), t.get(r, "external_uuid").text()))
+                .collect();
+            rows.sort_by_key(|r| r.0);
+            Some(rows.into_iter().map(|(_, title, uuid)| (uuid, title.trim().to_owned())).collect())
+        })
+        .unwrap_or_default();
+    let default_name = declared.iter().find(|(u, _)| u == "DefaultProfile").map(|(_, t)| if t.is_empty() { "Personal".to_owned() } else { t.clone() });
+    let mut out = vec![(".".to_owned(), default_name.unwrap_or_else(|| "Safari".to_owned()))];
+    let stores = library.join("WebKit").join("WebsiteDataStore");
+    let store = |u: &str| stores.join(u.to_lowercase()).join("Cookies").to_string_lossy().into_owned();
+    for (u, title) in declared.iter().filter(|(u, _)| uuid(u)) {
+        out.push((store(u), if title.is_empty() { u.clone() } else { title.clone() }));
+    }
+    // With readable metadata, deleted profiles left on disk stay gone.
+    if declared.is_empty() {
+        let mut entries: Vec<String> = std::fs::read_dir(&stores).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|e| uuid(e)).collect();
+        entries.sort();
+        for e in entries {
+            if stores.join(&e).join("Cookies").join("Cookies.binarycookies").is_file() {
+                out.push((store(&e), e));
+            }
+        }
+    }
+    out
+}
+
+/// How many cookies a profile's database holds, as the list shows; `None` when unreadable.
+fn count(engine: Engine, db: &Path) -> Option<usize> {
+    match engine {
+        Engine::Chromium => Some(Db::open(&std::fs::read(db).ok()?)?.table("cookies")?.rows.len()),
+        Engine::Firefox => {
+            let data = gecko_snapshot(db)?;
+            let t = Db::open(&data)?.table("moz_cookies")?;
+            // Only the default container: Rune's Chrome can't keep containers apart.
+            Some(t.rows.iter().filter(|r| t.get(r, "originAttributes").text().is_empty()).count())
+        }
+        Engine::Safari => parse_binary_cookies(&std::fs::read(db).ok()?).ok().map(|c| c.len()),
+    }
 }
 
 /// Profiles from `Local State`, or every directory holding a cookie database.
 pub fn profiles(source: &Source) -> Vec<Profile> {
     let Some(root) = root(source) else { return Vec::new() };
+    if source.engine != Engine::Chromium {
+        let listed = if source.engine == Engine::Firefox { gecko_profiles(&root) } else { safari_profiles(&root) };
+        return listed
+            .into_iter()
+            .filter_map(|(directory, name)| {
+                let db = cookie_db(source.engine, &profile_path(&root, &directory))?;
+                Some(Profile { cookies: count(source.engine, &db), directory, name })
+            })
+            .collect();
+    }
     let state = std::fs::read_to_string(root.join("Local State")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     let mut named: Vec<(String, String)> = state
         .as_ref()
@@ -110,17 +301,82 @@ pub fn profiles(source: &Source) -> Vec<Profile> {
         .into_iter()
         .filter(|(dir, _)| safe(dir))
         .filter_map(|(directory, name)| {
-            let db = cookie_db(&root.join(&directory))?;
-            let cookies = std::fs::read(db).ok().and_then(|data| Some(Db::open(&data)?.table("cookies")?.rows.len()));
-            Some(Profile { directory, name, cookies })
+            let db = cookie_db(Engine::Chromium, &root.join(&directory))?;
+            Some(Profile { cookies: count(Engine::Chromium, &db), directory, name })
         })
         .collect()
 }
 
-/// Chrome's `SingletonLock` links to `host-pid` while a browser holds the profile.
+/// Chrome's `SingletonLock` links to `host-pid` while a browser holds the profile; Firefox
+/// holds each profile's `lock` link or `.parentlock`. Safari writes its jar atomically.
 pub fn running(source: &Source) -> bool {
-    let Some(target) = root(source).and_then(|r| std::fs::read_link(r.join("SingletonLock")).ok()) else { return false };
-    lock_held(&target.to_string_lossy(), &hostname(), alive)
+    let Some(root) = root(source) else { return false };
+    match source.engine {
+        Engine::Safari => false,
+        Engine::Chromium => match std::fs::read_link(root.join("SingletonLock")) {
+            Ok(target) => lock_held(&target.to_string_lossy(), &hostname(), alive),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        },
+        Engine::Firefox => gecko_profiles(&root).iter().any(|(d, _)| gecko_held(&profile_path(&root, d))),
+    }
+}
+
+/// `firefoxProfileIsHeld`: Firefox leaves its lock files after exit, so test the lock itself.
+fn gecko_held(profile: &Path) -> bool {
+    if let Ok(target) = std::fs::read_link(profile.join("lock"))
+        && gecko_link_held(&target.to_string_lossy(), &local_addresses(), alive)
+    {
+        return true;
+    }
+    let parent = profile.join(".parentlock");
+    parent.is_file() && fcntl_held(&parent)
+}
+
+/// `firefoxSymlinkLockIsHeld`: the link reads `address:+pid`; only a local owner's pid means
+/// anything, and anything unreadable counts as held.
+fn gecko_link_held(target: &str, local: &[String], alive: impl Fn(u32) -> bool) -> bool {
+    let Some((owner, pid)) = target.rsplit_once(':') else { return true };
+    if !local.iter().any(|a| a == owner) {
+        return true;
+    }
+    // A `+` marks an fcntl-holding owner; the pid follows either way.
+    let pid = pid.strip_prefix('+').unwrap_or(pid);
+    match pid.parse::<u32>() {
+        Ok(n) if n > 0 && pid.bytes().all(|b| b.is_ascii_digit()) => alive(n),
+        _ => true,
+    }
+}
+
+/// Loopback and this machine's own addresses, which Firefox writes as the lock's owner.
+fn local_addresses() -> Vec<String> {
+    let mut out = vec!["127.0.0.1".to_owned(), "127.0.1.1".to_owned(), "::1".to_owned()];
+    if cfg!(target_os = "linux")
+        && let Ok(o) = Command::new("hostname").arg("-I").output()
+    {
+        out.extend(String::from_utf8_lossy(&o.stdout).split_whitespace().map(str::to_owned));
+    }
+    if cfg!(target_os = "macos")
+        && let Ok(o) = Command::new("ifconfig").output()
+    {
+        let text = String::from_utf8_lossy(&o.stdout);
+        out.extend(text.split_whitespace().collect::<Vec<_>>().windows(2).filter(|w| w[0] == "inet" || w[0] == "inet6").map(|w| w[1].split('%').next().unwrap_or(w[1]).to_owned()));
+    }
+    out
+}
+
+/// Electron's `posixLockIsHeld`: try Firefox's fcntl lock from a short Python probe. With no
+/// interpreter the probe can't tell, and "free" keeps the import possible.
+fn fcntl_held(path: &Path) -> bool {
+    const PROBE: &str = "import fcntl,os,sys\nfd=os.open(sys.argv[1],os.O_WRONLY)\ntry:\n  fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError:\n  print('held')\nelse:\n  print('free')";
+    for interpreter in ["/usr/bin/python3", "python3"] {
+        let Ok(out) = Command::new(interpreter).arg("-c").arg(PROBE).arg(path).stdin(Stdio::null()).stderr(Stdio::null()).output() else { continue };
+        match String::from_utf8_lossy(&out.stdout).trim() {
+            "held" => return true,
+            "free" => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn lock_held(target: &str, host: &str, alive: impl Fn(u32) -> bool) -> bool {
@@ -635,8 +891,9 @@ fn bare(host: &str) -> &str {
     host.strip_prefix('.').unwrap_or(host)
 }
 
-/// A CDP `CookieParam`, scoped as Electron's `cookieScope` does.
-fn cookie_param(host: &str, name: &str, value: &str, path: &str, expires_utc: i64, secure: bool, http_only: bool, same_site: i64) -> Value {
+/// A CDP `CookieParam`, scoped as Electron's `cookieScope` does. `expires` is in UNIX seconds.
+#[allow(clippy::too_many_arguments)]
+fn cookie_param(host: &str, name: &str, value: &str, path: &str, expires: Option<i64>, secure: bool, http_only: bool, same_site: Option<&str>) -> Value {
     let bare_host = bare(host);
     let authority = if bare_host.contains(':') && !(bare_host.starts_with('[') && bare_host.ends_with(']')) { format!("[{bare_host}]") } else { bare_host.to_owned() };
     let scheme = if secure { "https" } else { "http" };
@@ -644,20 +901,204 @@ fn cookie_param(host: &str, name: &str, value: &str, path: &str, expires_utc: i6
     if host.starts_with('.') {
         cookie["domain"] = json!(host);
     }
-    // Chrome stores expiry in microseconds since 1601.
-    let seconds = expires_utc / 1_000_000;
-    if seconds > 0 {
-        cookie["expires"] = json!(seconds - 11_644_473_600);
+    if let Some(expires) = expires {
+        cookie["expires"] = json!(expires);
     }
-    if let Some(same_site) = match same_site {
+    if let Some(same_site) = same_site {
+        cookie["sameSite"] = json!(same_site);
+    }
+    cookie
+}
+
+/// Chrome's `samesite` column; unspecified (-1) stays unset.
+fn chromium_same_site(value: i64) -> Option<&'static str> {
+    match value {
         0 => Some("None"),
         1 => Some("Lax"),
         2 => Some("Strict"),
         _ => None,
-    } {
-        cookie["sameSite"] = json!(same_site);
     }
-    cookie
+}
+
+/// The database as SQLite would read it: the main file with its write-ahead log's committed
+/// frames over it, which is what Electron's `VACUUM INTO` snapshot sees.
+fn gecko_snapshot(db: &Path) -> Option<Vec<u8>> {
+    let mut data = std::fs::read(db).ok()?;
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    if let Ok(log) = std::fs::read(&wal) {
+        apply_wal(&mut data, &log);
+    }
+    Some(data)
+}
+
+/// Applies a WAL's frames up to its last commit. Frames whose salts don't match the header are
+/// left over from before the last checkpoint and are skipped.
+fn apply_wal(data: &mut Vec<u8>, log: &[u8]) {
+    let (Some(magic), Some(page)) = (be(log, 0, 4), be(log, 8, 4)) else { return };
+    if magic & !1 != 0x377f_0682 || !(512..=65536).contains(&page) || !page.is_power_of_two() {
+        return;
+    }
+    let page = page as usize;
+    let salts = log.get(16..24);
+    let mut committed: Vec<(usize, &[u8])> = Vec::new();
+    let mut pending: Vec<(usize, &[u8])> = Vec::new();
+    let mut size = None;
+    let mut at = 32;
+    while let (Some(header), Some(body)) = (log.get(at..at + 24), log.get(at + 24..at + 24 + page)) {
+        if Some(&header[8..16]) != salts {
+            break;
+        }
+        let number = be(header, 0, 4).unwrap_or(0) as usize;
+        if number == 0 {
+            break;
+        }
+        pending.push((number, body));
+        let commit = be(header, 4, 4).unwrap_or(0) as usize;
+        if commit > 0 {
+            committed.append(&mut pending);
+            size = Some(commit);
+        }
+        at += 24 + page;
+    }
+    let Some(pages) = size else { return };
+    if be(data, 16, 2).map(|p| if p == 1 { 65536 } else { p as usize }) != Some(page) && !data.is_empty() {
+        return;
+    }
+    data.resize(pages * page, 0);
+    for (number, body) in committed {
+        if number <= pages {
+            data[(number - 1) * page..number * page].copy_from_slice(body);
+        }
+    }
+}
+
+/// Firefox's `sameSite`, with `rawSameSite` (schemas 10–14) keeping an undeclared value unset:
+/// mapping it to None would let the cookie go cross-site.
+fn gecko_same_site(value: &Val, raw: &Val) -> Option<&'static str> {
+    match (value, raw.int()) {
+        (Val::Null, _) => None,
+        (v, 0) if v.int() == 1 && !matches!(raw, Val::Null) => None,
+        (v, _) => match v.int() {
+            0 => Some("None"),
+            1 => Some("Lax"),
+            2 => Some("Strict"),
+            _ => None,
+        },
+    }
+}
+
+/// `readFirefoxCookies`: the default container's cookies. Schema 16+ stores expiry in
+/// milliseconds, older ones in seconds.
+fn read_gecko(data: &[u8]) -> Result<Read, &'static str> {
+    let db = Db::open(data).ok_or("readFailed")?;
+    let schema = be(data, 60, 4).unwrap_or(0);
+    let table = db.table("moz_cookies").ok_or("readFailed")?;
+    let mut read = Read { cookies: Vec::new(), skipped: 0, domains: Vec::new() };
+    for row in &table.rows {
+        let col = |name| table.get(row, name);
+        if !col("originAttributes").text().is_empty() {
+            continue;
+        }
+        let host = col("host").text();
+        let expiry = col("expiry").int();
+        let expires = (expiry > 0).then(|| if schema >= 16 { expiry / 1000 } else { expiry });
+        let raw = if (10..=14).contains(&schema) { col("rawSameSite").clone() } else { Val::Null };
+        let secure = col("isSecure").int() == 1;
+        let cookie = cookie_param(&host, &col("name").text(), &col("value").text(), &col("path").text(), expires, secure, col("isHttpOnly").int() == 1, gecko_same_site(col("sameSite"), &raw));
+        read.cookies.push((cookie, bare(&host).to_owned()));
+    }
+    Ok(read)
+}
+
+/// Safari's timestamps count seconds from 2001-01-01.
+const APPLE_EPOCH_OFFSET: i64 = 978_307_200;
+
+/// `parseBinaryCookies`: `Cookies.binarycookies`, a big-endian page index over little-endian
+/// pages of records. Anything out of bounds or overlapping fails the whole file rather than
+/// fabricating cookies.
+fn parse_binary_cookies(data: &[u8]) -> Result<Vec<(Value, String)>, &'static str> {
+    const PAGE_HEADER: usize = 12;
+    const RECORD_HEADER: usize = 56;
+    let le = |b: &[u8], at: usize| b.get(at..at + 4).map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]) as usize).ok_or("readFailed");
+    let c_str = |b: &[u8], at: usize| {
+        let tail = &b[at..];
+        String::from_utf8_lossy(&tail[..tail.iter().position(|c| *c == 0).unwrap_or(tail.len())]).into_owned()
+    };
+    if data.len() < 8 || &data[..4] != b"cook" {
+        return Err("readFailed");
+    }
+    let pages = be(data, 4, 4).ok_or("readFailed")? as usize;
+    if 8 + pages * 4 > data.len() {
+        return Err("readFailed");
+    }
+    let mut cookies = Vec::new();
+    let mut start = 8 + pages * 4;
+    for i in 0..pages {
+        let size = be(data, 8 + i * 4, 4).ok_or("readFailed")? as usize;
+        let page = data.get(start..start + size).filter(|_| size >= PAGE_HEADER).ok_or("readFailed")?;
+        start += size;
+        let count = le(page, 4)?;
+        let table_end = PAGE_HEADER + count * 4;
+        if table_end > page.len() {
+            return Err("readFailed");
+        }
+        let mut taken: Vec<(usize, usize)> = Vec::new();
+        for j in 0..count {
+            let at = le(page, 8 + j * 4)?;
+            if at < table_end || at + RECORD_HEADER > page.len() {
+                return Err("readFailed");
+            }
+            let end = at + le(page, at)?;
+            if end < at + RECORD_HEADER || end > page.len() || taken.iter().any(|&(s, e)| at < e && end > s) {
+                return Err("readFailed");
+            }
+            taken.push((at, end));
+            let record = &page[at..end];
+            let flags = le(record, 8)?;
+            let offsets = [le(record, 16)?, le(record, 20)?, le(record, 24)?, le(record, 28)?];
+            if offsets.iter().any(|&o| o < RECORD_HEADER || o >= record.len()) {
+                return Err("readFailed");
+            }
+            let expiry = f64::from_le_bytes(record[40..48].try_into().map_err(|_| "readFailed")?);
+            let [domain, name, path, value] = offsets.map(|o| c_str(record, o));
+            if domain.is_empty() || name.is_empty() {
+                continue;
+            }
+            let path = if path.is_empty() { "/".to_owned() } else { path };
+            let expires = (expiry > 0.0).then(|| expiry.floor() as i64 + APPLE_EPOCH_OFFSET);
+            // Safari's SameSite encoding is undocumented; guessing None would widen the scope.
+            let cookie = cookie_param(&domain, &name, &value, &path, expires, flags & 1 != 0, flags & 4 != 0, Some("Lax"));
+            cookies.push((cookie, bare(&domain).to_owned()));
+        }
+    }
+    // Pages end with an 8-byte checksum and an optional length-prefixed plist.
+    let trailer = data.len() - start;
+    let valid = trailer == 0 || trailer == 8 || (trailer >= 12 && be(data, start + 8, 4).is_some_and(|n| trailer == 12 + n as usize));
+    if !valid {
+        return Err("readFailed");
+    }
+    Ok(cookies)
+}
+
+/// Reading the jar failed: macOS's privacy protection answers EPERM, which Full Disk Access
+/// fixes; EACCES is an ordinary denial it doesn't.
+fn safari_read(path: &Path) -> Result<Vec<u8>, &'static str> {
+    std::fs::read(path).map_err(|e| if e.raw_os_error() == Some(1) { "needsFullDiskAccess" } else { "readFailed" })
+}
+
+/// Whether any Safari jar is readable now (`safariPermissionCheck`).
+pub fn safari_access() -> bool {
+    let Some(source) = SOURCES.iter().find(|s| s.engine == Engine::Safari) else { return false };
+    let Some(root) = root(source) else { return false };
+    let jars: Vec<PathBuf> = std::iter::once(".".to_owned()).chain(safari_profiles(&root).into_iter().map(|(d, _)| d)).filter_map(|d| cookie_db(Engine::Safari, &profile_path(&root, &d))).collect();
+    jars.iter().any(|jar| std::fs::File::open(jar).is_ok())
+}
+
+/// Safari is installed but its default jar is unreadable for lack of Full Disk Access.
+pub fn needs_full_disk_access(source: &Source) -> bool {
+    source.engine == Engine::Safari
+        && root(source).and_then(|r| cookie_db(Engine::Safari, &r)).is_some_and(|jar| std::fs::File::open(jar).is_err_and(|e| e.raw_os_error() == Some(1)))
 }
 
 struct Read {
@@ -698,7 +1139,10 @@ fn read_cookies(data: &[u8], keys: &Keys) -> Result<Read, &'static str> {
             note(&mut read.domains, bare(&host));
             continue;
         };
-        let cookie = cookie_param(&host, &col("name").text(), &value, &col("path").text(), col("expires_utc").int(), col("is_secure").int() == 1, col("is_httponly").int() == 1, col("samesite").int());
+        // Chrome stores expiry in microseconds since 1601.
+        let seconds = col("expires_utc").int() / 1_000_000;
+        let expires = (seconds > 0).then(|| seconds - 11_644_473_600);
+        let cookie = cookie_param(&host, &col("name").text(), &value, &col("path").text(), expires, col("is_secure").int() == 1, col("is_httponly").int() == 1, chromium_same_site(col("samesite").int()));
         read.cookies.push((cookie, bare(&host).to_owned()));
     }
     if read.cookies.is_empty() && needs_v11 {
@@ -750,11 +1194,19 @@ pub fn start(source: &'static Source, directory: String, tx: Sender<Cmd>, waker:
             if running(source) {
                 return Err("browserRunning");
             }
-            let root = root(source).ok_or("unsupportedPlatform")?;
-            let db = Some(directory.as_str()).filter(|d| safe(d)).and_then(|d| cookie_db(&root.join(d))).ok_or("unknownSourceProfile")?;
-            let keys = keys(source)?;
-            let data = std::fs::read(db).map_err(|_| "readFailed")?;
-            read_cookies(&data, &keys)
+            let db = listed_db(source, &directory)?;
+            match source.engine {
+                Engine::Chromium => {
+                    let keys = keys(source)?;
+                    let data = std::fs::read(db).map_err(|_| "readFailed")?;
+                    read_cookies(&data, &keys)
+                }
+                Engine::Firefox => read_gecko(&gecko_snapshot(&db).ok_or("readFailed")?),
+                Engine::Safari => {
+                    let cookies = parse_binary_cookies(&safari_read(&db)?)?;
+                    Ok(Read { cookies, skipped: 0, domains: Vec::new() })
+                }
+            }
         })();
         let next = match read {
             Err(reason) => Stage::Failed(reason),
@@ -859,6 +1311,129 @@ mod tests {
         assert_eq!(find("plain"), json!({ "url": "http://app.test/x", "name": "plain", "value": "visible", "path": "/x", "secure": false, "httpOnly": false }));
         assert_eq!(find("big")["value"], json!("B".repeat(1500)));
         assert_eq!(find("n42")["sameSite"], json!("None"));
+    }
+
+    #[test]
+    fn a_firefox_database_reads_with_its_write_ahead_log_and_only_the_default_container() {
+        // A schema-16 `cookies.sqlite` in WAL mode: `late` and sid's new value are only in the log.
+        let db = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/panel/testdata-firefox.sqlite"));
+        let main_only = read_gecko(&std::fs::read(db).unwrap()).unwrap();
+        assert_eq!(main_only.cookies.len(), 2, "the main file alone predates the log");
+        let read = read_gecko(&gecko_snapshot(db).unwrap()).unwrap();
+        let find = |name: &str| read.cookies.iter().find(|(c, _)| c["name"] == name).map(|c| c.0.clone());
+        assert_eq!(read.cookies.len(), 3);
+        assert_eq!(find("container"), None, "containers can't be kept apart in Chrome");
+        assert_eq!(
+            find("sid").unwrap(),
+            json!({ "url": "https://example.com/", "domain": ".example.com", "name": "sid", "value": "abc2", "path": "/", "secure": true, "httpOnly": true, "sameSite": "None", "expires": 1_900_000_000i64 })
+        );
+        assert_eq!(find("lax").unwrap(), json!({ "url": "http://app.test/x", "name": "lax", "value": "l", "path": "/x", "secure": false, "httpOnly": false, "sameSite": "Lax" }));
+        assert_eq!(find("late").unwrap()["sameSite"], json!("Strict"));
+        assert_eq!(count(Engine::Firefox, db), Some(3));
+    }
+
+    #[test]
+    fn firefox_same_site_keeps_an_undeclared_value_unset() {
+        assert_eq!(gecko_same_site(&Val::Null, &Val::Null), None, "schema 9 rows carry NULL");
+        assert_eq!(gecko_same_site(&Val::Int(1), &Val::Int(0)), None, "defaulted to Lax, declared nothing");
+        assert_eq!(gecko_same_site(&Val::Int(1), &Val::Int(1)), Some("Lax"));
+        assert_eq!(gecko_same_site(&Val::Int(1), &Val::Null), Some("Lax"));
+        assert_eq!(gecko_same_site(&Val::Int(0), &Val::Null), Some("None"));
+        assert_eq!(gecko_same_site(&Val::Int(2), &Val::Null), Some("Strict"));
+        assert_eq!(gecko_same_site(&Val::Int(7), &Val::Null), None);
+    }
+
+    #[test]
+    fn firefox_profiles_come_from_profile_blocks_and_stay_inside_the_root() {
+        // An absolute path names a drive on Windows.
+        let absolute = if cfg!(windows) { "C:\\data\\ff" } else { "/data/ff" };
+        let ini = format!("[Install4F96D1932A9F858E]\nDefault=Profiles/x.default-release\n\n[Profile1]\nName=work\nIsRelative=1\nPath=Profiles/abc.work\n\n[Profile0]\nName= default-release \nIsRelative=1\nPath=Profiles/x.default-release\n\n[Profile2]\nName=escape\nIsRelative=1\nPath=../../etc\n\n[Profile3]\nName=custom\nIsRelative=0\nPath={absolute}\n\n[Profile4]\nIsRelative=0\nPath=relative/again\n\n[General]\nPath=ignored\n");
+        assert_eq!(
+            firefox_profiles(&ini),
+            vec![
+                ("Profiles/abc.work".to_owned(), "work".to_owned()),
+                ("Profiles/x.default-release".to_owned(), "default-release".to_owned()),
+                (absolute.to_owned(), "custom".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_firefox_lock_link_is_stale_only_for_a_dead_local_pid() {
+        let local = vec!["127.0.1.1".to_owned()];
+        assert!(gecko_link_held("127.0.1.1:+4242", &local, |_| true));
+        assert!(!gecko_link_held("127.0.1.1:+4242", &local, |_| false));
+        assert!(!gecko_link_held("127.0.1.1:4242", &local, |_| false));
+        assert!(gecko_link_held("10.0.0.9:+4242", &local, |_| false), "another machine's lock");
+        assert!(gecko_link_held("127.0.1.1:+42x", &local, |_| false));
+        assert!(gecko_link_held("127.0.1.1:++42", &local, |_| false));
+        assert!(gecko_link_held("garbage", &local, |_| false));
+    }
+
+    /// A `Cookies.binarycookies` file of one page holding `records` (flags, domain, name, path,
+    /// value, Apple-epoch expiry).
+    fn jar(records: &[(u32, &str, &str, &str, &str, f64)]) -> Vec<u8> {
+        let bodies: Vec<Vec<u8>> = records
+            .iter()
+            .map(|(flags, domain, name, path, value, expiry)| {
+                let mut strings = Vec::new();
+                let mut offsets = Vec::new();
+                for s in [domain, name, path, value] {
+                    offsets.push(56 + strings.len() as u32);
+                    strings.extend_from_slice(s.as_bytes());
+                    strings.push(0);
+                }
+                let mut r = Vec::new();
+                r.extend((56 + strings.len() as u32).to_le_bytes());
+                r.extend(0u32.to_le_bytes());
+                r.extend(flags.to_le_bytes());
+                r.extend(0u32.to_le_bytes());
+                for o in offsets {
+                    r.extend(o.to_le_bytes());
+                }
+                r.extend([0u8; 8]);
+                r.extend(expiry.to_le_bytes());
+                r.extend(0f64.to_le_bytes());
+                r.extend(strings);
+                r
+            })
+            .collect();
+        let mut page = vec![0, 0, 1, 0];
+        page.extend((records.len() as u32).to_le_bytes());
+        let mut at = 12 + 4 * records.len() as u32;
+        for b in &bodies {
+            page.extend(at.to_le_bytes());
+            at += b.len() as u32;
+        }
+        page.extend(0u32.to_le_bytes());
+        for b in bodies {
+            page.extend(b);
+        }
+        let mut file = b"cook".to_vec();
+        file.extend(1u32.to_be_bytes());
+        file.extend((page.len() as u32).to_be_bytes());
+        file.extend(page);
+        file.extend([0u8; 8]);
+        file
+    }
+
+    #[test]
+    fn a_safari_jar_reads_its_records_and_rejects_a_malformed_file() {
+        let data = jar(&[(5, ".example.com", "sid", "/", "v", 700_000_000.5), (0, "app.test", "plain", "", "x", 0.0), (0, "", "nodomain", "/", "x", 0.0)]);
+        let cookies = parse_binary_cookies(&data).unwrap();
+        assert_eq!(cookies.len(), 2, "a record without a domain is dropped");
+        assert_eq!(
+            cookies[0].0,
+            json!({ "url": "https://example.com/", "domain": ".example.com", "name": "sid", "value": "v", "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax", "expires": 700_000_000i64 + APPLE_EPOCH_OFFSET })
+        );
+        assert_eq!(cookies[1].0["url"], json!("http://app.test/"), "an empty path is the root");
+        assert_eq!(parse_binary_cookies(b"nope").err(), Some("readFailed"));
+        assert_eq!(parse_binary_cookies(&data[..data.len() - 3]).err(), Some("readFailed"), "a truncated trailer");
+        let mut overlapping = data.clone();
+        // The page starts at byte 12 and its record offsets at 8 within it: point the second at the first.
+        let first = u32::from_le_bytes(overlapping[20..24].try_into().unwrap());
+        overlapping[24..28].copy_from_slice(&first.to_le_bytes());
+        assert_eq!(parse_binary_cookies(&overlapping).err(), Some("readFailed"));
     }
 
     #[test]

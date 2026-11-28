@@ -169,8 +169,10 @@ fn save(s: &App) -> Result<(), String> {
     let path = path();
     let old = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
     write(&path, &ui.saved, &ui.off, &ui.alternates, &ui.outdated)?;
-    let relay: Vec<String> = ui.saved.iter().filter(|e| reached_by_relay(s, &e.id)).map(|e| e.id.clone()).collect();
-    catalog::export(&old, &ui.saved, &relay);
+    let saved = &ui.saved;
+    let ssh: Vec<catalog::SshEntry> = ssh::targets(s).iter().filter_map(|(id, target)| Some((id.clone(), saved.iter().find(|e| &e.id == id)?.label.clone(), target.clone()))).collect();
+    let relay: Vec<String> = saved.iter().filter(|e| reached_by_relay(s, &e.id)).map(|e| e.id.clone()).collect();
+    catalog::export(&old, saved, &ssh, &relay);
     Ok(())
 }
 
@@ -229,11 +231,16 @@ pub fn start(s: &mut App) {
 }
 
 /// Electron's saved connections, read off the UI thread at launch.
-static CATALOG: std::sync::Mutex<Option<(Vec<Saved>, Vec<(String, String)>)>> = std::sync::Mutex::new(None);
+static CATALOG: std::sync::Mutex<Option<catalog::Read>> = std::sync::Mutex::new(None);
 
 /// Connections paired in the Electron app that this list lacks join it, and connect.
 fn adopt_catalog(s: &mut App) -> bool {
-    let Some((found, relays)) = CATALOG.lock().unwrap().take() else { return false };
+    let Some(catalog::Read { bearers: found, ssh: ssh_found, relays }) = CATALOG.lock().unwrap().take() else { return false };
+    for (id, _, target) in ssh_found {
+        if !s.ui.env.saved.iter().any(|x| x.id == id) {
+            ssh::adopt(s, target);
+        }
+    }
     let new: Vec<Saved> = found.into_iter().filter(|e| !s.ui.env.saved.iter().any(|x| x.id == e.id)).collect();
     let adopted = !new.is_empty();
     for env in new {
@@ -462,6 +469,13 @@ pub fn net_of<'a>(s: &'a mut App, key: &str) -> Option<&'a mut s5_net::Net> {
 /// a project a flow just created there lands on the right server.
 pub fn adopt(s: &mut App, id: &str, key: &str) {
     s.ui.env.owners.insert(id.to_owned(), key.to_owned());
+}
+
+/// Each connected environment's base URL and credential, on screen or parked.
+pub fn credentials(s: &mut App) -> Vec<(String, s5_net::Auth)> {
+    let mut nets: Vec<&mut s5_net::Net> = s.src.net().into_iter().collect();
+    nets.extend(s.ui.env.parked.iter_mut().filter_map(|(_, src)| src.net()));
+    nets.into_iter().map(|net| (net.base_url().to_owned(), net.auth().clone())).collect()
 }
 
 /// Sends one request to every connected environment; each reply reaches `App::src` (see [`drain`]).

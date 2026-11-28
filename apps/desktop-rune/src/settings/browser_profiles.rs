@@ -4,9 +4,9 @@
 //!
 //! Profiles are client settings. Rune's browser keeps one Default profile in the T3 home
 //! (`userdata/browser/rune-default`), cleared from the preview menu, so the data cleared here is
-//! a server browser's (`preview.clearProfile`). "Import from" reads a Chromium browser on this
-//! machine (`panel::browser_import`) into that Default profile, the only one Rune's Chrome
-//! opens, so the wizard offers no "New profile" target.
+//! a server browser's (`preview.clearProfile`). "Import from" reads a Chromium, Firefox or
+//! Safari browser on this machine (`panel::browser_import`) into that Default profile, the only
+//! one Rune's Chrome opens, so the wizard offers no "New profile" target.
 
 use rune::{El, col, icon, row, text};
 use serde_json::{Value, json};
@@ -31,11 +31,13 @@ pub struct Ui {
     pub remove: Option<(String, String)>,
     pub clear: Option<(String, String)>,
     pub import: Option<Import>,
+    /// Full Disk Access as last checked, and when: web's `usePermissionStatus`.
+    access: Option<(std::time::Instant, bool)>,
     /// Clear requests in flight, by reply id, with the profile's name for web's toasts.
     pub clearing: std::collections::HashMap<u64, String>,
 }
 
-/// Web's `BrowserImportWizard`, minus the steps only Safari needs.
+/// Web's `BrowserImportWizard`.
 pub struct Import {
     source: &'static Source,
     profiles: Vec<Profile>,
@@ -46,6 +48,9 @@ pub struct Import {
 enum Step {
     Configure,
     Quit,
+    /// Safari's jar is behind Full Disk Access; `import` resumes the import rather than the
+    /// configure step, and `checked` is a check that already came back without it.
+    FullDiskAccess { import: bool, checked: bool },
     Blocked(&'static str),
     Running(import::Job),
 }
@@ -56,12 +61,60 @@ fn wizard(source: &'static Source, from: Option<String>) -> Import {
     let from = from.filter(|f| profiles.iter().any(|p| p.directory == *f)).or_else(|| profiles.first().map(|p| p.directory.clone())).unwrap_or_default();
     let step = if import::running(source) {
         Step::Quit
+    } else if import::needs_full_disk_access(source) {
+        Step::FullDiskAccess { import: false, checked: false }
     } else if profiles.is_empty() {
         Step::Blocked("unknownSourceProfile")
     } else {
         Step::Configure
     };
     Import { source, profiles, from, step }
+}
+
+const ACCESS_POLL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Rechecks Full Disk Access while its step shows, and moves an import that hit it there.
+pub fn poll(s: &mut App, tx: &mut rune::Tx) -> bool {
+    poll_with(s, tx, std::time::Instant::now(), import::safari_access)
+}
+
+fn poll_with(s: &mut App, tx: &mut rune::Tx, now: std::time::Instant, granted: impl Fn() -> bool) -> bool {
+    let p = &mut s.ui.settings.profiles;
+    let Some(w) = p.import.as_mut() else {
+        p.access = None;
+        return false;
+    };
+    let mut changed = matches!(&w.step, Step::Running(job) if *job.lock().unwrap() == Stage::Failed("needsFullDiskAccess"));
+    if changed {
+        w.step = Step::FullDiskAccess { import: true, checked: true };
+    }
+    if !matches!(w.step, Step::FullDiskAccess { .. }) {
+        p.access = None;
+        return changed;
+    }
+    match p.access {
+        Some((at, _)) if now.duration_since(at) < ACCESS_POLL => tx.wake_after(ACCESS_POLL - now.duration_since(at)),
+        previous => {
+            let now_granted = granted();
+            p.access = Some((now, now_granted));
+            changed |= previous.map(|(_, g)| g) != Some(now_granted);
+            tx.wake_after(ACCESS_POLL);
+        }
+    }
+    changed
+}
+
+/// Continue: the import resumes, or the source is read again now that its jar opens.
+fn granted_continue(s: &mut App, scale: f32) {
+    let Some(w) = s.ui.settings.profiles.import.as_ref() else { return };
+    if matches!(w.step, Step::FullDiskAccess { import: true, .. }) {
+        return run_import(s, scale);
+    }
+    let mut next = wizard(w.source, Some(w.from.clone()));
+    if let Step::FullDiskAccess { checked, .. } = &mut next.step {
+        *checked = true;
+    }
+    s.ui.settings.profiles.import = Some(next);
 }
 
 fn run_import(s: &mut App, scale: f32) {
@@ -401,6 +454,43 @@ fn thousands(n: usize) -> String {
 
 fn close_import(s: &mut App) {
     s.ui.settings.profiles.import = None;
+    s.ui.settings.profiles.access = None;
+}
+
+/// Web `PermissionChecklist`'s row and `FullDiskAccessStep`'s note.
+fn full_disk_access(t: &T, name: &str, granted: bool, checked: bool) -> El {
+    let action = if granted {
+        row().gap(4.0).center_y().role("status").child(icon(&icons::CIRCLE_CHECK, 16.0).color(t.c.success)).child(text("Allowed").font(theme::TEXT_XS).color(t.c.success))
+    } else {
+        kit::Button::new("Allow")
+            .variant("outline")
+            .size("xs")
+            .on_press(|s: &mut App| crate::desktop::permission_helper::open_settings(crate::desktop::permission_helper::FULL_DISK_ACCESS_URL, s.ui.shell.dark.get(), import::safari_access))
+            .build(t)
+    };
+    let item = row()
+        .w_full()
+        .gap(12.0)
+        .px(12.0)
+        .py(8.0)
+        .center_y()
+        .radius(8.0)
+        .border(1.0, t.c.border)
+        .child(icon(&icons::HARD_DRIVE, 32.0).color(t.c.muted_foreground))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(text("Full Disk Access").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(format!("Read {name}'s cookies for this import.")).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
+        )
+        .child(action);
+    let note = if checked {
+        "Access is still required. Quit and reopen S5 Code if you just allowed it, then retry the import."
+    } else {
+        "If access doesn't update after you allow it, quit and reopen S5 Code, then retry the import."
+    };
+    col().w_full().gap(12.0).child(item).children((!granted).then(|| text(note).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()))
 }
 
 /// Web's `SelectableTile`.
@@ -516,6 +606,15 @@ fn import_dialog(s: &App, t: &T, w: &Import, scale: f32, layers: &mut Vec<El>) {
             ]))
         }
         (Step::Quit, _) | (_, Some(Stage::Failed("browserRunning"))) => quit(),
+        (Step::FullDiskAccess { checked, .. }, _) => {
+            let granted = s.ui.settings.profiles.access.is_some_and(|(_, g)| g);
+            dialog(
+                format!("Let S5 Code read {name}’s cookies"),
+                format!("To import cookies from {name}, S5 Code needs Full Disk Access. Turn it on in System Settings, then come back to finish the import. You can revoke it again once the import is done."),
+            )
+            .child(full_disk_access(t, name, granted, *checked))
+            .child(footer(vec![cancel(), kit::Button::new("Continue").disabled(!granted).on_press(move |s: &mut App| granted_continue(s, scale)).build(t)]))
+        }
         (Step::Blocked(reason), _) => blocked(*reason),
         (_, Some(Stage::Failed(reason))) => blocked(reason),
         (_, Some(Stage::Writing { .. })) if crate::panel::preview::browser_failed(s) => blocked("sessionUnavailable"),
@@ -549,6 +648,14 @@ fn import_dialog(s: &App, t: &T, w: &Import, scale: f32, layers: &mut Vec<El>) {
         _ => dialog("Importing cookies".into(), "This may take a moment.".into()).child(busy(t, "Importing…")),
     };
     built.build(t, layers);
+}
+
+/// The Full Disk Access step for Safari, as the import finds it missing.
+pub(crate) fn full_disk_access_scene(s: &mut App, granted: bool) {
+    let Some(source) = import::SOURCES.iter().find(|source| source.engine == import::Engine::Safari) else { return };
+    s.ui.settings.profiles.import = Some(Import { source, profiles: Vec::new(), from: String::new(), step: Step::FullDiskAccess { import: true, checked: !granted } });
+    // Checked "later", so no recheck replaces the scene's answer while it renders.
+    s.ui.settings.profiles.access = Some((std::time::Instant::now() + std::time::Duration::from_secs(3600), granted));
 }
 
 /// Escape closes the innermost profile overlay first.
@@ -657,6 +764,33 @@ pub(crate) fn viewport_options(current: &Value) -> Vec<(Value, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_disk_access_is_rechecked_while_its_step_shows_and_catches_a_failed_import() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let mut s = crate::App::new();
+        let mut tx = rune::Tx::default();
+        let safari = import::SOURCES.iter().find(|source| source.engine == import::Engine::Safari).unwrap();
+        let job = Arc::new(Mutex::new(Stage::Reading));
+        s.ui.settings.profiles.import = Some(Import { source: safari, profiles: Vec::new(), from: ".".into(), step: Step::Running(job.clone()) });
+        let start = Instant::now();
+        assert!(!poll_with(&mut s, &mut tx, start, || panic!("FAILED: no check while importing")));
+
+        *job.lock().unwrap() = Stage::Failed("needsFullDiskAccess");
+        assert!(poll_with(&mut s, &mut tx, start, || false), "FAILED: the import moves to the access step");
+        let step = &s.ui.settings.profiles.import.as_ref().unwrap().step;
+        assert!(matches!(step, Step::FullDiskAccess { import: true, checked: true }), "FAILED: it resumes the import, already checked");
+
+        assert!(!poll_with(&mut s, &mut tx, start + Duration::from_millis(500), || panic!("FAILED: no recheck inside 1.5 s")));
+        assert!(poll_with(&mut s, &mut tx, start + Duration::from_millis(1600), || true), "FAILED: the grant shows");
+        assert!(!poll_with(&mut s, &mut tx, start + Duration::from_millis(3200), || true), "FAILED: an unchanged answer draws nothing");
+
+        close_import(&mut s);
+        assert!(!poll_with(&mut s, &mut tx, start, || panic!("FAILED: closed")));
+        assert!(s.ui.settings.profiles.access.is_none());
+    }
 
     #[test]
     fn a_clear_reply_toasts_only_for_its_own_request() {

@@ -218,7 +218,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         let base = format!("http://127.0.0.1:{p}");
         let (serve, serve_port) = crate::desktop::exposure::tailscale_serve();
         let (env, prepared) = shell_env();
-        let bootstrap = serde_json::json!({
+        let mut bootstrap = serde_json::json!({
             "mode": "desktop",
             "noBrowser": true,
             "port": p,
@@ -228,10 +228,12 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "tailscaleServeEnabled": serve,
             "tailscaleServePort": serve_port,
             "shellEnvironmentPrepared": prepared,
-            "desktopBrowserFd": BROWSER_EVENTS_FD,
-            "desktopBrowserControlFd": BROWSER_CONTROL_FD,
-            "desktopTelemetryFd": TELEMETRY_FD,
         });
+        if cfg!(unix) {
+            bootstrap["desktopBrowserFd"] = BROWSER_EVENTS_FD.into();
+            bootstrap["desktopBrowserControlFd"] = BROWSER_CONTROL_FD.into();
+            bootstrap["desktopTelemetryFd"] = TELEMETRY_FD.into();
+        }
         let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
         let child = match spawn(&binary, &log_path, &bootstrap.to_string(), env) {
             Ok(c) => c,
@@ -374,9 +376,27 @@ const BROWSER_CONTROL_FD: i32 = 7;
 const TELEMETRY_FD: i32 = 4;
 
 fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, String)]) -> std::io::Result<Child> {
+    let out = File::options().create(true).append(true).open(log_path)?;
+    let mut command = Command::new(binary);
+    for name in DESKTOP_BACKEND_ENV_NAMES {
+        command.env_remove(name);
+    }
+    command.envs(env.iter().map(|(k, v)| (k, v))).args(["--bootstrap-fd", "0"]).stdin(Stdio::piped()).stdout(out.try_clone()?).stderr(out);
+    let connect = pass_channels(&mut command)?;
+    let mut child = command.spawn()?;
+    connect();
+    // One JSON line; the server reads fd 0 once and the pipe closes on drop.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(format!("{bootstrap}\n").as_bytes())?;
+    Ok(child)
+}
+
+/// Hands the server its browser and telemetry fds; the returned call, once the server has
+/// started, connects this side of them.
+#[cfg(unix)]
+fn pass_channels(command: &mut Command) -> std::io::Result<impl FnOnce() + use<>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
-    let out = File::options().create(true).append(true).open(log_path)?;
     let (events, server_events) = std::os::unix::net::UnixStream::pair()?;
     let (commands, server_commands) = std::os::unix::net::UnixStream::pair()?;
     let (server_telemetry, telemetry) = std::io::pipe()?;
@@ -385,11 +405,6 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
         (server_commands.as_raw_fd(), BROWSER_CONTROL_FD),
         (server_telemetry.as_raw_fd(), TELEMETRY_FD),
     ];
-    let mut command = Command::new(binary);
-    for name in DESKTOP_BACKEND_ENV_NAMES {
-        command.env_remove(name);
-    }
-    command.envs(env.iter().map(|(k, v)| (k, v))).args(["--bootstrap-fd", "0"]).stdin(Stdio::piped()).stdout(out.try_clone()?).stderr(out);
     // SAFETY: between fork and exec this only calls fcntl and dup2, which are async-signal-safe.
     unsafe {
         command.pre_exec(move || {
@@ -410,17 +425,23 @@ fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, 
             Ok(())
         });
     }
-    let mut child = command.spawn()?;
-    drop((server_events, server_commands, server_telemetry));
-    crate::desktop::telemetry::publish(telemetry);
-    crate::panel::agent::connect(events, commands);
-    // One JSON line; the server reads fd 0 once and the pipe closes on drop.
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(format!("{bootstrap}\n").as_bytes())?;
-    Ok(child)
+    Ok(move || {
+        drop((server_events, server_commands, server_telemetry));
+        crate::desktop::telemetry::publish(telemetry);
+        crate::panel::agent::connect(events, commands);
+    })
 }
 
+/// Windows passes no extra handles yet, so agents don't drive the panel's tabs there and the
+/// server gets no host telemetry.
+#[cfg(not(unix))]
+fn pass_channels(_: &mut Command) -> std::io::Result<impl FnOnce() + use<>> {
+    Ok(|| {})
+}
+
+#[cfg(unix)]
 const F_DUPFD: i32 = 0;
+#[cfg(unix)]
 unsafe extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn dup2(from: i32, to: i32) -> i32;
@@ -451,8 +472,9 @@ fn exchange(base: &str, credential: &str) -> Result<String, String> {
 fn terminate(sup: &Supervisor) {
     let mut guard = sup.child.lock().unwrap();
     let Some(child) = guard.as_mut() else { return };
-    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
-    let deadline = Instant::now() + TERMINATE_GRACE;
+    // Windows has no SIGTERM; Electron's `kill()` ends the process there at once.
+    let grace = if cfg!(unix) && Command::new("kill").args(["-TERM", &child.id().to_string()]).status().is_ok() { TERMINATE_GRACE } else { Duration::ZERO };
+    let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
             guard.take();
@@ -565,7 +587,7 @@ mod tests {
         child.wait().unwrap();
         let mut done = Some(child);
         assert!(matches!(exited(&mut done), Some(Some(_))));
-        assert_eq!(exit_reason(done.take().unwrap().wait().ok()), "killed by SIGKILL");
+        assert_eq!(exit_reason(done.take().unwrap().wait().ok()), if cfg!(unix) { "killed by SIGKILL" } else { "code=1" });
     }
 
     #[test]

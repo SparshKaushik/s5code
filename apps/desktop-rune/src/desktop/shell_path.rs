@@ -4,6 +4,7 @@
 //! Read once, off the UI thread.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -106,6 +107,10 @@ pub fn server_env() -> (&'static [(String, String)], bool) {
 }
 
 fn resolve() -> Shell {
+    // Windows apps inherit the user's environment; there is no login shell to read.
+    if cfg!(windows) {
+        return Shell { patch: Vec::new(), path: std::env::var("PATH").unwrap_or_default(), from_shell: false };
+    }
     let mut shell: HashMap<String, String> = HashMap::new();
     for candidate in candidates(std::env::var("SHELL").ok().as_deref()) {
         shell.extend(read(&candidate));
@@ -126,9 +131,15 @@ fn resolve() -> Shell {
     Shell { patch, path, from_shell }
 }
 
+#[cfg(unix)]
 fn runtime_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     if cfg!(target_os = "linux") { std::fs::metadata("/proc/self").ok().map(|m| m.uid()) } else { None }
+}
+
+#[cfg(not(unix))]
+fn runtime_uid() -> Option<u32> {
+    None
 }
 
 fn non_empty<'a>(env: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
@@ -213,14 +224,11 @@ fn capture_command(shell: &str) -> String {
 
 /// `readEnvironmentFromLoginShell`: an interactive login shell, detached from any terminal.
 fn read(shell: &str) -> HashMap<String, String> {
-    let Ok(mut child) = Command::new(shell)
-        .args(["-ilc", &capture_command(shell)])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-    else {
+    let mut command = Command::new(shell);
+    command.args(["-ilc", &capture_command(shell)]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    let Ok(mut child) = command.spawn() else {
         return HashMap::new();
     };
     let stdout = child.stdout.take();

@@ -996,9 +996,11 @@ mod tests {
     fn web_pages_follow_electrons_link_and_file_rules() {
         assert_eq!(web_page("https://example.com/a?b=1"), Some(WebPage::Url("https://example.com/a?b=1".into())));
         assert_eq!(web_page("http://localhost:3000"), Some(WebPage::Url("http://localhost:3000/".into())));
-        assert_eq!(web_page("file:///home/a%20b/Index.HTML"), Some(WebPage::File("/home/a b/Index.HTML".into())));
-        for page in ["file:///x/page.htm", "file:///x/page.xhtml", "file:///x/page.xhtm"] {
-            assert!(matches!(web_page(page), Some(WebPage::File(_))), "{page}");
+        // A Windows file URL names a drive.
+        let (root, path) = if cfg!(windows) { ("file:///C:", "C:\\home\\a b\\Index.HTML") } else { ("file://", "/home/a b/Index.HTML") };
+        assert_eq!(web_page(&format!("{root}/home/a%20b/Index.HTML")), Some(WebPage::File(path.into())));
+        for page in ["/x/page.htm", "/x/page.xhtml", "/x/page.xhtm"] {
+            assert!(matches!(web_page(&format!("{root}{page}")), Some(WebPage::File(_))), "{page}");
         }
         for other in ["file:///x/notes.md", "file:///x.html/notes", "file:///x/html", "mailto:a@b.c", "s5code://new?prompt=x", "ftp://a/b.html"] {
             assert_eq!(web_page(other), None, "{other}");

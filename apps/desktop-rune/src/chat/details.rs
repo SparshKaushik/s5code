@@ -2116,7 +2116,7 @@ mod tests {
         assert!(!editor_denied(&s) && !can_open_editor(&s), "FAILED: no SSH route leaves nothing to open with");
         assert!(editors(&s).is_empty());
         assert_eq!(editor_label("vscode"), "VS Code");
-        assert_eq!(editor_label("file-manager"), if cfg!(target_os = "macos") { "Finder" } else { "Files" });
+        assert_eq!(editor_label("file-manager"), if cfg!(target_os = "macos") { "Finder" } else if cfg!(windows) { "File Explorer" } else { "Files" });
     }
 
     #[test]

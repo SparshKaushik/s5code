@@ -200,6 +200,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::lifecycle::poll(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
+    changed |= settings::browser_profiles::poll(s, tx);
     changed |= settings::pulse_tick(s, tx);
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s, tx);
@@ -208,6 +209,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::remember_route(s);
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
+    changed |= shell::swipe::poll(s);
     changed |= pages::poll(s);
     changed |= pages::pr_code::answer_reveal(s, tx);
     changed |= pages::pr_detail::anchor_header(s, tx);
@@ -303,12 +305,14 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
+        on_wheel: Some(shell::swipe::on_wheel),
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
     let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url).compositor(panel::DeviceViewport::default());
     panel::popout::register(&mut app);
     desktop::capture::register(&mut app);
+    desktop::permission_helper::register(&mut app);
     notify::set_window(app.handle());
     instance.serve(app.handle());
     #[cfg(unix)]

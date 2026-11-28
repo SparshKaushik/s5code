@@ -4,7 +4,8 @@
 //! `secret-tool`) and joins a catalog that already exists. It never makes a key, since a blob
 //! Electron can't decrypt would cost it every saved connection.
 //!
-//! Bearer and T3 Connect connections sync both ways. SSH and learned entries are kept as they are.
+//! Bearer, SSH and T3 Connect connections sync both ways; an SSH one carries only its target,
+//! since each app opens its own tunnel and pairs through it. Learned entries are kept as they are.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -13,6 +14,19 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use super::Saved;
+use super::ssh::Target;
+
+/// An SSH environment: its id, label and the target that reaches it.
+pub type SshEntry = (String, String, Target);
+
+/// What the catalog holds for Rune: bearer connections, SSH environments, and T3 Connect
+/// routes by environment id and label.
+#[derive(Default)]
+pub struct Read {
+    pub bearers: Vec<Saved>,
+    pub ssh: Vec<SshEntry>,
+    pub relays: Vec<(String, String)>,
+}
 use crate::panel::browser_import::{decrypt_cbc, derive, encrypt_cbc};
 
 /// The names safeStorage may have used: `app.setName` runs before ready, and a packaged build
@@ -80,6 +94,26 @@ fn bearers(inner: &Value) -> Vec<Saved> {
         .collect()
 }
 
+/// SSH environments by their profile's `DesktopSshEnvironmentTarget`.
+fn ssh_entries(inner: &Value) -> Vec<SshEntry> {
+    list(inner, "targets")
+        .filter(|t| t["_tag"] == "SshConnectionTarget")
+        .filter_map(|t| {
+            let id = t["connectionId"].as_str()?;
+            let target = &list(inner, "profiles").find(|p| p["connectionId"] == id && p["_tag"] == "SshConnectionProfile" && p["environmentId"] == t["environmentId"])?["target"];
+            let field = |k: &str| target[k].as_str().unwrap_or_default().trim().to_owned();
+            let target = Target {
+                alias: field("alias"),
+                hostname: field("hostname"),
+                username: target["username"].as_str().map(str::trim).filter(|u| !u.is_empty()).map(str::to_owned),
+                port: target["port"].as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p > 0),
+            };
+            Some((t["environmentId"].as_str()?.to_owned(), t["label"].as_str().unwrap_or_default().to_owned(), target))
+        })
+        .filter(|(id, _, t)| !id.is_empty() && !(t.alias.is_empty() && t.hostname.is_empty()))
+        .collect()
+}
+
 /// T3 Connect routes (`RelayConnectionTarget`): an environment and its label. Where it is comes
 /// from the account's listing, since the catalog keeps no endpoint for it.
 fn relays(inner: &Value) -> Vec<(String, String)> {
@@ -110,9 +144,9 @@ fn rows<'a>(inner: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
     inner[key].as_array_mut().expect("made an array above")
 }
 
-/// Mirrors Rune's bearer list into the catalog: each saved one upserted, each one removed
-/// since the last save dropped.
-fn merge(inner: &mut Value, old: &[Saved], new: &[Saved], relay: &[String]) {
+/// Mirrors Rune's bearer, SSH and relay lists into the catalog: each saved one upserted, each
+/// one removed since the last save dropped.
+fn merge(inner: &mut Value, old: &[Saved], new: &[Saved], ssh: &[SshEntry], relay: &[String]) {
     let removed: Vec<&str> = old.iter().filter(|o| !new.iter().any(|n| n.id == o.id)).map(|o| o.id.as_str()).collect();
     // A relay route goes with its environment, or alone when Rune dropped just that route.
     // Electron's relay routes for environments Rune has not adopted stay.
@@ -132,7 +166,7 @@ fn merge(inner: &mut Value, old: &[Saved], new: &[Saved], relay: &[String]) {
         }
     }
     let gone: Vec<String> = list(inner, "targets")
-        .filter(|t| t["_tag"] == "BearerConnectionTarget" && t["environmentId"].as_str().is_some_and(|id| removed.contains(&id)))
+        .filter(|t| (t["_tag"] == "BearerConnectionTarget" || t["_tag"] == "SshConnectionTarget") && t["environmentId"].as_str().is_some_and(|id| removed.contains(&id)))
         .filter_map(|t| t["connectionId"].as_str().map(str::to_owned))
         .collect();
     for key in ["targets", "profiles", "credentials"] {
@@ -165,23 +199,41 @@ fn merge(inner: &mut Value, old: &[Saved], new: &[Saved], relay: &[String]) {
             None => credentials.push(json!({"connectionId": id, "credential": credential})),
         }
     }
+    for (env, label, target) in ssh {
+        let existing = list(inner, "targets").find(|t| t["_tag"] == "SshConnectionTarget" && t["environmentId"] == env.as_str()).and_then(|t| t["connectionId"].as_str()).map(str::to_owned);
+        let id = existing.unwrap_or_else(|| format!("ssh:{env}"));
+        let spec = json!({"alias": target.alias, "hostname": target.hostname, "username": target.username, "port": target.port});
+        let targets = rows(inner, "targets");
+        match targets.iter_mut().find(|t| t["connectionId"] == id.as_str()) {
+            Some(t) => t["label"] = json!(label),
+            None => targets.push(json!({"_tag": "SshConnectionTarget", "environmentId": env, "label": label, "connectionId": id})),
+        }
+        let profiles = rows(inner, "profiles");
+        match profiles.iter_mut().find(|p| p["connectionId"] == id.as_str()) {
+            Some(p) => {
+                p["label"] = json!(label);
+                p["target"] = spec;
+            }
+            None => profiles.push(json!({"_tag": "SshConnectionProfile", "connectionId": id, "environmentId": env, "label": label, "target": spec})),
+        }
+    }
 }
 
-/// The catalog's bearer connections and T3 Connect routes, remembering the key for saves.
+/// The catalog's bearer, SSH and T3 Connect connections, remembering the key for saves.
 /// Blocking: the keychain may ask the person first.
-pub fn read() -> (Vec<Saved>, Vec<(String, String)>) {
+pub fn read() -> Read {
     let Ok(text) = std::fs::read_to_string(path()) else { return Default::default() };
     let Some((inner, key)) = open(&text, candidates()) else { return Default::default() };
     *KEY.lock().unwrap() = Some(key);
-    (bearers(&inner), relays(&inner))
+    Read { bearers: bearers(&inner), ssh: ssh_entries(&inner), relays: relays(&inner) }
 }
 
 /// After Rune saves its list: the catalog follows, read fresh since Electron may have written.
-pub fn export(old: &[Saved], new: &[Saved], relay: &[String]) {
+pub fn export(old: &[Saved], new: &[Saved], ssh: &[SshEntry], relay: &[String]) {
     let Some(key) = *KEY.lock().unwrap() else { return };
     let path = path();
     let Some((mut inner, _)) = std::fs::read_to_string(&path).ok().and_then(|text| open(&text, [key])) else { return };
-    merge(&mut inner, old, new, relay);
+    merge(&mut inner, old, new, ssh, relay);
     let temporary = path.with_file_name(format!("connection-catalog.json.{}.{}.tmp", std::process::id(), s5_net::uuid().replace('-', "")));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -238,7 +290,7 @@ mod tests {
         let renamed = Saved { label: "Renamed".into(), bearer: "tok-new".into(), ..bearers(&inner)[0].clone() };
         let added = saved("env-new", "http://10.0.0.5:3773", "tok-x");
         let tunnel = saved("env-ssh2", "http://127.0.0.1:40001", "tok-t");
-        merge(&mut inner, &[], &[renamed, added.clone(), tunnel], &[]);
+        merge(&mut inner, &[], &[renamed, added.clone(), tunnel], &[], &[]);
         let read = bearers(&inner);
         assert_eq!(read.len(), 2, "a loopback SSH tunnel stays out: {read:?}");
         assert_eq!((read[0].label.as_str(), read[0].bearer.as_str()), ("Renamed", "tok-new"));
@@ -246,11 +298,30 @@ mod tests {
         let profile = list(&inner, "profiles").find(|p| p["environmentId"] == "env-new").unwrap();
         assert_eq!((profile["connectionId"].as_str(), profile["httpBaseUrl"].as_str(), profile["wsBaseUrl"].as_str()), (Some("bearer:env-new:http://10.0.0.5:3773"), Some("http://10.0.0.5:3773/"), Some("ws://10.0.0.5:3773/")));
 
-        merge(&mut inner, &[added.clone()], &[], &[]);
+        merge(&mut inner, &[added.clone()], &[], &[], &[]);
         assert!(bearers(&inner).iter().all(|e| e.id != "env-new"), "removed in Rune, removed here");
         assert!(list(&inner, "credentials").all(|c| c["connectionId"] != "bearer:env-new:http://10.0.0.5:3773"));
         assert_eq!(list(&inner, "targets").filter(|t| t["_tag"] != "BearerConnectionTarget").count(), 2, "SSH and relay entries stay");
         assert_eq!(inner["disabledEnvironmentIds"], json!(["env-relay"]));
+    }
+
+    #[test]
+    fn ssh_environments_sync_by_target() {
+        let mut inner = catalog();
+        let devbox = Target { alias: "devbox".into(), hostname: "devbox".into(), username: None, port: None };
+        assert_eq!(ssh_entries(&inner), [("env-ssh".to_owned(), "devbox".to_owned(), devbox.clone())]);
+
+        let moved = Target { username: Some("me".into()), port: Some(2222), ..devbox };
+        let added = Target { alias: String::new(), hostname: "10.0.0.9".into(), username: None, port: None };
+        merge(&mut inner, &[], &[], &[("env-ssh".into(), "Dev box".into(), moved.clone()), ("env-new".into(), "lab".into(), added.clone())], &[]);
+        assert_eq!(ssh_entries(&inner), [("env-ssh".to_owned(), "Dev box".to_owned(), moved), ("env-new".to_owned(), "lab".to_owned(), added)]);
+        let profile = list(&inner, "profiles").find(|p| p["connectionId"] == "ssh:env-new").unwrap();
+        assert_eq!(profile["target"], json!({"alias": "", "hostname": "10.0.0.9", "username": null, "port": null}), "Electron's DesktopSshEnvironmentTarget shape");
+        assert_eq!(list(&inner, "targets").filter(|t| t["_tag"] == "SshConnectionTarget").count(), 2, "updated in place, not duplicated");
+
+        merge(&mut inner, &[saved("env-ssh", "http://127.0.0.1:40001", "t")], &[], &[], &[]);
+        assert!(ssh_entries(&inner).iter().all(|(id, ..)| id != "env-ssh"), "removed in Rune, removed here");
+        assert!(list(&inner, "credentials").all(|c| c["connectionId"] != "ssh:env-ssh"));
     }
 
     #[test]
@@ -260,7 +331,7 @@ mod tests {
 
         let relay_only = saved("env-cloud", "https://env-cloud.tunnel.example", crate::env::T3_CONNECT);
         let both = bearers(&inner)[0].clone();
-        merge(&mut inner, &[], &[both.clone(), relay_only.clone()], &["env-abc".into(), "env-cloud".into()]);
+        merge(&mut inner, &[], &[both.clone(), relay_only.clone()], &[], &["env-abc".into(), "env-cloud".into()]);
         let tags: Vec<(String, String)> = list(&inner, "targets").map(|t| (t["_tag"].as_str().unwrap().to_owned(), t["environmentId"].as_str().unwrap().to_owned())).collect();
         let at = |tag: &str, id: &str| tags.iter().position(|t| t.0 == tag && t.1 == id);
         assert!(at("RelayConnectionTarget", "env-abc") == at("BearerConnectionTarget", "env-abc").map(|i| i + 1), "a fallback relay route follows its environment's bearer route: {tags:?}");
@@ -268,7 +339,7 @@ mod tests {
         assert!(list(&inner, "credentials").all(|c| !c["connectionId"].as_str().unwrap().contains("env-cloud")));
         assert_eq!(relays(&inner).len(), 3, "Electron's own relay route stays");
 
-        merge(&mut inner, &[both.clone(), relay_only.clone()], &[both], &[]);
+        merge(&mut inner, &[both.clone(), relay_only.clone()], &[both], &[], &[]);
         assert_eq!(relays(&inner), [("env-relay".to_owned(), "Relay".to_owned())], "removing the environment or just its relay route removes the target");
     }
 }

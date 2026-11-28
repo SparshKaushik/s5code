@@ -1663,6 +1663,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
     ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
     ("settings-browser-add-profile-menu", |s| browser_profiles_scene(s, false, Some("add"))),
+    ("settings-browser-import-full-disk-access", |s| {
+        browser_profiles_scene(s, false, None);
+        browser_profiles::full_disk_access_scene(s, false);
+    }),
+    ("settings-browser-import-full-disk-access-allowed", |s| {
+        browser_profiles_scene(s, true, None);
+        browser_profiles::full_disk_access_scene(s, true);
+    }),
     ("settings-browser-remove-profile", |s| {
         browser_profiles_scene(s, false, None);
         s.ui.settings.profiles.remove = Some(("profile-work".into(), "Work".into()));
