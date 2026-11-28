@@ -85,7 +85,7 @@ fn snooze_entries(s: &App, ids: &[String], now: i64) -> Vec<MenuEntry> {
             let ids = ids.to_vec();
             MenuEntry::item(item(label, move |s, _| {
                 close(s);
-                super::snooze_many(s, &ids, until);
+                super::snooze_picked(s, &ids, until);
             }))
         })
         .collect();
