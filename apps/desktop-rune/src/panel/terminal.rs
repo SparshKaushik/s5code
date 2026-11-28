@@ -186,7 +186,8 @@ fn add_to_chat(s: &mut App, thread: &str, id: &str) {
     for session in &mut s.ui.panel.terminal.sessions {
         session.input.focused = false;
     }
-    crate::chat::composer::add_terminal_context(s, thread, id, &label, start, end, &text);
+    let key = super::drawer::composer_key(s, thread);
+    crate::chat::composer::add_terminal_context(s, &key, id, &label, start, end, &text);
 }
 
 pub fn label_for(id: &str) -> String {
@@ -430,8 +431,12 @@ pub fn focus(app: &mut App, thread: &str, id: &str) {
     }
 }
 
+fn can_write(app: &App, thread: &str, id: &str) -> bool {
+    app.ui.panel.drawer.owner_of(thread, id).is_none() || super::drawer::can_operate(app)
+}
+
 fn send(app: &mut App, thread: &str, id: &str, data: String) {
-    if data.is_empty() {
+    if data.is_empty() || !can_write(app, thread, id) {
         return;
     }
     let data = match app.ui.panel.terminal.get_mut(thread, id) {
@@ -463,7 +468,9 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
     };
-    if let Some((cols, rows)) = session.fit_to(cols, rows, Instant::now())
+    let settled = session.fit_to(cols, rows, Instant::now());
+    if let Some((cols, rows)) = settled
+        && can_write(app, thread, id)
         && let Some(net) = app.src.net()
     {
         let request = net.request("terminal.resize", json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}));
@@ -847,13 +854,16 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
         return false;
     };
     let selection = session.vt.selection_text().is_some();
+    let writable = can_write(app, thread, id);
     match clip(e, cfg!(target_os = "macos"), selection) {
         Some(Clip::Copy { clear }) => {
             copy_selection(app, tx, thread, id, clear);
             return true;
         }
         Some(Clip::Paste) => {
-            paste_clipboard(tx, thread, id);
+            if writable {
+                paste_clipboard(tx, thread, id);
+            }
             return true;
         }
         Some(Clip::SelectAll) => {
@@ -873,6 +883,9 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
     };
     if session.vt.history_key(e, cfg!(target_os = "macos")) {
         return true;
+    }
+    if !writable {
+        return false;
     }
     match session.vt.key(e) {
         Some(data) => {
@@ -1451,8 +1464,9 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
             focus(s, &thread, &id);
         })
     };
-    let entries = vec![
-        kit::MenuEntry::item({
+    let mut entries = Vec::new();
+    if app.ui.panel.drawer.owner_of(&menu.thread, &menu.id).is_some() {
+        entries.push(kit::MenuEntry::item({
             // Not `item`: the caret goes to the composer, not back to the terminal.
             let (thread, id) = (menu.thread.clone(), menu.id.clone());
             kit::MenuItem::new("Add to chat")
@@ -1461,13 +1475,13 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                     add_to_chat(s, &thread, &id);
                 })
                 .disabled(!selection)
-        }),
-        kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)),
-    ];
+        }));
+    }
+    entries.push(kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)));
     let entries = if menu.selection {
         entries
     } else {
-        entries.into_iter().chain(right_click_entries(item)).collect()
+        entries.into_iter().chain(right_click_entries(item, can_write(app, &menu.thread, &menu.id))).collect()
     };
     kit::Menu::new("terminal-menu")
         .native(true)
@@ -1479,9 +1493,9 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .overlay(&kit::theme(t), out);
 }
 
-fn right_click_entries(item: impl Fn(&str, fn(&mut App, &mut Tx, &str, &str)) -> kit::MenuItem) -> Vec<kit::MenuEntry> {
+fn right_click_entries(item: impl Fn(&str, fn(&mut App, &mut Tx, &str, &str)) -> kit::MenuItem, writable: bool) -> Vec<kit::MenuEntry> {
     vec![
-        kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
+        kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id)).disabled(!writable)),
         kit::MenuEntry::item(item("Select all", |s, _, th, id| {
             if let Some(session) = s.ui.panel.terminal.get_mut(th, id) {
                 session.vt.select_all();

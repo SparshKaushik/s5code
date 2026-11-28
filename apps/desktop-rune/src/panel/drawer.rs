@@ -300,7 +300,7 @@ impl Ui {
             Owner::Panel => self.panel.entry(thread.into()).or_default(),
         }
     }
-    fn owner_of(&self, thread: &str, id: &str) -> Option<Owner> {
+    pub(super) fn owner_of(&self, thread: &str, id: &str) -> Option<Owner> {
         [Owner::Drawer, Owner::Panel]
             .into_iter()
             .find(|&o| self.groups(o, thread).is_some_and(|g| g.ids().any(|v| v == id)))
@@ -354,6 +354,16 @@ fn current_thread(app: &App) -> Option<String> {
     }
 }
 
+pub(super) fn composer_key(app: &App, thread: &str) -> String {
+    app.ui.panel.drawer.drafts.iter()
+        .find(|(_, id)| id.as_str() == thread)
+        .map_or_else(|| thread.to_owned(), |(key, _)| key.clone())
+}
+
+pub(super) fn can_operate(app: &App) -> bool {
+    crate::chat::details::grants(app, "terminal:operate")
+}
+
 /// The current thread; a draft gets the thread id it will be created with (web's draft terminals).
 fn current_or_draft(app: &mut App) -> Option<String> {
     if let Some(thread) = current_thread(app) {
@@ -385,6 +395,7 @@ fn allocate(app: &App, thread: &str) -> String {
         .into_iter()
         .filter_map(|o| ui.groups(o, thread))
         .flat_map(|g| g.ids().cloned())
+        .chain(terminal::known(app, thread).into_iter().map(|(id, _, _)| id))
         .collect();
     terminal::next_id(&ids)
 }
@@ -403,6 +414,12 @@ pub fn toggle(app: &mut App) {
     let Some(thread) = current_or_draft(app) else {
         return;
     };
+    if !app.ui.panel.drawer.is_open(&thread)
+        && !crate::chat::details::grants(app, "terminal:read")
+        && !can_operate(app)
+    {
+        return;
+    }
     let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
     if state.open {
         state.open = false;
@@ -443,6 +460,9 @@ pub fn show(app: &mut App, id: &str) {
 }
 
 pub fn new_terminal(app: &mut App, owner: Owner) {
+    if !can_operate(app) {
+        return;
+    }
     let Some(thread) = current_or_draft(app) else {
         return;
     };
@@ -474,6 +494,9 @@ fn reusable_script_terminal(drawer: &[String], active: &str, panel: &[String], r
 }
 
 pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
+    if !can_operate(app) {
+        return;
+    }
     let Some(thread) = current_or_draft(app) else {
         return;
     };
@@ -506,6 +529,9 @@ pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
 }
 
 pub fn split(app: &mut App, owner: Owner, vertical: bool) {
+    if !can_operate(app) {
+        return;
+    }
     let Some(thread) = current_or_draft(app) else {
         return;
     };
@@ -569,6 +595,9 @@ pub(super) fn activate_group(app: &mut App, group: &str) {
 }
 
 pub(super) fn request_close_groups(app: &mut App, groups: Vec<String>) {
+    if !can_operate(app) {
+        return;
+    }
     if !groups.is_empty() && let Some(thread) = current_thread(app) {
         app.ui.panel.drawer.confirm = Some(Confirm::Groups { thread, groups });
     }
@@ -597,6 +626,9 @@ pub fn focus_panel(app: &mut App) {
 
 /// Closing the panel's Terminal surface asks first, as it stops every terminal in it.
 pub fn request_close_panel(app: &mut App) {
+    if !can_operate(app) {
+        return;
+    }
     match current_thread(app).filter(|t| app.ui.panel.drawer.panel.get(t).is_some_and(|g| !g.is_empty())) {
         Some(thread) => app.ui.panel.drawer.confirm = Some(Confirm::Panel(thread)),
         None => {
@@ -633,6 +665,9 @@ fn select(app: &mut App, owner: Owner, id: &str) {
 }
 
 pub fn request_close(app: &mut App, owner: Owner, id: &str) {
+    if !can_operate(app) {
+        return;
+    }
     if let Some(thread) = current_thread(app) {
         app.ui.panel.drawer.confirm = Some(Confirm::One(owner, thread, id.into()));
     }
@@ -687,6 +722,11 @@ pub fn shortcut(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
     ]
     .into_iter()
     .find(|c| super::shortcut(app, e, c));
+    if !can_operate(app)
+        && matches!(command, Some("terminal.split" | "terminal.splitVertical" | "terminal.new" | "terminal.close"))
+    {
+        return false;
+    }
     match command {
         Some("terminal.toggle") => toggle(app),
         Some("terminal.split") => split(app, owner, false),
@@ -788,7 +828,7 @@ fn with_shortcut(app: &App, label: &str, command: &str) -> String {
 
 fn actions(app: &App, t: &T, owner: Owner, full: bool, sidebar: bool) -> El {
     // Every action needs terminal:operate, as web's `canOperateTerminal`.
-    let operate = crate::chat::details::grants(app, "terminal:operate");
+    let operate = can_operate(app);
     let split_label = |base: &str, command: &str| {
         if full {
             format!("{base} (max {MAX_PER_GROUP} per group)")
@@ -935,24 +975,26 @@ fn sidebar(app: &App, t: &T, owner: Owner, thread: &str, groups: &Groups) -> El 
             };
             let (close_id, select_id) = (id.clone(), id.clone());
             let close_label = if active { with_shortcut(app, &format!("Close {label}"), "terminal.close") } else { format!("Close {label}") };
-            let operable = crate::chat::details::grants(app, "terminal:operate");
-            let mut close = row()
+            let operable = can_operate(app);
+            let close = if operable {
+                row()
                 .size(16., 16.)
                 .center()
                 .role("button")
                 .label(close_label.clone())
                 .help(close_label)
                 .focusable(true)
-                .children(close_layers(operable).into_iter().map(|layer| match layer {
+                .children(close_layers().into_iter().map(|layer| match layer {
                     CloseLayer::Backdrop => el().size(16., 16.).pin(Some(0.), Some(0.), None, None).radius(2.).hover(t.c.muted),
                     CloseLayer::Glyph { glyph, rest, hovered } => {
                         let color = if std::ptr::eq(glyph, &icons::X) { t.c.foreground } else { fg };
                         icon(glyph, 12.).size(12., 12.).color(color).group_opacity(rest, hovered).pin(Some(2.), Some(2.), None, None)
                     }
-                }));
-            if operable {
-                close = close.on_press(move |s: &mut App| request_close(s, owner, &close_id));
-            }
+                }))
+                .on_press(move |s: &mut App| request_close(s, owner, &close_id))
+            } else {
+                icon(&icons::SQUARE_TERMINAL, 12.).size(12., 12.).color(fg)
+            };
             let mut entry = row()
                 .w_full()
                 .h(24.)
@@ -1017,15 +1059,12 @@ enum CloseLayer {
     Glyph { glyph: &'static rune::Icon, rest: f32, hovered: f32 },
 }
 
-fn close_layers(operable: bool) -> Vec<CloseLayer> {
-    let backdrop = operable.then_some(CloseLayer::Backdrop);
-    backdrop
-        .into_iter()
-        .chain([
-            CloseLayer::Glyph { glyph: &icons::SQUARE_TERMINAL, rest: 1., hovered: 0. },
-            CloseLayer::Glyph { glyph: &icons::X, rest: 0., hovered: 1. },
-        ])
-        .collect()
+fn close_layers() -> [CloseLayer; 3] {
+    [
+        CloseLayer::Backdrop,
+        CloseLayer::Glyph { glyph: &icons::SQUARE_TERMINAL, rest: 1., hovered: 0. },
+        CloseLayer::Glyph { glyph: &icons::X, rest: 0., hovered: 1. },
+    ]
 }
 
 /// The drawer or panel body for one owner's terminals.
@@ -1056,7 +1095,7 @@ pub fn surface(app: &App, t: &T, owner: Owner, width: f32) -> El {
                 kit::Button::new(with_shortcut(app, "New Terminal", "terminal.new"))
                     .variant("outline")
                     .size("xs")
-                    .disabled(!crate::chat::details::grants(app, "terminal:operate"))
+                    .disabled(!can_operate(app))
                     .on_press(move |s: &mut App| new_terminal(s, owner))
                     .build(t),
             );
@@ -1152,7 +1191,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .build(t);
     let confirm = kit::Button::new("Confirm")
         .variant("destructive")
-        .on_press(|s: &mut App| match s.ui.panel.drawer.confirm.take() {
+        .disabled(!can_operate(app))
+        .on_press(|s: &mut App| match s.ui.panel.drawer.confirm.take().filter(|_| can_operate(s)) {
             Some(Confirm::One(owner, thread, id)) => close_now(s, owner, &thread, &id),
             Some(Confirm::Groups { thread, groups }) if current_thread(s).as_deref() == Some(thread.as_str()) => {
                 let ids = group_ids(&s.ui.panel.drawer, &thread, &groups);
@@ -1238,13 +1278,10 @@ mod tests {
                 })
                 .collect()
         };
-        for operable in [true, false] {
-            let layers = close_layers(operable);
-            assert_eq!(shown(&layers, false), [icons::SQUARE_TERMINAL.name]);
-            assert_eq!(shown(&layers, true), [icons::X.name], "the row's hover reaches the glyphs");
-            let backdrops: Vec<usize> = layers.iter().enumerate().filter(|(_, l)| matches!(l, CloseLayer::Backdrop)).map(|(i, _)| i).collect();
-            assert_eq!(backdrops, if operable { vec![0] } else { vec![] }, "only a closable tab gets the fill, under the glyphs and not around them");
-        }
+        let layers = close_layers();
+        assert_eq!(shown(&layers, false), [icons::SQUARE_TERMINAL.name]);
+        assert_eq!(shown(&layers, true), [icons::X.name], "the row's hover reaches the glyphs");
+        assert!(matches!(layers[0], CloseLayer::Backdrop));
     }
 
     #[test]
@@ -1379,12 +1416,31 @@ mod tests {
         app.navigate(Route::Home { project_id: Some(project.clone()) });
         assert_eq!(current_thread(&app), None, "no id until a terminal needs one");
         let thread = current_or_draft(&mut app).unwrap();
+        assert_eq!(composer_key(&app, &thread), crate::chat::composer::home_key(&project));
+        assert_eq!(composer_key(&app, "other-thread"), "other-thread");
         assert!(thread.starts_with(&format!("thread:project:{project}:")), "{thread}");
         assert_eq!(launch_context(&app), Some((thread.clone(), root.clone(), None, Some(root.clone()))));
         app.ui.chat.home.workspace = Some((project.clone(), json!({"type": "existing_worktree", "worktreePath": "/w/b", "branch": "feat/b"})));
         assert_eq!(launch_context(&app), Some((thread.clone(), "/w/b".into(), Some("/w/b".into()), Some(root))), "the picked worktree");
         assert_eq!(take_draft_thread(&mut app, &project), Some(thread), "the thread is created with the terminals' id");
         assert_eq!(current_thread(&app), None);
+    }
+
+    #[test]
+    fn read_only_connections_cannot_change_the_drawer_layout() {
+        let mut app = App::new();
+        app.navigate(Route::Thread("t".into()));
+        crate::chat::details::set_session(&mut app, Some(Ok(json!({"authenticated": true, "scopes": ["terminal:read"]}))));
+        toggle(&mut app);
+        new_terminal(&mut app, Owner::Drawer);
+        split(&mut app, Owner::Drawer, false);
+        request_close(&mut app, Owner::Drawer, DEFAULT_ID);
+        let drawer = &app.ui.panel.drawer;
+        assert!(drawer.is_open("t"));
+        assert_eq!(drawer.groups(Owner::Drawer, "t").unwrap().ids().count(), 1);
+        assert!(drawer.confirm.is_none());
+        terminal::known_fixture(&mut app, "t", &["term-2"]);
+        assert_eq!(allocate(&app, "t"), "term-3");
     }
 
     #[test]

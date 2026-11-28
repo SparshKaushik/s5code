@@ -324,7 +324,7 @@ fn quick_action(s: &App, status: Option<&Value>) -> Quick {
 
 /// Runs a stacked action, first asking on the default branch (`runGitActionWithToast`).
 fn run(s: &mut App, action: &'static str, message: Option<String>, files: Option<Vec<String>>, feature_branch: bool, skip_prompt: bool) {
-    if denied(s) {
+    if denied(s) || (feature_branch && !super::can_change_branch(s)) {
         return;
     }
     let Some(cwd) = cwd(s) else { return };
@@ -705,10 +705,14 @@ fn close_commit(s: &mut App) {
 }
 
 fn submit_commit(s: &mut App, feature_branch: bool) {
-    let Some(commit) = s.ui.chat.details.git.commit.take() else { return };
+    let Some(commit) = &s.ui.chat.details.git.commit else { return };
     let files = status(s).map(|v| files(&v)).unwrap_or_default();
     let selected: Vec<String> = files.iter().filter(|f| !commit.excluded.contains(&f.0)).map(|f| f.0.clone()).collect();
+    if selected.is_empty() || !writable(s) || (feature_branch && !super::can_change_branch(s)) {
+        return;
+    }
     let message = Some(commit.message.text.trim().to_string()).filter(|m| !m.is_empty());
+    close_commit(s);
     let paths = (selected.len() != files.len()).then_some(selected);
     run(s, "commit", message, paths, feature_branch, feature_branch);
 }
