@@ -161,11 +161,37 @@ pub fn matrix(q: Quat) -> [f32; 16] {
     ]
 }
 
-/// `nearestDeviceView` over views of `rotation`, each allowed to turn about y within `yaw_limit`.
-pub fn nearest_view(rotation: Quat, views: &[(Quat, f32)]) -> Option<Quat> {
+/// `v.applyQuaternion(q)`.
+pub fn rotate(q: Quat, v: Vec3) -> Vec3 {
+    let p = mul(mul(q, [v[0], v[1], v[2], 0.]), invert(q));
+    [p[0], p[1], p[2]]
+}
+
+/// `setFromRotationMatrix(makeBasis(x, y, z))`.
+pub fn from_basis(x: Vec3, y: Vec3, z: Vec3) -> Quat {
+    let (m11, m12, m13, m21, m22, m23, m31, m32, m33) = (x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]);
+    let trace = m11 + m22 + m33;
+    if trace > 0. {
+        let s = 0.5 / (trace + 1.).sqrt();
+        [(m32 - m23) * s, (m13 - m31) * s, (m21 - m12) * s, 0.25 / s]
+    } else if m11 > m22 && m11 > m33 {
+        let s = 2. * (1. + m11 - m22 - m33).sqrt();
+        [0.25 * s, (m12 + m21) / s, (m13 + m31) / s, (m32 - m23) / s]
+    } else if m22 > m33 {
+        let s = 2. * (1. + m22 - m11 - m33).sqrt();
+        [(m12 + m21) / s, 0.25 * s, (m23 + m32) / s, (m13 - m31) / s]
+    } else {
+        let s = 2. * (1. + m33 - m11 - m22).sqrt();
+        [(m13 + m31) / s, (m23 + m32) / s, 0.25 * s, (m21 - m12) / s]
+    }
+}
+
+/// `nearestDeviceView` over views of `rotation`, each allowed to turn about y within `yaw_limit`:
+/// the nearest's index and the turned view.
+pub fn nearest_view(rotation: Quat, views: &[(Quat, f32)]) -> Option<(usize, Quat)> {
     let mut closest = None;
     let mut distance = f32::INFINITY;
-    for &(view, yaw_limit) in views {
+    for (index, &(view, yaw_limit)) in views.iter().enumerate() {
         let relative = mul(rotation, invert(view));
         let turn = 2. * relative[1].atan2(relative[3]);
         let yaw = turn.sin().atan2(turn.cos()).clamp(-yaw_limit, yaw_limit);
@@ -173,12 +199,11 @@ pub fn nearest_view(rotation: Quat, views: &[(Quat, f32)]) -> Option<Quat> {
         let next = angle_to(candidate, rotation);
         if next < distance - 1e-8 {
             distance = next;
-            closest = Some(candidate);
+            closest = Some((index, candidate));
         }
     }
     closest
 }
-
 
 struct Spring {
     at: f64,
@@ -431,7 +456,7 @@ mod tests {
 
     /// A phone's one rest view, as the device panel chooses it.
     fn phone_view(rotation: Quat) -> Quat {
-        nearest_view(rotation, &[(IDENTITY, YAW_LIMIT)]).unwrap_or(IDENTITY)
+        nearest_view(rotation, &[(IDENTITY, YAW_LIMIT)]).map_or(IDENTITY, |(_, view)| view)
     }
 
     fn yaw(q: Quat) -> f32 {

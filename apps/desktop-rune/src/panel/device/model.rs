@@ -1377,6 +1377,13 @@ mod tests {
         assert!((hi[1] - lo[1] - SCREEN_HEIGHT).abs() < 0.5, "scaled to the other devices' size: {lo:?} {hi:?}");
         let (clo, chi) = duo.posed_bounds(&duo.parts(0.));
         assert!(chi[2] - clo[2] > (hi[2] - lo[2]) * 3. && chi[0] - clo[0] < (hi[0] - lo[0]) * 0.3, "closed, the leaves fold together toward the camera");
+        use super::super::duo::{RestFace, rest_frames, snaps};
+        let (inside, cover) = (rest_frames(&duo, 180., 3), rest_frames(&duo, 180., 1));
+        assert!(inside.len() == 1 && (inside[0].1[2] - 1.).abs() < 1e-4 && (cover[0].1[2] + 1.).abs() < 1e-4, "open flat, the inner display faces front, the cover back");
+        let half = rest_frames(&duo, 110., 3);
+        assert!(half.len() == 3 && half[1].1[0] > 0.5 && half[2].1[0] < -0.5, "half open, the leaves face each other: {half:?}");
+        let views = snaps(&half, 3);
+        assert!(views.iter().any(|s| s.face == RestFace::Right) && views.iter().any(|s| s.face == RestFace::Inside), "{views:?}");
         let world = super::world(super::super::motion::IDENTITY, 0.);
         let cam = camera_in((lo, hi), &world, 1.4);
         let mut held = None;

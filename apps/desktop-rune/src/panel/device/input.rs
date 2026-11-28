@@ -31,6 +31,8 @@ pub struct Screen {
     /// and stand (`closed`, `book`, `open`, `laptop` or `tent`).
     pub screen_id: Option<u32>,
     pub supports_hinge: bool,
+    /// Whether the device can be asked which display faces up (`physical` commands).
+    pub supports_physical: bool,
     pub hinge_angle: Option<f64>,
     pub hinge_pose: Option<String>,
 }
@@ -341,6 +343,7 @@ fn inbound(bytes: &[u8], state: &mut State) -> bool {
                 orientation: config["orientation"].as_str().unwrap_or("portrait").to_owned(),
                 screen_id: config["screenId"].as_u64().map(|id| id as u32),
                 supports_hinge: config["supportsHingeAngle"] == true,
+                supports_physical: config["supportsPhysicalOrientation"] == true,
                 hinge_angle: config["hingeAngle"].as_f64().filter(|a| (0. ..=180.).contains(a)),
                 hinge_pose: config["hingePose"].as_str().map(str::to_owned),
             });
